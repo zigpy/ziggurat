@@ -1,12 +1,7 @@
-use chrono::{DateTime, Local, TimeZone};
-use env_logger::builder;
 use log::LevelFilter;
 use serial2::Settings;
-use serial2::{FlowControl, IntoSettings};
 use serial2_tokio::SerialPort;
 use std::env;
-use std::io::Write;
-use tokio::sync::mpsc;
 use ziggurat::ieee_802154::Ieee802154Frame;
 use ziggurat::ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154FrameControl, Ieee802154FrameType,
@@ -67,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sequence = 1;
 
     loop {
-        let mut now = std::time::Instant::now();
+        let now = std::time::Instant::now();
         // Print time since last packet with 8 decimal places
         println!(
             "=== Delta {:0.8}",

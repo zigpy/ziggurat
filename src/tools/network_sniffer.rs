@@ -1,16 +1,9 @@
-use chrono::{DateTime, Local, TimeZone};
-use env_logger::builder;
 use log::LevelFilter;
 use serial2::Settings;
-use serial2::{FlowControl, IntoSettings};
 use serial2_tokio::SerialPort;
 use std::env;
-use std::io::Write;
 use tokio::sync::mpsc;
 use ziggurat::ieee_802154::Ieee802154Frame;
-use ziggurat::ieee_802154::{
-    Ieee802154Address, Ieee802154AddressingMode, Ieee802154FrameControl, Ieee802154FrameType,
-};
 use ziggurat::spinel::SpinelPropertyId;
 use ziggurat::spinel_client::{SpinelClient, SpinelRxFrame};
 use ziggurat::types::{Eui64, Key, Nwk, PanId};
@@ -64,20 +57,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to enable the RAW stream");
 
     let mut zigbee_stack = ZigbeeStack::new();
-    zigbee_stack.nib.nwkUpdateId = 0;
-    zigbee_stack.nib.nwkNetworkAddress = Nwk(0x0000);
-    zigbee_stack.nib.nwkExtendedPanId = Eui64::from_hex("fe:ed:fa:ce:de:ad:be:ef");
-    zigbee_stack.nib.nwkIsConcentrator = true;
-    zigbee_stack.nib.nwkSecurityLevel = 5;
-    zigbee_stack.nib.nwkSecurityMaterialPrimary.keySeqNumber = 0;
+    zigbee_stack.nib.nwk_update_id = 0;
+    zigbee_stack.nib.nwk_network_address = Nwk(0x0000);
+    zigbee_stack.nib.nwk_extended_pan_id = Eui64::from_hex("fe:ed:fa:ce:de:ad:be:ef");
+    zigbee_stack.nib.nwk_is_concentrator = true;
+    zigbee_stack.nib.nwk_security_level = 5;
     zigbee_stack
         .nib
-        .nwkSecurityMaterialPrimary
-        .outgoingFrameCounter = 16498716;
-    zigbee_stack.nib.nwkSecurityMaterialPrimary.key =
+        .nwk_security_material_primary
+        .key_seq_number = 0;
+    zigbee_stack
+        .nib
+        .nwk_security_material_primary
+        .outgoing_frame_counter = 16498716;
+    zigbee_stack.nib.nwk_security_material_primary.key =
         Key::from_hex("37:66:8f:d6:4e:35:e0:33:42:e5:ef:9f:35:cc:f4:ab");
-    zigbee_stack.nib.nwkPanId = PanId(0xBEEF);
-    zigbee_stack.nib.nwkIeeeAddress = Eui64::from_hex("00:12:4b:00:1c:a1:b8:46");
+    zigbee_stack.nib.nwk_pan_id = PanId(0xBEEF);
+    zigbee_stack.nib.nwk_ieee_address = Eui64::from_hex("00:12:4b:00:1c:a1:b8:46");
 
     let channel = 25;
     client

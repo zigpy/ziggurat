@@ -1,6 +1,6 @@
 use crate::spinel::{
     packed_uint21_deserialize, packed_uint21_to_bytes, HdlcLiteFrame, SpinelCommandId, SpinelFrame,
-    SpinelPropertyId, SpinelProtocol, SpinelStatus,
+    SpinelPropertyId, SpinelProtocol,
 };
 use serial2_tokio::SerialPort;
 use std::string::String;
@@ -291,7 +291,7 @@ impl SpinelClient {
     }
 
     pub async fn transmit_frame(&self, tx_frame: &SpinelTxFrame) -> Result<u8, SpinelSendError> {
-        let (rsp_prop_id, rsp) = self
+        let (_rsp_prop_id, _rsp) = self
             .prop_value_set(SpinelPropertyId::StreamRaw as u32, tx_frame.to_bytes())
             .await
             .unwrap();

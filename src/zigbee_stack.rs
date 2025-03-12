@@ -1,5 +1,5 @@
-use crate::ieee_802154::{Ieee802154Address, Ieee802154Frame, Ieee802154FrameType};
-use crate::types::{format_hex, Eui64, Key, Nwk, PanId};
+use crate::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
+use crate::types::{Eui64, Key, Nwk, PanId};
 use crate::zigbee_nwk::{NwkFrame, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 use std::collections::HashMap;
 
@@ -28,30 +28,30 @@ pub enum NwkSecurityCapability {
 
 #[derive(Debug)]
 pub struct NwkCapabilityInformation {
-    pub alternatePanCoordinator: bool,
-    pub deviceType: NwkCapabilityInformationDeviceType,
-    pub powerSource: NwkCapabilityInformationPowerSource,
-    pub receiverOnWhenIdle: bool,
+    pub alternate_pan_coordinator: bool,
+    pub device_type: NwkCapabilityInformationDeviceType,
+    pub power_source: NwkCapabilityInformationPowerSource,
+    pub receiver_on_when_idle: bool,
     pub reserved1: bool,
     pub reserved2: bool,
-    pub securityCapability: NwkSecurityCapability,
-    pub allocateAddress: bool, // = 1
+    pub security_capability: NwkSecurityCapability,
+    pub allocate_address: bool, // = 1
 }
 
 #[derive(Debug)]
 pub struct NwkSecurityDescriptor {
-    pub keySeqNumber: u8,
-    pub outgoingFrameCounter: u32,
-    pub incomingFrameCounterSet: HashMap<Eui64, u32>,
+    pub key_seq_number: u8,
+    pub outgoing_frame_counter: u32,
+    pub incoming_frame_counter_set: HashMap<Eui64, u32>,
     pub key: Key,
-    pub networkKeyType: NetworkKeyType,
+    pub network_key_type: NetworkKeyType,
 }
 
 #[derive(Debug)]
 pub struct NwkBroadcastTransaction {
-    pub sourceNwk: Nwk,
-    pub sequenceNumber: u8,
-    pub expirationTime: u8,
+    pub source_nwk: Nwk,
+    pub sequence_number: u8,
+    pub expiration_time: u8,
 }
 
 #[derive(Debug)]
@@ -115,43 +115,43 @@ pub struct NwkRouteDiscoveryTableEntry {
 
 #[derive(Debug)]
 pub struct Nib {
-    pub nwkSequenceNumber: u8,
-    pub nwkPassiveAckTimeout: u32,
-    pub nwkMaxBroadcastRetries: u8,
-    pub nwkMaxChildren: u8,
-    pub nwkMaxDepth: u8,
+    pub nwk_sequence_number: u8,
+    pub nwk_passive_ack_timeout: u32,
+    pub nwk_max_broadcast_retries: u8,
+    pub nwk_max_children: u8,
+    pub nwk_max_depth: u8,
     // pub nwkNeighborTable: Vec<NwkNeighbor>,
-    pub nwkNetworkBroadcastDeliveryTime: u32,
-    pub nwkRouteTable: Vec<NwkRoutingTableEntry>,
-    pub nwkCapabilityInformation: NwkCapabilityInformation,
-    pub nwkManagerAddr: Nwk,
-    pub nwkMaxSourceRoute: u8,
-    pub nwkUpdateId: u8,
-    pub nwkTransactionPersistenceTime: u16,
-    pub nwkNetworkAddress: Nwk,
-    pub nwkStackProfile: u8,
-    pub nwkBroadcastTransactionTable: Vec<NwkBroadcastTransaction>,
-    pub nwkExtendedPanId: Eui64,
-    pub nwkRouteRecordTable: HashMap<Nwk, Vec<Nwk>>,
-    pub nwkIsConcentrator: bool,
-    pub nwkConcentratorRadius: u8,
-    pub nwkConcentratorDiscoveryTime: u8,
-    pub nwkSecurityLevel: u8,
-    pub nwkSecurityMaterialPrimary: NwkSecurityDescriptor,
-    pub nwkSecurityMaterialAlternate: NwkSecurityDescriptor,
-    pub nwkActiveKeySeqNumber: u8,
-    pub nwkAllFresh: bool,
-    pub nwkConcentratorDiscoverySeparationTime: u8,
-    pub nwkLinkStatusPeriod: u8,
+    pub nwk_network_broadcast_delivery_time: u32,
+    pub nwk_route_table: Vec<NwkRoutingTableEntry>,
+    pub nwk_capability_information: NwkCapabilityInformation,
+    pub nwk_manager_addr: Nwk,
+    pub nwk_max_source_route: u8,
+    pub nwk_update_id: u8,
+    pub nwk_transaction_persistence_time: u16,
+    pub nwk_network_address: Nwk,
+    pub nwk_stack_profile: u8,
+    pub nwk_broadcast_transaction_table: Vec<NwkBroadcastTransaction>,
+    pub nwk_extended_pan_id: Eui64,
+    pub nwk_route_record_table: HashMap<Nwk, Vec<Nwk>>,
+    pub nwk_is_concentrator: bool,
+    pub nwk_concentrator_radius: u8,
+    pub nwk_concentrator_discovery_time: u8,
+    pub nwk_security_level: u8,
+    pub nwk_security_material_primary: NwkSecurityDescriptor,
+    pub nwk_security_material_alternate: NwkSecurityDescriptor,
+    pub nwk_active_key_seq_number: u8,
+    pub nwk_all_fresh: bool,
+    pub nwk_concentrator_discovery_separation_time: u8,
+    pub nwk_link_status_period: u8,
 
     // The number of missed link status command frames before resetting the link costs to zero.
-    pub nwkRouterAgeLimit: u8,
-    pub nwkAddressMap: HashMap<Eui64, Nwk>,
+    pub nwk_router_age_limit: u8,
+    pub nwk_address_map: HashMap<Eui64, Nwk>,
 
     // A flag that determines if a time stamp indication is provided on incoming and outgoing packets.
-    pub nwkTimeStamp: bool,
+    pub nwk_time_stamp: bool,
 
-    pub nwkPanId: PanId,
+    pub nwk_pan_id: PanId,
 
     // A count of unicast transmissions made by the NNK layer on this device. Each time
     // the NWK layer transmits aunicast frame, by invoking the MCPS-DATA.request
@@ -159,20 +159,20 @@ pub struct Nib {
     // NHL performs an NLME-SET.request on this attribute or if the value of nwkTxTotal
     // rolls over past 0xffff the NWK layer SHALL reset to 0x00 each Transmit Failure
     // field contained in the neighbor table.
-    pub nwkTxTotal: u16,
+    pub nwk_tx_total: u16,
 
     // This policy determines whether or not a remote NWK leave request command frame received by the local device is accepted.
-    pub nwkLeaveRequestAllowed: bool,
+    pub nwk_leave_request_allowed: bool,
 
-    pub nwkParentInformation: u8,
+    pub nwk_parent_information: u8,
 
     // This is an index into Table 3-54. It indicates the default timeout in minutes for any end device that does not negotiate a different timeout value.
-    pub nwkEndDeviceTimeoutDefault: u8,
+    pub nwk_end_device_timeout_default: u8,
 
     // This policy determines whether a NWK leave request is accepted when the Rejoin bit in the message is set to FALSE
-    pub nwkLeaveRequestWithoutRejoinAllowed: bool,
+    pub nwk_leave_request_without_rejoin_allowed: bool,
 
-    pub nwkIeeeAddress: Eui64,
+    pub nwk_ieee_address: Eui64,
     // nwkMacInterfaceTable
     // nwkNetworkWideBeaconAppendixTLVs
     // nwkDeviceLocalBeaconAppendixTLVs
@@ -193,65 +193,65 @@ pub struct Nib {
 impl Nib {
     pub fn new() -> Nib {
         Nib {
-            nwkSequenceNumber: 0,
-            nwkPassiveAckTimeout: 500,
-            nwkMaxBroadcastRetries: 2,
-            nwkMaxChildren: 32,
-            nwkMaxDepth: 15,
+            nwk_sequence_number: 0,
+            nwk_passive_ack_timeout: 500,
+            nwk_max_broadcast_retries: 2,
+            nwk_max_children: 32,
+            nwk_max_depth: 15,
             // nwkNeighborTable: Vec::new(),
-            nwkNetworkBroadcastDeliveryTime: 0,
-            nwkRouteTable: Vec::new(),
-            nwkCapabilityInformation: NwkCapabilityInformation {
-                alternatePanCoordinator: false,
-                deviceType: NwkCapabilityInformationDeviceType::EndDevice,
-                powerSource: NwkCapabilityInformationPowerSource::MainsPower,
-                receiverOnWhenIdle: true,
+            nwk_network_broadcast_delivery_time: 0,
+            nwk_route_table: Vec::new(),
+            nwk_capability_information: NwkCapabilityInformation {
+                alternate_pan_coordinator: false,
+                device_type: NwkCapabilityInformationDeviceType::EndDevice,
+                power_source: NwkCapabilityInformationPowerSource::MainsPower,
+                receiver_on_when_idle: true,
                 reserved1: false,
                 reserved2: false,
-                securityCapability: NwkSecurityCapability::Capable,
-                allocateAddress: true,
+                security_capability: NwkSecurityCapability::Capable,
+                allocate_address: true,
             },
-            nwkManagerAddr: Nwk(0x0000),
-            nwkMaxSourceRoute: 12,
-            nwkUpdateId: 0,
-            nwkTransactionPersistenceTime: 7680,
-            nwkNetworkAddress: Nwk(0x0000),
-            nwkStackProfile: 2,
-            nwkBroadcastTransactionTable: Vec::new(),
-            nwkExtendedPanId: Eui64::from_hex("0000000000000000"),
-            nwkRouteRecordTable: HashMap::new(),
-            nwkIsConcentrator: true,
-            nwkConcentratorRadius: 10,
-            nwkConcentratorDiscoveryTime: 0,
-            nwkSecurityLevel: 5,
-            nwkSecurityMaterialPrimary: NwkSecurityDescriptor {
-                keySeqNumber: 0,
-                outgoingFrameCounter: 0,
-                incomingFrameCounterSet: HashMap::new(),
+            nwk_manager_addr: Nwk(0x0000),
+            nwk_max_source_route: 12,
+            nwk_update_id: 0,
+            nwk_transaction_persistence_time: 7680,
+            nwk_network_address: Nwk(0x0000),
+            nwk_stack_profile: 2,
+            nwk_broadcast_transaction_table: Vec::new(),
+            nwk_extended_pan_id: Eui64::from_hex("0000000000000000"),
+            nwk_route_record_table: HashMap::new(),
+            nwk_is_concentrator: true,
+            nwk_concentrator_radius: 10,
+            nwk_concentrator_discovery_time: 0,
+            nwk_security_level: 5,
+            nwk_security_material_primary: NwkSecurityDescriptor {
+                key_seq_number: 0,
+                outgoing_frame_counter: 0,
+                incoming_frame_counter_set: HashMap::new(),
                 key: Key::from_hex("00000000000000000000000000000000"),
-                networkKeyType: NetworkKeyType::Standard,
+                network_key_type: NetworkKeyType::Standard,
             },
-            nwkSecurityMaterialAlternate: NwkSecurityDescriptor {
-                keySeqNumber: 0,
-                outgoingFrameCounter: 0,
-                incomingFrameCounterSet: HashMap::new(),
+            nwk_security_material_alternate: NwkSecurityDescriptor {
+                key_seq_number: 0,
+                outgoing_frame_counter: 0,
+                incoming_frame_counter_set: HashMap::new(),
                 key: Key::from_hex("00000000000000000000000000000000"),
-                networkKeyType: NetworkKeyType::Standard,
+                network_key_type: NetworkKeyType::Standard,
             },
-            nwkActiveKeySeqNumber: 0,
-            nwkAllFresh: false,
-            nwkConcentratorDiscoverySeparationTime: 0,
-            nwkLinkStatusPeriod: 0x0F,
-            nwkRouterAgeLimit: 3,
-            nwkAddressMap: HashMap::new(),
-            nwkTimeStamp: false,
-            nwkPanId: PanId(0xFFFF),
-            nwkTxTotal: 0,
-            nwkLeaveRequestAllowed: false,
-            nwkParentInformation: 0,
-            nwkEndDeviceTimeoutDefault: 0,
-            nwkLeaveRequestWithoutRejoinAllowed: false,
-            nwkIeeeAddress: Eui64::from_hex("0000000000000000"),
+            nwk_active_key_seq_number: 0,
+            nwk_all_fresh: false,
+            nwk_concentrator_discovery_separation_time: 0,
+            nwk_link_status_period: 0x0F,
+            nwk_router_age_limit: 3,
+            nwk_address_map: HashMap::new(),
+            nwk_time_stamp: false,
+            nwk_pan_id: PanId(0xFFFF),
+            nwk_tx_total: 0,
+            nwk_leave_request_allowed: false,
+            nwk_parent_information: 0,
+            nwk_end_device_timeout_default: 0,
+            nwk_leave_request_without_rejoin_allowed: false,
+            nwk_ieee_address: Eui64::from_hex("0000000000000000"),
         }
     }
 }
@@ -286,7 +286,7 @@ impl ZigbeeStack {
                 return;
             }
             Some(dest_pan_id) => {
-                if dest_pan_id != self.nib.nwkPanId {
+                if dest_pan_id != self.nib.nwk_pan_id {
                     log::debug!("Ignoring frame, PAN ID does not match");
                     return;
                 }
@@ -303,7 +303,7 @@ impl ZigbeeStack {
         };
 
         // Ignore frames that aren't destined for us
-        if nwk_frame.nwk_header.destination != self.nib.nwkNetworkAddress
+        if nwk_frame.nwk_header.destination != self.nib.nwk_network_address
             && nwk_frame.nwk_header.destination.as_u16() < 0xFFFC
         {
             log::debug!("Ignoring frame, destination is not us");
@@ -337,7 +337,7 @@ impl ZigbeeStack {
         }
 
         // Validate the network key sequence number
-        if aux_header.key_sequence_number != self.nib.nwkActiveKeySeqNumber {
+        if aux_header.key_sequence_number != self.nib.nwk_active_key_seq_number {
             log::debug!("Ignoring frame, key sequence number is unknown");
             return;
         }
@@ -359,8 +359,8 @@ impl ZigbeeStack {
 
         match self
             .nib
-            .nwkSecurityMaterialPrimary
-            .incomingFrameCounterSet
+            .nwk_security_material_primary
+            .incoming_frame_counter_set
             .get(&src_eui64)
         {
             None => {
@@ -384,23 +384,23 @@ impl ZigbeeStack {
         log::debug!(
             "Attempting to decrypt {:?} with {:?}",
             nwk_frame,
-            self.nib.nwkSecurityMaterialPrimary
+            self.nib.nwk_security_material_primary
         );
 
         // Finally, attempt decryption
-        let decrypted_nwk_frame = match nwk_frame.decrypt(&self.nib.nwkSecurityMaterialPrimary.key)
-        {
-            Ok(decrypted_frame) => decrypted_frame,
-            Err(err) => {
-                log::warn!("Ignoring frame, decryption failed: {:?}", err);
-                return;
-            }
-        };
+        let decrypted_nwk_frame =
+            match nwk_frame.decrypt(&self.nib.nwk_security_material_primary.key) {
+                Ok(decrypted_frame) => decrypted_frame,
+                Err(err) => {
+                    log::warn!("Ignoring frame, decryption failed: {:?}", err);
+                    return;
+                }
+            };
 
         // The frame is valid, update the frame counter for the sender
         self.nib
-            .nwkSecurityMaterialPrimary
-            .incomingFrameCounterSet
+            .nwk_security_material_primary
+            .incoming_frame_counter_set
             .insert(src_eui64, aux_header.frame_counter);
 
         log::debug!(
@@ -413,7 +413,7 @@ impl ZigbeeStack {
         // Update the address cache
         match self
             .nib
-            .nwkAddressMap
+            .nwk_address_map
             .insert(src_eui64, nwk_frame.nwk_header.source)
         {
             None => {
@@ -425,9 +425,10 @@ impl ZigbeeStack {
             }
             Some(old_nwk) => {
                 log::warn!(
-                    "Updated address mapping: {:?} -> {:?}",
+                    "Updated address mapping: {:?} -> {:?} (was {:?})",
                     nwk_frame.nwk_header.source,
-                    src_eui64
+                    src_eui64,
+                    old_nwk,
                 )
             }
         }

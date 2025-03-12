@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 
 use crc_all::CrcAlgo;
-use env_logger::Builder;
 use log;
-use log::LevelFilter;
 use std::collections::HashMap;
 use strum_macros::FromRepr;
 use tokio::sync::{mpsc, oneshot};
