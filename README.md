@@ -20,6 +20,10 @@ cargo run --bin ziggurat-capture /dev/cu.SLAB_USBtoUART
 
 # Parse a PCAP file with loaded Wireshark Zigbee network keys, printing decryption and parsing statistics
 cargo run --bin ziggurat-pcap capture.pcap
+
+# Capture and decrypt traffic on channel 25 with hardcoded network information,
+# performing rudimentary security processing (NWK->IEEE mapping and rollback protection)
+cargo run --bin ziggurat-network-sniffer /dev/cu.SLAB_USBtoUART
 ```
 
 ### TODO
