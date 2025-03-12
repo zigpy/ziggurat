@@ -266,29 +266,33 @@ impl ZigbeeStack {
         ZigbeeStack { nib: Nib::new() }
     }
 
-    pub fn receive_802154_frame(&mut self, frame: &Ieee802154Frame) {
+    pub fn receive_802154_frame(&mut self, frame: &Ieee802154Frame) -> Option<NwkFrame> {
         // 802.15.4 encrypted frames can't be Zigbee NWK
         if frame.frame_control.security_enabled {
             log::debug!("Ignoring frame, 802.15.4 security bit is enabled");
-            return;
+            return None;
         }
 
         // Only process data frames for now
         if frame.frame_control.frame_type != Ieee802154FrameType::Data {
             log::debug!("Ignoring frame, not a data frame");
-            return;
+            return None;
         }
 
         // Only process packets destined for our PAN ID
         match frame.dest_pan_id {
             None => {
                 log::debug!("Ignoring frame, destination PAN ID is not present");
-                return;
+                return None;
             }
             Some(dest_pan_id) => {
                 if dest_pan_id != self.nib.nwk_pan_id {
-                    log::debug!("Ignoring frame, PAN ID does not match");
-                    return;
+                    log::debug!(
+                        "Ignoring frame, PAN ID does not match {:?} != {:?}",
+                        dest_pan_id,
+                        self.nib.nwk_pan_id
+                    );
+                    return None;
                 }
             }
         }
@@ -298,7 +302,7 @@ impl ZigbeeStack {
             Ok(nwk_frame) => nwk_frame,
             Err(_) => {
                 log::debug!("Ignoring frame, not a NWK frame");
-                return;
+                return None;
             }
         };
 
@@ -307,19 +311,19 @@ impl ZigbeeStack {
             && nwk_frame.nwk_header.destination.as_u16() < 0xFFFC
         {
             log::debug!("Ignoring frame, destination is not us");
-            return;
+            return None;
         }
 
         // Ignore unencrypted frames
         if !nwk_frame.encrypted {
             log::debug!("Ignoring frame, it is not encrypted");
-            return;
+            return None;
         }
 
         let aux_header = match nwk_frame.aux_header {
             None => {
                 log::debug!("Ignoring frame, auxiliary header is missing");
-                return;
+                return None;
             }
             Some(ref header) => header,
         };
@@ -327,19 +331,19 @@ impl ZigbeeStack {
         // The frame security level is fixed for a given network and transmitted frames will use "0"
         if aux_header.security_control.security_level != NwkSecurityLevel::NoSecurity {
             log::debug!("Ignoring frame, security level is not 0");
-            return;
+            return None;
         }
 
         // Only the network key is supported for now
         if aux_header.security_control.key_id != NwkSecurityHeaderKeyId::NetworkKey {
             log::debug!("Ignoring frame, key ID is not NetworkKey");
-            return;
+            return None;
         }
 
         // Validate the network key sequence number
         if aux_header.key_sequence_number != self.nib.nwk_active_key_seq_number {
             log::debug!("Ignoring frame, key sequence number is unknown");
-            return;
+            return None;
         }
 
         // Validate the security header frame counter for the current IEEE
@@ -348,7 +352,7 @@ impl ZigbeeStack {
         match aux_header.extended_source {
             None => {
                 log::debug!("Ignoring frame, extended source is missing");
-                return;
+                return None;
             }
             Some(eui64) => {
                 src_eui64 = eui64;
@@ -374,7 +378,7 @@ impl ZigbeeStack {
                         last_stored_frame_counter,
                         aux_header.frame_counter
                     );
-                    return;
+                    return None;
                 }
 
                 last_frame_counter = *last_stored_frame_counter;
@@ -393,7 +397,7 @@ impl ZigbeeStack {
                 Ok(decrypted_frame) => decrypted_frame,
                 Err(err) => {
                     log::warn!("Ignoring frame, decryption failed: {:?}", err);
-                    return;
+                    return None;
                 }
             };
 
@@ -434,5 +438,6 @@ impl ZigbeeStack {
         }
 
         log::info!("Decrypted frame: {:#?}", decrypted_nwk_frame);
+        return Some(decrypted_nwk_frame);
     }
 }

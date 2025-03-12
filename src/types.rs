@@ -5,6 +5,20 @@ use std::fmt;
 pub struct Nwk(pub u16);
 
 impl Nwk {
+    pub fn from_hex(text: &str) -> Self {
+        // Strip off colons and a 0x prefix, if present
+        let text = text.replace(":", "").replace("0x", "");
+
+        if text.len() != 4 {
+            panic!("Invalid Nwk length");
+        }
+
+        let mut nwk_bytes = [0; 2];
+        hex::decode_to_slice(text, &mut nwk_bytes).expect("Decoding failed");
+
+        Self(u16::from_be_bytes(nwk_bytes))
+    }
+
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
         if bytes.len() < 2 {
             return Err("Not enough data to parse Nwk");
@@ -94,6 +108,20 @@ pub enum Address {
 pub struct PanId(pub u16);
 
 impl PanId {
+    pub fn from_hex(text: &str) -> Self {
+        // Strip off colons and a 0x prefix, if present
+        let text = text.replace(":", "").replace("0x", "");
+
+        if text.len() != 4 {
+            panic!("Invalid PanId length");
+        }
+
+        let mut pan_id_bytes = [0; 2];
+        hex::decode_to_slice(text, &mut pan_id_bytes).expect("Decoding failed");
+
+        Self(u16::from_be_bytes(pan_id_bytes))
+    }
+
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
         if bytes.len() < 2 {
             return Err("Not enough data to parse PanId");
