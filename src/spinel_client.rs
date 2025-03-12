@@ -1,13 +1,13 @@
 use crate::spinel::{
-    packed_uint21_deserialize, packed_uint21_to_bytes, HdlcLiteFrame, SpinelCommandId, SpinelFrame,
-    SpinelPropertyId, SpinelProtocol, SpinelStatus,
+    HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelPropertyId, SpinelProtocol,
+    packed_uint21_deserialize, packed_uint21_to_bytes,
 };
 use serial2_tokio::SerialPort;
 use std::string::String;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -63,8 +63,6 @@ pub struct SpinelRxFrame {
 
 impl SpinelRxFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        eprintln!("bytes: {:02x?}", bytes);
-
         let mut offset = 0;
 
         let psdu_len = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as usize;
@@ -232,7 +230,7 @@ impl SpinelClient {
                 return Err(SpinelSendError::IoError(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     e,
-                )))
+                )));
             }
         };
 
@@ -262,7 +260,7 @@ impl SpinelClient {
                 return Err(SpinelSendError::IoError(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     e,
-                )))
+                )));
             }
         };
 
@@ -293,7 +291,7 @@ impl SpinelClient {
     }
 
     pub async fn transmit_frame(&self, tx_frame: &SpinelTxFrame) -> Result<u8, SpinelSendError> {
-        let (rsp_prop_id, rsp) = self
+        let (_rsp_prop_id, _rsp) = self
             .prop_value_set(SpinelPropertyId::StreamRaw as u32, tx_frame.to_bytes())
             .await
             .unwrap();

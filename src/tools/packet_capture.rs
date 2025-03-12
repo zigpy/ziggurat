@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to set the MAC promiscuous mode");
 
     client
-        .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![20])
+        .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![25])
         .await
         .expect("Failed to set the PHY");
 

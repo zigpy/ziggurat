@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 
-use crate::types::{format_hex, Eui64, Key, Nwk};
+use crate::types::{Eui64, Key, Nwk, format_hex};
 
 use std::convert::TryFrom;
 
+use aes::Aes128;
+use aes::Block;
 use aes::cipher::BlockModeEncrypt;
 use aes::cipher::KeyInit;
 use aes::cipher::KeyIvInit;
-use aes::Aes128;
-use aes::Block;
-use cbc::cipher::BlockCipherEncrypt;
 use cbc::Encryptor;
+use cbc::cipher::BlockCipherEncrypt;
 use constant_time_eq::constant_time_eq;
 
 use derivative::Derivative;
@@ -334,7 +334,7 @@ impl TryFrom<u8> for NwkSecurityLevel {
 pub struct NwkSecurityHeaderControlField {
     pub security_level: NwkSecurityLevel,
     pub key_id: NwkSecurityHeaderKeyId,
-    pub extended_source: bool,
+    pub extended_nonce: bool,
     pub require_verified_frame_counter: bool,
     pub reserved: u8,
 }
@@ -349,7 +349,7 @@ impl NwkSecurityHeaderControlField {
             Self {
                 security_level: NwkSecurityLevel::try_from((bytes[0] >> 0) & 0b111)?,
                 key_id: NwkSecurityHeaderKeyId::try_from((bytes[0] >> 3) & 0b11)?,
-                extended_source: (bytes[0] >> 5) & 0b1 == 1,
+                extended_nonce: (bytes[0] >> 5) & 0b1 == 1,
                 require_verified_frame_counter: (bytes[0] >> 6) & 0b1 == 1,
                 reserved: (bytes[0] >> 7) & 0b1,
             },
@@ -360,7 +360,7 @@ impl NwkSecurityHeaderControlField {
     pub fn to_bytes(&self) -> [u8; 1] {
         [((self.security_level as u8) & 0b111)
             | (((self.key_id as u8) & 0b11) << 3)
-            | ((self.extended_source as u8) << 5)
+            | ((self.extended_nonce as u8) << 5)
             | ((self.require_verified_frame_counter as u8) << 6)
             | ((self.reserved & 0b1) << 7)]
     }
@@ -391,7 +391,7 @@ impl NwkAuxHeader {
 
         let mut extended_source = None;
 
-        if security_control.extended_source {
+        if security_control.extended_nonce {
             let ieee;
             (ieee, remaining) = Eui64::deserialize(remaining)?;
             extended_source = Some(ieee);
@@ -719,7 +719,7 @@ mod test {
                 security_control: NwkSecurityHeaderControlField {
                     security_level: NwkSecurityLevel::NoSecurity,
                     key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                    extended_source: true,
+                    extended_nonce: true,
                     require_verified_frame_counter: false,
                     reserved: 0b0,
                 },
@@ -789,7 +789,7 @@ mod test {
                 security_control: NwkSecurityHeaderControlField {
                     security_level: NwkSecurityLevel::NoSecurity,
                     key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                    extended_source: true,
+                    extended_nonce: true,
                     require_verified_frame_counter: false,
                     reserved: 0b0,
                 },

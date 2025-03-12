@@ -16,6 +16,10 @@ impl Nwk {
     pub fn to_bytes(&self) -> [u8; 2] {
         self.0.to_le_bytes()
     }
+
+    pub fn as_u16(&self) -> u16 {
+        self.0
+    }
 }
 
 impl fmt::Debug for Nwk {
@@ -26,7 +30,7 @@ impl fmt::Debug for Nwk {
     }
 }
 
-#[derive(PartialEq, Copy, Clone)]
+#[derive(Eq, PartialEq, Hash, Copy, Clone)]
 pub struct Eui64(pub [u8; 8]);
 
 impl Eui64 {

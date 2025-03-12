@@ -2,7 +2,7 @@ use std::fs::File;
 
 use inline_colorization::*;
 use pcap_parser::traits::PcapNGPacketBlock;
-use pcap_parser::{create_reader, PcapBlockOwned, PcapError};
+use pcap_parser::{PcapBlockOwned, PcapError, create_reader};
 use shellexpand;
 
 use ziggurat::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
