@@ -1,5 +1,5 @@
 ## ziggurat
-An **experimental** open source Zigbee stack implemented in Rust.
+An **experimental** open source Zigbee stack implemented in Rust[^1].
 
 This project aims to replace the functionality provided by existing radio adapters running Zigbee firmware and move all processing to the host, eliminating practically all limitations imposed by microcontroller-based Zigbee stacks.
 
@@ -31,3 +31,5 @@ cargo run --bin ziggurat-network-sniffer /dev/cu.SLAB_USBtoUART
 - [x] The stack is able to reliably send and receive 802.15.4 frames (limited to about 200 per second).
 - [ ] The wire protocol is not yet implemented. We have no significant latency limitations so for clarity and ease of implementation in downstream applications, Protobuf will probably be used.
 - [ ] The Zigbee stack itself is not yet implemented, so we need to keep track of the NIB, implement routing, child management, and state persistence (likely via SQLite).
+
+[^1]: An earlier iteration in Python is available as [zigpy-spinel](https://github.com/puddly/zigpy-spinel).
