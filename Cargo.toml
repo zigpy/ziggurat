@@ -39,7 +39,6 @@ name = "ziggurat-network-sniffer"
 path = "src/tools/network_sniffer.rs"
 
 [dev-dependencies]
-cargo-debug = "0.3.0"
 rand = "0.8.5"
 
 [profile.release]
