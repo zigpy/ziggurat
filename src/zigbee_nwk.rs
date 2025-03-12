@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 
-use crate::types::{format_hex, Eui64, Key, Nwk};
+use crate::types::{Eui64, Key, Nwk, format_hex};
 
 use std::convert::TryFrom;
 
+use aes::Aes128;
+use aes::Block;
 use aes::cipher::BlockModeEncrypt;
 use aes::cipher::KeyInit;
 use aes::cipher::KeyIvInit;
-use aes::Aes128;
-use aes::Block;
-use cbc::cipher::BlockCipherEncrypt;
 use cbc::Encryptor;
+use cbc::cipher::BlockCipherEncrypt;
 use constant_time_eq::constant_time_eq;
 
 use derivative::Derivative;

@@ -1,4 +1,4 @@
-use crate::types::{format_hex, Eui64, Nwk, PanId};
+use crate::types::{Eui64, Nwk, PanId, format_hex};
 
 use derivative::Derivative;
 use std::convert::TryFrom;
@@ -439,7 +439,9 @@ mod test {
 
     #[test]
     fn test_frame_data2() {
-        let bytes = hex!("618834efbe909d443e48020000443e1eb4287cc54700e095dd0c018817000033a8fc4eb11941104ea261f13064f175f477d311e62736b708a6a390a4f8b120df6cd3ec5c244681");
+        let bytes = hex!(
+            "618834efbe909d443e48020000443e1eb4287cc54700e095dd0c018817000033a8fc4eb11941104ea261f13064f175f477d311e62736b708a6a390a4f8b120df6cd3ec5c244681"
+        );
         let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
 
         let expected_frame = Ieee802154Frame {

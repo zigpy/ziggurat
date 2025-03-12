@@ -1,13 +1,13 @@
 use crate::spinel::{
-    packed_uint21_deserialize, packed_uint21_to_bytes, HdlcLiteFrame, SpinelCommandId, SpinelFrame,
-    SpinelPropertyId, SpinelProtocol,
+    HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelPropertyId, SpinelProtocol,
+    packed_uint21_deserialize, packed_uint21_to_bytes,
 };
 use serial2_tokio::SerialPort;
 use std::string::String;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -230,7 +230,7 @@ impl SpinelClient {
                 return Err(SpinelSendError::IoError(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     e,
-                )))
+                )));
             }
         };
 
@@ -260,7 +260,7 @@ impl SpinelClient {
                 return Err(SpinelSendError::IoError(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     e,
-                )))
+                )));
             }
         };
 

@@ -638,9 +638,9 @@ impl SpinelProtocol {
 mod test {
     use super::*;
     use hex_literal::hex;
-    use rand::rngs::StdRng;
     use rand::Rng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     #[test]
     fn test_uint21_to_bytes() {
@@ -713,7 +713,7 @@ mod test {
             let mut data = Vec::new();
 
             for _ in 0..len {
-                data.push(rng.gen());
+                data.push(rng.next_u32() & 0xFF);
             }
 
             let frame = HdlcLiteFrame { data: data.clone() };
