@@ -63,8 +63,6 @@ pub struct SpinelRxFrame {
 
 impl SpinelRxFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        eprintln!("bytes: {:02x?}", bytes);
-
         let mut offset = 0;
 
         let psdu_len = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as usize;

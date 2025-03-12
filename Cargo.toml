@@ -37,6 +37,15 @@ path = "src/tools/packet_capture.rs"
 name = "ziggurat-sender"
 path = "src/tools/packet_sender.rs"
 
+[[bin]]
+name = "ziggurat-network-sniffer"
+path = "src/tools/network_sniffer.rs"
+
 [dev-dependencies]
 cargo-debug = "0.3.0"
 rand = "0.8.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
