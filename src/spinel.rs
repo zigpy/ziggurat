@@ -639,6 +639,7 @@ mod test {
     use super::*;
     use hex_literal::hex;
     use rand::Rng;
+    use rand::RngCore;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -713,7 +714,7 @@ mod test {
             let mut data = Vec::new();
 
             for _ in 0..len {
-                data.push(rng.next_u32() & 0xFF);
+                data.push((rng.next_u32() & 0xFF) as u8);
             }
 
             let frame = HdlcLiteFrame { data: data.clone() };

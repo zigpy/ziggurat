@@ -1,0 +1,165 @@
+use num_enum::TryFromPrimitive;
+use crate::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
+use crate::types::{Eui64, Key, Nwk, PanId};
+use std::convert::TryFrom;
+use crate::zigbee_nwk::{NwkFrame, NwkSecurityHeaderKeyId, NwkSecurityLevel, NwkFrameType};
+use std::collections::HashMap;
+
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkCommandId {
+    RouteRequest = 0x01,
+    RouteReply = 0x02,
+    NetworkStatus = 0x03,
+    Leave = 0x04,
+    RouteRecord = 0x05,
+    RejoinRequest = 0x06,
+    RejoinResponse = 0x07,
+    LinkStatus = 0x08,
+    NetworkReport = 0x09
+    NetworkUpdate = 0x0a,
+    EndDeviceTimeoutRequest = 0x0b,
+    EndDeviceTimeoutResponse = 0x0c,
+    LinkPowerDelta = 0x0d,
+    NetworkCommissioningRequest = 0x0e,
+    NetworkCommissioningResponse = 0x0f,
+}
+
+
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+pub enum NwkRouteRequestManyToOne {
+    NotManyToOne = 0,
+    ManyToOneSenderSupportsRouteRecordTable = 1,
+    ManyToOneSenderDoesntSupportRouteRecordTable = 2,
+    Reserved = 3,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRouteRequestCommand {
+    // pub reserved1: bool,
+    pub multicast: bool,
+    pub has_destination_eui64_address: bool,
+    pub many_to_one: NwkRouteRequestManyToOne,
+    // pub reserved2: bool,
+    // pub reserved3: bool,
+    // pub reserved4: bool,
+
+    pub route_request_identifier: u8,
+    pub destination_address: Nwk,
+    pub path_cost: u8,
+    pub destination_eui64: Option<Eui64>,
+    pub tlvs: Vec<u8>,
+}
+
+impl NwkRouteRequestCommand {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 5 {
+            return Err("Not enough data to parse NwkRouteRequestCommand");
+        }
+
+        // let reserved1 = (bytes[0] & 0b10000000) != 0;
+        let multicast = (bytes[0] & 0b01000000) != 0;
+        let has_destination_eui64 = (bytes[0] & 0b00100000 != 0);
+
+        if has_destination_eui64 && bytes.len() < 5 + 8 {
+            return Err("Not enough data to parse NwkRouteRequestCommand destination EUI64");
+        }
+
+        // This cannot fail, `NwkRouteRequestManyToOne` is a complete 2 bit enum
+        let many_to_one = NwkRouteRequestManyToOne::try_from((bytes[0] & 0b00011000) >> 3).unwrap();
+
+        // let reserved2 = (bytes[0] & 0b00000100) != 0;
+        // let reserved3 = (bytes[0] & 0b00000010) != 0;
+        // let reserved4 = (bytes[0] & 0b00000001) != 0;
+
+        let route_request_identifier = bytes[1];
+        let destination_address = Nwk(u16::from_le_bytes([bytes[2], bytes[3]));
+        let path_cost = bytes[4];
+
+        let destination_eui64 = None;
+        let tlvs;
+
+        if has_destination_eui64 {
+            (destination_eui64, tlvs) = Eui64::deserialize(&bytes[5..]);
+        } else {
+            tlvs = &bytes[5..];
+        }
+
+        Ok(
+            Self {
+                // reserved1,
+                multicast,
+                has_destination_eui64_address,
+                many_to_one,
+                // reserved2,
+                // reserved3,
+                // reserved4,
+                route_request_identifier,
+                destination_address,
+                path_cost,
+                destination_eui64,
+                tlvs: tlvs.to_vec(),
+            },
+        )
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        let mut byte = 0u8;
+        // byte |= (self.reserved1 as u8) << 7;
+        byte |= (self.multicast as u8) << 6;
+        byte |= (self.has_destination_eui64_address as u8) << 5;
+        byte |= (self.many_to_one as u8) << 3;
+        // byte |= (self.reserved2 as u8) << 2;
+        // byte |= (self.reserved3 as u8) << 1;
+        // byte |= (self.reserved4 as u8);
+        bytes.push(byte);
+
+        bytes.push(self.route_request_identifier);
+        bytes.extend_from_slice(&self.destination_address.to_bytes());
+        bytes.push(self.path_cost);
+
+        if let Some(destination_eui64) = self.destination_eui64 {
+            bytes.extend_from_slice(&destination_eui64.to_bytes());
+        }
+
+        bytes.extend_from_slice(&self.tlvs);
+
+        bytes
+    }
+}
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use hex_literal::hex;
+
+    #[test]
+    fn test_nwk_route_request_command() {
+        let bytes = hex!("10defcff00");
+        let command = NwkRouteRequestCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkRouteRequestCommand {
+                // reserved1: false,
+                multicast: false,
+                has_destination_eui64_address: false,
+                many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
+                // reserved2: false,
+                // reserved3: false,
+                // reserved4: false,
+                route_request_identifier: 222,
+                destination_address: Nwk(0xFFFC),
+                path_cost: 0,
+                destination_eui64: None,
+                tlvs: vec![],
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+}

@@ -152,7 +152,7 @@ impl Key {
         let text = text.replace(":", "").replace("0x", "");
 
         if text.len() != 32 {
-            panic!("Invalid Eui64 length");
+            panic!("Invalid key length");
         }
 
         let mut key = [0; 16];
