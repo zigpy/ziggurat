@@ -280,6 +280,100 @@ impl NwkLeaveCommand {
 }
 
 
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+pub enum EndDeviceTimeout {
+    Seconds10 = 0,
+    Minutes2 = 1,
+    Minutes4 = 2,
+    Minutes8 = 3,
+    Minutes16 = 4,
+    Minutes32 = 5,
+    Minutes64 = 6,
+    Minutes128 = 7,
+    Minutes256 = 8,
+    Minutes512 = 9,
+    Minutes1024 = 10,
+    Minutes2048 = 11,
+    Minutes4096 = 12,
+    Minutes8192 = 13,
+    Minutes16384 = 14,
+}
+
+
+pub struct NwkEndDeviceTimeoutRequestCommand {
+    pub request_timeout_enum: EndDeviceTimeout,
+    pub end_device_configuration: u8,
+}
+
+impl NwkEndDeviceTimeoutRequestCommand {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 2 {
+            return Err("Not enough data to parse NwkEndDeviceTimeoutRequestCommand");
+        }
+
+        let request_timeout_enum = EndDeviceTimeout::try_from(bytes[0])?;
+        let end_device_configuration = bytes[1];
+
+        Ok(Self {
+            request_timeout_enum,
+            end_device_configuration,
+        })
+    }
+
+    pub fn serialize(&self) -> [u8; 2] {
+        let mut result = [0x00; 2];
+        result[0] = self.request_timeout_enum as u8;
+        result[1] = self.end_device_configuration;
+
+        result
+    }
+}
+
+
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+pub enum NwkEndDeviceTimeoutResponseStatus {
+    Success = 0x00,
+    IncorrectValue = 0x01,
+    UnsupportedFeature = 0x02,
+}
+
+
+pub struct NwkEndDeviceTimeoutResponseCommand {
+    pub status: NwkEndDeviceTimeoutResponseStatus,
+    pub mac_data_poll_keepalive_supported: bool,
+    pub end_device_timeout_request_keepalive_supported: bool,
+    pub power_negotation_support: bool,
+}
+
+impl NwkEndDeviceTimeoutResponseCommand {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 2 {
+            return Err("Not enough data to parse NwkEndDeviceTimeoutResponseCommand");
+        }
+
+        let status = NwkEndDeviceTimeoutResponseStatus::try_from(bytes[0])?;
+        let mac_data_poll_keepalive_supported = (bytes[1] & 0b00000001) != 0;
+        let end_device_timeout_request_keepalive_supported = (bytes[1] & 0b00000010) != 0;
+        let power_negotation_support = (bytes[1] & 0b00000100) != 0;
+
+        Ok(Self {
+            status,
+            mac_data_poll_keepalive_supported,
+            end_device_timeout_request_keepalive_supported,
+            power_negotation_support,
+        })
+    }
+
+    pub fn serialize(&self) -> [u8; 2] {
+        let mut result = [0x00; 2];
+        result[0] = self.status as u8;
+        result[1] |= (self.mac_data_poll_keepalive_supported as u8) << 0;
+        result[1] |= (self.end_device_timeout_request_keepalive_supported as u8) << 1;
+        result[1] |= (self.power_negotation_support as u8) << 2;
+
+        result
+    }
+}
 
 
 #[cfg(test)]
@@ -412,6 +506,40 @@ mod test {
                 rejoin: false,
                 request: false,
                 remove_children: false,
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_nwk_end_device_timeout_request_command() {
+        let bytes = hex!("0300");
+        let command = NwkEndDeviceTimeoutRequestCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkEndDeviceTimeoutRequestCommand {
+                request_timeout_enum: EndDeviceTimeout::Minutes8,
+                end_device_configuration: 0,
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_nwk_end_device_timeout_response_command() {
+        let bytes = hex!("0003");
+        let command = NwkEndDeviceTimeoutResponseCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkEndDeviceTimeoutResponseCommand {
+                status: NwkEndDeviceTimeoutResponseStatus::Success,
+                mac_data_poll_keepalive_supported: true,
+                end_device_timeout_request_keepalive_supported: true,
+                power_negotation_support: false,
             }
         );
 
