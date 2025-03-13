@@ -150,6 +150,102 @@ impl NwkRouteRecordCommand {
 }
 
 
+pub struct NwkLinkStatus {
+    pub address: NWK,
+    pub incoming_cost: u8,
+    pub outgoing_cost: u8,
+}
+
+impl NwkLinkStatus {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() != 3 {
+            return Err("Not enough data to parse NwkLinkStatus");
+        }
+
+        let address = Nwk::from_bytes(&bytes[0..2]);
+        let incoming_cost = (bytes[2] & 0b00000111) >> 0;
+        let outgoing_cost = (bytes[2] & 0b01110000) >> 4;
+
+        Ok(Self {
+            address,
+            incoming_cost,
+            outgoing_cost,
+        })
+    }
+
+    pub fn serialize(&self) -> [u8; 3] {
+        let mut result = [0x00; 3];
+        self.address.to_bytes().copy_to_slice(&result[0..2]);
+        result[2] |= self.incoming_cost << 0;
+        result[2] |= self.outgoing_cost << 4;
+
+        result
+    }
+}
+
+
+pub struct NwkLinkStatusCommand {
+    // Flag: 0b01000000
+    pub is_first_frame: bool,
+    // Flag: 0b00100000
+    pub is_last_frame: bool,
+    // Count: 0b00011111
+    // Appended:
+    pub link_statuses: Vec<NwkLinkStatus>,
+}
+
+impl NwkLinkStatusCommand {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 1 {
+            return Err("Not enough data to parse NwkLinkStatusCommand");
+        }
+
+        let is_first_frame = (bytes[0] & 0b01000000) != 0;
+        let is_last_frame = (bytes[0] & 0b00100000) != 0;
+        let count = (bytes[0] & 0b00011111) as usize;
+
+        if bytes.len() < 1 + count * 3 {
+            return Err("Not enough data to parse NwkLinkStatusCommand link statuses");
+        }
+
+        let mut link_statuses = Vec::with_capacity(count);
+        let mut remaining = &bytes[1..];
+
+        for _ in 0..count {
+            let link_status = NwkLinkStatus::from_bytes(remaining)?;
+            link_statuses.push(link_status);
+            remaining = &remaining[3..];
+        }
+
+        Ok(Self {
+            is_first_frame,
+            is_last_frame,
+            link_statuses,
+        })
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        if self.link_statuses.len() > 31 {
+            panic!("Cannot encode more than 31 link statuses");
+        }
+
+        let mut result = Vec::with_capacity(1 + self.link_statuses.len() * 3);
+
+        let mut byte = 0u8;
+        byte |= (self.is_first_frame as u8) << 6;
+        byte |= (self.is_last_frame as u8) << 5;
+        byte |= (self.link_statuses.len() as u8) & 0b00011111;
+        result.push(byte);
+
+        for link_status in &self.link_statuses {
+            result.extend_from_slice(&link_status.serialize());
+        }
+
+        result
+    }
+}
+
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -200,6 +296,69 @@ mod test {
             command,
             NwkRouteRecordCommand {
                 relays: vec![Nwk(0x1CEB)],
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_nwk_link_status_command() {
+        let bytes = hex!("69000011130711ae0e77eb1c13c58816fe9411599e13ff9f11e1e111");
+        let command = NwkLinkStatusCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkLinkStatusCommand {
+                is_first_frame: true,
+                is_last_frame: true,
+                link_statuses: vec![
+                    NwkLinkStatus {
+                        address: Nwk(0x0000),
+                        incoming_cost: 1,
+                        outgoing_cost: 1,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0x0713),
+                        incoming_cost: 1,
+                        outgoing_cost: 1,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0x0EAE),
+                        incoming_cost: 7,
+                        outgoing_cost: 7,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0x1CEB),
+                        incoming_cost: 3,
+                        outgoing_cost: 1,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0x88C5),
+                        incoming_cost: 6,
+                        outgoing_cost: 1,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0x94FE),
+                        incoming_cost: 1,
+                        outgoing_cost: 1,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0x9E59),
+                        incoming_cost: 3,
+                        outgoing_cost: 1,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0x9FFF),
+                        incoming_cost: 1,
+                        outgoing_cost: 1,
+                    },
+                    NwkLinkStatus {
+                        address: Nwk(0xE1E1),
+                        incoming_cost: 1,
+                        outgoing_cost: 1,
+                    },
+                ],
             }
         );
 
