@@ -246,6 +246,42 @@ impl NwkLinkStatusCommand {
 }
 
 
+pub struct NwkLeaveCommand {
+    pub rejoin: bool,
+    pub request: bool,
+    pub remove_children: bool,
+}
+
+impl NwkLeaveCommand {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 1 {
+            return Err("Not enough data to parse NwkLeaveCommand");
+        }
+
+        let rejoin = (bytes[0] & 0b00100000) != 0;
+        let request = (bytes[0] & 0b01000000) != 0;
+        let remove_children = (bytes[0] & 0b10000000) != 0;
+
+        Ok(Self {
+            rejoin,
+            request,
+            remove_children,
+        })
+    }
+
+    pub fn serialize(&self) -> [u8; 1] {
+        let mut result = [0x00];
+        result[0] |= (self.rejoin as u8) << 5;
+        result[0] |= (self.request as u8) << 6;
+        result[0] |= (self.remove_children as u8) << 7;
+
+        result
+    }
+}
+
+
+
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -359,6 +395,23 @@ mod test {
                         outgoing_cost: 1,
                     },
                 ],
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_nwk_leave_command() {
+        let bytes = hex!("00");
+        let command = NwkLeaveCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkLeaveCommand {
+                rejoin: false,
+                request: false,
+                remove_children: false,
             }
         );
 
