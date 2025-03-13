@@ -1,6 +1,6 @@
 use crate::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
 use crate::types::{Eui64, Key, Nwk, PanId};
-use crate::zigbee_nwk::{NwkFrame, NwkSecurityHeaderKeyId, NwkSecurityLevel};
+use crate::zigbee_nwk::{NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -346,7 +346,7 @@ impl ZigbeeStack {
             return None;
         }
 
-        // Validate the security header frame counter for the current IEEE
+        // Validate the security header frame counter for the relaying EUI64
         let src_eui64;
 
         match aux_header.extended_source {
@@ -374,7 +374,7 @@ impl ZigbeeStack {
             Some(last_stored_frame_counter) => {
                 if aux_header.frame_counter <= *last_stored_frame_counter {
                     log::debug!(
-                        "Ignoring frame, frame counter has rolled backward from {}, to {}",
+                        "Ignoring frame, frame counter has rolled backward from {} to {}",
                         last_stored_frame_counter,
                         aux_header.frame_counter
                     );
@@ -401,43 +401,65 @@ impl ZigbeeStack {
                 }
             };
 
-        // The frame is valid, update the frame counter for the sender
-        self.nib
-            .nwk_security_material_primary
-            .incoming_frame_counter_set
-            .insert(src_eui64, aux_header.frame_counter);
-
-        log::debug!(
-            "Incremented frame counter for {:?} from {} to {}",
-            src_eui64,
-            last_frame_counter,
-            aux_header.frame_counter
-        );
-
-        // Update the address cache
-        match self
-            .nib
-            .nwk_address_map
-            .insert(src_eui64, nwk_frame.nwk_header.source)
-        {
-            None => {
-                log::debug!(
-                    "Added new address mapping: {:?} -> {:?}",
-                    nwk_frame.nwk_header.source,
-                    src_eui64
-                )
-            }
-            Some(old_nwk) => {
-                log::warn!(
-                    "Updated address mapping: {:?} -> {:?} (was {:?})",
-                    nwk_frame.nwk_header.source,
-                    src_eui64,
-                    old_nwk,
-                )
-            }
-        }
+        self.handle_decrypted_frame(&decrypted_nwk_frame, frame);
 
         log::info!("Decrypted frame: {:#?}", decrypted_nwk_frame);
         return Some(decrypted_nwk_frame);
+    }
+
+    pub fn handle_decrypted_frame(
+        &mut self,
+        nwk_frame: &NwkFrame,
+        ieee802154_frame: &Ieee802154Frame,
+    ) {
+        // Update the frame counter for the relaying device
+        if let Some(aux_header) = &nwk_frame.aux_header {
+            match aux_header.extended_source {
+                Some(relaying_eui64) => {
+                    self.nib
+                        .nwk_security_material_primary
+                        .incoming_frame_counter_set
+                        .insert(relaying_eui64, aux_header.frame_counter);
+
+                    log::debug!(
+                        "Incremented frame counter for {:?} to {}",
+                        relaying_eui64,
+                        aux_header.frame_counter
+                    );
+                }
+                None => {}
+            }
+        }
+
+        // Update the address cache
+        match nwk_frame.nwk_header.source_ieee {
+            Some(src_eui64) => {
+                match self
+                    .nib
+                    .nwk_address_map
+                    .insert(src_eui64, nwk_frame.nwk_header.source)
+                {
+                    None => {
+                        log::debug!(
+                            "Added new address mapping: {:?} -> {:?}",
+                            nwk_frame.nwk_header.source,
+                            src_eui64
+                        )
+                    }
+                    Some(old_nwk) => {
+                        log::warn!(
+                            "Updated address mapping: {:?} -> {:?} (was {:?})",
+                            nwk_frame.nwk_header.source,
+                            src_eui64,
+                            old_nwk,
+                        )
+                    }
+                }
+            }
+            None => {}
+        }
+
+        // Handle route records
+        if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command {}
     }
 }
