@@ -112,6 +112,44 @@ impl NwkRouteRequestCommand {
 }
 
 
+pub struct NwkRouteRecordCommand {
+    pub relays: Vec<Nwk>,
+}
+
+impl NwkRouteRecordCommand {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 1 {
+            return Err("Not enough data to parse NwkRouteRecordCommand");
+        }
+
+        let num_relays = bytes[0] as usize;
+        let relays = Vec::with_capacity(num_relays);
+
+        let mut remaining = &bytes[1..];
+
+        for _ in 0..num_relays {
+            let (nwk, remaining) = Nwk::deserialize(remaining)?;
+            relays.push(nwk);
+        }
+
+        Ok(Self { relays })
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let num_relays = self.relays.len();
+        let mut bytes = Vec::with_capacity(1 + num_relays * 2);
+
+        bytes.push(num_relays as u8);
+
+        for relay in &self.relays {
+            bytes.extend_from_slice(&relay.to_bytes());
+        }
+
+        bytes
+    }
+}
+
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -132,6 +170,36 @@ mod test {
                 path_cost: 0,
                 destination_eui64: None,
                 tlvs: vec![],
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_nwk_route_record_command_empty() {
+        let bytes = hex!("00");
+        let command = NwkRouteRecordCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkRouteRecordCommand {
+                relays: vec![Nwk()],
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_nwk_route_record_command() {
+        let bytes = hex!("01eb1c");
+        let command = NwkRouteRecordCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkRouteRecordCommand {
+                relays: vec![Nwk(0x1CEB)],
             }
         );
 
