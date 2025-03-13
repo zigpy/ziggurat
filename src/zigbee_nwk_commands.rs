@@ -37,14 +37,8 @@ pub enum NwkRouteRequestManyToOne {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteRequestCommand {
-    // pub reserved1: bool,
     pub multicast: bool,
-    pub has_destination_eui64_address: bool,
     pub many_to_one: NwkRouteRequestManyToOne,
-    // pub reserved2: bool,
-    // pub reserved3: bool,
-    // pub reserved4: bool,
-
     pub route_request_identifier: u8,
     pub destination_address: Nwk,
     pub path_cost: u8,
@@ -58,7 +52,6 @@ impl NwkRouteRequestCommand {
             return Err("Not enough data to parse NwkRouteRequestCommand");
         }
 
-        // let reserved1 = (bytes[0] & 0b10000000) != 0;
         let multicast = (bytes[0] & 0b01000000) != 0;
         let has_destination_eui64 = (bytes[0] & 0b00100000 != 0);
 
@@ -68,10 +61,6 @@ impl NwkRouteRequestCommand {
 
         // This cannot fail, `NwkRouteRequestManyToOne` is a complete 2 bit enum
         let many_to_one = NwkRouteRequestManyToOne::try_from((bytes[0] & 0b00011000) >> 3).unwrap();
-
-        // let reserved2 = (bytes[0] & 0b00000100) != 0;
-        // let reserved3 = (bytes[0] & 0b00000010) != 0;
-        // let reserved4 = (bytes[0] & 0b00000001) != 0;
 
         let route_request_identifier = bytes[1];
         let destination_address = Nwk(u16::from_le_bytes([bytes[2], bytes[3]));
@@ -88,13 +77,8 @@ impl NwkRouteRequestCommand {
 
         Ok(
             Self {
-                // reserved1,
                 multicast,
-                has_destination_eui64_address,
                 many_to_one,
-                // reserved2,
-                // reserved3,
-                // reserved4,
                 route_request_identifier,
                 destination_address,
                 path_cost,
@@ -108,13 +92,9 @@ impl NwkRouteRequestCommand {
         let mut bytes = Vec::new();
 
         let mut byte = 0u8;
-        // byte |= (self.reserved1 as u8) << 7;
         byte |= (self.multicast as u8) << 6;
-        byte |= (self.has_destination_eui64_address as u8) << 5;
+        byte |= (!self.destination_eui64.is_none() as u8) << 5;
         byte |= (self.many_to_one as u8) << 3;
-        // byte |= (self.reserved2 as u8) << 2;
-        // byte |= (self.reserved3 as u8) << 1;
-        // byte |= (self.reserved4 as u8);
         bytes.push(byte);
 
         bytes.push(self.route_request_identifier);
@@ -145,13 +125,8 @@ mod test {
         assert_eq!(
             command,
             NwkRouteRequestCommand {
-                // reserved1: false,
                 multicast: false,
-                has_destination_eui64_address: false,
                 many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
-                // reserved2: false,
-                // reserved3: false,
-                // reserved4: false,
                 route_request_identifier: 222,
                 destination_address: Nwk(0xFFFC),
                 path_cost: 0,
