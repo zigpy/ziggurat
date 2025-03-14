@@ -115,15 +115,65 @@ pub struct NwkRouteDiscoveryTableEntry {
 }
 
 #[derive(Debug)]
+pub enum NwkDeviceType {
+    Coordinator = 0x00,
+    Router = 0x01,
+    EndDevice = 0x02,
+}
+
+#[derive(Debug)]
+pub enum NwkNeighborRelationship {
+    Parent = 0x00,
+    Child = 0x01,
+    Sibling = 0x02,
+    NoneOfTheAbove = 0x03, // NotParentChildOrSibling?
+    PreviousChild = 0x04,
+    UnauthenticatedChild = 0x05,
+    UnauthorizedChildWithRelayAllowed = 0x06,
+    LostChild = 0x07,
+    AddressConflictChild = 0x08,
+    BackboneMeshSibling = 0x09,
+}
+
+#[derive(Debug)]
+pub struct NwkNeighborTableEntry {
+    pub extended_address: Eui64,
+    pub network_address: Nwk,
+    pub device_type: NwkDeviceType,
+    pub rx_on_when_idle: bool,
+    pub end_device_configuration: u16,
+    pub timeout_counter: u32, // max: 15728640
+    pub device_timeout: u32,  // max: 129600
+    pub relationship: NwkNeighborRelationship,
+    pub transmit_failure: u8,
+    pub lqa: u8,
+    pub outgoing_cost: u8,
+    pub age: u8,
+    pub incoming_beacon_timestamp: u32,
+    pub beacon_transmission_time_offset: u32,
+    pub keepalive_received: bool,
+    // pub mac_interface_index: u8,
+    pub mac_unicast_bytes_transmitted: u32,
+    pub mac_unicast_bytes_received: u32,
+    pub router_age: u16,
+    pub router_connectivity: u8,
+    pub router_neighbor_set_diversity: u8,
+    pub router_outbound_activity: u8,
+    pub router_inbound_activity: u8,
+    pub security_timer: u8,
+}
+
+#[derive(Debug)]
 pub struct Nib {
     pub nwk_sequence_number: u8,
     pub nwk_passive_ack_timeout: u32,
     pub nwk_max_broadcast_retries: u8,
     pub nwk_max_children: u8,
     pub nwk_max_depth: u8,
-    // pub nwkNeighborTable: Vec<NwkNeighbor>,
+    pub nwk_neighbor_table: HashMap<Eui64, NwkNeighborTableEntry>,
     pub nwk_network_broadcast_delivery_time: u32,
     pub nwk_route_table: Vec<NwkRoutingTableEntry>,
+    pub nwk_route_discovery_table: HashMap<u8, NwkRouteDiscoveryTableEntry>,
     pub nwk_capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
     pub nwk_max_source_route: u8,
@@ -145,11 +195,13 @@ pub struct Nib {
     pub nwk_concentrator_discovery_separation_time: u8,
     pub nwk_link_status_period: u8,
 
-    // The number of missed link status command frames before resetting the link costs to zero.
+    // The number of missed link status command frames before resetting the link costs
+    // to zero.
     pub nwk_router_age_limit: u8,
     pub nwk_address_map: HashMap<Eui64, Nwk>,
 
-    // A flag that determines if a time stamp indication is provided on incoming and outgoing packets.
+    // A flag that determines if a time stamp indication is provided on incoming and
+    // outgoing packets.
     pub nwk_time_stamp: bool,
 
     pub nwk_pan_id: PanId,
@@ -162,15 +214,18 @@ pub struct Nib {
     // field contained in the neighbor table.
     pub nwk_tx_total: u16,
 
-    // This policy determines whether or not a remote NWK leave request command frame received by the local device is accepted.
+    // This policy determines whether or not a remote NWK leave request command frame
+    // received by the local device is accepted.
     pub nwk_leave_request_allowed: bool,
 
     pub nwk_parent_information: u8,
 
-    // This is an index into Table 3-54. It indicates the default timeout in minutes for any end device that does not negotiate a different timeout value.
+    // This is an index into Table 3-54. It indicates the default timeout in minutes for
+    // any end device that does not negotiate a different timeout value.
     pub nwk_end_device_timeout_default: u8,
 
-    // This policy determines whether a NWK leave request is accepted when the Rejoin bit in the message is set to FALSE
+    // This policy determines whether a NWK leave request is accepted when the Rejoin
+    // bit in the message is set to FALSE
     pub nwk_leave_request_without_rejoin_allowed: bool,
 
     pub nwk_ieee_address: Eui64,
@@ -199,9 +254,10 @@ impl Nib {
             nwk_max_broadcast_retries: 2,
             nwk_max_children: 32,
             nwk_max_depth: 15,
-            // nwkNeighborTable: Vec::new(),
+            nwk_neighbor_table: HashMap::new(),
             nwk_network_broadcast_delivery_time: 0,
             nwk_route_table: Vec::new(),
+            nwk_route_discovery_table: HashMap::new(),
             nwk_capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
                 device_type: NwkCapabilityInformationDeviceType::EndDevice,
@@ -408,6 +464,22 @@ impl ZigbeeStack {
         return Some(decrypted_nwk_frame);
     }
 
+    pub fn update_nwk_eui64_mapping(&mut self, nwk: Nwk, eui64: Eui64) {
+        match self.nib.nwk_address_map.insert(eui64, nwk) {
+            None => {
+                log::debug!("Added new address mapping: {:?} -> {:?}", eui64, nwk)
+            }
+            Some(old_nwk) => {
+                log::warn!(
+                    "Updated address mapping: {:?} -> {:?} (was {:?})",
+                    eui64,
+                    nwk,
+                    old_nwk,
+                )
+            }
+        }
+    }
+
     pub fn handle_decrypted_frame(
         &mut self,
         nwk_frame: &NwkFrame,
@@ -435,27 +507,7 @@ impl ZigbeeStack {
         // Update the address cache
         match nwk_frame.nwk_header.source_ieee {
             Some(src_eui64) => {
-                match self
-                    .nib
-                    .nwk_address_map
-                    .insert(src_eui64, nwk_frame.nwk_header.source)
-                {
-                    None => {
-                        log::debug!(
-                            "Added new address mapping: {:?} -> {:?}",
-                            nwk_frame.nwk_header.source,
-                            src_eui64
-                        )
-                    }
-                    Some(old_nwk) => {
-                        log::warn!(
-                            "Updated address mapping: {:?} -> {:?} (was {:?})",
-                            nwk_frame.nwk_header.source,
-                            src_eui64,
-                            old_nwk,
-                        )
-                    }
-                }
+                self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
             }
             None => {}
         }
