@@ -1,39 +1,35 @@
+use crate::types::{Eui64, Nwk};
 use num_enum::TryFromPrimitive;
-use crate::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
-use crate::types::{Eui64, Key, Nwk, PanId};
 use std::convert::TryFrom;
-use crate::zigbee_nwk::{NwkFrame, NwkSecurityHeaderKeyId, NwkSecurityLevel, NwkFrameType};
-use std::collections::HashMap;
 
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum NwkCommandId {
     RouteRequest = 0x01,
-    RouteReply = 0x02,
-    NetworkStatus = 0x03,
+    //RouteReply = 0x02,
+    //NetworkStatus = 0x03,
     Leave = 0x04,
     RouteRecord = 0x05,
-    RejoinRequest = 0x06,
-    RejoinResponse = 0x07,
+    //RejoinRequest = 0x06,
+    //RejoinResponse = 0x07,
     LinkStatus = 0x08,
-    NetworkReport = 0x09
-    NetworkUpdate = 0x0a,
+    //NetworkReport = 0x09
+    //NetworkUpdate = 0x0a,
     EndDeviceTimeoutRequest = 0x0b,
     EndDeviceTimeoutResponse = 0x0c,
-    LinkPowerDelta = 0x0d,
-    NetworkCommissioningRequest = 0x0e,
-    NetworkCommissioningResponse = 0x0f,
+    //LinkPowerDelta = 0x0d,
+    //NetworkCommissioningRequest = 0x0e,
+    //NetworkCommissioningResponse = 0x0f,
 }
 
-
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum NwkRouteRequestManyToOne {
     NotManyToOne = 0,
     ManyToOneSenderSupportsRouteRecordTable = 1,
     ManyToOneSenderDoesntSupportRouteRecordTable = 2,
     Reserved = 3,
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteRequestCommand {
@@ -52,8 +48,8 @@ impl NwkRouteRequestCommand {
             return Err("Not enough data to parse NwkRouteRequestCommand");
         }
 
-        let multicast = (bytes[0] & 0b01000000) != 0;
-        let has_destination_eui64 = (bytes[0] & 0b00100000 != 0);
+        let multicast = bytes[0] & 0b01000000 != 0;
+        let has_destination_eui64 = bytes[0] & 0b00100000 != 0;
 
         if has_destination_eui64 && bytes.len() < 5 + 8 {
             return Err("Not enough data to parse NwkRouteRequestCommand destination EUI64");
@@ -63,29 +59,25 @@ impl NwkRouteRequestCommand {
         let many_to_one = NwkRouteRequestManyToOne::try_from((bytes[0] & 0b00011000) >> 3).unwrap();
 
         let route_request_identifier = bytes[1];
-        let destination_address = Nwk(u16::from_le_bytes([bytes[2], bytes[3]));
+        let destination_address = Nwk(u16::from_le_bytes([bytes[2], bytes[3]]));
         let path_cost = bytes[4];
 
-        let destination_eui64 = None;
-        let tlvs;
-
-        if has_destination_eui64 {
-            (destination_eui64, tlvs) = Eui64::deserialize(&bytes[5..]);
+        let (destination_eui64, tlvs) = if has_destination_eui64 {
+            let (eui64, remaining) = Eui64::deserialize(&bytes[5..])?;
+            (Some(eui64), remaining)
         } else {
-            tlvs = &bytes[5..];
-        }
+            (None, &bytes[5..])
+        };
 
-        Ok(
-            Self {
-                multicast,
-                many_to_one,
-                route_request_identifier,
-                destination_address,
-                path_cost,
-                destination_eui64,
-                tlvs: tlvs.to_vec(),
-            },
-        )
+        Ok(Self {
+            multicast,
+            many_to_one,
+            route_request_identifier,
+            destination_address,
+            path_cost,
+            destination_eui64,
+            tlvs: tlvs.to_vec(),
+        })
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -93,7 +85,7 @@ impl NwkRouteRequestCommand {
 
         let mut byte = 0u8;
         byte |= (self.multicast as u8) << 6;
-        byte |= (!self.destination_eui64.is_none() as u8) << 5;
+        byte |= (self.destination_eui64.is_some() as u8) << 5;
         byte |= (self.many_to_one as u8) << 3;
         bytes.push(byte);
 
@@ -111,7 +103,102 @@ impl NwkRouteRequestCommand {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRouteReplyCommand {
+    // bit 6 of first byte
+    pub multicast: bool,
 
+    pub route_request_identifier: u8,
+    pub originator_nwk: Nwk,
+    pub responder_nwk: Nwk,
+    pub path_cost: u8,
+    // if bit 4 of first byte is set, this is present
+    pub originator_eui64: Option<Eui64>,
+    // if bit 5 of first byte is set, this is present
+    pub responder_eui64: Option<Eui64>,
+    pub tlvs: Vec<u8>,
+}
+
+impl NwkRouteReplyCommand {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 5 {
+            return Err("Not enough data to parse NwkRouteReplyCommand");
+        }
+
+        let multicast = bytes[0] & 0b01000000 != 0;
+        let has_originator_eui64 = bytes[0] & 0b00010000 != 0;
+        let has_responder_eui64 = bytes[0] & 0b00100000 != 0;
+
+        if has_originator_eui64 && bytes.len() < 5 + 8 {
+            return Err("Not enough data to parse NwkRouteReplyCommand originator EUI64");
+        }
+
+        if has_responder_eui64 && bytes.len() < 5 + 8 + 8 {
+            return Err("Not enough data to parse NwkRouteReplyCommand responder EUI64");
+        }
+
+        let route_request_identifier = bytes[1];
+        let originator_nwk = Nwk(u16::from_le_bytes([bytes[2], bytes[3]]));
+        let responder_nwk = Nwk(u16::from_le_bytes([bytes[4], bytes[5]]));
+        let path_cost = bytes[6];
+
+        let mut originator_eui64 = None;
+        let mut responder_eui64 = None;
+        let mut remaining = &bytes[7..];
+
+        if has_originator_eui64 {
+            let eui64;
+            (eui64, remaining) = Eui64::deserialize(remaining)?;
+            originator_eui64 = Some(eui64);
+        }
+
+        if has_responder_eui64 {
+            let eui64;
+            (eui64, remaining) = Eui64::deserialize(remaining)?;
+            responder_eui64 = Some(eui64);
+        }
+
+        Ok(Self {
+            multicast,
+            route_request_identifier,
+            originator_nwk,
+            responder_nwk,
+            path_cost,
+            originator_eui64,
+            responder_eui64,
+            tlvs: remaining.to_vec(),
+        })
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        let mut byte = 0u8;
+        byte |= (self.multicast as u8) << 6;
+        byte |= (!self.originator_eui64.is_none() as u8) << 4;
+        byte |= (!self.responder_eui64.is_none() as u8) << 5;
+        bytes.push(byte);
+
+        bytes.push(self.route_request_identifier);
+        bytes.extend_from_slice(&self.originator_nwk.to_bytes());
+        bytes.extend_from_slice(&self.responder_nwk.to_bytes());
+        bytes.push(self.path_cost);
+
+        if let Some(originator_eui64) = self.originator_eui64 {
+            bytes.extend_from_slice(&originator_eui64.to_bytes());
+        }
+
+        if let Some(responder_eui64) = self.responder_eui64 {
+            bytes.extend_from_slice(&responder_eui64.to_bytes());
+        }
+
+        bytes.extend_from_slice(&self.tlvs);
+
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteRecordCommand {
     pub relays: Vec<Nwk>,
 }
@@ -123,9 +210,9 @@ impl NwkRouteRecordCommand {
         }
 
         let num_relays = bytes[0] as usize;
-        let relays = Vec::with_capacity(num_relays);
+        let mut relays = Vec::with_capacity(num_relays);
 
-        let mut remaining = &bytes[1..];
+        let remaining = &bytes[1..];
 
         for _ in 0..num_relays {
             let (nwk, remaining) = Nwk::deserialize(remaining)?;
@@ -149,20 +236,20 @@ impl NwkRouteRecordCommand {
     }
 }
 
-
+#[derive(Debug, Clone, PartialEq)]
 pub struct NwkLinkStatus {
-    pub address: NWK,
+    pub address: Nwk,
     pub incoming_cost: u8,
     pub outgoing_cost: u8,
 }
 
 impl NwkLinkStatus {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        if bytes.len() != 3 {
+        if bytes.len() < 3 {
             return Err("Not enough data to parse NwkLinkStatus");
         }
 
-        let address = Nwk::from_bytes(&bytes[0..2]);
+        let address = Nwk(u16::from_le_bytes([bytes[0], bytes[1]]));
         let incoming_cost = (bytes[2] & 0b00000111) >> 0;
         let outgoing_cost = (bytes[2] & 0b01110000) >> 4;
 
@@ -175,7 +262,7 @@ impl NwkLinkStatus {
 
     pub fn serialize(&self) -> [u8; 3] {
         let mut result = [0x00; 3];
-        self.address.to_bytes().copy_to_slice(&result[0..2]);
+        result[0..2].copy_from_slice(&self.address.to_bytes());
         result[2] |= self.incoming_cost << 0;
         result[2] |= self.outgoing_cost << 4;
 
@@ -183,14 +270,10 @@ impl NwkLinkStatus {
     }
 }
 
-
+#[derive(Debug, Clone, PartialEq)]
 pub struct NwkLinkStatusCommand {
-    // Flag: 0b01000000
     pub is_first_frame: bool,
-    // Flag: 0b00100000
     pub is_last_frame: bool,
-    // Count: 0b00011111
-    // Appended:
     pub link_statuses: Vec<NwkLinkStatus>,
 }
 
@@ -200,8 +283,8 @@ impl NwkLinkStatusCommand {
             return Err("Not enough data to parse NwkLinkStatusCommand");
         }
 
-        let is_first_frame = (bytes[0] & 0b01000000) != 0;
-        let is_last_frame = (bytes[0] & 0b00100000) != 0;
+        let is_first_frame = bytes[0] & 0b01000000 != 0;
+        let is_last_frame = bytes[0] & 0b00100000 != 0;
         let count = (bytes[0] & 0b00011111) as usize;
 
         if bytes.len() < 1 + count * 3 {
@@ -245,7 +328,7 @@ impl NwkLinkStatusCommand {
     }
 }
 
-
+#[derive(Debug, Clone, PartialEq)]
 pub struct NwkLeaveCommand {
     pub rejoin: bool,
     pub request: bool,
@@ -258,9 +341,9 @@ impl NwkLeaveCommand {
             return Err("Not enough data to parse NwkLeaveCommand");
         }
 
-        let rejoin = (bytes[0] & 0b00100000) != 0;
-        let request = (bytes[0] & 0b01000000) != 0;
-        let remove_children = (bytes[0] & 0b10000000) != 0;
+        let rejoin = bytes[0] & 0b00100000 != 0;
+        let request = bytes[0] & 0b01000000 != 0;
+        let remove_children = bytes[0] & 0b10000000 != 0;
 
         Ok(Self {
             rejoin,
@@ -279,8 +362,8 @@ impl NwkLeaveCommand {
     }
 }
 
-
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, Clone, TryFromPrimitive, Copy)]
+#[repr(u8)]
 pub enum EndDeviceTimeout {
     Seconds10 = 0,
     Minutes2 = 1,
@@ -299,7 +382,7 @@ pub enum EndDeviceTimeout {
     Minutes16384 = 14,
 }
 
-
+#[derive(Debug, Clone, PartialEq)]
 pub struct NwkEndDeviceTimeoutRequestCommand {
     pub request_timeout_enum: EndDeviceTimeout,
     pub end_device_configuration: u8,
@@ -311,7 +394,8 @@ impl NwkEndDeviceTimeoutRequestCommand {
             return Err("Not enough data to parse NwkEndDeviceTimeoutRequestCommand");
         }
 
-        let request_timeout_enum = EndDeviceTimeout::try_from(bytes[0])?;
+        let request_timeout_enum =
+            EndDeviceTimeout::try_from(bytes[0]).map_err(|_| "Invalid EndDeviceTimeout value")?;
         let end_device_configuration = bytes[1];
 
         Ok(Self {
@@ -329,15 +413,15 @@ impl NwkEndDeviceTimeoutRequestCommand {
     }
 }
 
-
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, Clone, TryFromPrimitive, Copy)]
+#[repr(u8)]
 pub enum NwkEndDeviceTimeoutResponseStatus {
     Success = 0x00,
     IncorrectValue = 0x01,
     UnsupportedFeature = 0x02,
 }
 
-
+#[derive(Debug, Clone, PartialEq)]
 pub struct NwkEndDeviceTimeoutResponseCommand {
     pub status: NwkEndDeviceTimeoutResponseStatus,
     pub mac_data_poll_keepalive_supported: bool,
@@ -351,10 +435,11 @@ impl NwkEndDeviceTimeoutResponseCommand {
             return Err("Not enough data to parse NwkEndDeviceTimeoutResponseCommand");
         }
 
-        let status = NwkEndDeviceTimeoutResponseStatus::try_from(bytes[0])?;
-        let mac_data_poll_keepalive_supported = (bytes[1] & 0b00000001) != 0;
-        let end_device_timeout_request_keepalive_supported = (bytes[1] & 0b00000010) != 0;
-        let power_negotation_support = (bytes[1] & 0b00000100) != 0;
+        let status = NwkEndDeviceTimeoutResponseStatus::try_from(bytes[0])
+            .map_err(|_| "Invalid NwkEndDeviceTimeoutResponseStatus value")?;
+        let mac_data_poll_keepalive_supported = bytes[1] & 0b00000001 != 0;
+        let end_device_timeout_request_keepalive_supported = bytes[1] & 0b00000010 != 0;
+        let power_negotation_support = bytes[1] & 0b00000100 != 0;
 
         Ok(Self {
             status,
@@ -375,7 +460,6 @@ impl NwkEndDeviceTimeoutResponseCommand {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -383,7 +467,7 @@ mod test {
 
     #[test]
     fn test_nwk_route_request_command() {
-        let bytes = hex!("10defcff00");
+        let bytes = hex!("00dea30501");
         let command = NwkRouteRequestCommand::from_bytes(&bytes).unwrap();
 
         assert_eq!(
@@ -392,8 +476,8 @@ mod test {
                 multicast: false,
                 many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
                 route_request_identifier: 222,
-                destination_address: Nwk(0xFFFC),
-                path_cost: 0,
+                destination_address: Nwk(0x05A3),
+                path_cost: 1,
                 destination_eui64: None,
                 tlvs: vec![],
             }
@@ -407,12 +491,7 @@ mod test {
         let bytes = hex!("00");
         let command = NwkRouteRecordCommand::from_bytes(&bytes).unwrap();
 
-        assert_eq!(
-            command,
-            NwkRouteRecordCommand {
-                relays: vec![Nwk()],
-            }
-        );
+        assert_eq!(command, NwkRouteRecordCommand { relays: vec![] });
 
         assert_eq!(command.serialize(), bytes);
     }
@@ -434,7 +513,7 @@ mod test {
 
     #[test]
     fn test_nwk_link_status_command() {
-        let bytes = hex!("69000011130711ae0e77eb1c13c58816fe9411599e13ff9f11e1e111");
+        let bytes = hex!("62e73c120ac711");
         let command = NwkLinkStatusCommand::from_bytes(&bytes).unwrap();
 
         assert_eq!(
@@ -444,47 +523,12 @@ mod test {
                 is_last_frame: true,
                 link_statuses: vec![
                     NwkLinkStatus {
-                        address: Nwk(0x0000),
-                        incoming_cost: 1,
+                        address: Nwk(0x3CE7),
+                        incoming_cost: 2,
                         outgoing_cost: 1,
                     },
                     NwkLinkStatus {
-                        address: Nwk(0x0713),
-                        incoming_cost: 1,
-                        outgoing_cost: 1,
-                    },
-                    NwkLinkStatus {
-                        address: Nwk(0x0EAE),
-                        incoming_cost: 7,
-                        outgoing_cost: 7,
-                    },
-                    NwkLinkStatus {
-                        address: Nwk(0x1CEB),
-                        incoming_cost: 3,
-                        outgoing_cost: 1,
-                    },
-                    NwkLinkStatus {
-                        address: Nwk(0x88C5),
-                        incoming_cost: 6,
-                        outgoing_cost: 1,
-                    },
-                    NwkLinkStatus {
-                        address: Nwk(0x94FE),
-                        incoming_cost: 1,
-                        outgoing_cost: 1,
-                    },
-                    NwkLinkStatus {
-                        address: Nwk(0x9E59),
-                        incoming_cost: 3,
-                        outgoing_cost: 1,
-                    },
-                    NwkLinkStatus {
-                        address: Nwk(0x9FFF),
-                        incoming_cost: 1,
-                        outgoing_cost: 1,
-                    },
-                    NwkLinkStatus {
-                        address: Nwk(0xE1E1),
+                        address: Nwk(0xC70A),
                         incoming_cost: 1,
                         outgoing_cost: 1,
                     },
@@ -540,6 +584,28 @@ mod test {
                 mac_data_poll_keepalive_supported: true,
                 end_device_timeout_request_keepalive_supported: true,
                 power_negotation_support: false,
+            }
+        );
+
+        assert_eq!(command.serialize(), bytes);
+    }
+
+    #[test]
+    fn test_nwk_route_reply_command() {
+        let bytes = hex!("305f375f0a93037138210501881700aed31f0b01881700");
+        let command = NwkRouteReplyCommand::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            command,
+            NwkRouteReplyCommand {
+                multicast: false,
+                route_request_identifier: 95,
+                originator_nwk: Nwk(0x5F37),
+                responder_nwk: Nwk(0x930A),
+                path_cost: 3,
+                originator_eui64: Some(Eui64::from_hex("00:17:88:01:05:21:38:71")),
+                responder_eui64: Some(Eui64::from_hex("00:17:88:01:0b:1f:d3:ae")),
+                tlvs: vec![],
             }
         );
 

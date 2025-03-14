@@ -1,6 +1,7 @@
 use crate::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
 use crate::types::{Eui64, Key, Nwk, PanId};
 use crate::zigbee_nwk::{NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId, NwkSecurityLevel};
+use crate::zigbee_nwk_commands::NwkCommandId;
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -460,6 +461,18 @@ impl ZigbeeStack {
         }
 
         // Handle route records
-        if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command {}
+        if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command {
+            match NwkCommandId::try_from(nwk_frame.payload[0]) {
+                Ok(NwkCommandId::LinkStatus) => {
+                    log::debug!("Link status command frame received");
+                }
+                Err(_) => {
+                    log::debug!("Unknown NWK command: {}", nwk_frame.payload[0]);
+                }
+                _ => {
+                    log::debug!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
+                }
+            }
+        }
     }
 }
