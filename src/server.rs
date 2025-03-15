@@ -32,7 +32,6 @@ struct CommandResponse {
 }
 
 pub struct ZigguratServer {
-    spinel: Arc<SpinelClient>,
     zigbee_stack: Arc<Mutex<ZigbeeStack>>,
     notify_tx: broadcast::Sender<serde_json::Value>,
 }
@@ -47,115 +46,34 @@ impl ZigguratServer {
         })?;
 
         // Connect the Spinel client to the port
-        let spinel = Arc::new(SpinelClient::new(port));
+        let spinel = SpinelClient::new(port);
         spinel.spawn_reader();
 
-        // Enable the PHY and set up the radio, save for the channel
-        spinel
-            .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
-            .await
-            .expect("Failed to enable the PHY");
-        spinel
-            .prop_value_set(SpinelPropertyId::MacPromiscuousMode as u32, vec![2])
-            .await
-            .expect("Failed to set the MAC promiscuous mode");
-        spinel
-            .prop_value_set(
-                SpinelPropertyId::MacRawStreamEnabled as u32,
-                vec![true as u8],
-            )
-            .await
-            .expect("Failed to enable the RAW stream");
+        // Start the radio via the stack
+        let zigbee_stack = Arc::new(Mutex::new(ZigbeeStack::new(spinel)));
 
-        let zigbee_stack = ZigbeeStack::new();
+        {
+            let mut stack = zigbee_stack.lock().await;
+            stack.start_radio().await;
+        }
+
+        // Spawn the receiver loop in the background
+        {
+            let stack = Arc::clone(&zigbee_stack);
+            tokio::spawn(async move {
+                ZigbeeStack::run_802154_receiver(stack).await;
+            });
+        }
 
         // Create a channel for notification events
         let (notify_tx, _notify_rx) = broadcast::channel::<serde_json::Value>(100);
 
         let server = ZigguratServer {
-            spinel: spinel,
-            zigbee_stack: Arc::new(Mutex::new(zigbee_stack)),
+            zigbee_stack: zigbee_stack,
             notify_tx: notify_tx,
         };
 
         Ok(server)
-    }
-
-    pub async fn spawn_zigbee_receiver(&self) {
-        let (stream_raw_tx, mut stream_raw_rx) = mpsc::channel(32);
-
-        {
-            // Lock the protocol and set the property update receiver for StreamRaw
-            let mut guard = self.spinel.protocol.lock().await;
-            guard.set_property_update_receiver(
-                SpinelPropertyId::StreamRaw as u32,
-                stream_raw_tx.clone(),
-            );
-        }
-
-        let zigbee_stack = Arc::clone(&self.zigbee_stack);
-        let notify_tx = self.notify_tx.clone();
-
-        // Spawn a new task
-        tokio::spawn(async move {
-            log::debug!("Spawning Zigbee/Spinel receive loop...");
-            while let Some(raw_frame) = stream_raw_rx.recv().await {
-                let packet = match SpinelRxFrame::from_bytes(&raw_frame.value) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        log::warn!("Error parsing spinel frame: {:?}", e);
-                        continue;
-                    }
-                };
-
-                if packet.psdu.len() < 2 {
-                    log::warn!("Packet too short to contain FCS");
-                    continue;
-                }
-                let frame_data = &packet.psdu[..packet.psdu.len() - 2];
-
-                let ieee802154_frame = match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
-                        continue;
-                    }
-                };
-
-                log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
-
-                // Pass the 802.15.4 frame to the Zigbee stack for decryption
-                let maybe_zigbee_frame = {
-                    let mut zs = zigbee_stack.lock().await;
-                    zs.receive_802154_frame(&ieee802154_frame)
-                };
-
-                if maybe_zigbee_frame.is_none() {
-                    continue;
-                }
-
-                let zigbee_frame = maybe_zigbee_frame.unwrap();
-
-                // Broadcast the received packet to listening clients
-                let async_event = json!({
-                    "tid": 0,
-                    "cmd": "packet_received",
-                    "data": {
-                        "destination": zigbee_frame.nwk_header.destination.as_u16(),
-                        "source": zigbee_frame.nwk_header.source.as_u16(),
-                        "radius": zigbee_frame.nwk_header.radius,
-                        "sequence_number": zigbee_frame.nwk_header.sequence_number,
-                        //"destination_ieee": zigbee_frame.nwk_header.destination_ieee.map(|v| hex::encode(v.serialize())),
-                        //"source_ieee": zigbee_frame.nwk_header.source_ieee.map(|v| hex::encode(v.serialize())),
-                        //"source_route": zigbee_frame.nwk_header.source_route,
-                        "payload": hex::encode(zigbee_frame.payload),
-                    }
-                });
-
-                // If no subscribers, ignore error
-                let _ = notify_tx.send(async_event);
-            }
-        });
     }
 
     pub async fn run_tcp_server(&self, listen_addr: &str) -> std::io::Result<()> {
@@ -194,7 +112,6 @@ impl ZigguratServer {
         loop {
             line.clear();
             tokio::select! {
-                // 1) Inbound commands
                 read_result = reader.read_line(&mut line) => {
                     let n = read_result?;
                     if n == 0 {
@@ -203,8 +120,10 @@ impl ZigguratServer {
                     }
                     match serde_json::from_str::<CommandRequest>(line.trim()) {
                         Ok(cmd) => {
+                            log::debug!("Received command from {}: {:?}", addr, cmd);
                             let resp = self.process_command(cmd).await;
                             let resp_str = serde_json::to_string(&resp)?;
+                            log::debug!("Sending response: {:?}", resp_str);
                             writer.write_all(resp_str.as_bytes()).await?;
                             writer.write_all(b"\n").await?;
                         },
@@ -223,7 +142,7 @@ impl ZigguratServer {
                         }
                     }
                 }
-                // 2) Outbound async notifications (like packet_received)
+
                 broadcast_event = notify_rx.recv() => {
                     match broadcast_event {
                         Ok(event) => {
@@ -250,6 +169,7 @@ impl ZigguratServer {
     async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
         match cmd.cmd.as_str() {
             "set_network_settings" => {
+                let channel = cmd.data.get("channel").map(|v| v.as_u64().unwrap() as u8);
                 let nwk_update_id = cmd
                     .data
                     .get("nwk_update_id")
@@ -283,62 +203,25 @@ impl ZigguratServer {
                     .get("network_key_tx_counter")
                     .map(|v| v.as_u64().unwrap() as u32);
 
-                // Add the parameters to the stack
                 {
-                    let mut zigbee = self.zigbee_stack.lock().await;
-
-                    if let Some(v) = nwk_update_id {
-                        zigbee.nib.nwk_update_id = v;
-                    }
-                    if let Some(v) = pan_id {
-                        zigbee.nib.nwk_pan_id = v;
-                    }
-                    if let Some(v) = extended_pan_id {
-                        zigbee.nib.nwk_extended_pan_id = v;
-                    }
-                    if let Some(v) = nwk_address {
-                        zigbee.nib.nwk_network_address = v;
-                    }
-                    if let Some(v) = ieee_address {
-                        zigbee.nib.nwk_ieee_address = v;
-                    }
-                    if let Some(v) = network_key {
-                        zigbee.nib.nwk_security_material_primary.key = v;
-                    }
-                    if let Some(v) = network_key_seq {
-                        zigbee.nib.nwk_security_material_primary.key_seq_number = v;
-                    }
-                    if let Some(v) = network_key_tx_counter {
-                        zigbee
-                            .nib
-                            .nwk_security_material_primary
-                            .outgoing_frame_counter = v;
-                    }
-
-                    // Update the MAC layer with the new network settings to enable auto-ACK
-                    self.spinel
-                        .prop_value_set(
-                            SpinelPropertyId::Mac154Laddr as u32,
-                            zigbee.nib.nwk_ieee_address.to_bytes().to_vec(),
+                    log::info!("Acquiring Zigbee stack lock...");
+                    let stack = Arc::clone(&self.zigbee_stack);
+                    let mut zigbee = stack.lock().await;
+                    log::info!("Setting network settings...");
+                    zigbee
+                        .set_network_settings(
+                            channel.unwrap(),
+                            nwk_update_id.unwrap(),
+                            pan_id.unwrap(),
+                            extended_pan_id.unwrap(),
+                            nwk_address.unwrap(),
+                            ieee_address.unwrap(),
+                            network_key.unwrap(),
+                            network_key_seq.unwrap(),
+                            network_key_tx_counter.unwrap(),
                         )
-                        .await
-                        .expect("Failed to set the MAC IEEE address");
-
-                    self.spinel
-                        .prop_value_set(
-                            SpinelPropertyId::Mac154Saddr as u32,
-                            zigbee.nib.nwk_network_address.to_bytes().to_vec(),
-                        )
-                        .await
-                        .expect("Failed to set the MAC NWK address");
-
-                    self.spinel
-                        .prop_value_set(
-                            SpinelPropertyId::Mac154Panid as u32,
-                            zigbee.nib.nwk_pan_id.to_bytes().to_vec(),
-                        )
-                        .await
-                        .expect("Failed to set the MAC PAN ID");
+                        .await;
+                    log::info!("Done!");
                 }
 
                 CommandResponse {
@@ -348,32 +231,42 @@ impl ZigguratServer {
                 }
             }
 
-            "set_channel" => {
-                let channel = cmd
+            "send_aps_command" => {
+                let destination_nwk = cmd
                     .data
-                    .get("channel")
-                    .unwrap()
-                    .as_number()
-                    .unwrap()
-                    .as_u64()
-                    .unwrap() as u8;
-
-                if channel < 11 || channel > 26 {
-                    return CommandResponse {
-                        tid: cmd.tid,
-                        cmd: cmd.cmd,
-                        data: json!({
-                            "status": "error",
-                            "reason": "invalid_channel",
-                        }),
-                    };
-                }
+                    .get("destination_nwk")
+                    .map(|v| Nwk::from_hex(v.as_str().unwrap()));
+                let profile_id = cmd
+                    .data
+                    .get("profile_id")
+                    .map(|v| v.as_u64().unwrap() as u16);
+                let cluster_id = cmd
+                    .data
+                    .get("cluster_id")
+                    .map(|v| v.as_u64().unwrap() as u16);
+                let src_ep = cmd.data.get("src_ep").map(|v| v.as_u64().unwrap() as u8);
+                let dst_ep = cmd.data.get("dst_ep").map(|v| v.as_u64().unwrap() as u8);
+                let data = cmd
+                    .data
+                    .get("data")
+                    .map(|v| hex::decode(v.as_str().unwrap()).unwrap());
 
                 {
-                    self.spinel
-                        .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![channel])
-                        .await
-                        .expect("Failed to set the PHY channel");
+                    log::info!("Acquiring Zigbee stack lock...");
+                    let stack = Arc::clone(&self.zigbee_stack);
+                    let mut zigbee = stack.lock().await;
+                    log::info!("Sending APS command...");
+                    zigbee
+                        .send_aps_command(
+                            destination_nwk.unwrap(),
+                            profile_id.unwrap(),
+                            cluster_id.unwrap(),
+                            src_ep.unwrap(),
+                            dst_ep.unwrap(),
+                            data.unwrap(),
+                        )
+                        .await;
+                    log::info!("Done!");
                 }
 
                 CommandResponse {
@@ -383,7 +276,6 @@ impl ZigguratServer {
                 }
             }
 
-            // Insert more commands here
             _ => CommandResponse {
                 tid: cmd.tid,
                 cmd: cmd.cmd,
@@ -399,7 +291,6 @@ impl ZigguratServer {
 impl Clone for ZigguratServer {
     fn clone(&self) -> Self {
         ZigguratServer {
-            spinel: Arc::clone(&self.spinel),
             zigbee_stack: Arc::clone(&self.zigbee_stack),
             notify_tx: self.notify_tx.clone(),
         }
@@ -429,10 +320,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and configure our Zigbee server
     let server = ZigguratServer::new(serial_path).await?;
-
-    // Spawn the Zigbee receiver loop, which processes frames from the radio
-    // and broadcasts async events (tid=0).
-    server.spawn_zigbee_receiver().await;
 
     // Now run our async TCP server
     server.run_tcp_server(&tcp_listen_addr).await?;

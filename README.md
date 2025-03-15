@@ -9,7 +9,21 @@ Existing Zigbee applications (i.e. ZHA, Z2M, and OpenHAB) would implement a new 
 Ziggurat communicates with a 802.15.4 radio hardware over the OpenThread Spinel serial protocol. We currently use OpenThread RCP firmware to just send & receive packets and automatically send 802.15.4 ACKs. The stack handles all encryption, decryption, and processing, treating the radio hardware as just an 802.15.4 frontend. We aim to use with OpenThread RCP firmware for the foreseeable future, as it provides a uniform and hardware-agnostic 802.15.4 frontend that theoretically runs on chips from every major vendor and eliminates the need to use multiple firmwares when switching between Zigbee and Thread applications.
 
 ### Status
-A few tools exist to test functionality but there is currently no server binary:
+Start the TCP server and attach it to a port:
+
+```bash
+cargo run --bin ziggurat /dev/cu.SLAB_USBtoUART 0.0.0.0:9999
+```
+
+A sample client written in Python is available to set up a Zigbee network and send commands to a pre-joined device:
+
+```bash
+python src/tools/python_client.py
+```
+
+The wire format is provisional. Currently, commands and responses are sent line-by-line as JSON.
+
+A few other independent tools exist to test functionality:
 
 ```bash
 # Rapidly send 802.15.4 beacon requests on channel 19 and print timing information
@@ -20,10 +34,6 @@ cargo run --bin ziggurat-capture /dev/cu.SLAB_USBtoUART
 
 # Parse a PCAP file with loaded Wireshark Zigbee network keys, printing decryption and parsing statistics
 cargo run --bin ziggurat-pcap capture.pcap
-
-# Capture and decrypt traffic on channel 25 with hardcoded network information,
-# performing rudimentary security processing (NWK->IEEE mapping and rollback protection)
-cargo run --bin ziggurat-network-sniffer /dev/cu.SLAB_USBtoUART
 ```
 
 ### TODO

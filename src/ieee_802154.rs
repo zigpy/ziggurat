@@ -431,7 +431,7 @@ mod test {
         assert_eq!(frame.src_pan_id, None);
         assert_eq!(frame.src_address, None);
 
-        assert_eq!(frame.payload, []);
+        assert_eq!(frame.payload, hex!("").to_vec());
         assert_eq!(frame.fcs, 0x72BC);
 
         assert_eq!(frame.to_bytes(), bytes);
