@@ -21,6 +21,13 @@ tokio = { version = "1.43.0", features = ["full"] }
 log = "0.4.26"
 env_logger = "0.11.6"
 serial2 = "0.2.28"
+serde_json = "1.0.140"
+serde = { version = "1.0.219", features = ["derive"] }
+num_enum = "0.7.3"
+
+[[bin]]
+name = "ziggurat"
+path = "src/server.rs"
 
 [[bin]]
 name = "ziggurat-pcap"
@@ -33,10 +40,6 @@ path = "src/tools/packet_capture.rs"
 [[bin]]
 name = "ziggurat-sender"
 path = "src/tools/packet_sender.rs"
-
-[[bin]]
-name = "ziggurat-network-sniffer"
-path = "src/tools/network_sniffer.rs"
 
 [dev-dependencies]
 rand = "0.8.5"

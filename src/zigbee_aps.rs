@@ -121,11 +121,11 @@ impl ApsFrame {
         let mut bytes = Vec::new();
 
         bytes.extend(self.frame_control.to_bytes());
-        bytes.extend(self.destination_endpoint.to_be_bytes());
-        bytes.extend(self.cluster_id.to_be_bytes());
-        bytes.extend(self.profile_id.to_be_bytes());
-        bytes.extend(self.source_endpoint.to_be_bytes());
-        bytes.extend(self.counter.to_be_bytes());
+        bytes.extend(self.destination_endpoint.to_le_bytes());
+        bytes.extend(self.cluster_id.to_le_bytes());
+        bytes.extend(self.profile_id.to_le_bytes());
+        bytes.extend(self.source_endpoint.to_le_bytes());
+        bytes.extend(self.counter.to_le_bytes());
         bytes.extend(self.asdu.clone());
 
         bytes
@@ -139,7 +139,8 @@ mod test {
 
     #[test]
     fn test_nwk_decryption_unicast() {
-        let aps_frame = ApsFrame::from_bytes(&hex!("00010600040101a9015701")).unwrap();
+        let data = hex!("4001060004010103015a00");
+        let aps_frame = ApsFrame::from_bytes(&data).unwrap();
 
         let expected_aps_frame = ApsFrame {
             frame_control: ApsFrameControl {
@@ -147,18 +148,19 @@ mod test {
                 delivery_mode: ApsDeliveryMode::Unicast,
                 reserved: 0b0,
                 security: false,
-                ack_request: false,
+                ack_request: true,
                 extended_header: false,
             },
             destination_endpoint: 1,
             cluster_id: 0x0006,
             profile_id: 0x0104,
             source_endpoint: 1,
-            counter: 169,
-            asdu: hex!("015701").to_vec(),
+            counter: 3,
+            asdu: hex!("01 5a 00").to_vec(),
         };
 
         assert_eq!(aps_frame, expected_aps_frame);
+        assert_eq!(aps_frame.to_bytes(), data.to_vec());
     }
 
     #[test]

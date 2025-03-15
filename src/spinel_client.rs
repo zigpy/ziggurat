@@ -126,7 +126,7 @@ impl SpinelRxFrame {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SpinelClient {
     pub port: Arc<SerialPort>,
     pub protocol: Arc<Mutex<SpinelProtocol>>,
