@@ -31,13 +31,13 @@ struct CommandResponse {
     data: serde_json::Value,
 }
 
-pub struct ZigbeeServer {
-    client: Arc<SpinelClient>,
+pub struct ZigguratServer {
+    spinel: Arc<SpinelClient>,
     zigbee_stack: Arc<Mutex<ZigbeeStack>>,
     notify_tx: broadcast::Sender<serde_json::Value>,
 }
 
-impl ZigbeeServer {
+impl ZigguratServer {
     pub async fn new(serial_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         // Open a serial port
         let port = SerialPort::open(serial_path, |mut settings: Settings| {
@@ -47,19 +47,19 @@ impl ZigbeeServer {
         })?;
 
         // Connect the Spinel client to the port
-        let client = Arc::new(SpinelClient::new(port));
-        client.spawn_reader();
+        let spinel = Arc::new(SpinelClient::new(port));
+        spinel.spawn_reader();
 
         // Enable the PHY and set up the radio, save for the channel
-        client
+        spinel
             .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
             .await
             .expect("Failed to enable the PHY");
-        client
+        spinel
             .prop_value_set(SpinelPropertyId::MacPromiscuousMode as u32, vec![2])
             .await
             .expect("Failed to set the MAC promiscuous mode");
-        client
+        spinel
             .prop_value_set(
                 SpinelPropertyId::MacRawStreamEnabled as u32,
                 vec![true as u8],
@@ -72,8 +72,8 @@ impl ZigbeeServer {
         // Create a channel for notification events
         let (notify_tx, _notify_rx) = broadcast::channel::<serde_json::Value>(100);
 
-        let server = ZigbeeServer {
-            client: client,
+        let server = ZigguratServer {
+            spinel: spinel,
             zigbee_stack: Arc::new(Mutex::new(zigbee_stack)),
             notify_tx: notify_tx,
         };
@@ -86,7 +86,7 @@ impl ZigbeeServer {
 
         {
             // Lock the protocol and set the property update receiver for StreamRaw
-            let mut guard = self.client.protocol.lock().await;
+            let mut guard = self.spinel.protocol.lock().await;
             guard.set_property_update_receiver(
                 SpinelPropertyId::StreamRaw as u32,
                 stream_raw_tx.clone(),
@@ -247,8 +247,6 @@ impl ZigbeeServer {
         Ok(())
     }
 
-    /// Process an incoming command from the client.  
-    /// Extend this with more commands as needed.
     async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
         match cmd.cmd.as_str() {
             "set_network_settings" => {
@@ -346,7 +344,7 @@ impl ZigbeeServer {
                 }
 
                 {
-                    self.client
+                    self.spinel
                         .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![channel])
                         .await
                         .expect("Failed to set the PHY channel");
@@ -372,19 +370,16 @@ impl ZigbeeServer {
     }
 }
 
-// Implement `Clone` manually so we can pass `ZigbeeServer` around easily.
-// Because everything inside is an Arc or broadcast channel, it's cheap to clone.
-impl Clone for ZigbeeServer {
+impl Clone for ZigguratServer {
     fn clone(&self) -> Self {
-        ZigbeeServer {
-            client: Arc::clone(&self.client),
+        ZigguratServer {
+            spinel: Arc::clone(&self.spinel),
             zigbee_stack: Arc::clone(&self.zigbee_stack),
             notify_tx: self.notify_tx.clone(),
         }
     }
 }
 
-/// A simple main function to wire it all up:
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::builder()
@@ -399,6 +394,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Usage: {} <serial_path> [tcp_listen_addr]", args[0]);
         return Ok(());
     }
+
     let serial_path = &args[1];
     let tcp_listen_addr = args
         .get(2)
@@ -406,7 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "0.0.0.0:9999".to_string());
 
     // Create and configure our Zigbee server
-    let server = ZigbeeServer::new(serial_path).await?;
+    let server = ZigguratServer::new(serial_path).await?;
 
     // Spawn the Zigbee receiver loop, which processes frames from the radio
     // and broadcasts async events (tid=0).
