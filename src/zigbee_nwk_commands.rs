@@ -6,7 +6,7 @@ use std::convert::TryFrom;
 #[repr(u8)]
 pub enum NwkCommandId {
     RouteRequest = 0x01,
-    //RouteReply = 0x02,
+    RouteReply = 0x02,
     //NetworkStatus = 0x03,
     Leave = 0x04,
     RouteRecord = 0x05,

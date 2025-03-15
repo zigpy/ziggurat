@@ -1,7 +1,16 @@
-use crate::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
+use crate::ieee_802154::{
+    Ieee802154Address, Ieee802154AddressingMode, Ieee802154Frame, Ieee802154FrameControl,
+    Ieee802154FrameType,
+};
 use crate::types::{Eui64, Key, Nwk, PanId};
-use crate::zigbee_nwk::{NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId, NwkSecurityLevel};
-use crate::zigbee_nwk_commands::NwkCommandId;
+use crate::zigbee_aps::{ApsDeliveryMode, ApsFrame, ApsFrameControl, ApsFrameType};
+use crate::zigbee_nwk::{
+    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
+    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+};
+use crate::zigbee_nwk_commands::{
+    NwkCommandId, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
+};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -512,17 +521,38 @@ impl ZigbeeStack {
             None => {}
         }
 
-        // Handle route records
+        // Handle NWK commands
         if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command {
             match NwkCommandId::try_from(nwk_frame.payload[0]) {
                 Ok(NwkCommandId::LinkStatus) => {
-                    log::debug!("Link status command frame received");
+                    // TODO: Error handling for decoding?
+                    let link_status_cmd =
+                        NwkLinkStatusCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                    log::info!("Link status command frame received: {:#?}", link_status_cmd);
+                }
+                Ok(NwkCommandId::RouteReply) => {
+                    // TODO: Error handling for decoding?
+                    let route_reply_cmd =
+                        NwkRouteReplyCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                    log::info!("Route reply command frame received: {:#?}", route_reply_cmd);
+                }
+                Ok(NwkCommandId::RouteRecord) => {
+                    // TODO: Error handling for decoding?
+                    let route_record_cmd =
+                        NwkRouteRecordCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                    log::info!(
+                        "Route record command frame received: {:#?}",
+                        route_record_cmd
+                    );
+                    self.nib
+                        .nwk_route_record_table
+                        .insert(nwk_frame.nwk_header.source, route_record_cmd.relays);
                 }
                 Err(_) => {
-                    log::debug!("Unknown NWK command: {}", nwk_frame.payload[0]);
+                    log::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
                 }
                 _ => {
-                    log::debug!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
+                    log::warn!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
                 }
             }
         }

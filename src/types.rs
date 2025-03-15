@@ -1,7 +1,7 @@
 use hex;
 use std::fmt;
 
-#[derive(PartialEq, Copy, Clone)]
+#[derive(Eq, Hash, Copy, Clone, PartialEq)]
 pub struct Nwk(pub u16);
 
 impl Nwk {
