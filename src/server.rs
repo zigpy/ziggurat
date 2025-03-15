@@ -283,6 +283,7 @@ impl ZigguratServer {
                     .get("network_key_tx_counter")
                     .map(|v| v.as_u64().unwrap() as u32);
 
+                // Add the parameters to the stack
                 {
                     let mut zigbee = self.zigbee_stack.lock().await;
 
@@ -313,6 +314,31 @@ impl ZigguratServer {
                             .nwk_security_material_primary
                             .outgoing_frame_counter = v;
                     }
+
+                    // Update the MAC layer with the new network settings to enable auto-ACK
+                    self.spinel
+                        .prop_value_set(
+                            SpinelPropertyId::Mac154Laddr as u32,
+                            zigbee.nib.nwk_ieee_address.to_bytes().to_vec(),
+                        )
+                        .await
+                        .expect("Failed to set the MAC IEEE address");
+
+                    self.spinel
+                        .prop_value_set(
+                            SpinelPropertyId::Mac154Saddr as u32,
+                            zigbee.nib.nwk_network_address.to_bytes().to_vec(),
+                        )
+                        .await
+                        .expect("Failed to set the MAC NWK address");
+
+                    self.spinel
+                        .prop_value_set(
+                            SpinelPropertyId::Mac154Panid as u32,
+                            zigbee.nib.nwk_pan_id.to_bytes().to_vec(),
+                        )
+                        .await
+                        .expect("Failed to set the MAC PAN ID");
                 }
 
                 CommandResponse {
