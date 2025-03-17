@@ -2,18 +2,7 @@ use crate::ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154Frame, Ieee802154FrameControl,
     Ieee802154FrameType,
 };
-use log::LevelFilter;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use serial2::Settings;
-use serial2_tokio::SerialPort;
-use std::env;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-
-use crate::spinel::SpinelPropertyId;
+use crate::spinel::{SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelPropertyId};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
 use crate::types::{Eui64, Key, Nwk, PanId};
 use crate::zigbee_aps::{ApsDeliveryMode, ApsFrame, ApsFrameControl, ApsFrameType};
@@ -24,8 +13,10 @@ use crate::zigbee_nwk::{
 use crate::zigbee_nwk_commands::{
     NwkCommandId, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
 };
+use log::{debug, info, warn};
+use serde_json::json;
 use std::collections::HashMap;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
@@ -345,27 +336,27 @@ pub struct ZigbeeStack {
 }
 
 impl ZigbeeStack {
-    pub fn new(spinel: SpinelClient) -> ZigbeeStack {
+    pub fn new(spinel: SpinelClient) -> Self {
         ZigbeeStack {
             channel: 0,
             ieee802154_sequence_number: 0,
             nib: Nib::new(),
-            spinel: spinel,
+            spinel,
         }
     }
 
     pub async fn start_radio(&self) {
-        // Enable the PHY and set up the radio, save for the channel
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
             .await
             .expect("Failed to enable the PHY");
-
         self.spinel
-            .prop_value_set(SpinelPropertyId::MacPromiscuousMode as u32, vec![2])
+            .prop_value_set(
+                SpinelPropertyId::MacPromiscuousMode as u32,
+                vec![SpinelMacPromiscuousMode::Full as u8],
+            )
             .await
             .expect("Failed to set the MAC promiscuous mode");
-
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::MacRawStreamEnabled as u32,
@@ -373,56 +364,6 @@ impl ZigbeeStack {
             )
             .await
             .expect("Failed to enable the RAW stream");
-    }
-
-    pub async fn run_802154_receiver(self_mutex: Arc<Mutex<ZigbeeStack>>) {
-        let (stream_raw_tx, mut stream_raw_rx) = mpsc::channel(32);
-
-        {
-            // Lock the protocol and set the property update receiver for StreamRaw
-            let stack = self_mutex.lock().await;
-            let mut spinel = stack.spinel.protocol.lock().await;
-
-            spinel.set_property_update_receiver(
-                SpinelPropertyId::StreamRaw as u32,
-                stream_raw_tx.clone(),
-            );
-        }
-
-        // Spawn a new task
-        log::debug!("Spawning Zigbee/Spinel receive loop...");
-
-        while let Some(raw_frame) = stream_raw_rx.recv().await {
-            let packet = match SpinelRxFrame::from_bytes(&raw_frame.value) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!("Error parsing spinel frame: {:?}", e);
-                    continue;
-                }
-            };
-
-            if packet.psdu.len() < 2 {
-                log::warn!("Packet too short to contain FCS");
-                continue;
-            }
-            let frame_data = &packet.psdu[..packet.psdu.len() - 2];
-
-            let ieee802154_frame = match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
-                Ok(f) => f,
-                Err(e) => {
-                    log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
-                    continue;
-                }
-            };
-
-            log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
-            {
-                self_mutex
-                    .lock()
-                    .await
-                    .receive_802154_frame(&ieee802154_frame);
-            }
-        }
     }
 
     pub async fn set_network_settings(
@@ -436,7 +377,7 @@ impl ZigbeeStack {
         key: Key,
         key_seq_number: u8,
         outgoing_frame_counter: u32,
-    ) {
+    ) -> Result<(), String> {
         self.channel = nwk_channel;
         self.nib.nwk_update_id = nwk_update_id;
         self.nib.nwk_pan_id = nwk_pan_id;
@@ -448,36 +389,33 @@ impl ZigbeeStack {
         self.nib
             .nwk_security_material_primary
             .outgoing_frame_counter = outgoing_frame_counter;
-
-        // Update the MAC layer with the new network settings to enable auto-ACK
+        // Update the hardware with new settings.
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![nwk_channel])
             .await
-            .expect("Failed to set the PHY channel");
-
+            .map_err(|e| format!("Failed to set PHY channel: {:?}", e))?;
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Laddr as u32,
                 self.nib.nwk_ieee_address.to_bytes().to_vec(),
             )
             .await
-            .expect("Failed to set the MAC IEEE address");
-
+            .map_err(|e| format!("Failed to set MAC IEEE address: {:?}", e))?;
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Saddr as u32,
                 self.nib.nwk_network_address.to_bytes().to_vec(),
             )
             .await
-            .expect("Failed to set the MAC NWK address");
-
+            .map_err(|e| format!("Failed to set MAC NWK address: {:?}", e))?;
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Panid as u32,
                 self.nib.nwk_pan_id.to_bytes().to_vec(),
             )
             .await
-            .expect("Failed to set the MAC PAN ID");
+            .map_err(|e| format!("Failed to set MAC PAN ID: {:?}", e))?;
+        Ok(())
     }
 
     pub fn receive_802154_frame(&mut self, frame: &Ieee802154Frame) -> Option<NwkFrame> {
@@ -859,7 +797,7 @@ impl ZigbeeStack {
         src_ep: u8,
         dst_ep: u8,
         data: Vec<u8>,
-    ) {
+    ) -> Result<(), String> {
         let ieee802154_frame = self.prepare_request(
             destination,
             src_ep,
@@ -869,7 +807,212 @@ impl ZigbeeStack {
             0,
             &data,
         );
-
         self.send_802154_frame(ieee802154_frame).await;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum ZigbeeCommand {
+    SetNetworkSettings {
+        nwk_channel: u8,
+        nwk_update_id: u8,
+        nwk_pan_id: PanId,
+        nwk_extended_pan_id: Eui64,
+        nwk_network_address: Nwk,
+        nwk_ieee_address: Eui64,
+        key: Key,
+        key_seq_number: u8,
+        outgoing_frame_counter: u32,
+        resp: oneshot::Sender<Result<(), String>>,
+    },
+    SendApsCommand {
+        destination: Nwk,
+        profile_id: u16,
+        cluster_id: u16,
+        src_ep: u8,
+        dst_ep: u8,
+        data: Vec<u8>,
+        resp: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ZigbeeNotification {
+    ReceivedApsCommand {
+        source: Nwk,
+        profile_id: u16,
+        cluster_id: u16,
+        src_ep: u8,
+        dst_ep: u8,
+        lqi: u8,
+        rssi: i8,
+        data: Vec<u8>,
+    },
+}
+
+/// The actor that processes all Zigbee commands.
+pub struct ZigbeeStackActor {
+    pub stack: ZigbeeStack,
+    pub command_rx: mpsc::Receiver<ZigbeeCommand>,
+    pub notification_tx: broadcast::Sender<ZigbeeNotification>,
+    pub raw_frame_rx: mpsc::Receiver<SpinelFramePropValueIs>,
+}
+
+impl ZigbeeStackActor {
+    pub async fn new(
+        stack: ZigbeeStack,
+    ) -> (
+        Self,
+        mpsc::Sender<ZigbeeCommand>,
+        broadcast::Receiver<ZigbeeNotification>,
+    ) {
+        let (command_tx, command_rx) = mpsc::channel::<ZigbeeCommand>(32);
+        let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
+        let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
+
+        {
+            let mut spinel_protocol = stack.spinel.protocol.lock().await;
+            spinel_protocol
+                .set_property_update_receiver(SpinelPropertyId::StreamRaw as u32, raw_frame_tx);
+        }
+
+        (
+            ZigbeeStackActor {
+                stack,
+                command_rx,
+                notification_tx,
+                raw_frame_rx,
+            },
+            command_tx,
+            notification_rx,
+        )
+    }
+
+    pub async fn run(mut self) {
+        // Start radio once at the beginning.
+        self.stack.start_radio().await;
+
+        loop {
+            tokio::select! {
+                // Handle incoming Zigbee commands from the mpsc channel.
+                maybe_cmd = self.command_rx.recv() => {
+                    match maybe_cmd {
+                        Some(cmd) => {
+                            match cmd {
+                                ZigbeeCommand::SetNetworkSettings {
+                                    nwk_channel,
+                                    nwk_update_id,
+                                    nwk_pan_id,
+                                    nwk_extended_pan_id,
+                                    nwk_network_address,
+                                    nwk_ieee_address,
+                                    key,
+                                    key_seq_number,
+                                    outgoing_frame_counter,
+                                    resp,
+                                } => {
+                                    let res = self.stack
+                                        .set_network_settings(
+                                            nwk_channel,
+                                            nwk_update_id,
+                                            nwk_pan_id,
+                                            nwk_extended_pan_id,
+                                            nwk_network_address,
+                                            nwk_ieee_address,
+                                            key,
+                                            key_seq_number,
+                                            outgoing_frame_counter
+                                        )
+                                        .await;
+                                    let _ = resp.send(res);
+                                },
+                                ZigbeeCommand::SendApsCommand {
+                                    destination,
+                                    profile_id,
+                                    cluster_id,
+                                    src_ep,
+                                    dst_ep,
+                                    data,
+                                    resp,
+                                } => {
+                                    let res = self.stack
+                                        .send_aps_command(
+                                            destination,
+                                            profile_id,
+                                            cluster_id,
+                                            src_ep,
+                                            dst_ep,
+                                            data
+                                        )
+                                        .await;
+                                    let _ = resp.send(res);
+                                }
+                            }
+                        }
+                        None => {
+                            // mpsc channel closed; nothing more to do.
+                            break;
+                        }
+                    }
+                }
+
+                // Parse incoming 802.15.4 frames from Spinel
+                Some(spinel_frame) = self.raw_frame_rx.recv() => {
+                    let packet = match SpinelRxFrame::from_bytes(&spinel_frame.value) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            log::warn!("Error parsing spinel frame: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    if packet.psdu.len() < 2 {
+                        log::warn!("Packet too short to contain FCS");
+                        continue;
+                    }
+                    let frame_data = &packet.psdu[..packet.psdu.len() - 2];
+
+                    let ieee802154_frame = match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
+
+                    match self.stack.receive_802154_frame(&ieee802154_frame) {
+                        Some(nwk_frame) => {
+                            if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
+                                continue;
+                            }
+
+                            let aps_frame = match ApsFrame::from_bytes(&nwk_frame.payload) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    log::warn!("Error parsing APS frame: {:?}", e);
+                                    continue;
+                                }
+                            };
+
+                            let notification = ZigbeeNotification::ReceivedApsCommand {
+                                source: nwk_frame.nwk_header.source,
+                                profile_id: aps_frame.profile_id,
+                                cluster_id: aps_frame.cluster_id,
+                                src_ep: aps_frame.source_endpoint,
+                                dst_ep: aps_frame.destination_endpoint,
+                                lqi: packet.lqi,
+                                rssi: packet.rssi,
+                                data: aps_frame.asdu,
+                            };
+                            let _ = self.notification_tx.send(notification);
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
     }
 }
