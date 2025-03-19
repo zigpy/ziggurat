@@ -17,6 +17,7 @@ use log::{debug, info, warn};
 use serde_json::json;
 use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::{Duration, sleep, timeout};
 
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
@@ -258,6 +259,7 @@ pub struct Nib {
     // nwkPanIdConflictCount = 0
     // nwkMaxInitialJoinParentAttempts = 1
     // nwkMaxRejoinParentAttempts = 3
+    pub mac_symbol_period: Duration,
 }
 
 impl Nib {
@@ -323,6 +325,7 @@ impl Nib {
             nwk_end_device_timeout_default: 0,
             nwk_leave_request_without_rejoin_allowed: false,
             nwk_ieee_address: Eui64::from_hex("0000000000000000"),
+            mac_symbol_period: Duration::from_micros(16),
         }
     }
 }
@@ -331,6 +334,7 @@ impl Nib {
 pub struct ZigbeeStack {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,
+    pub ieee802154_pending_acks: HashMap<u8, oneshot::Sender<()>>,
     pub nib: Nib,
     pub spinel: SpinelClient,
 }
@@ -340,6 +344,7 @@ impl ZigbeeStack {
         ZigbeeStack {
             channel: 0,
             ieee802154_sequence_number: 0,
+            ieee802154_pending_acks: HashMap::new(),
             nib: Nib::new(),
             spinel,
         }
@@ -425,11 +430,27 @@ impl ZigbeeStack {
             return None;
         }
 
+        match frame.frame_control.frame_type {
+            Ieee802154FrameType::Ack => {
+                self.ieee802154_pending_acks
+                    .remove(&frame.sequence_number.unwrap())
+                    .map(|ack_tx| ack_tx.send(()));
+            }
+            Ieee802154FrameType::Data => {
+                // Process it below
+            }
+            _ => {
+                log::debug!("Ignoring frame, not a data frame");
+                return None;
+            }
+        }
+
+        /*
         // Only process data frames for now
         if frame.frame_control.frame_type != Ieee802154FrameType::Data {
-            log::debug!("Ignoring frame, not a data frame");
             return None;
         }
+        */
 
         // Only process packets destined for our PAN ID
         match frame.dest_pan_id {
@@ -775,7 +796,7 @@ impl ZigbeeStack {
                 psdu: frame.to_bytes(),
                 channel: self.channel,
                 max_csma_backoffs: 1,
-                max_frame_retries: 4,
+                max_frame_retries: 0,
                 enable_csma_ca: true,
                 is_header_updated: true,
                 is_a_retransmit: false,
@@ -787,6 +808,36 @@ impl ZigbeeStack {
             })
             .await
             .expect("Failed to transmit frame");
+
+        // Frames that do not ask for an ACK or that suppress their sequence number
+        // cannot be ACKed
+        if !frame.frame_control.ack_request || frame.frame_control.sequence_number_suppression {
+            return;
+        }
+
+        // Create a one shot
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.ieee802154_pending_acks
+            .insert(frame.sequence_number.unwrap(), ack_tx);
+
+        //let mac_ack_wait_duration = 54 * self.nib.mac_symbol_period;
+        let mac_ack_wait_duration = Duration::from_millis(1000);
+        let ack_timeout = tokio::time::timeout(mac_ack_wait_duration, ack_rx);
+
+        match ack_timeout.await {
+            Ok(Ok(_)) => {
+                log::info!(
+                    "ACK received for frame {:?}",
+                    frame.sequence_number.unwrap()
+                );
+            }
+            Ok(Err(_)) => {
+                log::warn!("ACK timeout for frame {:?}", frame.sequence_number.unwrap());
+            }
+            Err(_) => {
+                log::warn!("ACK timeout for frame {:?}", frame.sequence_number.unwrap());
+            }
+        }
     }
 
     pub async fn send_aps_command(
@@ -808,6 +859,16 @@ impl ZigbeeStack {
             &data,
         );
         self.send_802154_frame(ieee802154_frame).await;
+
+        // Handle `nwk_tx_total` wrapping
+        if self.nib.nwk_tx_total == 0xFFFF {
+            for (_, neighbor) in self.nib.nwk_neighbor_table.iter_mut() {
+                neighbor.transmit_failure = 0;
+            }
+        }
+
+        self.nib.nwk_tx_total = self.nib.nwk_tx_total.wrapping_add(1);
+
         Ok(())
     }
 }
