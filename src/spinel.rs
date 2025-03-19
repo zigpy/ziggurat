@@ -216,6 +216,16 @@ pub enum SpinelStatus {
     ResetWatchdog = 120,
 }
 
+#[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
+pub enum SpinelMacPromiscuousMode {
+    //  Normal MAC filtering is in place.
+    Off = 0,
+    // All MAC packets matching network are passed up the stack.
+    Network = 1,
+    // All decoded MAC packets are passed up the stack.
+    Full = 2,
+}
+
 pub fn packed_uint21_deserialize(bytes: &[u8]) -> Result<(u32, &[u8]), &'static str> {
     let mut result = 0u32;
 

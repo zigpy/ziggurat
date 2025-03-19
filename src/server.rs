@@ -5,16 +5,16 @@ use serial2::Settings;
 use serial2_tokio::SerialPort;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::mpsc;
+use tokio::sync::{broadcast, oneshot};
 
 use ziggurat::ieee_802154::Ieee802154Frame;
 use ziggurat::spinel::SpinelPropertyId;
 use ziggurat::spinel_client::{SpinelClient, SpinelRxFrame};
 use ziggurat::types::{Eui64, Key, Nwk, PanId};
-use ziggurat::zigbee_stack::ZigbeeStack;
+use ziggurat::zigbee_stack::{ZigbeeCommand, ZigbeeNotification, ZigbeeStack, ZigbeeStackActor};
 
 #[derive(Deserialize, Debug)]
 struct CommandRequest {
@@ -32,8 +32,11 @@ struct CommandResponse {
 }
 
 pub struct ZigguratServer {
-    zigbee_stack: Arc<Mutex<ZigbeeStack>>,
-    notify_tx: broadcast::Sender<serde_json::Value>,
+    // Outgoing Zigbee stack commands
+    zigbee_tx: mpsc::Sender<ZigbeeCommand>,
+
+    // Incoming Zigbee stack notification
+    notification_rx: broadcast::Receiver<ZigbeeNotification>,
 }
 
 impl ZigguratServer {
@@ -45,35 +48,17 @@ impl ZigguratServer {
             Ok(settings)
         })?;
 
-        // Connect the Spinel client to the port
         let spinel = SpinelClient::new(port);
         spinel.spawn_reader();
 
-        // Start the radio via the stack
-        let zigbee_stack = Arc::new(Mutex::new(ZigbeeStack::new(spinel)));
+        let stack = ZigbeeStack::new(spinel);
+        let (actor, zigbee_tx, notification_rx) = ZigbeeStackActor::new(stack).await;
+        tokio::spawn(actor.run());
 
-        {
-            let mut stack = zigbee_stack.lock().await;
-            stack.start_radio().await;
-        }
-
-        // Spawn the receiver loop in the background
-        {
-            let stack = Arc::clone(&zigbee_stack);
-            tokio::spawn(async move {
-                ZigbeeStack::run_802154_receiver(stack).await;
-            });
-        }
-
-        // Create a channel for notification events
-        let (notify_tx, _notify_rx) = broadcast::channel::<serde_json::Value>(100);
-
-        let server = ZigguratServer {
-            zigbee_stack: zigbee_stack,
-            notify_tx: notify_tx,
-        };
-
-        Ok(server)
+        Ok(ZigguratServer {
+            zigbee_tx: zigbee_tx,
+            notification_rx: notification_rx,
+        })
     }
 
     pub async fn run_tcp_server(&self, listen_addr: &str) -> std::io::Result<()> {
@@ -84,12 +69,10 @@ impl ZigguratServer {
             let (socket, addr) = listener.accept().await?;
             log::debug!("New TCP client from {}", addr);
 
-            let notify_rx = self.notify_tx.subscribe();
-
             let server = self.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = server.handle_client(socket, addr, notify_rx).await {
+                if let Err(e) = server.handle_client(socket, addr).await {
                     log::warn!("Error handling client {}: {:?}", addr, e);
                 } else {
                     log::debug!("Client {} disconnected", addr);
@@ -102,12 +85,12 @@ impl ZigguratServer {
         self,
         mut stream: TcpStream,
         addr: SocketAddr,
-        mut notify_rx: broadcast::Receiver<serde_json::Value>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (reader, mut writer) = stream.split();
         let mut reader = BufReader::new(reader);
-
         let mut line = String::new();
+
+        let mut notification_rx = self.notification_rx.resubscribe();
 
         loop {
             line.clear();
@@ -115,8 +98,7 @@ impl ZigguratServer {
                 read_result = reader.read_line(&mut line) => {
                     let n = read_result?;
                     if n == 0 {
-                        // EOF
-                        break;
+                        break; // EOF reached
                     }
                     match serde_json::from_str::<CommandRequest>(line.trim()) {
                         Ok(cmd) => {
@@ -142,12 +124,33 @@ impl ZigguratServer {
                         }
                     }
                 }
-
-                broadcast_event = notify_rx.recv() => {
-                    match broadcast_event {
-                        Ok(event) => {
-                            let event_str = event.to_string();
-                            writer.write_all(event_str.as_bytes()).await?;
+                notify_event = notification_rx.recv() => {
+                    match notify_event {
+                        Ok(ZigbeeNotification::ReceivedApsCommand {
+                            source,
+                            profile_id,
+                            cluster_id,
+                            src_ep,
+                            dst_ep,
+                            lqi,
+                            rssi,
+                            data,
+                        }) => {
+                            let event = json!({
+                                "tid": 0,
+                                "cmd": "received_aps_command",
+                                "data": {
+                                    "source": hex::encode(source.to_bytes()),
+                                    "profile_id": profile_id,
+                                    "cluster_id": cluster_id,
+                                    "src_ep": src_ep,
+                                    "dst_ep": dst_ep,
+                                    "lqi": lqi,
+                                    "rssi": rssi,
+                                    "data": hex::encode(data),
+                                }
+                            });
+                            writer.write_all(event.to_string().as_bytes()).await?;
                             writer.write_all(b"\n").await?;
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
@@ -162,127 +165,89 @@ impl ZigguratServer {
                 }
             }
         }
-
         Ok(())
     }
 
     async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
         match cmd.cmd.as_str() {
             "set_network_settings" => {
-                let channel = cmd.data.get("channel").map(|v| v.as_u64().unwrap() as u8);
-                let nwk_update_id = cmd
-                    .data
-                    .get("nwk_update_id")
-                    .map(|v| v.as_u64().unwrap() as u8);
-                let pan_id = cmd
-                    .data
-                    .get("pan_id")
-                    .map(|v| PanId::from_hex(v.as_str().unwrap()));
-                let extended_pan_id = cmd
-                    .data
-                    .get("extended_pan_id")
-                    .map(|v| Eui64::from_hex(v.as_str().unwrap()));
-                let nwk_address = cmd
-                    .data
-                    .get("nwk_address")
-                    .map(|v| Nwk::from_hex(v.as_str().unwrap()));
-                let ieee_address = cmd
-                    .data
-                    .get("ieee_address")
-                    .map(|v| Eui64::from_hex(v.as_str().unwrap()));
-                let network_key = cmd
-                    .data
-                    .get("network_key")
-                    .map(|v| Key::from_hex(v.as_str().unwrap()));
-                let network_key_seq = cmd
-                    .data
-                    .get("network_key_seq")
-                    .map(|v| v.as_u64().unwrap() as u8);
+                // Build the oneshot channel
+                let (resp_tx, resp_rx) = oneshot::channel();
+                // Extract parameters from the data
+                let channel = cmd.data.get("channel").unwrap().as_u64().unwrap() as u8;
+                let nwk_update_id = cmd.data.get("nwk_update_id").unwrap().as_u64().unwrap() as u8;
+                let pan_id = PanId::from_hex(cmd.data.get("pan_id").unwrap().as_str().unwrap());
+                let extended_pan_id =
+                    Eui64::from_hex(cmd.data.get("extended_pan_id").unwrap().as_str().unwrap());
+                let nwk_address =
+                    Nwk::from_hex(cmd.data.get("nwk_address").unwrap().as_str().unwrap());
+                let ieee_address =
+                    Eui64::from_hex(cmd.data.get("ieee_address").unwrap().as_str().unwrap());
+                let network_key =
+                    Key::from_hex(cmd.data.get("network_key").unwrap().as_str().unwrap());
+                let network_key_seq =
+                    cmd.data.get("network_key_seq").unwrap().as_u64().unwrap() as u8;
                 let network_key_tx_counter = cmd
                     .data
                     .get("network_key_tx_counter")
-                    .map(|v| v.as_u64().unwrap() as u32);
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
 
-                {
-                    log::info!("Acquiring Zigbee stack lock...");
-                    let stack = Arc::clone(&self.zigbee_stack);
-                    let mut zigbee = stack.lock().await;
-                    log::info!("Setting network settings...");
-                    zigbee
-                        .set_network_settings(
-                            channel.unwrap(),
-                            nwk_update_id.unwrap(),
-                            pan_id.unwrap(),
-                            extended_pan_id.unwrap(),
-                            nwk_address.unwrap(),
-                            ieee_address.unwrap(),
-                            network_key.unwrap(),
-                            network_key_seq.unwrap(),
-                            network_key_tx_counter.unwrap(),
-                        )
-                        .await;
-                    log::info!("Done!");
-                }
+                // Send the command to the Zigbee actor
+                let command = ZigbeeCommand::SetNetworkSettings {
+                    nwk_channel: channel,
+                    nwk_update_id,
+                    nwk_pan_id: pan_id,
+                    nwk_extended_pan_id: extended_pan_id,
+                    nwk_network_address: nwk_address,
+                    nwk_ieee_address: ieee_address,
+                    key: network_key,
+                    key_seq_number: network_key_seq,
+                    outgoing_frame_counter: network_key_tx_counter,
+                    resp: resp_tx,
+                };
+                let _ = self.zigbee_tx.send(command).await;
+                let status = resp_rx.await.unwrap_or(Err("Unknown error".to_string()));
 
                 CommandResponse {
                     tid: cmd.tid,
                     cmd: cmd.cmd,
-                    data: json!({"status": "success"}),
+                    data: json!({"status": if status.is_ok() { "success" } else { "error" } }),
                 }
             }
-
             "send_aps_command" => {
-                let destination_nwk = cmd
-                    .data
-                    .get("destination_nwk")
-                    .map(|v| Nwk::from_hex(v.as_str().unwrap()));
-                let profile_id = cmd
-                    .data
-                    .get("profile_id")
-                    .map(|v| v.as_u64().unwrap() as u16);
-                let cluster_id = cmd
-                    .data
-                    .get("cluster_id")
-                    .map(|v| v.as_u64().unwrap() as u16);
-                let src_ep = cmd.data.get("src_ep").map(|v| v.as_u64().unwrap() as u8);
-                let dst_ep = cmd.data.get("dst_ep").map(|v| v.as_u64().unwrap() as u8);
-                let data = cmd
-                    .data
-                    .get("data")
-                    .map(|v| hex::decode(v.as_str().unwrap()).unwrap());
+                let (resp_tx, resp_rx) = oneshot::channel();
+                let destination_nwk =
+                    Nwk::from_hex(cmd.data.get("destination_nwk").unwrap().as_str().unwrap());
+                let profile_id = cmd.data.get("profile_id").unwrap().as_u64().unwrap() as u16;
+                let cluster_id = cmd.data.get("cluster_id").unwrap().as_u64().unwrap() as u16;
+                let src_ep = cmd.data.get("src_ep").unwrap().as_u64().unwrap() as u8;
+                let dst_ep = cmd.data.get("dst_ep").unwrap().as_u64().unwrap() as u8;
+                let data = hex::decode(cmd.data.get("data").unwrap().as_str().unwrap()).unwrap();
 
-                {
-                    log::info!("Acquiring Zigbee stack lock...");
-                    let stack = Arc::clone(&self.zigbee_stack);
-                    let mut zigbee = stack.lock().await;
-                    log::info!("Sending APS command...");
-                    zigbee
-                        .send_aps_command(
-                            destination_nwk.unwrap(),
-                            profile_id.unwrap(),
-                            cluster_id.unwrap(),
-                            src_ep.unwrap(),
-                            dst_ep.unwrap(),
-                            data.unwrap(),
-                        )
-                        .await;
-                    log::info!("Done!");
-                }
+                let command = ZigbeeCommand::SendApsCommand {
+                    destination: destination_nwk,
+                    profile_id,
+                    cluster_id,
+                    src_ep,
+                    dst_ep,
+                    data,
+                    resp: resp_tx,
+                };
+                let _ = self.zigbee_tx.send(command).await;
+                let status = resp_rx.await.unwrap_or(Err("Unknown error".to_string()));
 
                 CommandResponse {
                     tid: cmd.tid,
                     cmd: cmd.cmd,
-                    data: json!({"status": "success"}),
+                    data: json!({"status": if status.is_ok() { "success" } else { "error" } }),
                 }
             }
-
             _ => CommandResponse {
                 tid: cmd.tid,
                 cmd: cmd.cmd,
-                data: json!({
-                    "status": "error",
-                    "reason": "unknown_command",
-                }),
+                data: json!({ "status": "error", "reason": "unknown_command" }),
             },
         }
     }
@@ -291,8 +256,8 @@ impl ZigguratServer {
 impl Clone for ZigguratServer {
     fn clone(&self) -> Self {
         ZigguratServer {
-            zigbee_stack: Arc::clone(&self.zigbee_stack),
-            notify_tx: self.notify_tx.clone(),
+            zigbee_tx: self.zigbee_tx.clone(),
+            notification_rx: self.notification_rx.resubscribe(),
         }
     }
 }
@@ -302,27 +267,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::builder()
         .format_timestamp_micros()
         .filter(None, LevelFilter::Debug)
-        //.filter_module("ziggurat::spinel", LevelFilter::Info)
+        //.filter_module("ziggurat::spinel", LevelFilter::Info
         .init();
 
-    // Grab arguments
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <serial_path> [tcp_listen_addr]", args[0]);
         return Ok(());
     }
-
     let serial_path = &args[1];
     let tcp_listen_addr = args
         .get(2)
         .cloned()
         .unwrap_or_else(|| "0.0.0.0:9999".to_string());
-
-    // Create and configure our Zigbee server
     let server = ZigguratServer::new(serial_path).await?;
-
-    // Now run our async TCP server
     server.run_tcp_server(&tcp_listen_addr).await?;
-
     Ok(())
 }
