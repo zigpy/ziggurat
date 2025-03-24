@@ -251,7 +251,7 @@ impl Ieee802154Frame {
         Self::from_bytes(&data_with_fcs)
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes_without_fcs(&self) -> Vec<u8> {
         let mut data = Vec::new();
 
         // Serialize frame control
@@ -290,7 +290,11 @@ impl Ieee802154Frame {
         // Add payload
         data.extend(&self.payload);
 
-        // Add FCS
+        data
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = self.to_bytes_without_fcs();
         data.extend(&Self::compute_fcs(&data).to_le_bytes());
 
         data
@@ -468,5 +472,79 @@ mod test {
         };
 
         assert_eq!(frame, expected_frame);
+    }
+
+    #[test]
+    fn test_frame_ack2() {
+        let bytes = hex!(
+            "6188034072f42600000802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b 1c2e"
+        );
+        let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
+
+        let expected_frame = Ieee802154Frame {
+            frame_control: Ieee802154FrameControl {
+                frame_type: Ieee802154FrameType::Data,
+                security_enabled: false,
+                frame_pending: false,
+                ack_request: true,
+                pan_id_compression: true,
+                reserved: false,
+                sequence_number_suppression: false,
+                information_elements_present: false,
+                dest_addr_mode: Ieee802154AddressingMode::Short,
+                frame_version: 0,
+                src_addr_mode: Ieee802154AddressingMode::Short,
+            },
+            sequence_number: Some(3),
+            dest_pan_id: Some(PanId(0x7240)),
+            dest_address: Some(Ieee802154Address::Nwk(Nwk(0x26F4))),
+            src_pan_id: Some(PanId(0x7240)),
+            src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
+            payload: hex!(
+                "0802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b"
+            )
+            .to_vec(),
+            fcs: 0x2e1c,
+        };
+
+        assert_eq!(frame, expected_frame);
+        assert_eq!(frame.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn test_frame_ack3() {
+        let bytes = hex!(
+            "4188034072f42600000802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b"
+        );
+        let frame = Ieee802154Frame::from_bytes_without_fcs(&bytes).unwrap();
+
+        let expected_frame = Ieee802154Frame {
+            frame_control: Ieee802154FrameControl {
+                frame_type: Ieee802154FrameType::Data,
+                security_enabled: false,
+                frame_pending: false,
+                ack_request: false,
+                pan_id_compression: true,
+                reserved: false,
+                sequence_number_suppression: false,
+                information_elements_present: false,
+                dest_addr_mode: Ieee802154AddressingMode::Short,
+                frame_version: 0,
+                src_addr_mode: Ieee802154AddressingMode::Short,
+            },
+            sequence_number: Some(3),
+            dest_pan_id: Some(PanId(0x7240)),
+            dest_address: Some(Ieee802154Address::Nwk(Nwk(0x26F4))),
+            src_pan_id: Some(PanId(0x7240)),
+            src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
+            payload: hex!(
+                "0802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b"
+            )
+            .to_vec(),
+            fcs: 0x4bdd,
+        };
+
+        assert_eq!(frame, expected_frame);
+        assert_eq!(frame.to_bytes_without_fcs(), bytes);
     }
 }
