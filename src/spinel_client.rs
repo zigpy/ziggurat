@@ -1,12 +1,13 @@
 use crate::spinel::{
-    HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelPropertyId, SpinelProtocol,
-    packed_uint21_deserialize, packed_uint21_to_bytes,
+    HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelFramePropValueIs, SpinelPropertyId,
+    SpinelProtocol, packed_uint21_deserialize, packed_uint21_to_bytes,
 };
 use serial2_tokio::SerialPort;
 use std::string::String;
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -126,12 +127,6 @@ impl SpinelRxFrame {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct SpinelClient {
-    pub port: Arc<SerialPort>,
-    pub protocol: Arc<Mutex<SpinelProtocol>>,
-}
-
 #[derive(Debug)]
 pub enum SpinelSendError {
     IoError(std::io::Error),
@@ -139,26 +134,46 @@ pub enum SpinelSendError {
     Timeout,
 }
 
+#[derive(Debug)]
+pub struct SpinelClient {
+    pub port: Arc<SerialPort>,
+    pub protocol: Arc<Mutex<SpinelProtocol>>,
+    pub buffer: [u8; 2048],
+}
+
 impl SpinelClient {
     pub fn new(port: SerialPort) -> Self {
         Self {
             port: Arc::new(port),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
+            buffer: [0u8; 2048],
         }
+    }
+
+    pub fn set_property_update_receiver(
+        &self,
+        property_id: u32,
+        tx: mpsc::Sender<SpinelFramePropValueIs>,
+    ) {
+        self.protocol
+            .lock()
+            .expect("Failed to lock Spinel")
+            .property_update_receivers
+            .insert(property_id, tx);
     }
 
     /// Start a reading loop to parse and handle inbound frames.
     pub fn spawn_reader(&self) {
-        let port_clone = Arc::clone(&self.port);
-        let client_clone = Arc::clone(&self.protocol);
+        let port = Arc::clone(&self.port);
+        let protocol = Arc::clone(&self.protocol);
 
         tokio::spawn(async move {
             let mut buffer = [0u8; 2048];
 
             loop {
-                match port_clone.read(&mut buffer).await {
+                match port.read(&mut buffer).await {
                     Ok(n) if n > 0 => {
-                        let mut protocol = client_clone.lock().await;
+                        let mut protocol = protocol.lock().expect("Failed to lock Spinel");
                         protocol.handle_inbound_bytes(&buffer[..n])
                     }
                     Ok(_) => {
@@ -180,8 +195,10 @@ impl SpinelClient {
         payload: Vec<u8>,
     ) -> Result<SpinelFrame, SpinelSendError> {
         let (frame, rx) = {
-            let mut guard = self.protocol.lock().await;
-            guard.prepare_request(command_id, payload)
+            self.protocol
+                .lock()
+                .expect("Failed to lock Spinel")
+                .prepare_request(command_id, payload)
         };
 
         log::debug!("Sending frame {:?}", frame);
@@ -201,14 +218,18 @@ impl SpinelClient {
         match timeout(TIMEOUT, rx).await {
             Ok(Ok(response_frame)) => Ok(response_frame),
             Ok(Err(_recv_closed)) => {
-                let mut guard = self.protocol.lock().await;
-                guard.cancel_request(frame.header.transaction_id);
+                self.protocol
+                    .lock()
+                    .expect("Failed to lock Spinel")
+                    .cancel_request(frame.header.transaction_id);
 
                 Err(SpinelSendError::ChannelClosed)
             }
             Err(_elapsed) => {
-                let mut guard = self.protocol.lock().await;
-                guard.cancel_request(frame.header.transaction_id);
+                self.protocol
+                    .lock()
+                    .expect("Failed to lock Spinel")
+                    .cancel_request(frame.header.transaction_id);
 
                 Err(SpinelSendError::Timeout)
             }
