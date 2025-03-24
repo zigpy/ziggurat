@@ -33,14 +33,6 @@ path = "src/server.rs"
 name = "ziggurat-pcap"
 path = "src/tools/dump_pcap.rs"
 
-[[bin]]
-name = "ziggurat-capture"
-path = "src/tools/packet_capture.rs"
-
-[[bin]]
-name = "ziggurat-sender"
-path = "src/tools/packet_sender.rs"
-
 [dev-dependencies]
 rand = "0.8.5"
 

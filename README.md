@@ -26,12 +26,6 @@ The wire format is provisional. Currently, commands and responses are sent line-
 A few other independent tools exist to test functionality:
 
 ```bash
-# Rapidly send 802.15.4 beacon requests on channel 19 and print timing information
-cargo run --bin ziggurat-sender /dev/cu.SLAB_USBtoUART
-
-# Capture traffic on channel 19 and dissect the 802.15.4, Zigbee APS, and NWK layers
-cargo run --bin ziggurat-capture /dev/cu.SLAB_USBtoUART
-
 # Parse a PCAP file with loaded Wireshark Zigbee network keys, printing decryption and parsing statistics
 cargo run --bin ziggurat-pcap capture.pcap
 ```
