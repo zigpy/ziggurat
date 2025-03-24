@@ -17,8 +17,7 @@ use std::collections::HashMap;
 use std::mem::drop;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::Duration;
+use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
@@ -260,7 +259,6 @@ pub struct Nib {
     // nwkPanIdConflictCount = 0
     // nwkMaxInitialJoinParentAttempts = 1
     // nwkMaxRejoinParentAttempts = 3
-    pub mac_symbol_period: Duration,
 }
 
 impl Nib {
@@ -326,7 +324,6 @@ impl Nib {
             nwk_end_device_timeout_default: 0,
             nwk_leave_request_without_rejoin_allowed: false,
             nwk_ieee_address: Eui64::from_hex("0000000000000000"),
-            mac_symbol_period: Duration::from_micros(16),
         }
     }
 }
@@ -335,7 +332,6 @@ impl Nib {
 pub struct ZigbeeStackState {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,
-    pub ieee802154_pending_acks: HashMap<u8, oneshot::Sender<()>>,
     pub nib: Nib,
 }
 
@@ -344,7 +340,6 @@ impl ZigbeeStackState {
         ZigbeeStackState {
             channel: 0,
             ieee802154_sequence_number: 0,
-            ieee802154_pending_acks: HashMap::new(),
             nib: Nib::new(),
         }
     }
@@ -538,7 +533,7 @@ impl ZigbeeStack {
     }
 
     pub fn receive_802154_frame(&self, frame: &Ieee802154Frame) -> Option<NwkFrame> {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
 
         // 802.15.4 encrypted frames can't be Zigbee NWK
         if frame.frame_control.security_enabled {
@@ -548,16 +543,14 @@ impl ZigbeeStack {
 
         match frame.frame_control.frame_type {
             Ieee802154FrameType::Ack => {
-                state
-                    .ieee802154_pending_acks
-                    .remove(&frame.sequence_number.unwrap())
-                    .map(|ack_tx| ack_tx.send(()));
+                // Ignored, OpenThread RCP takes care of it
+                return None;
             }
             Ieee802154FrameType::Data => {
                 // Process it below
             }
             _ => {
-                log::debug!("Ignoring frame, not a state frame");
+                log::debug!("Ignoring frame, not a data frame");
                 return None;
             }
         }
@@ -642,8 +635,6 @@ impl ZigbeeStack {
             }
         }
 
-        let last_frame_counter;
-
         match state
             .nib
             .nwk_security_material_primary
@@ -652,7 +643,6 @@ impl ZigbeeStack {
         {
             None => {
                 log::warn!("Unknown sender, not validating frame counter");
-                last_frame_counter = 0;
             }
             Some(last_stored_frame_counter) => {
                 if aux_header.frame_counter <= *last_stored_frame_counter {
@@ -663,8 +653,6 @@ impl ZigbeeStack {
                     );
                     return None;
                 }
-
-                last_frame_counter = *last_stored_frame_counter;
             }
         };
 
@@ -688,7 +676,7 @@ impl ZigbeeStack {
         drop(state);
 
         log::info!("Decrypted frame: {:#?}", decrypted_nwk_frame);
-        self.handle_decrypted_frame(&decrypted_nwk_frame, frame);
+        self.handle_decrypted_frame(&decrypted_nwk_frame);
 
         return Some(decrypted_nwk_frame);
     }
@@ -711,7 +699,7 @@ impl ZigbeeStack {
         }
     }
 
-    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, ieee802154_frame: &Ieee802154Frame) {
+    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame) {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header {
             match aux_header.extended_source {
@@ -915,7 +903,8 @@ impl ZigbeeStack {
         // waiting for an ACK
         let channel = { self.state.lock().unwrap().channel };
 
-        self.spinel
+        let status = self
+            .spinel
             .transmit_frame(&SpinelTxFrame {
                 psdu: frame.to_bytes(),
                 channel: channel,
@@ -933,39 +922,12 @@ impl ZigbeeStack {
             .await
             .expect("Failed to transmit frame");
 
+        log::info!("Send status: {:?}", status);
+
         // Frames that do not ask for an ACK or that suppress their sequence number
         // cannot be ACKed
         if !frame.frame_control.ack_request || frame.frame_control.sequence_number_suppression {
             return;
-        }
-
-        // Create a one shot
-        let (ack_tx, ack_rx) = oneshot::channel();
-
-        {
-            let mut state = self.state.lock().unwrap();
-            state
-                .ieee802154_pending_acks
-                .insert(frame.sequence_number.unwrap(), ack_tx);
-        }
-
-        //let mac_ack_wait_duration = 54 * self.nib.mac_symbol_period;
-        let mac_ack_wait_duration = Duration::from_millis(1000);
-        let ack_timeout = tokio::time::timeout(mac_ack_wait_duration, ack_rx);
-
-        match ack_timeout.await {
-            Ok(Ok(_)) => {
-                log::info!(
-                    "ACK received for frame {:?}",
-                    frame.sequence_number.unwrap()
-                );
-            }
-            Ok(Err(_)) => {
-                log::warn!("ACK timeout for frame {:?}", frame.sequence_number.unwrap());
-            }
-            Err(_) => {
-                log::warn!("ACK timeout for frame {:?}", frame.sequence_number.unwrap());
-            }
         }
     }
 

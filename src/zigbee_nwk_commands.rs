@@ -212,10 +212,11 @@ impl NwkRouteRecordCommand {
         let num_relays = bytes[0] as usize;
         let mut relays = Vec::with_capacity(num_relays);
 
-        let remaining = &bytes[1..];
+        let mut remaining = &bytes[1..];
 
         for _ in 0..num_relays {
-            let (nwk, remaining) = Nwk::deserialize(remaining)?;
+            let nwk;
+            (nwk, remaining) = Nwk::deserialize(remaining)?;
             relays.push(nwk);
         }
 

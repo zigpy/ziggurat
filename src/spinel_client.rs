@@ -312,13 +312,10 @@ impl SpinelClient {
     }
 
     pub async fn transmit_frame(&self, tx_frame: &SpinelTxFrame) -> Result<u8, SpinelSendError> {
-        let (_rsp_prop_id, _rsp) = self
+        let (rsp_prop_id, rsp) = self
             .prop_value_set(SpinelPropertyId::StreamRaw as u32, tx_frame.to_bytes())
             .await
             .unwrap();
-
-        Ok(1)
-        /*
 
         if rsp_prop_id != SpinelPropertyId::LastStatus as u32 {
             return Err(SpinelSendError::IoError(std::io::Error::new(
@@ -336,6 +333,5 @@ impl SpinelClient {
 
         let status = rsp[0];
         Ok(status)
-        */
     }
 }

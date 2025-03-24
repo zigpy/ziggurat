@@ -8,16 +8,12 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::LocalRuntime;
-use tokio::sync::mpsc;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 use tokio::task::spawn_local;
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
-use ziggurat::ieee_802154::Ieee802154Frame;
-use ziggurat::spinel::SpinelPropertyId;
-use ziggurat::spinel_client::{SpinelClient, SpinelRxFrame};
+use ziggurat::spinel_client::SpinelClient;
 use ziggurat::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::{ZigbeeNotification, ZigbeeStack};
 
