@@ -135,6 +135,7 @@ async def main(host, port):
                     "cluster_id": 0x0006,  # OnOff
                     "src_ep": 1,
                     "dst_ep": 1,
+                    "aps_ack": True,
                     "data": bytearray([0x01, seq, 0x02]).hex(),  # Toggle
                 },
             )

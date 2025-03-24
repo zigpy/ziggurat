@@ -220,6 +220,7 @@ impl ZigguratServer {
                 let cluster_id = cmd.data.get("cluster_id").unwrap().as_u64().unwrap() as u16;
                 let src_ep = cmd.data.get("src_ep").unwrap().as_u64().unwrap() as u8;
                 let dst_ep = cmd.data.get("dst_ep").unwrap().as_u64().unwrap() as u8;
+                let aps_ack = cmd.data.get("aps_ack").unwrap().as_bool().unwrap();
                 let data = hex::decode(cmd.data.get("data").unwrap().as_str().unwrap()).unwrap();
 
                 let status = self
@@ -230,6 +231,7 @@ impl ZigguratServer {
                         cluster_id,
                         src_ep,
                         dst_ep,
+                        aps_ack,
                         data,
                     )
                     .await;

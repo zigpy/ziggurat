@@ -412,8 +412,13 @@ impl ZigbeeStack {
 
         loop {
             // Parse incoming 802.15.4 frames from Spinel
-            let mut raw_frame_rx = self.raw_frame_rx.lock().expect("Failed to receive frame");
-            let maybe_spinel_frame = raw_frame_rx.recv().await;
+            let maybe_spinel_frame = {
+                self.raw_frame_rx
+                    .lock()
+                    .expect("Failed to receive frame")
+                    .recv()
+                    .await
+            };
 
             if maybe_spinel_frame.is_none() {
                 log::warn!("Frame sender hung up");
@@ -426,13 +431,13 @@ impl ZigbeeStack {
                 Ok(p) => p,
                 Err(e) => {
                     log::warn!("Error parsing spinel frame: {:?}", e);
-                    return;
+                    continue;
                 }
             };
 
             if packet.psdu.len() < 2 {
                 log::warn!("Packet too short to contain FCS");
-                return;
+                continue;
             }
             let frame_data = &packet.psdu[..packet.psdu.len() - 2];
 
@@ -440,7 +445,7 @@ impl ZigbeeStack {
                 Ok(f) => f,
                 Err(e) => {
                     log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
-                    return;
+                    continue;
                 }
             };
 
@@ -449,16 +454,18 @@ impl ZigbeeStack {
             match self.receive_802154_frame(&ieee802154_frame) {
                 Some(nwk_frame) => {
                     if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
-                        return;
+                        continue;
                     }
 
                     let aps_frame = match ApsFrame::from_bytes(&nwk_frame.payload) {
                         Ok(f) => f,
                         Err(e) => {
                             log::warn!("Error parsing APS frame: {:?}", e);
-                            return;
+                            continue;
                         }
                     };
+
+                    log::debug!("Received APS frame: {:#?}", aps_frame);
 
                     let notification = ZigbeeNotification::ReceivedApsCommand {
                         source: nwk_frame.nwk_header.source,
@@ -775,6 +782,7 @@ impl ZigbeeStack {
         dst_ep: u8,
         cluster_id: u16,
         profile_id: u16,
+        aps_ack: bool,
         counter: u8,
         asdu: &Vec<u8>,
     ) -> Ieee802154Frame {
@@ -784,7 +792,7 @@ impl ZigbeeStack {
                 delivery_mode: ApsDeliveryMode::Unicast,
                 reserved: 0b0,
                 security: false,
-                ack_request: true,
+                ack_request: aps_ack,
                 extended_header: false,
             },
             destination_endpoint: dst_ep,
@@ -938,6 +946,7 @@ impl ZigbeeStack {
         cluster_id: u16,
         src_ep: u8,
         dst_ep: u8,
+        aps_ack: bool,
         data: Vec<u8>,
     ) -> Result<(), String> {
         let ieee802154_frame = self.prepare_request(
@@ -946,6 +955,7 @@ impl ZigbeeStack {
             dst_ep,
             cluster_id,
             profile_id,
+            aps_ack,
             0,
             &data,
         );
