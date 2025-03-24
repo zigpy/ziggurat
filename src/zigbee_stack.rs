@@ -5,7 +5,10 @@ use crate::ieee_802154::{
 use crate::spinel::{SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelPropertyId};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
 use crate::types::{Eui64, Key, Nwk, PanId};
-use crate::zigbee_aps::{ApsDeliveryMode, ApsFrame, ApsFrameControl, ApsFrameType};
+use crate::zigbee_aps::{
+    ApsAckFrame, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl, ApsFrameType,
+    parse_aps_frame,
+};
 use crate::zigbee_nwk::{
     NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
     NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
@@ -17,7 +20,8 @@ use std::collections::HashMap;
 use std::mem::drop;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Duration;
 
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
@@ -328,11 +332,35 @@ impl Nib {
     }
 }
 
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct ApsAckData {
+    pub src: Nwk,
+    pub destination_endpoint: Option<u8>,
+    pub cluster_id: Option<u16>,
+    pub profile_id: Option<u16>,
+    pub source_endpoint: Option<u8>,
+    pub counter: u8,
+}
+
+impl ApsAckData {
+    pub fn from_aps_ack(src: Nwk, ack: &ApsAckFrame) -> Self {
+        ApsAckData {
+            src: src,
+            destination_endpoint: ack.destination_endpoint,
+            cluster_id: ack.cluster_id,
+            profile_id: ack.profile_id,
+            source_endpoint: ack.source_endpoint,
+            counter: ack.counter,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ZigbeeStackState {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,
     pub nib: Nib,
+    pub pending_aps_acks: HashMap<ApsAckData, oneshot::Sender<()>>,
 }
 
 impl ZigbeeStackState {
@@ -341,6 +369,7 @@ impl ZigbeeStackState {
             channel: 0,
             ieee802154_sequence_number: 0,
             nib: Nib::new(),
+            pending_aps_acks: HashMap::new(),
         }
     }
 }
@@ -453,19 +482,31 @@ impl ZigbeeStack {
 
             match self.receive_802154_frame(&ieee802154_frame) {
                 Some(nwk_frame) => {
-                    if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
-                        continue;
-                    }
+                    let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
+                        Ok(ApsFrame::Data(data)) => data,
+                        Ok(ApsFrame::Ack(ack)) => {
+                            let ack_data =
+                                ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, &ack);
+                            log::debug!("Received APS ack: {:?}", ack_data);
 
-                    let aps_frame = match ApsFrame::from_bytes(&nwk_frame.payload) {
-                        Ok(f) => f,
+                            self.state
+                                .lock()
+                                .unwrap()
+                                .pending_aps_acks
+                                .remove(&ack_data)
+                                .map(|tx| {
+                                    let _ = tx.send(());
+                                });
+
+                            continue;
+                        }
                         Err(e) => {
                             log::warn!("Error parsing APS frame: {:?}", e);
                             continue;
                         }
                     };
 
-                    log::debug!("Received APS frame: {:#?}", aps_frame);
+                    log::debug!("Received APS data frame: {:#?}", aps_frame);
 
                     let notification = ZigbeeNotification::ReceivedApsCommand {
                         source: nwk_frame.nwk_header.source,
@@ -786,7 +827,7 @@ impl ZigbeeStack {
         counter: u8,
         asdu: &Vec<u8>,
     ) -> Ieee802154Frame {
-        let aps_frame = ApsFrame {
+        let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
                 frame_type: ApsFrameType::Data,
                 delivery_mode: ApsDeliveryMode::Unicast,
@@ -814,7 +855,7 @@ impl ZigbeeStack {
         ieee802154_frame
     }
 
-    fn wrap_aps_frame(&self, destination: Nwk, aps_frame: &ApsFrame) -> NwkFrame {
+    fn wrap_aps_frame(&self, destination: Nwk, aps_frame: &ApsDataFrame) -> NwkFrame {
         // TODO: TX frame counter wrapping is an error condition
         let mut state = self.state.lock().unwrap();
 
@@ -911,6 +952,8 @@ impl ZigbeeStack {
         // waiting for an ACK
         let channel = { self.state.lock().unwrap().channel };
 
+        log::info!("Sending 802.15.4 frame: {:#?}", frame);
+        log::info!("Sending 802.15.4 frame bytes: {:02X?}", frame.to_bytes());
         let status = self
             .spinel
             .transmit_frame(&SpinelTxFrame {
@@ -947,6 +990,7 @@ impl ZigbeeStack {
         src_ep: u8,
         dst_ep: u8,
         aps_ack: bool,
+        aps_seq: u8,
         data: Vec<u8>,
     ) -> Result<(), String> {
         let ieee802154_frame = self.prepare_request(
@@ -956,21 +1000,63 @@ impl ZigbeeStack {
             cluster_id,
             profile_id,
             aps_ack,
-            0,
+            aps_seq,
             &data,
         );
-        self.send_802154_frame(ieee802154_frame).await;
 
-        let mut state = self.state.lock().unwrap();
+        let mut maybe_ack_rx = None;
 
-        // Handle `nwk_tx_total` wrapping
-        if state.nib.nwk_tx_total == 0xFFFF {
-            for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
-                neighbor.transmit_failure = 0;
-            }
+        if aps_ack {
+            let ack_data = ApsAckData {
+                src: destination,
+                destination_endpoint: Some(src_ep), // These are swapped
+                cluster_id: Some(cluster_id),
+                profile_id: Some(profile_id),
+                source_endpoint: Some(dst_ep), // These are swapped
+                counter: aps_seq,
+            };
+
+            let (tx, rx) = oneshot::channel();
+            maybe_ack_rx = Some(rx);
+
+            log::debug!("APS ACK requested, waiting for {:?}", ack_data);
+            self.state
+                .lock()
+                .unwrap()
+                .pending_aps_acks
+                .insert(ack_data, tx);
         }
 
-        state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
+        self.send_802154_frame(ieee802154_frame).await;
+
+        {
+            let mut state = self.state.lock().unwrap();
+
+            // Handle `nwk_tx_total` wrapping
+            if state.nib.nwk_tx_total == 0xFFFF {
+                for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
+                    neighbor.transmit_failure = 0;
+                }
+            }
+
+            state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
+        }
+
+        if let Some(ack_rx) = maybe_ack_rx {
+            // With a 5s timeout
+            let aps_ack_timeout = Duration::from_secs(5);
+            match tokio::time::timeout(aps_ack_timeout, ack_rx).await {
+                Ok(Ok(())) => {
+                    log::info!("APS ACK received");
+                }
+                Ok(Err(e)) => {
+                    log::warn!("APS ACK channel hung up: {:?}", e);
+                }
+                Err(_) => {
+                    log::warn!("APS ACK timed out");
+                }
+            }
+        }
 
         Ok(())
     }

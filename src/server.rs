@@ -221,6 +221,7 @@ impl ZigguratServer {
                 let src_ep = cmd.data.get("src_ep").unwrap().as_u64().unwrap() as u8;
                 let dst_ep = cmd.data.get("dst_ep").unwrap().as_u64().unwrap() as u8;
                 let aps_ack = cmd.data.get("aps_ack").unwrap().as_bool().unwrap();
+                let aps_seq = cmd.data.get("aps_seq").unwrap().as_u64().unwrap() as u8;
                 let data = hex::decode(cmd.data.get("data").unwrap().as_str().unwrap()).unwrap();
 
                 let status = self
@@ -232,6 +233,7 @@ impl ZigguratServer {
                         src_ep,
                         dst_ep,
                         aps_ack,
+                        aps_seq,
                         data,
                     )
                     .await;
