@@ -33,7 +33,7 @@ struct CommandResponse {
 }
 
 pub struct ZigguratServer {
-    zigbee_stack: ZigbeeStack,
+    zigbee_stack: Arc<ZigbeeStack>,
     notification_rx: broadcast::Receiver<ZigbeeNotification>,
 }
 

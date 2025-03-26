@@ -15,12 +15,15 @@ use crate::zigbee_nwk::{
 };
 use crate::zigbee_nwk_commands::{
     NwkCommandId, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
+    NwkRouteRequestCommand,
 };
 use std::collections::HashMap;
 use std::mem::drop;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::spawn_local;
 use tokio::time::Duration;
 
 #[derive(Debug)]
@@ -390,55 +393,32 @@ pub enum ZigbeeNotification {
 
 #[derive(Debug)]
 pub struct ZigbeeStack {
-    pub state: Arc<Mutex<ZigbeeStackState>>,
+    self_weak: Weak<ZigbeeStack>,
+
+    pub state: Mutex<ZigbeeStackState>,
     pub spinel: SpinelClient,
     pub notification_tx: broadcast::Sender<ZigbeeNotification>,
-    pub raw_frame_rx: Arc<Mutex<mpsc::Receiver<SpinelFramePropValueIs>>>,
+    pub raw_frame_rx: Mutex<mpsc::Receiver<SpinelFramePropValueIs>>,
 }
 
 impl ZigbeeStack {
-    pub fn new(spinel: SpinelClient) -> (Self, broadcast::Receiver<ZigbeeNotification>) {
+    pub fn new(spinel: SpinelClient) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
         let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
         spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw as u32, raw_frame_tx);
 
-        (
-            ZigbeeStack {
-                state: Arc::new(Mutex::new(ZigbeeStackState::new())),
-                spinel: spinel,
-                notification_tx: notification_tx,
-                raw_frame_rx: Arc::new(Mutex::new(raw_frame_rx)),
-            },
-            notification_rx,
-        )
-    }
+        let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
+            self_weak: weak_self.clone(),
+            state: Mutex::new(ZigbeeStackState::new()),
+            spinel: spinel,
+            notification_tx: notification_tx,
+            raw_frame_rx: Mutex::new(raw_frame_rx),
+        });
 
-    pub async fn start_radio(&self) {
-        self.spinel
-            .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
-            .await
-            .expect("Failed to enable the PHY");
-
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacPromiscuousMode as u32,
-                vec![SpinelMacPromiscuousMode::Full as u8],
-            )
-            .await
-            .expect("Failed to set the MAC promiscuous mode");
-
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacRawStreamEnabled as u32,
-                vec![true as u8],
-            )
-            .await
-            .expect("Failed to enable the RAW stream");
+        (arc_stack, notification_rx)
     }
 
     pub async fn run(&self) {
-        self.start_radio().await;
-
         loop {
             // Parse incoming 802.15.4 frames from Spinel
             let maybe_spinel_frame = {
@@ -553,9 +533,30 @@ impl ZigbeeStack {
 
         // Update the hardware with new settings.
         self.spinel
+            .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
+            .await
+            .expect("Failed to enable the PHY");
+
+        self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![nwk_channel])
             .await
             .map_err(|e| format!("Failed to set PHY channel: {:?}", e))?;
+
+        self.spinel
+            .prop_value_set(SpinelPropertyId::PhyTxPower as u32, vec![8])
+            .await
+            .map_err(|e| format!("Failed to set PHY TX power: {:?}", e))?;
+
+        /*
+        self.spinel
+            .prop_value_set(
+                SpinelPropertyId::MacPromiscuousMode as u32,
+                vec![SpinelMacPromiscuousMode::Full as u8],
+            )
+            .await
+            .expect("Failed to set the MAC promiscuous mode");
+        */
+
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Laddr as u32,
@@ -563,6 +564,7 @@ impl ZigbeeStack {
             )
             .await
             .map_err(|e| format!("Failed to set MAC IEEE address: {:?}", e))?;
+
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Saddr as u32,
@@ -570,6 +572,7 @@ impl ZigbeeStack {
             )
             .await
             .map_err(|e| format!("Failed to set MAC NWK address: {:?}", e))?;
+
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Panid as u32,
@@ -577,6 +580,23 @@ impl ZigbeeStack {
             )
             .await
             .map_err(|e| format!("Failed to set MAC PAN ID: {:?}", e))?;
+
+        self.spinel
+            .prop_value_set(
+                SpinelPropertyId::MacRxOnWhenIdleMode as u32,
+                vec![true as u8],
+            )
+            .await
+            .expect("Failed to set RX on when idle");
+
+        self.spinel
+            .prop_value_set(
+                SpinelPropertyId::MacRawStreamEnabled as u32,
+                vec![true as u8],
+            )
+            .await
+            .expect("Failed to enable the RAW stream");
+
         Ok(())
     }
 
@@ -806,6 +826,10 @@ impl ZigbeeStack {
                         .nwk_route_record_table
                         .insert(nwk_frame.nwk_header.source, route_record_cmd.relays);
                 }
+                Ok(NwkCommandId::RouteRequest) => {
+                    log::info!("Route request command frame received");
+                    self.handle_route_request(nwk_frame);
+                }
                 Err(_) => {
                     log::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
                 }
@@ -814,6 +838,84 @@ impl ZigbeeStack {
                 }
             }
         }
+    }
+
+    fn handle_route_request(&self, nwk_frame: &NwkFrame) {
+        let route_request_cmd = match NwkRouteRequestCommand::from_bytes(&nwk_frame.payload[1..]) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing route request command: {:?}", e);
+                return;
+            }
+        };
+
+        log::info!("Route request command frame: {:#?}", route_request_cmd);
+
+        let state = self.state.lock().unwrap();
+
+        // TODO: for now, only handle route requests back to us
+        if route_request_cmd.destination_address != state.nib.nwk_network_address {
+            log::debug!("Ignoring route request not destined for us (NWK)");
+            return;
+        }
+
+        if let Some(destination_eui64) = route_request_cmd.destination_eui64 {
+            if destination_eui64 != state.nib.nwk_ieee_address {
+                log::debug!("Ignoring route request not destined for us (EUI64)");
+                return;
+            }
+        }
+
+        let route_reply_frame = NwkFrame {
+            encrypted: false,
+            nwk_header: NwkHeader {
+                frame_control: NwkFrameControl {
+                    frame_type: NwkFrameType::Command,
+                    protocol_version: 2,
+                    discover_route: NwkRouteDiscovery::Suppress,
+                    multicast: false,
+                    security: false,
+                    source_route: false,
+                    destination: false,
+                    extended_source: false,
+                    end_device_initiator: false,
+                    reserved: 0b00,
+                },
+                destination: nwk_frame.nwk_header.source,
+                source: state.nib.nwk_network_address,
+                radius: 30,
+                sequence_number: state.nib.nwk_sequence_number,
+                destination_ieee: None,
+                source_ieee: None,
+                multicast_control: None,
+                source_route: None,
+            },
+            aux_header: None,
+            payload: NwkRouteReplyCommand {
+                multicast: false,
+                route_request_identifier: route_request_cmd.route_request_identifier,
+                originator_nwk: state.nib.nwk_network_address,
+                responder_nwk: nwk_frame.nwk_header.source,
+                path_cost: 1, // :)
+                originator_eui64: nwk_frame.nwk_header.source_ieee,
+                responder_eui64: Some(state.nib.nwk_ieee_address),
+                tlvs: vec![],
+            }
+            .serialize(),
+        };
+
+        drop(state);
+
+        let ieee802154_frame = self.wrap_nwk_frame(&route_reply_frame);
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        spawn_local(async move {
+            arc_self.send_802154_frame(ieee802154_frame).await;
+        });
     }
 
     fn prepare_request(

@@ -136,6 +136,7 @@ async def main(host, port):
                     "src_ep": 1,
                     "dst_ep": 1,
                     "aps_ack": True,
+                    "aps_seq": seq,
                     "data": bytearray([0x01, seq, 0x02]).hex(),  # Toggle
                 },
             )

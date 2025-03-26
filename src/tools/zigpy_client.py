@@ -159,9 +159,9 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
             {
                 "channel": network_info.channel,
                 "nwk_update_id": network_info.nwk_update_id,
-                "pan_id": network_info.pan_id.serialize().hex(),
+                "pan_id": network_info.pan_id.serialize()[::-1].hex(),
                 "extended_pan_id": str(network_info.extended_pan_id),
-                "nwk_address": node_info.nwk.serialize().hex(),
+                "nwk_address": node_info.nwk.serialize()[::-1].hex(),
                 "ieee_address": str(node_info.ieee),
                 "network_key": str(network_info.network_key.key),
                 "network_key_seq": network_info.network_key.seq,
@@ -181,11 +181,11 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
         if event["cmd"] == "received_aps_command":
             packet = t.ZigbeePacket(
                 src=t.AddrModeAddress(
-                    addr_mode=t.AddressMode.NWK,
-                    address=t.NWK(int(event["data"]["source"], 16)),
+                    addr_mode=t.AddrMode.NWK,
+                    address=t.NWK.deserialize(bytes.fromhex(event["data"]["source"]))[0],
                 ),
                 dst=t.AddrModeAddress(
-                    addr_mode=t.AddressMode.NWK,
+                    addr_mode=t.AddrMode.NWK,
                     address=t.NWK(0x0000),
                 ),
                 src_ep=event["data"]["src_ep"],
@@ -194,19 +194,24 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
                 cluster_id=event["data"]["cluster_id"],
                 lqi=event["data"]["lqi"],
                 rssi=event["data"]["rssi"],
-                data=t.SerializedBytes(bytes.fromhex(event["data"]["data"])),
+                data=t.SerializableBytes(bytes.fromhex(event["data"]["data"])),
             )
             self.packet_received(packet)
 
     async def send_packet(self, packet):
         assert packet.dst.addr_mode is t.AddrMode.NWK
 
+        profile_id = 0x0000
+
+        if packet.src_ep != 0 or packet.dst_ep != 0:
+            profile_id = 0x0104
+
         await self._api.send_command(
             "send_aps_command",
             {
-                "destination_nwk": hex(packet.dst.address)[2:],
+                "destination_nwk": packet.dst.address.serialize()[::-1].hex(),
                 # "destination_eui64": "00:0d:6f:ff:fe:a4:f1:0b",
-                "profile_id": packet.profile_id or 0x0104,
+                "profile_id": profile_id,
                 "cluster_id": packet.cluster_id or 0x0000,
                 "src_ep": packet.src_ep,
                 "dst_ep": packet.dst_ep,
@@ -233,10 +238,14 @@ async def main(host, port):
     await app.start_network()
 
     dev = app.add_device(nwk=0x26f4, ieee=t.EUI64.convert("00:0d:6f:ff:fe:a4:f1:0b"))
-    ep = dev.add_endpoint(1)
-    ep.add_input_cluster(0x0006)
+    await dev.schedule_initialize()
 
-    await ep.on_off.toggle()
+    while True:
+        try:
+            async with asyncio.timeout(1):
+                await dev.endpoints[1].on_off.toggle()
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Timed out...")
 
 
 if __name__ == "__main__":

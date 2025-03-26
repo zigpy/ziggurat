@@ -105,16 +105,12 @@ impl NwkRouteRequestCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteReplyCommand {
-    // bit 6 of first byte
     pub multicast: bool,
-
     pub route_request_identifier: u8,
     pub originator_nwk: Nwk,
     pub responder_nwk: Nwk,
     pub path_cost: u8,
-    // if bit 4 of first byte is set, this is present
     pub originator_eui64: Option<Eui64>,
-    // if bit 5 of first byte is set, this is present
     pub responder_eui64: Option<Eui64>,
     pub tlvs: Vec<u8>,
 }
