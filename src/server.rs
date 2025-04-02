@@ -149,6 +149,7 @@ impl ZigguratServer {
                                     "data": hex::encode(data),
                                 }
                             });
+                            log::debug!("Sending APS frame notification: {:?}", event);
                             writer.write_all(event.to_string().as_bytes()).await?;
                             writer.write_all(b"\n").await?;
                         },

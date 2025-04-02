@@ -6,8 +6,8 @@ use crate::spinel::{SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelProp
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
 use crate::types::{Eui64, Key, Nwk, PanId};
 use crate::zigbee_aps::{
-    ApsAckFrame, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl, ApsFrameType,
-    parse_aps_frame,
+    ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl,
+    ApsFrameType, parse_aps_frame,
 };
 use crate::zigbee_nwk::{
     NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
@@ -488,6 +488,10 @@ impl ZigbeeStack {
 
                     log::debug!("Received APS data frame: {:#?}", aps_frame);
 
+                    if aps_frame.frame_control.ack_request {
+                        self.handle_aps_ack_request(&aps_frame, &nwk_frame);
+                    }
+
                     let notification = ZigbeeNotification::ReceivedApsCommand {
                         source: nwk_frame.nwk_header.source,
                         profile_id: aps_frame.profile_id,
@@ -874,10 +878,10 @@ impl ZigbeeStack {
                     protocol_version: 2,
                     discover_route: NwkRouteDiscovery::Suppress,
                     multicast: false,
-                    security: false,
+                    security: true,
                     source_route: false,
-                    destination: false,
-                    extended_source: false,
+                    destination: true,
+                    extended_source: true,
                     end_device_initiator: false,
                     reserved: 0b00,
                 },
@@ -885,28 +889,78 @@ impl ZigbeeStack {
                 source: state.nib.nwk_network_address,
                 radius: 30,
                 sequence_number: state.nib.nwk_sequence_number,
-                destination_ieee: None,
-                source_ieee: None,
+                destination_ieee: nwk_frame.nwk_header.source_ieee,
+                source_ieee: Some(state.nib.nwk_ieee_address),
                 multicast_control: None,
                 source_route: None,
             },
-            aux_header: None,
+            aux_header: Some(NwkAuxHeader {
+                security_control: NwkSecurityHeaderControlField {
+                    security_level: NwkSecurityLevel::NoSecurity,
+                    key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                    extended_nonce: true,
+                    require_verified_frame_counter: false,
+                    reserved: 0b0,
+                },
+                frame_counter: state
+                    .nib
+                    .nwk_security_material_primary
+                    .outgoing_frame_counter,
+                extended_source: Some(state.nib.nwk_ieee_address),
+                key_sequence_number: state.nib.nwk_active_key_seq_number,
+            }),
             payload: NwkRouteReplyCommand {
                 multicast: false,
                 route_request_identifier: route_request_cmd.route_request_identifier,
-                originator_nwk: state.nib.nwk_network_address,
-                responder_nwk: nwk_frame.nwk_header.source,
+                originator_nwk: nwk_frame.nwk_header.source,
+                responder_nwk: state.nib.nwk_network_address,
                 path_cost: 1, // :)
                 originator_eui64: nwk_frame.nwk_header.source_ieee,
                 responder_eui64: Some(state.nib.nwk_ieee_address),
                 tlvs: vec![],
             }
             .serialize(),
-        };
+        }
+        .encrypt(&state.nib.nwk_security_material_primary.key)
+        .expect("Encryption somehow failed");
 
         drop(state);
 
         let ieee802154_frame = self.wrap_nwk_frame(&route_reply_frame);
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        spawn_local(async move {
+            arc_self.send_802154_frame(ieee802154_frame).await;
+        });
+    }
+
+    fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
+        log::debug!("Sending back an APS ACK");
+
+        let ack_frame = ApsAckFrame {
+            frame_control: ApsAckFrameControl {
+                frame_type: ApsFrameType::Ack,
+                delivery_mode: ApsDeliveryMode::Unicast,
+                ack_format: false,
+                security: false,
+                ack_request: false,
+                extended_header: false,
+            },
+            destination_endpoint: Some(aps_frame.source_endpoint),
+            cluster_id: Some(aps_frame.cluster_id),
+            profile_id: Some(aps_frame.profile_id),
+            source_endpoint: Some(aps_frame.destination_endpoint),
+            counter: aps_frame.counter,
+        };
+
+        // Wrap it in a NWK frame
+        let destination = nwk_frame.nwk_header.source;
+        let outgoing_nwk_frame = self.wrap_aps_frame(destination, &ApsFrame::Ack(ack_frame));
+        let mut ieee802154_frame = self.wrap_nwk_frame(&outgoing_nwk_frame);
 
         let arc_self = self
             .self_weak
@@ -950,14 +1004,14 @@ impl ZigbeeStack {
 
         // TODO: routing :)
         // At this point, we assume the destination device is in range of the coordinator.
-        let nwk_frame = self.wrap_aps_frame(destination, &aps_frame);
+        let nwk_frame = self.wrap_aps_frame(destination, &ApsFrame::Data(aps_frame));
         log::debug!("Prepared NWK frame: {:#?}", nwk_frame);
         let ieee802154_frame = self.wrap_nwk_frame(&nwk_frame);
 
         ieee802154_frame
     }
 
-    fn wrap_aps_frame(&self, destination: Nwk, aps_frame: &ApsDataFrame) -> NwkFrame {
+    fn wrap_aps_frame(&self, destination: Nwk, aps_frame: &ApsFrame) -> NwkFrame {
         // TODO: TX frame counter wrapping is an error condition
         let mut state = self.state.lock().unwrap();
 
@@ -977,7 +1031,7 @@ impl ZigbeeStack {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
                     protocol_version: 2,
-                    discover_route: NwkRouteDiscovery::Suppress,
+                    discover_route: NwkRouteDiscovery::Enable,
                     multicast: false,
                     security: true,
                     source_route: false,
@@ -1010,7 +1064,10 @@ impl ZigbeeStack {
                 extended_source: Some(state.nib.nwk_ieee_address),
                 key_sequence_number: state.nib.nwk_active_key_seq_number,
             }),
-            payload: aps_frame.to_bytes(),
+            payload: match aps_frame {
+                ApsFrame::Data(data_frame) => data_frame.to_bytes(),
+                ApsFrame::Ack(ack_frame) => ack_frame.to_bytes(),
+            },
         };
 
         plaintext_nwk_frame
