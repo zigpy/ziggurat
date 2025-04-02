@@ -803,19 +803,19 @@ impl ZigbeeStack {
                 Ok(NwkCommandId::LinkStatus) => {
                     // TODO: Error handling for decoding?
                     let link_status_cmd =
-                        NwkLinkStatusCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                        NwkLinkStatusCommand::from_bytes(&nwk_frame.payload).unwrap();
                     log::info!("Link status command frame received: {:#?}", link_status_cmd);
                 }
                 Ok(NwkCommandId::RouteReply) => {
                     // TODO: Error handling for decoding?
                     let route_reply_cmd =
-                        NwkRouteReplyCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                        NwkRouteReplyCommand::from_bytes(&nwk_frame.payload).unwrap();
                     log::info!("Route reply command frame received: {:#?}", route_reply_cmd);
                 }
                 Ok(NwkCommandId::RouteRecord) => {
                     // TODO: Error handling for decoding?
                     let route_record_cmd =
-                        NwkRouteRecordCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                        NwkRouteRecordCommand::from_bytes(&nwk_frame.payload).unwrap();
                     log::info!(
                         "Route record command frame received: {:#?}",
                         route_record_cmd
@@ -841,7 +841,7 @@ impl ZigbeeStack {
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame) {
-        let route_request_cmd = match NwkRouteRequestCommand::from_bytes(&nwk_frame.payload[1..]) {
+        let route_request_cmd = match NwkRouteRequestCommand::from_bytes(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing route request command: {:?}", e);
