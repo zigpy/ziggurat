@@ -419,6 +419,16 @@ impl ZigbeeStack {
     }
 
     pub async fn run(&self) {
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        // Start the background link status broadcaster task
+        spawn_local(async move {
+            arc_self.periodic_link_status_broadcast_task().await;
+        });
+
         loop {
             // Parse incoming 802.15.4 frames from Spinel
             let maybe_spinel_frame = {
@@ -1218,5 +1228,83 @@ impl ZigbeeStack {
         }
 
         Ok(())
+    }
+
+    pub async fn periodic_link_status_broadcast_task(&self) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            let mut state = self.state.lock().unwrap();
+            log::debug!("Sending periodic link status broadcast");
+
+            if state.nib.nwk_network_address == Nwk(0xFFFF) {
+                log::debug!("Skipping, stack has not been initialized yet");
+                continue;
+            }
+
+            state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter = state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter
+                .wrapping_add(1);
+            state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
+
+            let link_status_frame = NwkFrame {
+                encrypted: false,
+                nwk_header: NwkHeader {
+                    frame_control: NwkFrameControl {
+                        frame_type: NwkFrameType::Command,
+                        protocol_version: 2,
+                        discover_route: NwkRouteDiscovery::Suppress,
+                        multicast: false,
+                        security: true,
+                        source_route: false,
+                        destination: false,
+                        extended_source: true,
+                        end_device_initiator: false,
+                        reserved: 0b00,
+                    },
+                    destination: Nwk(0xFFFC),
+                    source: state.nib.nwk_network_address,
+                    radius: 1,
+                    sequence_number: state.nib.nwk_sequence_number,
+                    destination_ieee: None,
+                    source_ieee: Some(state.nib.nwk_ieee_address),
+                    multicast_control: None,
+                    source_route: None,
+                },
+                aux_header: Some(NwkAuxHeader {
+                    security_control: NwkSecurityHeaderControlField {
+                        security_level: NwkSecurityLevel::NoSecurity,
+                        key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                        extended_nonce: true,
+                        require_verified_frame_counter: false,
+                        reserved: 0b0,
+                    },
+                    frame_counter: state
+                        .nib
+                        .nwk_security_material_primary
+                        .outgoing_frame_counter,
+                    extended_source: Some(state.nib.nwk_ieee_address),
+                    key_sequence_number: state.nib.nwk_active_key_seq_number,
+                }),
+                payload: NwkLinkStatusCommand {
+                    is_first_frame: true,
+                    is_last_frame: true,
+                    link_statuses: vec![],
+                }
+                .serialize(),
+            }
+            .encrypt(&state.nib.nwk_security_material_primary.key)
+            .expect("Encryption somehow failed");
+
+            drop(state);
+
+            let ieee802154_frame = self.wrap_nwk_frame(&link_status_frame);
+            self.send_802154_frame(ieee802154_frame).await;
+        }
     }
 }
