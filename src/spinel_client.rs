@@ -7,6 +7,7 @@ use std::string::String;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
@@ -174,6 +175,7 @@ pub struct SpinelClient {
     pub port: Arc<SerialPort>,
     pub protocol: Arc<Mutex<SpinelProtocol>>,
     pub buffer: [u8; 2048],
+    pub send_lock: AsyncMutex<()>,
 }
 
 impl SpinelClient {
@@ -182,6 +184,7 @@ impl SpinelClient {
             port: Arc::new(port),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
             buffer: [0u8; 2048],
+            send_lock: AsyncMutex::new(()),
         }
     }
 
@@ -347,6 +350,8 @@ impl SpinelClient {
     }
 
     pub async fn transmit_frame(&self, tx_frame: &SpinelTxFrame) -> Result<u8, SpinelSendError> {
+        let _send_lock = self.send_lock.lock().await;
+
         let (rsp_prop_id, rsp) = self
             .prop_value_set(SpinelPropertyId::StreamRaw as u32, tx_frame.to_bytes())
             .await

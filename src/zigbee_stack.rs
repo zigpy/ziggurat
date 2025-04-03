@@ -1166,10 +1166,6 @@ impl ZigbeeStack {
         if status != SpinelStatus::Ok as u8 {
             log::warn!("Failed to send frame ({:?}): {:#?}", status, frame);
         }
-
-        // XXX: Without this delay, back-to-back requests fail. With it, they succeed
-        //      with 100% reliability. Why?
-        tokio::time::sleep(Duration::from_millis(40)).await;
     }
 
     pub async fn send_aps_command(
