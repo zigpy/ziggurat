@@ -898,7 +898,7 @@ impl ZigbeeStack {
                 destination: nwk_frame.nwk_header.source,
                 source: state.nib.nwk_network_address,
                 radius: 30,
-                sequence_number: state.nib.nwk_sequence_number,
+                sequence_number: nwk_frame.nwk_header.sequence_number,
                 destination_ieee: nwk_frame.nwk_header.source_ieee,
                 source_ieee: Some(state.nib.nwk_ieee_address),
                 multicast_control: None,
