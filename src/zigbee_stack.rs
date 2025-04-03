@@ -1091,6 +1091,13 @@ impl ZigbeeStack {
         // Increment the 802.15.4 sequence number
         state.ieee802154_sequence_number = state.ieee802154_sequence_number.wrapping_add(1);
 
+        let destination =
+            Ieee802154Address::Nwk(if nwk_frame.nwk_header.destination.as_u16() >= 0xFFFC {
+                Nwk(0xFFFF)
+            } else {
+                nwk_frame.nwk_header.destination
+            });
+
         // TODO: support EUI64 addressing
         Ieee802154Frame {
             frame_control: Ieee802154FrameControl {
@@ -1108,7 +1115,7 @@ impl ZigbeeStack {
             },
             sequence_number: Some(state.ieee802154_sequence_number),
             dest_pan_id: Some(state.nib.nwk_pan_id),
-            dest_address: Some(Ieee802154Address::Nwk(nwk_frame.nwk_header.destination)),
+            dest_address: Some(destination),
             src_pan_id: None,
             src_address: Some(Ieee802154Address::Nwk(state.nib.nwk_network_address)),
             payload: nwk_frame.to_bytes(),
