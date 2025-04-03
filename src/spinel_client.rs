@@ -15,17 +15,17 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, PartialEq, Clone)]
 pub struct SpinelTxFrame {
     pub psdu: Vec<u8>,
-    pub channel: u8,
-    pub max_csma_backoffs: u8,
-    pub max_frame_retries: u8,
-    pub enable_csma_ca: bool,
-    pub is_header_updated: bool,
-    pub is_a_retransmit: bool,
-    pub is_security_processed: bool,
-    pub tx_delay: u32,
-    pub tx_delay_base_time: u32,
-    pub rx_channel_after_tx: u8,
-    pub tx_power: i8,
+    pub channel: Option<u8>,
+    pub max_csma_backoffs: Option<u8>,
+    pub max_frame_retries: Option<u8>,
+    pub enable_csma_ca: Option<bool>,
+    pub is_header_updated: Option<bool>,
+    pub is_a_retransmit: Option<bool>,
+    pub is_security_processed: Option<bool>,
+    pub tx_delay: Option<u32>,
+    pub tx_delay_base_time: Option<u32>,
+    pub rx_channel_after_tx: Option<u8>,
+    pub tx_power: Option<i8>,
 }
 
 impl SpinelTxFrame {
@@ -33,17 +33,52 @@ impl SpinelTxFrame {
         let mut result = Vec::new();
         result.extend_from_slice(&(self.psdu.len() as u16).to_le_bytes());
         result.extend_from_slice(&self.psdu);
-        result.push(self.channel);
-        result.push(self.max_csma_backoffs);
-        result.push(self.max_frame_retries);
-        result.push(self.enable_csma_ca as u8);
-        result.push(self.is_header_updated as u8);
-        result.push(self.is_a_retransmit as u8);
-        result.push(self.is_security_processed as u8);
-        result.extend_from_slice(&self.tx_delay.to_le_bytes());
-        result.extend_from_slice(&self.tx_delay_base_time.to_le_bytes());
-        result.push(self.rx_channel_after_tx);
-        result.push(self.tx_power as u8);
+
+        // TODO: These are not really optional per-field, they must be contiguous: if a
+        // field is not provided, all subsequent fields must be omitted as well
+        if let Some(channel) = self.channel {
+            result.push(channel);
+        }
+
+        if let Some(max_csma_backoffs) = self.max_csma_backoffs {
+            result.push(max_csma_backoffs);
+        }
+
+        if let Some(max_frame_retries) = self.max_frame_retries {
+            result.push(max_frame_retries);
+        }
+
+        if let Some(enable_csma_ca) = self.enable_csma_ca {
+            result.push(enable_csma_ca as u8);
+        }
+
+        if let Some(is_header_updated) = self.is_header_updated {
+            result.push(is_header_updated as u8);
+        }
+
+        if let Some(is_a_retransmit) = self.is_a_retransmit {
+            result.push(is_a_retransmit as u8);
+        }
+
+        if let Some(is_security_processed) = self.is_security_processed {
+            result.push(is_security_processed as u8);
+        }
+
+        if let Some(tx_delay) = self.tx_delay {
+            result.extend_from_slice(&tx_delay.to_le_bytes());
+        }
+
+        if let Some(tx_delay_base_time) = self.tx_delay_base_time {
+            result.extend_from_slice(&tx_delay_base_time.to_le_bytes());
+        }
+
+        if let Some(rx_channel_after_tx) = self.rx_channel_after_tx {
+            result.push(rx_channel_after_tx);
+        }
+
+        if let Some(tx_power) = self.tx_power {
+            result.push(tx_power as u8);
+        }
 
         result
     }

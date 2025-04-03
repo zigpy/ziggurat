@@ -1145,17 +1145,18 @@ impl ZigbeeStack {
             .spinel
             .transmit_frame(&SpinelTxFrame {
                 psdu: frame.to_bytes(),
-                channel: channel,
-                max_csma_backoffs: 1,
-                max_frame_retries: 0,
-                enable_csma_ca: true,
-                is_header_updated: true,
-                is_a_retransmit: false,
-                is_security_processed: true,
-                tx_delay: 0 as u32,
-                tx_delay_base_time: 0 as u32,
-                rx_channel_after_tx: channel,
-                tx_power: 8,
+                channel: Some(channel),
+                max_csma_backoffs: Some(1),
+                max_frame_retries: Some(5),
+                enable_csma_ca: Some(true),
+                is_header_updated: Some(true),
+                is_a_retransmit: Some(false),
+                is_security_processed: Some(true),
+                // Omit subsequent fields to reduce serial traffic
+                tx_delay: None,            // Some(0 as u32),
+                tx_delay_base_time: None,  // Some(0 as u32),
+                rx_channel_after_tx: None, // Some(channel),
+                tx_power: None,            // Some(8),
             })
             .await
             .expect("Failed to transmit frame");
