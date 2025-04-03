@@ -2,21 +2,31 @@ use crate::ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154Frame, Ieee802154FrameControl,
     Ieee802154FrameType,
 };
-use crate::spinel::{SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelPropertyId};
+use crate::spinel::{
+    SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelPropertyId, SpinelStatus,
+};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
 use crate::types::{Eui64, Key, Nwk, PanId};
-use crate::zigbee_aps::{ApsDeliveryMode, ApsFrame, ApsFrameControl, ApsFrameType};
+use crate::zigbee_aps::{
+    ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl,
+    ApsFrameType, parse_aps_frame,
+};
 use crate::zigbee_nwk::{
     NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
     NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 use crate::zigbee_nwk_commands::{
     NwkCommandId, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
+    NwkRouteRequestCommand,
 };
-use log::{debug, info, warn};
-use serde_json::json;
 use std::collections::HashMap;
+use std::mem::drop;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::spawn_local;
+use tokio::time::Duration;
 
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
@@ -92,7 +102,7 @@ pub struct NwkRoutingTableEntry {
 
     // An 8-bit saturating counter, which is pre-loaded with nwkRouterAgeLimit when the
     // routing table entry is created; incremented whenever this routing table entry is
-    // used to forward a data packet towards its destination; and decremented
+    // used to forward a state packet towards its destination; and decremented
     // unconditionally once every nwkLinkStatusPeriod. A value of 0 indicates no
     // packets have recently been forwarded along this route.
     pub recent_activity: u8,
@@ -221,7 +231,7 @@ pub struct Nib {
     pub nwk_pan_id: PanId,
 
     // A count of unicast transmissions made by the NNK layer on this device. Each time
-    // the NWK layer transmits aunicast frame, by invoking the MCPS-DATA.request
+    // the NWK layer transmits aunicast frame, by invoking the MCPS-state.request
     // primitive of the MAC sub-layer, it SHALL increment this counter. When either the
     // NHL performs an NLME-SET.request on this attribute or if the value of nwkTxTotal
     // rolls over past 0xffff the NWK layer SHALL reset to 0x00 each Transmit Failure
@@ -327,47 +337,192 @@ impl Nib {
     }
 }
 
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct ApsAckData {
+    pub src: Nwk,
+    pub destination_endpoint: Option<u8>,
+    pub cluster_id: Option<u16>,
+    pub profile_id: Option<u16>,
+    pub source_endpoint: Option<u8>,
+    pub counter: u8,
+}
+
+impl ApsAckData {
+    pub fn from_aps_ack(src: Nwk, ack: &ApsAckFrame) -> Self {
+        ApsAckData {
+            src: src,
+            destination_endpoint: ack.destination_endpoint,
+            cluster_id: ack.cluster_id,
+            profile_id: ack.profile_id,
+            source_endpoint: ack.source_endpoint,
+            counter: ack.counter,
+        }
+    }
+}
+
 #[derive(Debug)]
-pub struct ZigbeeStack {
+pub struct ZigbeeStackState {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,
     pub nib: Nib,
-    pub spinel: SpinelClient,
+    pub pending_aps_acks: HashMap<ApsAckData, oneshot::Sender<()>>,
 }
 
-impl ZigbeeStack {
-    pub fn new(spinel: SpinelClient) -> Self {
-        ZigbeeStack {
+impl ZigbeeStackState {
+    pub fn new() -> Self {
+        ZigbeeStackState {
             channel: 0,
             ieee802154_sequence_number: 0,
             nib: Nib::new(),
-            spinel,
+            pending_aps_acks: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ZigbeeNotification {
+    ReceivedApsCommand {
+        source: Nwk,
+        profile_id: u16,
+        cluster_id: u16,
+        src_ep: u8,
+        dst_ep: u8,
+        lqi: u8,
+        rssi: i8,
+        data: Vec<u8>,
+    },
+}
+
+#[derive(Debug)]
+pub struct ZigbeeStack {
+    self_weak: Weak<ZigbeeStack>,
+
+    pub state: Mutex<ZigbeeStackState>,
+    pub spinel: SpinelClient,
+    pub notification_tx: broadcast::Sender<ZigbeeNotification>,
+    pub raw_frame_rx: Mutex<mpsc::Receiver<SpinelFramePropValueIs>>,
+}
+
+impl ZigbeeStack {
+    pub fn new(spinel: SpinelClient) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
+        let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
+        let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
+        spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw as u32, raw_frame_tx);
+
+        let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
+            self_weak: weak_self.clone(),
+            state: Mutex::new(ZigbeeStackState::new()),
+            spinel: spinel,
+            notification_tx: notification_tx,
+            raw_frame_rx: Mutex::new(raw_frame_rx),
+        });
+
+        (arc_stack, notification_rx)
+    }
+
+    pub async fn run(&self) {
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        // Start the background link status broadcaster task
+        spawn_local(async move {
+            arc_self.periodic_link_status_broadcast_task().await;
+        });
+
+        loop {
+            // Parse incoming 802.15.4 frames from Spinel
+            let maybe_spinel_frame = {
+                self.raw_frame_rx
+                    .lock()
+                    .expect("Failed to receive frame")
+                    .recv()
+                    .await
+            };
+
+            if maybe_spinel_frame.is_none() {
+                log::warn!("Frame sender hung up");
+                continue;
+            }
+
+            let spinel_frame = maybe_spinel_frame.unwrap();
+
+            let packet = match SpinelRxFrame::from_bytes(&spinel_frame.value) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("Error parsing spinel frame: {:?}", e);
+                    continue;
+                }
+            };
+
+            if packet.psdu.len() < 2 {
+                log::warn!("Packet too short to contain FCS");
+                continue;
+            }
+            let frame_data = &packet.psdu[..packet.psdu.len() - 2];
+
+            let ieee802154_frame = match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
+                    continue;
+                }
+            };
+
+            log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
+
+            match self.receive_802154_frame(&ieee802154_frame) {
+                Some(nwk_frame) => {
+                    let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
+                        Ok(ApsFrame::Data(data)) => data,
+                        Ok(ApsFrame::Ack(ack)) => {
+                            let ack_data =
+                                ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, &ack);
+                            log::debug!("Received APS ack: {:?}", ack_data);
+
+                            self.state
+                                .lock()
+                                .unwrap()
+                                .pending_aps_acks
+                                .remove(&ack_data)
+                                .map(|tx| {
+                                    let _ = tx.send(());
+                                });
+
+                            continue;
+                        }
+                        Err(e) => {
+                            log::warn!("Error parsing APS frame: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    log::debug!("Received APS data frame: {:#?}", aps_frame);
+
+                    if aps_frame.frame_control.ack_request {
+                        self.handle_aps_ack_request(&aps_frame, &nwk_frame);
+                    }
+
+                    let notification = ZigbeeNotification::ReceivedApsCommand {
+                        source: nwk_frame.nwk_header.source,
+                        profile_id: aps_frame.profile_id,
+                        cluster_id: aps_frame.cluster_id,
+                        src_ep: aps_frame.source_endpoint,
+                        dst_ep: aps_frame.destination_endpoint,
+                        lqi: packet.lqi,
+                        rssi: packet.rssi,
+                        data: aps_frame.asdu,
+                    };
+                    let _ = self.notification_tx.send(notification);
+                }
+                None => {}
+            }
         }
     }
 
-    pub async fn start_radio(&self) {
-        self.spinel
-            .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
-            .await
-            .expect("Failed to enable the PHY");
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacPromiscuousMode as u32,
-                vec![SpinelMacPromiscuousMode::Full as u8],
-            )
-            .await
-            .expect("Failed to set the MAC promiscuous mode");
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacRawStreamEnabled as u32,
-                vec![true as u8],
-            )
-            .await
-            .expect("Failed to enable the RAW stream");
-    }
-
     pub async fn set_network_settings(
-        &mut self,
+        &self,
         nwk_channel: u8,
         nwk_update_id: u8,
         nwk_pan_id: PanId,
@@ -378,57 +533,110 @@ impl ZigbeeStack {
         key_seq_number: u8,
         outgoing_frame_counter: u32,
     ) -> Result<(), String> {
-        self.channel = nwk_channel;
-        self.nib.nwk_update_id = nwk_update_id;
-        self.nib.nwk_pan_id = nwk_pan_id;
-        self.nib.nwk_extended_pan_id = nwk_extended_pan_id;
-        self.nib.nwk_network_address = nwk_network_address;
-        self.nib.nwk_ieee_address = nwk_ieee_address;
-        self.nib.nwk_security_material_primary.key = key;
-        self.nib.nwk_security_material_primary.key_seq_number = key_seq_number;
-        self.nib
+        let mut state = self.state.lock().unwrap();
+        state.channel = nwk_channel;
+        state.nib.nwk_update_id = nwk_update_id;
+        state.nib.nwk_pan_id = nwk_pan_id;
+        state.nib.nwk_extended_pan_id = nwk_extended_pan_id;
+        state.nib.nwk_network_address = nwk_network_address;
+        state.nib.nwk_ieee_address = nwk_ieee_address;
+        state.nib.nwk_security_material_primary.key = key;
+        state.nib.nwk_security_material_primary.key_seq_number = key_seq_number;
+        state
+            .nib
             .nwk_security_material_primary
             .outgoing_frame_counter = outgoing_frame_counter;
+
         // Update the hardware with new settings.
+        self.spinel
+            .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
+            .await
+            .expect("Failed to enable the PHY");
+
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![nwk_channel])
             .await
             .map_err(|e| format!("Failed to set PHY channel: {:?}", e))?;
+
+        self.spinel
+            .prop_value_set(SpinelPropertyId::PhyTxPower as u32, vec![8])
+            .await
+            .map_err(|e| format!("Failed to set PHY TX power: {:?}", e))?;
+
+        /*
+        self.spinel
+            .prop_value_set(
+                SpinelPropertyId::MacPromiscuousMode as u32,
+                vec![SpinelMacPromiscuousMode::Full as u8],
+            )
+            .await
+            .expect("Failed to set the MAC promiscuous mode");
+        */
+
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Laddr as u32,
-                self.nib.nwk_ieee_address.to_bytes().to_vec(),
+                state.nib.nwk_ieee_address.to_bytes().to_vec(),
             )
             .await
             .map_err(|e| format!("Failed to set MAC IEEE address: {:?}", e))?;
+
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Saddr as u32,
-                self.nib.nwk_network_address.to_bytes().to_vec(),
+                state.nib.nwk_network_address.to_bytes().to_vec(),
             )
             .await
             .map_err(|e| format!("Failed to set MAC NWK address: {:?}", e))?;
+
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Panid as u32,
-                self.nib.nwk_pan_id.to_bytes().to_vec(),
+                state.nib.nwk_pan_id.to_bytes().to_vec(),
             )
             .await
             .map_err(|e| format!("Failed to set MAC PAN ID: {:?}", e))?;
+
+        self.spinel
+            .prop_value_set(
+                SpinelPropertyId::MacRxOnWhenIdleMode as u32,
+                vec![true as u8],
+            )
+            .await
+            .expect("Failed to set RX on when idle");
+
+        self.spinel
+            .prop_value_set(
+                SpinelPropertyId::MacRawStreamEnabled as u32,
+                vec![true as u8],
+            )
+            .await
+            .expect("Failed to enable the RAW stream");
+
         Ok(())
     }
 
-    pub fn receive_802154_frame(&mut self, frame: &Ieee802154Frame) -> Option<NwkFrame> {
+    pub fn receive_802154_frame(&self, frame: &Ieee802154Frame) -> Option<NwkFrame> {
+        let state = self.state.lock().unwrap();
+
         // 802.15.4 encrypted frames can't be Zigbee NWK
         if frame.frame_control.security_enabled {
             log::debug!("Ignoring frame, 802.15.4 security bit is enabled");
             return None;
         }
 
-        // Only process data frames for now
-        if frame.frame_control.frame_type != Ieee802154FrameType::Data {
-            log::debug!("Ignoring frame, not a data frame");
-            return None;
+        match frame.frame_control.frame_type {
+            Ieee802154FrameType::Ack => {
+                // Ignored, OpenThread RCP takes care of it
+                return None;
+            }
+            Ieee802154FrameType::Data => {
+                // Process it below
+            }
+            _ => {
+                log::debug!("Ignoring frame, not a data frame");
+                return None;
+            }
         }
 
         // Only process packets destined for our PAN ID
@@ -438,11 +646,11 @@ impl ZigbeeStack {
                 return None;
             }
             Some(dest_pan_id) => {
-                if dest_pan_id != self.nib.nwk_pan_id {
+                if dest_pan_id != state.nib.nwk_pan_id {
                     log::debug!(
                         "Ignoring frame, PAN ID does not match {:?} != {:?}",
                         dest_pan_id,
-                        self.nib.nwk_pan_id
+                        state.nib.nwk_pan_id
                     );
                     return None;
                 }
@@ -459,7 +667,7 @@ impl ZigbeeStack {
         };
 
         // Ignore frames that aren't destined for us
-        if nwk_frame.nwk_header.destination != self.nib.nwk_network_address
+        if nwk_frame.nwk_header.destination != state.nib.nwk_network_address
             && nwk_frame.nwk_header.destination.as_u16() < 0xFFFC
         {
             log::debug!("Ignoring frame, destination is not us");
@@ -493,7 +701,7 @@ impl ZigbeeStack {
         }
 
         // Validate the network key sequence number
-        if aux_header.key_sequence_number != self.nib.nwk_active_key_seq_number {
+        if aux_header.key_sequence_number != state.nib.nwk_active_key_seq_number {
             log::debug!("Ignoring frame, key sequence number is unknown");
             return None;
         }
@@ -511,9 +719,7 @@ impl ZigbeeStack {
             }
         }
 
-        let last_frame_counter;
-
-        match self
+        match state
             .nib
             .nwk_security_material_primary
             .incoming_frame_counter_set
@@ -521,7 +727,6 @@ impl ZigbeeStack {
         {
             None => {
                 log::warn!("Unknown sender, not validating frame counter");
-                last_frame_counter = 0;
             }
             Some(last_stored_frame_counter) => {
                 if aux_header.frame_counter <= *last_stored_frame_counter {
@@ -532,20 +737,18 @@ impl ZigbeeStack {
                     );
                     return None;
                 }
-
-                last_frame_counter = *last_stored_frame_counter;
             }
         };
 
         log::debug!(
             "Attempting to decrypt {:?} with {:?}",
             nwk_frame,
-            self.nib.nwk_security_material_primary
+            state.nib.nwk_security_material_primary
         );
 
         // Finally, attempt decryption
         let decrypted_nwk_frame =
-            match nwk_frame.decrypt(&self.nib.nwk_security_material_primary.key) {
+            match nwk_frame.decrypt(&state.nib.nwk_security_material_primary.key) {
                 Ok(decrypted_frame) => decrypted_frame,
                 Err(err) => {
                     log::warn!("Ignoring frame, decryption failed: {:?}", err);
@@ -553,14 +756,19 @@ impl ZigbeeStack {
                 }
             };
 
+        // At this point we no longer need to lock `state`
+        drop(state);
+
         log::info!("Decrypted frame: {:#?}", decrypted_nwk_frame);
-        self.handle_decrypted_frame(&decrypted_nwk_frame, frame);
+        self.handle_decrypted_frame(&decrypted_nwk_frame);
 
         return Some(decrypted_nwk_frame);
     }
 
-    pub fn update_nwk_eui64_mapping(&mut self, nwk: Nwk, eui64: Eui64) {
-        match self.nib.nwk_address_map.insert(eui64, nwk) {
+    pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
+        let mut state = self.state.lock().unwrap();
+
+        match state.nib.nwk_address_map.insert(eui64, nwk) {
             None => {
                 log::debug!("Added new address mapping: {:?} -> {:?}", eui64, nwk)
             }
@@ -575,16 +783,14 @@ impl ZigbeeStack {
         }
     }
 
-    pub fn handle_decrypted_frame(
-        &mut self,
-        nwk_frame: &NwkFrame,
-        ieee802154_frame: &Ieee802154Frame,
-    ) {
+    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame) {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header {
             match aux_header.extended_source {
                 Some(relaying_eui64) => {
-                    self.nib
+                    let mut state = self.state.lock().unwrap();
+                    state
+                        .nib
                         .nwk_security_material_primary
                         .incoming_frame_counter_set
                         .insert(relaying_eui64, aux_header.frame_counter);
@@ -613,26 +819,32 @@ impl ZigbeeStack {
                 Ok(NwkCommandId::LinkStatus) => {
                     // TODO: Error handling for decoding?
                     let link_status_cmd =
-                        NwkLinkStatusCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                        NwkLinkStatusCommand::from_bytes(&nwk_frame.payload).unwrap();
                     log::info!("Link status command frame received: {:#?}", link_status_cmd);
                 }
                 Ok(NwkCommandId::RouteReply) => {
                     // TODO: Error handling for decoding?
                     let route_reply_cmd =
-                        NwkRouteReplyCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                        NwkRouteReplyCommand::from_bytes(&nwk_frame.payload).unwrap();
                     log::info!("Route reply command frame received: {:#?}", route_reply_cmd);
                 }
                 Ok(NwkCommandId::RouteRecord) => {
                     // TODO: Error handling for decoding?
                     let route_record_cmd =
-                        NwkRouteRecordCommand::from_bytes(&nwk_frame.payload[1..]).unwrap();
+                        NwkRouteRecordCommand::from_bytes(&nwk_frame.payload).unwrap();
                     log::info!(
                         "Route record command frame received: {:#?}",
                         route_record_cmd
                     );
-                    self.nib
+                    let mut state = self.state.lock().unwrap();
+                    state
+                        .nib
                         .nwk_route_record_table
                         .insert(nwk_frame.nwk_header.source, route_record_cmd.relays);
+                }
+                Ok(NwkCommandId::RouteRequest) => {
+                    log::info!("Route request command frame received");
+                    self.handle_route_request(nwk_frame);
                 }
                 Err(_) => {
                     log::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
@@ -644,23 +856,161 @@ impl ZigbeeStack {
         }
     }
 
+    fn handle_route_request(&self, nwk_frame: &NwkFrame) {
+        let route_request_cmd = match NwkRouteRequestCommand::from_bytes(&nwk_frame.payload) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing route request command: {:?}", e);
+                return;
+            }
+        };
+
+        log::info!("Route request command frame: {:#?}", route_request_cmd);
+
+        let mut state = self.state.lock().unwrap();
+
+        // TODO: for now, only handle route requests back to us
+        if route_request_cmd.destination_address != state.nib.nwk_network_address {
+            log::debug!("Ignoring route request not destined for us (NWK)");
+            return;
+        }
+
+        if let Some(destination_eui64) = route_request_cmd.destination_eui64 {
+            if destination_eui64 != state.nib.nwk_ieee_address {
+                log::debug!("Ignoring route request not destined for us (EUI64)");
+                return;
+            }
+        }
+
+        state
+            .nib
+            .nwk_security_material_primary
+            .outgoing_frame_counter = state
+            .nib
+            .nwk_security_material_primary
+            .outgoing_frame_counter
+            .wrapping_add(1);
+
+        let route_reply_frame = NwkFrame {
+            encrypted: false,
+            nwk_header: NwkHeader {
+                frame_control: NwkFrameControl {
+                    frame_type: NwkFrameType::Command,
+                    protocol_version: 2,
+                    discover_route: NwkRouteDiscovery::Suppress,
+                    multicast: false,
+                    security: true,
+                    source_route: false,
+                    destination: true,
+                    extended_source: true,
+                    end_device_initiator: false,
+                    reserved: 0b00,
+                },
+                destination: nwk_frame.nwk_header.source,
+                source: state.nib.nwk_network_address,
+                radius: 30,
+                sequence_number: nwk_frame.nwk_header.sequence_number,
+                destination_ieee: nwk_frame.nwk_header.source_ieee,
+                source_ieee: Some(state.nib.nwk_ieee_address),
+                multicast_control: None,
+                source_route: None,
+            },
+            aux_header: Some(NwkAuxHeader {
+                security_control: NwkSecurityHeaderControlField {
+                    security_level: NwkSecurityLevel::NoSecurity,
+                    key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                    extended_nonce: true,
+                    require_verified_frame_counter: false,
+                    reserved: 0b0,
+                },
+                frame_counter: state
+                    .nib
+                    .nwk_security_material_primary
+                    .outgoing_frame_counter,
+                extended_source: Some(state.nib.nwk_ieee_address),
+                key_sequence_number: state.nib.nwk_active_key_seq_number,
+            }),
+            payload: NwkRouteReplyCommand {
+                multicast: false,
+                route_request_identifier: route_request_cmd.route_request_identifier,
+                originator_nwk: nwk_frame.nwk_header.source,
+                responder_nwk: state.nib.nwk_network_address,
+                path_cost: 1, // :)
+                originator_eui64: nwk_frame.nwk_header.source_ieee,
+                responder_eui64: Some(state.nib.nwk_ieee_address),
+                tlvs: vec![],
+            }
+            .serialize(),
+        }
+        .encrypt(&state.nib.nwk_security_material_primary.key)
+        .expect("Encryption somehow failed");
+
+        drop(state);
+
+        let ieee802154_frame = self.wrap_nwk_frame(&route_reply_frame);
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        spawn_local(async move {
+            arc_self.send_802154_frame(ieee802154_frame).await;
+        });
+    }
+
+    fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
+        log::debug!("Sending back an APS ACK");
+
+        let ack_frame = ApsAckFrame {
+            frame_control: ApsAckFrameControl {
+                frame_type: ApsFrameType::Ack,
+                delivery_mode: ApsDeliveryMode::Unicast,
+                ack_format: false,
+                security: false,
+                ack_request: false,
+                extended_header: false,
+            },
+            destination_endpoint: Some(aps_frame.source_endpoint),
+            cluster_id: Some(aps_frame.cluster_id),
+            profile_id: Some(aps_frame.profile_id),
+            source_endpoint: Some(aps_frame.destination_endpoint),
+            counter: aps_frame.counter,
+        };
+
+        // Wrap it in a NWK frame
+        let destination = nwk_frame.nwk_header.source;
+        let outgoing_nwk_frame = self.wrap_aps_frame(destination, &ApsFrame::Ack(ack_frame));
+        let mut ieee802154_frame = self.wrap_nwk_frame(&outgoing_nwk_frame);
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        spawn_local(async move {
+            arc_self.send_802154_frame(ieee802154_frame).await;
+        });
+    }
+
     fn prepare_request(
-        &mut self,
+        &self,
         destination: Nwk,
         src_ep: u8,
         dst_ep: u8,
         cluster_id: u16,
         profile_id: u16,
+        aps_ack: bool,
         counter: u8,
         asdu: &Vec<u8>,
     ) -> Ieee802154Frame {
-        let aps_frame = ApsFrame {
+        let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
                 frame_type: ApsFrameType::Data,
                 delivery_mode: ApsDeliveryMode::Unicast,
                 reserved: 0b0,
                 security: false,
-                ack_request: true,
+                ack_request: aps_ack,
                 extended_header: false,
             },
             destination_endpoint: dst_ep,
@@ -675,23 +1025,26 @@ impl ZigbeeStack {
 
         // TODO: routing :)
         // At this point, we assume the destination device is in range of the coordinator.
-        let nwk_frame = self.wrap_aps_frame(destination, &aps_frame);
+        let nwk_frame = self.wrap_aps_frame(destination, &ApsFrame::Data(aps_frame));
         log::debug!("Prepared NWK frame: {:#?}", nwk_frame);
         let ieee802154_frame = self.wrap_nwk_frame(&nwk_frame);
 
         ieee802154_frame
     }
 
-    fn wrap_aps_frame(&mut self, destination: Nwk, aps_frame: &ApsFrame) -> NwkFrame {
+    fn wrap_aps_frame(&self, destination: Nwk, aps_frame: &ApsFrame) -> NwkFrame {
         // TODO: TX frame counter wrapping is an error condition
-        self.nib
+        let mut state = self.state.lock().unwrap();
+
+        state
+            .nib
             .nwk_security_material_primary
-            .outgoing_frame_counter = self
+            .outgoing_frame_counter = state
             .nib
             .nwk_security_material_primary
             .outgoing_frame_counter
             .wrapping_add(1);
-        self.nib.nwk_sequence_number = self.nib.nwk_sequence_number.wrapping_add(1);
+        state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
 
         let plaintext_nwk_frame = NwkFrame {
             encrypted: false,
@@ -699,7 +1052,7 @@ impl ZigbeeStack {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
                     protocol_version: 2,
-                    discover_route: NwkRouteDiscovery::Suppress,
+                    discover_route: NwkRouteDiscovery::Enable,
                     multicast: false,
                     security: true,
                     source_route: false,
@@ -709,9 +1062,9 @@ impl ZigbeeStack {
                     reserved: 0b00,
                 },
                 destination: destination,
-                source: self.nib.nwk_network_address,
+                source: state.nib.nwk_network_address,
                 radius: 30,
-                sequence_number: self.nib.nwk_sequence_number,
+                sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: None,
                 source_ieee: None,
                 multicast_control: None,
@@ -725,24 +1078,36 @@ impl ZigbeeStack {
                     require_verified_frame_counter: false,
                     reserved: 0b0,
                 },
-                frame_counter: self
+                frame_counter: state
                     .nib
                     .nwk_security_material_primary
                     .outgoing_frame_counter,
-                extended_source: Some(self.nib.nwk_ieee_address),
-                key_sequence_number: self.nib.nwk_active_key_seq_number,
+                extended_source: Some(state.nib.nwk_ieee_address),
+                key_sequence_number: state.nib.nwk_active_key_seq_number,
             }),
-            payload: aps_frame.to_bytes(),
+            payload: match aps_frame {
+                ApsFrame::Data(data_frame) => data_frame.to_bytes(),
+                ApsFrame::Ack(ack_frame) => ack_frame.to_bytes(),
+            },
         };
 
         plaintext_nwk_frame
-            .encrypt(&self.nib.nwk_security_material_primary.key)
+            .encrypt(&state.nib.nwk_security_material_primary.key)
             .expect("Encryption somehow failed")
     }
 
-    fn wrap_nwk_frame(&mut self, nwk_frame: &NwkFrame) -> Ieee802154Frame {
+    fn wrap_nwk_frame(&self, nwk_frame: &NwkFrame) -> Ieee802154Frame {
+        let mut state = self.state.lock().unwrap();
+
         // Increment the 802.15.4 sequence number
-        self.ieee802154_sequence_number = self.ieee802154_sequence_number.wrapping_add(1);
+        state.ieee802154_sequence_number = state.ieee802154_sequence_number.wrapping_add(1);
+
+        let destination =
+            Ieee802154Address::Nwk(if nwk_frame.nwk_header.destination.as_u16() >= 0xFFFC {
+                Nwk(0xFFFF)
+            } else {
+                nwk_frame.nwk_header.destination
+            });
 
         // TODO: support EUI64 addressing
         Ieee802154Frame {
@@ -759,43 +1124,59 @@ impl ZigbeeStack {
                 frame_version: 0,
                 src_addr_mode: Ieee802154AddressingMode::Short,
             },
-            sequence_number: Some(self.ieee802154_sequence_number),
-            dest_pan_id: Some(self.nib.nwk_pan_id),
-            dest_address: Some(Ieee802154Address::Nwk(nwk_frame.nwk_header.destination)),
+            sequence_number: Some(state.ieee802154_sequence_number),
+            dest_pan_id: Some(state.nib.nwk_pan_id),
+            dest_address: Some(destination),
             src_pan_id: None,
-            src_address: Some(Ieee802154Address::Nwk(self.nib.nwk_network_address)),
+            src_address: Some(Ieee802154Address::Nwk(state.nib.nwk_network_address)),
             payload: nwk_frame.to_bytes(),
             fcs: 0x0000, // It'll be replaced
         }
     }
 
-    async fn send_802154_frame(&mut self, frame: Ieee802154Frame) {
-        self.spinel
+    async fn send_802154_frame(&self, frame: Ieee802154Frame) {
+        // Briefly grab the channel when sending, we don't want to hold the lock while
+        // waiting for an ACK
+        let channel = { self.state.lock().unwrap().channel };
+
+        log::info!("Sending 802.15.4 frame: {:#?}", frame);
+        log::info!("Sending 802.15.4 frame bytes: {:02X?}", frame.to_bytes());
+        let status = self
+            .spinel
             .transmit_frame(&SpinelTxFrame {
                 psdu: frame.to_bytes(),
-                channel: self.channel,
-                max_csma_backoffs: 1,
-                max_frame_retries: 4,
-                enable_csma_ca: true,
-                is_header_updated: true,
-                is_a_retransmit: false,
-                is_security_processed: true,
-                tx_delay: 0 as u32,
-                tx_delay_base_time: 0 as u32,
-                rx_channel_after_tx: self.channel,
-                tx_power: 8,
+                channel: Some(channel),
+                max_csma_backoffs: Some(1),
+                max_frame_retries: Some(5),
+                enable_csma_ca: Some(true),
+                is_header_updated: Some(true),
+                is_a_retransmit: Some(false),
+                is_security_processed: Some(true),
+                // Omit subsequent fields to reduce serial traffic
+                tx_delay: None,            // Some(0 as u32),
+                tx_delay_base_time: None,  // Some(0 as u32),
+                rx_channel_after_tx: None, // Some(channel),
+                tx_power: None,            // Some(8),
             })
             .await
             .expect("Failed to transmit frame");
+
+        log::info!("Send status: {:?}", status);
+
+        if status != SpinelStatus::Ok as u8 {
+            log::warn!("Failed to send frame ({:?}): {:#?}", status, frame);
+        }
     }
 
     pub async fn send_aps_command(
-        &mut self,
+        &self,
         destination: Nwk,
         profile_id: u16,
         cluster_id: u16,
         src_ep: u8,
         dst_ep: u8,
+        aps_ack: bool,
+        aps_seq: u8,
         data: Vec<u8>,
     ) -> Result<(), String> {
         let ieee802154_frame = self.prepare_request(
@@ -804,215 +1185,143 @@ impl ZigbeeStack {
             dst_ep,
             cluster_id,
             profile_id,
-            0,
+            aps_ack,
+            aps_seq,
             &data,
         );
-        self.send_802154_frame(ieee802154_frame).await;
-        Ok(())
-    }
-}
 
-#[derive(Debug)]
-pub enum ZigbeeCommand {
-    SetNetworkSettings {
-        nwk_channel: u8,
-        nwk_update_id: u8,
-        nwk_pan_id: PanId,
-        nwk_extended_pan_id: Eui64,
-        nwk_network_address: Nwk,
-        nwk_ieee_address: Eui64,
-        key: Key,
-        key_seq_number: u8,
-        outgoing_frame_counter: u32,
-        resp: oneshot::Sender<Result<(), String>>,
-    },
-    SendApsCommand {
-        destination: Nwk,
-        profile_id: u16,
-        cluster_id: u16,
-        src_ep: u8,
-        dst_ep: u8,
-        data: Vec<u8>,
-        resp: oneshot::Sender<Result<(), String>>,
-    },
-}
+        let mut maybe_ack_rx = None;
 
-#[derive(Debug, Clone)]
-pub enum ZigbeeNotification {
-    ReceivedApsCommand {
-        source: Nwk,
-        profile_id: u16,
-        cluster_id: u16,
-        src_ep: u8,
-        dst_ep: u8,
-        lqi: u8,
-        rssi: i8,
-        data: Vec<u8>,
-    },
-}
+        if aps_ack {
+            let ack_data = ApsAckData {
+                src: destination,
+                destination_endpoint: Some(src_ep), // These are swapped
+                cluster_id: Some(cluster_id),
+                profile_id: Some(profile_id),
+                source_endpoint: Some(dst_ep), // These are swapped
+                counter: aps_seq,
+            };
 
-/// The actor that processes all Zigbee commands.
-pub struct ZigbeeStackActor {
-    pub stack: ZigbeeStack,
-    pub command_rx: mpsc::Receiver<ZigbeeCommand>,
-    pub notification_tx: broadcast::Sender<ZigbeeNotification>,
-    pub raw_frame_rx: mpsc::Receiver<SpinelFramePropValueIs>,
-}
+            let (tx, rx) = oneshot::channel();
+            maybe_ack_rx = Some(rx);
 
-impl ZigbeeStackActor {
-    pub async fn new(
-        stack: ZigbeeStack,
-    ) -> (
-        Self,
-        mpsc::Sender<ZigbeeCommand>,
-        broadcast::Receiver<ZigbeeNotification>,
-    ) {
-        let (command_tx, command_rx) = mpsc::channel::<ZigbeeCommand>(32);
-        let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
-        let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
-
-        {
-            let mut spinel_protocol = stack.spinel.protocol.lock().await;
-            spinel_protocol
-                .set_property_update_receiver(SpinelPropertyId::StreamRaw as u32, raw_frame_tx);
+            log::debug!("APS ACK requested, waiting for {:?}", ack_data);
+            self.state
+                .lock()
+                .unwrap()
+                .pending_aps_acks
+                .insert(ack_data, tx);
         }
 
-        (
-            ZigbeeStackActor {
-                stack,
-                command_rx,
-                notification_tx,
-                raw_frame_rx,
-            },
-            command_tx,
-            notification_rx,
-        )
-    }
+        self.send_802154_frame(ieee802154_frame).await;
 
-    pub async fn run(mut self) {
-        // Start radio once at the beginning.
-        self.stack.start_radio().await;
+        {
+            let mut state = self.state.lock().unwrap();
 
-        loop {
-            tokio::select! {
-                // Handle incoming Zigbee commands from the mpsc channel.
-                maybe_cmd = self.command_rx.recv() => {
-                    match maybe_cmd {
-                        Some(cmd) => {
-                            match cmd {
-                                ZigbeeCommand::SetNetworkSettings {
-                                    nwk_channel,
-                                    nwk_update_id,
-                                    nwk_pan_id,
-                                    nwk_extended_pan_id,
-                                    nwk_network_address,
-                                    nwk_ieee_address,
-                                    key,
-                                    key_seq_number,
-                                    outgoing_frame_counter,
-                                    resp,
-                                } => {
-                                    let res = self.stack
-                                        .set_network_settings(
-                                            nwk_channel,
-                                            nwk_update_id,
-                                            nwk_pan_id,
-                                            nwk_extended_pan_id,
-                                            nwk_network_address,
-                                            nwk_ieee_address,
-                                            key,
-                                            key_seq_number,
-                                            outgoing_frame_counter
-                                        )
-                                        .await;
-                                    let _ = resp.send(res);
-                                },
-                                ZigbeeCommand::SendApsCommand {
-                                    destination,
-                                    profile_id,
-                                    cluster_id,
-                                    src_ep,
-                                    dst_ep,
-                                    data,
-                                    resp,
-                                } => {
-                                    let res = self.stack
-                                        .send_aps_command(
-                                            destination,
-                                            profile_id,
-                                            cluster_id,
-                                            src_ep,
-                                            dst_ep,
-                                            data
-                                        )
-                                        .await;
-                                    let _ = resp.send(res);
-                                }
-                            }
-                        }
-                        None => {
-                            // mpsc channel closed; nothing more to do.
-                            break;
-                        }
-                    }
-                }
-
-                // Parse incoming 802.15.4 frames from Spinel
-                Some(spinel_frame) = self.raw_frame_rx.recv() => {
-                    let packet = match SpinelRxFrame::from_bytes(&spinel_frame.value) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            log::warn!("Error parsing spinel frame: {:?}", e);
-                            continue;
-                        }
-                    };
-
-                    if packet.psdu.len() < 2 {
-                        log::warn!("Packet too short to contain FCS");
-                        continue;
-                    }
-                    let frame_data = &packet.psdu[..packet.psdu.len() - 2];
-
-                    let ieee802154_frame = match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
-                            continue;
-                        }
-                    };
-
-                    log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
-
-                    match self.stack.receive_802154_frame(&ieee802154_frame) {
-                        Some(nwk_frame) => {
-                            if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
-                                continue;
-                            }
-
-                            let aps_frame = match ApsFrame::from_bytes(&nwk_frame.payload) {
-                                Ok(f) => f,
-                                Err(e) => {
-                                    log::warn!("Error parsing APS frame: {:?}", e);
-                                    continue;
-                                }
-                            };
-
-                            let notification = ZigbeeNotification::ReceivedApsCommand {
-                                source: nwk_frame.nwk_header.source,
-                                profile_id: aps_frame.profile_id,
-                                cluster_id: aps_frame.cluster_id,
-                                src_ep: aps_frame.source_endpoint,
-                                dst_ep: aps_frame.destination_endpoint,
-                                lqi: packet.lqi,
-                                rssi: packet.rssi,
-                                data: aps_frame.asdu,
-                            };
-                            let _ = self.notification_tx.send(notification);
-                        }
-                        None => {}
-                    }
+            // Handle `nwk_tx_total` wrapping
+            if state.nib.nwk_tx_total == 0xFFFF {
+                for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
+                    neighbor.transmit_failure = 0;
                 }
             }
+
+            state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
+        }
+
+        if let Some(ack_rx) = maybe_ack_rx {
+            // With a 5s timeout
+            let aps_ack_timeout = Duration::from_secs(5);
+            match tokio::time::timeout(aps_ack_timeout, ack_rx).await {
+                Ok(Ok(())) => {
+                    log::info!("APS ACK received");
+                }
+                Ok(Err(e)) => {
+                    log::warn!("APS ACK channel hung up: {:?}", e);
+                }
+                Err(_) => {
+                    log::warn!("APS ACK timed out");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn periodic_link_status_broadcast_task(&self) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            let mut state = self.state.lock().unwrap();
+            log::debug!("Sending periodic link status broadcast");
+
+            if state.nib.nwk_network_address == Nwk(0xFFFF) {
+                log::debug!("Skipping, stack has not been initialized yet");
+                continue;
+            }
+
+            state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter = state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter
+                .wrapping_add(1);
+            state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
+
+            let link_status_frame = NwkFrame {
+                encrypted: false,
+                nwk_header: NwkHeader {
+                    frame_control: NwkFrameControl {
+                        frame_type: NwkFrameType::Command,
+                        protocol_version: 2,
+                        discover_route: NwkRouteDiscovery::Suppress,
+                        multicast: false,
+                        security: true,
+                        source_route: false,
+                        destination: false,
+                        extended_source: true,
+                        end_device_initiator: false,
+                        reserved: 0b00,
+                    },
+                    destination: Nwk(0xFFFC),
+                    source: state.nib.nwk_network_address,
+                    radius: 1,
+                    sequence_number: state.nib.nwk_sequence_number,
+                    destination_ieee: None,
+                    source_ieee: Some(state.nib.nwk_ieee_address),
+                    multicast_control: None,
+                    source_route: None,
+                },
+                aux_header: Some(NwkAuxHeader {
+                    security_control: NwkSecurityHeaderControlField {
+                        security_level: NwkSecurityLevel::NoSecurity,
+                        key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                        extended_nonce: true,
+                        require_verified_frame_counter: false,
+                        reserved: 0b0,
+                    },
+                    frame_counter: state
+                        .nib
+                        .nwk_security_material_primary
+                        .outgoing_frame_counter,
+                    extended_source: Some(state.nib.nwk_ieee_address),
+                    key_sequence_number: state.nib.nwk_active_key_seq_number,
+                }),
+                payload: NwkLinkStatusCommand {
+                    is_first_frame: true,
+                    is_last_frame: true,
+                    link_statuses: vec![],
+                }
+                .serialize(),
+            }
+            .encrypt(&state.nib.nwk_security_material_primary.key)
+            .expect("Encryption somehow failed");
+
+            drop(state);
+
+            let ieee802154_frame = self.wrap_nwk_frame(&link_status_frame);
+            self.send_802154_frame(ieee802154_frame).await;
         }
     }
 }

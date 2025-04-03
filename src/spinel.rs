@@ -81,6 +81,9 @@ pub enum SpinelPropertyId {
     MacRawStreamEnabled = 55,
     MacPromiscuousMode = 56,
     MacEnergyScanResult = 57,
+    MacDataPollPeriod = 58,
+    MacRxOnWhenIdleMode = 59,
+    Mac154AltSaddr = 60,
     MacWhitelist = 4864,
     MacWhitelistEnabled = 4865,
 
