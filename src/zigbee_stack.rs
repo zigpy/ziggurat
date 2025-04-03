@@ -865,7 +865,7 @@ impl ZigbeeStack {
 
         log::info!("Route request command frame: {:#?}", route_request_cmd);
 
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
 
         // TODO: for now, only handle route requests back to us
         if route_request_cmd.destination_address != state.nib.nwk_network_address {
@@ -879,6 +879,15 @@ impl ZigbeeStack {
                 return;
             }
         }
+
+        state
+            .nib
+            .nwk_security_material_primary
+            .outgoing_frame_counter = state
+            .nib
+            .nwk_security_material_primary
+            .outgoing_frame_counter
+            .wrapping_add(1);
 
         let route_reply_frame = NwkFrame {
             encrypted: false,
