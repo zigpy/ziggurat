@@ -2,7 +2,9 @@ use crate::ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154Frame, Ieee802154FrameControl,
     Ieee802154FrameType,
 };
-use crate::spinel::{SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelPropertyId};
+use crate::spinel::{
+    SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelPropertyId, SpinelStatus,
+};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
 use crate::types::{Eui64, Key, Nwk, PanId};
 use crate::zigbee_aps::{
@@ -1160,11 +1162,13 @@ impl ZigbeeStack {
 
         log::info!("Send status: {:?}", status);
 
-        // Frames that do not ask for an ACK or that suppress their sequence number
-        // cannot be ACKed
-        if !frame.frame_control.ack_request || frame.frame_control.sequence_number_suppression {
-            return;
+        if status != SpinelStatus::Ok as u8 {
+            log::warn!("Failed to send frame ({:?}): {:#?}", status, frame);
         }
+
+        // XXX: Without this delay, back-to-back requests fail. With it, they succeed
+        //      with 100% reliability. Why?
+        tokio::time::sleep(Duration::from_millis(40)).await;
     }
 
     pub async fn send_aps_command(
