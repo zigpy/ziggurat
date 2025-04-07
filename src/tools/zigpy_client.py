@@ -133,17 +133,9 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
             metadata={},
         )
 
-        '''
         node_info = NodeInfo(
             ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
             nwk=t.NWK(0x0000),
-            logical_type=zdo_t.LogicalType.Coordinator,
-        )
-        '''
-
-        node_info = NodeInfo(
-            ieee=t.EUI64.convert("aa:bb:cc:dd:11:22:33:44"),
-            nwk=t.NWK(0xABCD),
             logical_type=zdo_t.LogicalType.Coordinator,
         )
 
@@ -267,10 +259,15 @@ async def main(host, port):
         )
         await asyncio.sleep(0.1)
 
-    '''
     dev = app.add_device(nwk=0x26f4, ieee=t.EUI64.convert("00:0d:6f:ff:fe:a4:f1:0b"))
     await dev.schedule_initialize()
-    '''
+
+    while True:
+        try:
+            async with asyncio.timeout(1):
+                await dev.endpoints[1].on_off.toggle()
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Timed out...")
 
 
 if __name__ == "__main__":
