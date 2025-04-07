@@ -204,7 +204,8 @@ impl ApsAckFrame {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApsDataFrame {
     pub frame_control: ApsFrameControl,
-    pub destination_endpoint: u8,
+    pub group_id: Option<u16>,
+    pub destination_endpoint: Option<u8>,
     pub cluster_id: u16,
     pub profile_id: u16,
     pub source_endpoint: u8,
@@ -219,7 +220,18 @@ impl ApsDataFrame {
         }
 
         let (frame_control, remaining) = ApsFrameControl::deserialize(bytes)?;
-        let destination_endpoint = u8::from_le_bytes([remaining[0]]);
+
+        let mut group_id = None;
+        let mut destination_endpoint = None;
+
+        if frame_control.delivery_mode == ApsDeliveryMode::Multicast {
+            group_id = Some(u16::from_le_bytes([remaining[0], remaining[1]]));
+            destination_endpoint = None;
+        } else {
+            group_id = None;
+            destination_endpoint = Some(u8::from_le_bytes([remaining[0]]));
+        }
+
         let cluster_id = u16::from_le_bytes([remaining[1], remaining[2]]);
         let profile_id = u16::from_le_bytes([remaining[3], remaining[4]]);
         let source_endpoint = u8::from_le_bytes([remaining[5]]);
@@ -228,6 +240,7 @@ impl ApsDataFrame {
 
         Ok(Self {
             frame_control: frame_control,
+            group_id: group_id,
             destination_endpoint: destination_endpoint,
             cluster_id: cluster_id,
             profile_id: profile_id,
@@ -241,7 +254,15 @@ impl ApsDataFrame {
         let mut bytes = Vec::new();
 
         bytes.extend(self.frame_control.to_bytes());
-        bytes.extend(self.destination_endpoint.to_le_bytes());
+
+        if let Some(group_id) = self.group_id {
+            bytes.extend(group_id.to_le_bytes());
+        }
+
+        if let Some(destination_endpoint) = self.destination_endpoint {
+            bytes.extend(destination_endpoint.to_le_bytes());
+        }
+
         bytes.extend(self.cluster_id.to_le_bytes());
         bytes.extend(self.profile_id.to_le_bytes());
         bytes.extend(self.source_endpoint.to_le_bytes());

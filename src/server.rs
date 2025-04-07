@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use ziggurat::spinel_client::SpinelClient;
 use ziggurat::types::{Eui64, Key, Nwk, PanId};
+use ziggurat::zigbee_aps::ApsDeliveryMode;
 use ziggurat::zigbee_stack::{ZigbeeNotification, ZigbeeStack};
 
 #[derive(Deserialize, Debug)]
@@ -215,25 +216,41 @@ impl ZigguratServer {
                 }
             }
             "send_aps_command" => {
-                let destination_nwk =
-                    Nwk::from_hex(cmd.data.get("destination_nwk").unwrap().as_str().unwrap());
+                let delivery_mode = match cmd.data.get("delivery_mode").unwrap().as_str().unwrap() {
+                    "unicast" => ApsDeliveryMode::Unicast,
+                    "broadcast" => ApsDeliveryMode::Broadcast,
+                    "multicast" => ApsDeliveryMode::Multicast,
+                    _ => {
+                        return CommandResponse {
+                            tid: cmd.tid,
+                            cmd: cmd.cmd,
+                            data: json!({"status": "error", "reason": "invalid_delivery_mode"}),
+                        };
+                    }
+                };
+
+                let destination =
+                    Nwk::from_hex(cmd.data.get("destination").unwrap().as_str().unwrap());
                 let profile_id = cmd.data.get("profile_id").unwrap().as_u64().unwrap() as u16;
                 let cluster_id = cmd.data.get("cluster_id").unwrap().as_u64().unwrap() as u16;
                 let src_ep = cmd.data.get("src_ep").unwrap().as_u64().unwrap() as u8;
                 let dst_ep = cmd.data.get("dst_ep").unwrap().as_u64().unwrap() as u8;
                 let aps_ack = cmd.data.get("aps_ack").unwrap().as_bool().unwrap();
                 let aps_seq = cmd.data.get("aps_seq").unwrap().as_u64().unwrap() as u8;
+                let radius = cmd.data.get("radius").unwrap().as_u64().unwrap() as u8;
                 let data = hex::decode(cmd.data.get("data").unwrap().as_str().unwrap()).unwrap();
 
                 let status = self
                     .zigbee_stack
                     .send_aps_command(
-                        destination_nwk,
+                        delivery_mode,
+                        destination,
                         profile_id,
                         cluster_id,
                         src_ep,
                         dst_ep,
                         aps_ack,
+                        radius,
                         aps_seq,
                         data,
                     )

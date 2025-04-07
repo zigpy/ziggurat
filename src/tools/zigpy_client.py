@@ -133,9 +133,17 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
             metadata={},
         )
 
+        '''
         node_info = NodeInfo(
             ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
             nwk=t.NWK(0x0000),
+            logical_type=zdo_t.LogicalType.Coordinator,
+        )
+        '''
+
+        node_info = NodeInfo(
+            ieee=t.EUI64.convert("aa:bb:cc:dd:11:22:33:44"),
+            nwk=t.NWK(0xABCD),
             logical_type=zdo_t.LogicalType.Coordinator,
         )
 
@@ -199,8 +207,6 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
             self.packet_received(packet)
 
     async def send_packet(self, packet):
-        assert packet.dst.addr_mode is t.AddrMode.NWK
-
         profile_id = 0x0000
 
         if packet.src_ep != 0 or packet.dst_ep != 0:
@@ -209,13 +215,19 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
         await self._api.send_command(
             "send_aps_command",
             {
-                "destination_nwk": packet.dst.address.serialize()[::-1].hex(),
+                "delivery_mode": {
+                    t.AddrMode.NWK: "unicast",
+                    t.AddrMode.Group: "multicast",
+                    t.AddrMode.Broadcast: "broadcast",
+                }[packet.dst.addr_mode],
+                "destination": packet.dst.address.serialize()[::-1].hex(),
                 # "destination_eui64": "00:0d:6f:ff:fe:a4:f1:0b",
                 "profile_id": profile_id,
                 "cluster_id": packet.cluster_id or 0x0000,
                 "src_ep": packet.src_ep,
-                "dst_ep": packet.dst_ep,
+                "dst_ep": packet.dst_ep or 0,
                 "aps_ack": t.TransmitOptions.ACK in packet.tx_options,
+                "radius": packet.radius,
                 "aps_seq": packet.tsn,
                 "data": packet.data.serialize().hex(),
             },
@@ -237,15 +249,28 @@ async def main(host, port):
     await app.connect()
     await app.start_network()
 
+    for seq in range(1000):
+        await app.send_packet(
+            t.ZigbeePacket(
+                src_ep=123,
+                dst=t.AddrModeAddress(
+                    addr_mode=t.AddrMode.Group, address=seq % 0xFFF0,
+                ),
+                tsn=12,
+                profile_id=0x0104,
+                cluster_id=0x0006,
+                data=t.SerializableBytes(b"\x01" + bytes([seq % 255]) + b"\x00"),
+                radius=1,
+                non_member_radius=3,
+                tx_options=t.TransmitOptions.NONE,
+            )
+        )
+        await asyncio.sleep(0.1)
+
+    '''
     dev = app.add_device(nwk=0x26f4, ieee=t.EUI64.convert("00:0d:6f:ff:fe:a4:f1:0b"))
     await dev.schedule_initialize()
-
-    while True:
-        try:
-            async with asyncio.timeout(1):
-                await dev.endpoints[1].on_off.toggle()
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Timed out...")
+    '''
 
 
 if __name__ == "__main__":
