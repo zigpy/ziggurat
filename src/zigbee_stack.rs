@@ -509,7 +509,7 @@ impl ZigbeeStack {
                         profile_id: aps_frame.profile_id,
                         cluster_id: aps_frame.cluster_id,
                         src_ep: aps_frame.source_endpoint,
-                        dst_ep: aps_frame.destination_endpoint,
+                        dst_ep: aps_frame.destination_endpoint.unwrap_or(0),
                         lqi: packet.lqi,
                         rssi: packet.rssi,
                         data: aps_frame.asdu,
@@ -974,13 +974,13 @@ impl ZigbeeStack {
             destination_endpoint: Some(aps_frame.source_endpoint),
             cluster_id: Some(aps_frame.cluster_id),
             profile_id: Some(aps_frame.profile_id),
-            source_endpoint: Some(aps_frame.destination_endpoint),
+            source_endpoint: aps_frame.destination_endpoint,
             counter: aps_frame.counter,
         };
 
         // Wrap it in a NWK frame
         let destination = nwk_frame.nwk_header.source;
-        let outgoing_nwk_frame = self.wrap_aps_frame(destination, &ApsFrame::Ack(ack_frame));
+        let outgoing_nwk_frame = self.wrap_aps_frame(destination, 30, &ApsFrame::Ack(ack_frame));
         let mut ieee802154_frame = self.wrap_nwk_frame(&outgoing_nwk_frame);
 
         let arc_self = self
@@ -995,44 +995,91 @@ impl ZigbeeStack {
 
     fn prepare_request(
         &self,
+        delivery_mode: ApsDeliveryMode,
         destination: Nwk,
         src_ep: u8,
         dst_ep: u8,
         cluster_id: u16,
         profile_id: u16,
         aps_ack: bool,
+        radius: u8,
         counter: u8,
         asdu: &Vec<u8>,
     ) -> Ieee802154Frame {
-        let aps_frame = ApsDataFrame {
-            frame_control: ApsFrameControl {
-                frame_type: ApsFrameType::Data,
-                delivery_mode: ApsDeliveryMode::Unicast,
-                reserved: 0b0,
-                security: false,
-                ack_request: aps_ack,
-                extended_header: false,
+        let aps_frame = match delivery_mode {
+            ApsDeliveryMode::Unicast => ApsDataFrame {
+                frame_control: ApsFrameControl {
+                    frame_type: ApsFrameType::Data,
+                    delivery_mode: ApsDeliveryMode::Unicast,
+                    reserved: 0b0,
+                    security: false,
+                    ack_request: aps_ack,
+                    extended_header: false,
+                },
+                group_id: None,
+                destination_endpoint: Some(dst_ep),
+                cluster_id: cluster_id,
+                profile_id: profile_id,
+                source_endpoint: src_ep,
+                counter: counter,
+                asdu: asdu.to_vec(),
             },
-            destination_endpoint: dst_ep,
-            cluster_id: cluster_id,
-            profile_id: profile_id,
-            source_endpoint: src_ep,
-            counter: counter,
-            asdu: asdu.to_vec(),
+            ApsDeliveryMode::Broadcast => ApsDataFrame {
+                frame_control: ApsFrameControl {
+                    frame_type: ApsFrameType::Data,
+                    delivery_mode: ApsDeliveryMode::Broadcast,
+                    reserved: 0b0,
+                    security: false,
+                    ack_request: false,
+                    extended_header: false,
+                },
+                group_id: None,
+                destination_endpoint: Some(dst_ep),
+                cluster_id: cluster_id,
+                profile_id: profile_id,
+                source_endpoint: src_ep,
+                counter: counter,
+                asdu: asdu.to_vec(),
+            },
+            ApsDeliveryMode::Multicast => ApsDataFrame {
+                frame_control: ApsFrameControl {
+                    frame_type: ApsFrameType::Data,
+                    delivery_mode: ApsDeliveryMode::Multicast,
+                    reserved: 0b0,
+                    security: false,
+                    ack_request: false,
+                    extended_header: false,
+                },
+                group_id: Some(destination.as_u16()),
+                destination_endpoint: None,
+                cluster_id: cluster_id,
+                profile_id: profile_id,
+                source_endpoint: src_ep,
+                counter: counter,
+                asdu: asdu.to_vec(),
+            },
         };
 
         log::debug!("Prepared APS frame: {:#?}", aps_frame);
 
-        // TODO: routing :)
-        // At this point, we assume the destination device is in range of the coordinator.
-        let nwk_frame = self.wrap_aps_frame(destination, &ApsFrame::Data(aps_frame));
+        let nwk_frame = self.wrap_aps_frame(
+            if aps_frame.frame_control.delivery_mode == ApsDeliveryMode::Unicast {
+                // TODO: routing :)
+                // At this point, we assume the destination device is in range of the coordinator.
+                destination
+            } else {
+                Nwk(0xFFFD)
+            },
+            radius,
+            &ApsFrame::Data(aps_frame),
+        );
         log::debug!("Prepared NWK frame: {:#?}", nwk_frame);
         let ieee802154_frame = self.wrap_nwk_frame(&nwk_frame);
 
         ieee802154_frame
     }
 
-    fn wrap_aps_frame(&self, destination: Nwk, aps_frame: &ApsFrame) -> NwkFrame {
+    fn wrap_aps_frame(&self, destination: Nwk, radius: u8, aps_frame: &ApsFrame) -> NwkFrame {
         // TODO: TX frame counter wrapping is an error condition
         let mut state = self.state.lock().unwrap();
 
@@ -1063,7 +1110,7 @@ impl ZigbeeStack {
                 },
                 destination: destination,
                 source: state.nib.nwk_network_address,
-                radius: 30,
+                radius: radius,
                 sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: None,
                 source_ieee: None,
@@ -1115,7 +1162,11 @@ impl ZigbeeStack {
                 frame_type: Ieee802154FrameType::Data,
                 security_enabled: false,
                 frame_pending: false,
-                ack_request: true,
+                ack_request: if destination == Ieee802154Address::Nwk(Nwk(0xFFFF)) {
+                    false
+                } else {
+                    true
+                },
                 pan_id_compression: true,
                 reserved: false,
                 sequence_number_suppression: false,
@@ -1170,22 +1221,26 @@ impl ZigbeeStack {
 
     pub async fn send_aps_command(
         &self,
+        delivery_mode: ApsDeliveryMode,
         destination: Nwk,
         profile_id: u16,
         cluster_id: u16,
         src_ep: u8,
         dst_ep: u8,
         aps_ack: bool,
+        radius: u8,
         aps_seq: u8,
         data: Vec<u8>,
     ) -> Result<(), String> {
         let ieee802154_frame = self.prepare_request(
+            delivery_mode,
             destination,
             src_ep,
             dst_ep,
             cluster_id,
             profile_id,
             aps_ack,
+            radius,
             aps_seq,
             &data,
         );
