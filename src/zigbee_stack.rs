@@ -20,7 +20,7 @@ use crate::zigbee_nwk_commands::{
 };
 
 use std::cmp;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::drop;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,6 +28,18 @@ use std::sync::Weak;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
+
+// The number of the most recent samples taken into consideration SHOULD be n = 3, which
+// eliminates single outliers maintains a fast response to real changes in link quality,
+// and keeps memory requirements to a minimum.
+const LINK_QUALITY_SAMPLES: usize = 3; // For simplicity, keep this odd
+
+fn lqi_to_link_cost(lqi: u8) -> u8 {
+    // TODO: is a linear mapping good enough?
+
+    // Remap 0-255 to 1-7
+    ((1.0 - (lqi as f32) / 255.0) * 6.0 + 1.0).round() as u8
+}
 
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
@@ -209,7 +221,7 @@ pub struct NwkNeighborTableEntry {
     // A value indicating if previous transmissions to the device were successful or
     // not. Higher values indicate more failures.
     pub transmit_failure: u8,
-    pub lqa: u8,
+    pub lqas: VecDeque<u8>, // TODO: replace with a fixed-size ring buffer
 
     // The outgoing cost field contains the cost of the link as measured by the
     // neighbor. The value is obtained from the most recent link status command frame
@@ -245,6 +257,23 @@ pub struct NwkNeighborTableEntry {
     pub router_outbound_activity: u8,
     pub router_inbound_activity: u8,
     pub security_timer: u8,
+}
+
+impl NwkNeighborTableEntry {
+    pub fn lqa(&self) -> Option<u8> {
+        if self.lqas.len() < LINK_QUALITY_SAMPLES {
+            return None;
+        }
+
+        let mut lqas = Vec::from(self.lqas.clone());
+        lqas.sort_by(|a, b| a.cmp(b));
+        let median = lqas
+            .into_iter()
+            .map(|x| lqi_to_link_cost(x))
+            .collect::<Vec<u8>>()[LINK_QUALITY_SAMPLES / 2];
+
+        Some(median)
+    }
 }
 
 #[derive(Debug)]
@@ -585,7 +614,7 @@ impl ZigbeeStack {
 
             log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
 
-            match self.receive_802154_frame(&ieee802154_frame) {
+            match self.receive_802154_frame(&ieee802154_frame, packet.lqi, packet.rssi) {
                 Some(nwk_frame) => {
                     let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
                         Ok(ApsFrame::Data(data)) => data,
@@ -729,7 +758,12 @@ impl ZigbeeStack {
         Ok(())
     }
 
-    pub fn receive_802154_frame(&self, frame: &Ieee802154Frame) -> Option<NwkFrame> {
+    pub fn receive_802154_frame(
+        &self,
+        frame: &Ieee802154Frame,
+        lqi: u8,
+        rssi: i8,
+    ) -> Option<NwkFrame> {
         let state = self.state.lock().unwrap();
 
         // 802.15.4 encrypted frames can't be Zigbee NWK
@@ -874,7 +908,7 @@ impl ZigbeeStack {
         drop(state);
 
         log::info!("Decrypted frame: {:#?}", decrypted_nwk_frame);
-        self.handle_decrypted_frame(&decrypted_nwk_frame);
+        self.handle_decrypted_frame(&decrypted_nwk_frame, lqi, rssi);
 
         return Some(decrypted_nwk_frame);
     }
@@ -897,7 +931,7 @@ impl ZigbeeStack {
         }
     }
 
-    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame) {
+    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, lqi: u8, rssi: i8) {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header {
             match aux_header.extended_source {
@@ -966,6 +1000,28 @@ impl ZigbeeStack {
                 }
             }
         }
+
+        // Handle LQA calculation
+        self.maybe_recompute_lqa(nwk_frame, lqi, rssi);
+    }
+
+    fn maybe_recompute_lqa(&self, nwk_frame: &NwkFrame, lqi: u8, rssi: i8) {
+        if nwk_frame.nwk_header.source_ieee.is_none() {
+            return;
+        }
+
+        let mut state = self.state.lock().unwrap();
+        if let Some(entry) = state
+            .nib
+            .nwk_neighbor_table
+            .get_mut(&nwk_frame.nwk_header.source_ieee.unwrap())
+        {
+            entry.lqas.push_back(lqi);
+
+            if entry.lqas.len() > LINK_QUALITY_SAMPLES {
+                entry.lqas.pop_front();
+            }
+        }
     }
 
     fn handle_link_status(&self, nwk_frame: &NwkFrame) {
@@ -1023,7 +1079,7 @@ impl ZigbeeStack {
                     device_timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
                     relationship: NwkNeighborRelationship::Sibling,
                     transmit_failure: 0,
-                    lqa: 255, // TODO: pass the raw frame up to here?
+                    lqas: VecDeque::new(),
                     outgoing_cost: 0,
                     last_link_status_timestamp: Instant::now(),
                     incoming_beacon_timestamp: 0,
@@ -1703,12 +1759,14 @@ impl ZigbeeStack {
                 .nib
                 .nwk_neighbor_table
                 .iter()
-                .map(|(_, neighbor)| {
-                    NwkLinkStatus {
+                .filter_map(|(_, neighbor)| {
+                    // We only calculate link statuses for neighbors for which we have
+                    // seen more than a few packets
+                    neighbor.lqa().map(|lqa| NwkLinkStatus {
                         address: neighbor.network_address,
-                        incoming_cost: 1, // TODO: actually compute this
+                        incoming_cost: lqa,
                         outgoing_cost: neighbor.outgoing_cost,
-                    }
+                    })
                 })
                 .collect::<Vec<_>>();
 
@@ -1718,7 +1776,7 @@ impl ZigbeeStack {
             link_statuses.sort_by(|a, b| a.address.as_u16().cmp(&b.address.as_u16()));
 
             let max_link_statuses = 7;
-            let mut link_statuses_to_send = link_statuses.clone();
+            let mut remaining_link_statuses = link_statuses.clone();
 
             loop {
                 let mut state = self.state.lock().unwrap();
@@ -1773,12 +1831,21 @@ impl ZigbeeStack {
                         key_sequence_number: state.nib.nwk_active_key_seq_number,
                     }),
                     payload: NwkLinkStatusCommand {
-                        is_first_frame: link_statuses_to_send.len() == link_statuses.len(),
-                        is_last_frame: link_statuses_to_send.len() <= max_link_statuses,
-                        // Link status frames overlap by a single entry
-                        link_statuses: link_statuses_to_send
-                            .drain(..max_link_statuses - 1)
-                            .collect(),
+                        is_first_frame: remaining_link_statuses.len() == link_statuses.len(),
+                        is_last_frame: remaining_link_statuses.len() <= max_link_statuses,
+                        link_statuses: if remaining_link_statuses.is_empty() {
+                            vec![]
+                        } else {
+                            // Link status frames overlap by a single entry
+                            remaining_link_statuses
+                                .drain(
+                                    ..cmp::min(
+                                        remaining_link_statuses.len(),
+                                        max_link_statuses - 1,
+                                    ),
+                                )
+                                .collect()
+                        },
                     }
                     .serialize(),
                 }
@@ -1790,7 +1857,7 @@ impl ZigbeeStack {
                 let ieee802154_frame = self.wrap_nwk_frame(&link_status_frame);
                 self.send_802154_frame(ieee802154_frame).await;
 
-                if link_statuses_to_send.is_empty() {
+                if remaining_link_statuses.is_empty() {
                     break;
                 }
             }
