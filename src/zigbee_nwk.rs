@@ -15,6 +15,11 @@ use constant_time_eq::constant_time_eq;
 
 use derivative::Derivative;
 
+pub const BROADCAST_ALL_DEVICES: Nwk = Nwk(0xFFFF);
+pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
+pub const BROADCAST_ALL_ROUTERS_AND_COORDINATOR: Nwk = Nwk(0xFFFC);
+pub const BROADCAST_LOW_POWER_ROUTERS: Nwk = Nwk(0xFFFB);
+
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum NwkFrameType {
     Data = 0b00,

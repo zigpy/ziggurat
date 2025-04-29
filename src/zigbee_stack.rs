@@ -2,9 +2,7 @@ use crate::ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154Frame, Ieee802154FrameControl,
     Ieee802154FrameType,
 };
-use crate::spinel::{
-    SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelPropertyId, SpinelStatus,
-};
+use crate::spinel::{SpinelFramePropValueIs, SpinelPropertyId, SpinelStatus};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
 use crate::types::{Eui64, Key, Nwk, PanId};
 use crate::zigbee_aps::{
@@ -12,21 +10,36 @@ use crate::zigbee_aps::{
     ApsFrameType, parse_aps_frame,
 };
 use crate::zigbee_nwk::{
-    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
-    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_RX_ON_WHEN_IDLE, NwkAuxHeader, NwkFrame,
+    NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery, NwkSecurityHeaderControlField,
+    NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 use crate::zigbee_nwk_commands::{
-    NwkCommandId, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
+    NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
     NwkRouteRequestCommand,
 };
-use std::collections::HashMap;
+
+use std::cmp;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::drop;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
+
+// The number of the most recent samples taken into consideration SHOULD be n = 3, which
+// eliminates single outliers maintains a fast response to real changes in link quality,
+// and keeps memory requirements to a minimum.
+const LINK_QUALITY_SAMPLES: usize = 3; // For simplicity, keep this odd
+
+fn lqi_to_link_cost(lqi: u8) -> u8 {
+    // TODO: is a linear mapping good enough?
+
+    // Remap 0-255 to 1-7
+    ((1.0 - (lqi as f32) / 255.0) * 6.0 + 1.0).round() as u8
+}
 
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
@@ -76,10 +89,10 @@ pub struct NwkSecurityDescriptor {
 pub struct NwkBroadcastTransaction {
     pub source_nwk: Nwk,
     pub sequence_number: u8,
-    pub expiration_time: u8,
+    pub expiration_time: Instant,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum NwkRouteStatus {
     Active = 0,
     DiscoveryUnderway = 1,
@@ -91,13 +104,42 @@ pub enum NwkRouteStatus {
 pub struct NwkRoutingTableEntry {
     pub destination: Nwk,
     pub status: NwkRouteStatus,
+
+    // A flag indicating that the destination indicated by this address does not store
+    // source routes.
     pub no_route_cache: bool,
+
+    // A flag indicating that the destination is a concentrator that issued a
+    // many-to-one route request.
     pub many_to_one: bool,
+
+    // A flag indicating that a route record command frame SHOULD be sent to the
+    // destination prior to the next data packet.
     pub route_record_required: bool,
+
+    // When set to TRUE, this flag indicates that an expected regular many-to-one route
+    // request was missed, i.e. the last many-to-one route request for this destination
+    // was received more than nwkConcentratorDiscoveryTime + nwkRouteDiscoveryTime
+    // seconds ago. When the entry is created, this field is initially set to FALSE.
+    // This flag only has meaning for entries, which have the many-to-one field set to
+    // TRUE.
     pub expired: bool,
+
+    // Used for TLVs and a few subsequent fields
     pub sequence_number_valid: bool,
+
+    // The 16-bit network address of the next hop on the way to the destination.
     pub next_hop_address: Nwk,
+
+    // The 16-bit sequence number associated with this entry, obtained from the last
+    // route message that successfully updated this entry and conveyed a sequence
+    // number. Notice that routers prior to R23 did neither maintain nor convey a
+    // sequence number. The value stored in this field is only valid if the Sequence
+    // Number Valid flag is set.
     pub sequence_number: u16,
+
+    // A 32-bit saturating counter, which is incremented whenever this routing table
+    // entry is used to forward a data packet towards its destination
     pub total_usage_count: u32,
 
     // An 8-bit saturating counter, which is pre-loaded with nwkRouterAgeLimit when the
@@ -108,6 +150,8 @@ pub struct NwkRoutingTableEntry {
     pub recent_activity: u8,
 }
 
+type RouteRequestId = u8;
+
 #[derive(Debug)]
 pub struct NwkRouteDiscoveryTableEntry {
     // A sequence number for a route request command frame that is incremented each time
@@ -115,7 +159,7 @@ pub struct NwkRouteDiscoveryTableEntry {
     // distinct from the 16-bit Routing Sequence Number. The former is used to discern
     // route requests originating in a particular router; the latter is used to
     // identify stale routing information.
-    pub route_request_id: u8,
+    pub route_request_id: RouteRequestId,
 
     // The 16-bit network address of the route request’s initiator.
     pub source_address: Nwk,
@@ -135,7 +179,7 @@ pub struct NwkRouteDiscoveryTableEntry {
 
     // A countdown timer indicating the number of milliseconds until route discovery
     // expires. The initial value is nwkcRouteDiscoveryTime.
-    pub expiration_time: u16,
+    pub expiration_time: Instant,
 }
 
 #[derive(Debug)]
@@ -166,20 +210,48 @@ pub struct NwkNeighborTableEntry {
     pub device_type: NwkDeviceType,
     pub rx_on_when_idle: bool,
     pub end_device_configuration: u16,
-    pub timeout_counter: u32, // max: 15728640
-    pub device_timeout: u32,  // max: 129600
+
+    // The current time remaining, in seconds, for the end device
+    pub timeout_at: Instant, // max: 15728640s, ~182 days
+
+    // This field indicates the timeout, in seconds, for the end device child
+    pub device_timeout_at: Instant, // max: 129600s, 36 hours
     pub relationship: NwkNeighborRelationship,
+
+    // A value indicating if previous transmissions to the device were successful or
+    // not. Higher values indicate more failures.
     pub transmit_failure: u8,
-    pub lqa: u8,
+    pub lqas: VecDeque<u8>, // TODO: replace with a fixed-size ring buffer
+
+    // The outgoing cost field contains the cost of the link as measured by the
+    // neighbor. The value is obtained from the most recent link status command frame
+    // received from the neighbor. A value of 0 indicates that no link status command
+    // listing this device has been received.
     pub outgoing_cost: u8,
-    pub age: u8,
+
+    // The number of nwkLinkStatusPeriod intervals that have passed since the last link
+    // status command frame was received, up to a maximum value of nwkRouterAgeLimit.
+    // pub age: u8,
+    pub last_link_status_timestamp: Instant,
+
     pub incoming_beacon_timestamp: u32,
     pub beacon_transmission_time_offset: u32,
+
+    // This value indicates at least one keepalive has been received from the end device
+    // since the router has rebooted.
     pub keepalive_received: bool,
     // pub mac_interface_index: u8,
     pub mac_unicast_bytes_transmitted: u32,
     pub mac_unicast_bytes_received: u32,
-    pub router_age: u16,
+
+    // The number of nwkLinkStatusPeriod intervals, which elapsed since this router
+    // neighbor was added to the neighbor table. This value is only maintained on
+    // routers and the coordinator and is only valid for entries with a relationship
+    // of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating
+    // up-counter, which does not roll-over.
+    //pub router_age: u16,
+    pub router_added_timestamp: Instant,
+
     pub router_connectivity: u8,
     pub router_neighbor_set_diversity: u8,
     pub router_outbound_activity: u8,
@@ -187,17 +259,33 @@ pub struct NwkNeighborTableEntry {
     pub security_timer: u8,
 }
 
+impl NwkNeighborTableEntry {
+    pub fn lqa(&self) -> Option<u8> {
+        if self.lqas.len() < LINK_QUALITY_SAMPLES {
+            return None;
+        }
+
+        let mut lqas = Vec::from(self.lqas.clone());
+        lqas.sort_by(|a, b| a.cmp(b));
+        let median = lqas
+            .into_iter()
+            .map(|x| lqi_to_link_cost(x))
+            .collect::<Vec<u8>>()[LINK_QUALITY_SAMPLES / 2];
+
+        Some(median)
+    }
+}
+
 #[derive(Debug)]
 pub struct Nib {
     pub nwk_sequence_number: u8,
-    pub nwk_passive_ack_timeout: u32,
+    pub nwk_passive_ack_timeout: Duration,
     pub nwk_max_broadcast_retries: u8,
     pub nwk_max_children: u8,
     pub nwk_max_depth: u8,
     pub nwk_neighbor_table: HashMap<Eui64, NwkNeighborTableEntry>,
-    pub nwk_network_broadcast_delivery_time: u32,
-    pub nwk_route_table: Vec<NwkRoutingTableEntry>,
-    pub nwk_route_discovery_table: HashMap<u8, NwkRouteDiscoveryTableEntry>,
+    pub nwk_route_table: HashMap<Nwk, NwkRoutingTableEntry>,
+    pub nwk_route_discovery_table: HashMap<RouteRequestId, NwkRouteDiscoveryTableEntry>,
     pub nwk_capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
     pub nwk_max_source_route: u8,
@@ -210,14 +298,20 @@ pub struct Nib {
     pub nwk_route_record_table: HashMap<Nwk, Vec<Nwk>>,
     pub nwk_is_concentrator: bool,
     pub nwk_concentrator_radius: u8,
-    pub nwk_concentrator_discovery_time: u8,
+    pub nwk_concentrator_discovery_time: Duration,
     pub nwk_security_level: u8,
     pub nwk_security_material_primary: NwkSecurityDescriptor,
     pub nwk_security_material_alternate: NwkSecurityDescriptor,
     pub nwk_active_key_seq_number: u8,
     pub nwk_all_fresh: bool,
-    pub nwk_concentrator_discovery_separation_time: u8,
-    pub nwk_link_status_period: u8,
+
+    // The minimum time, in seconds, between two consecutive concentrator route
+    // discoveries. If set to 0x00, there is no minimum separation. This only applies
+    // when the device is operating as a Concentrator.
+    pub nwk_concentrator_discovery_separation_time: Duration,
+
+    // The time between link status command frames.
+    pub nwk_link_status_period: Duration,
 
     // The number of missed link status command frames before resetting the link costs
     // to zero.
@@ -231,7 +325,7 @@ pub struct Nib {
     pub nwk_pan_id: PanId,
 
     // A count of unicast transmissions made by the NNK layer on this device. Each time
-    // the NWK layer transmits aunicast frame, by invoking the MCPS-state.request
+    // the NWK layer transmits a unicast frame, by invoking the MCPS-state.request
     // primitive of the MAC sub-layer, it SHALL increment this counter. When either the
     // NHL performs an NLME-SET.request on this attribute or if the value of nwkTxTotal
     // rolls over past 0xffff the NWK layer SHALL reset to 0x00 each Transmit Failure
@@ -253,6 +347,23 @@ pub struct Nib {
     pub nwk_leave_request_without_rejoin_allowed: bool,
 
     pub nwk_ieee_address: Eui64,
+
+    // A strictly increasing sequence number included in all route request and route
+    // reply command frames to allow other routers to determine the chronological order
+    // of such route discovery messages.
+    pub nwk_routing_sequence_number: u16,
+
+    // Implied from the spec: "notice that this 8-bit identifier is distinct from the
+    // 16-bit Routing Sequence Number. The former is used to discern route requests
+    // originating in a particular router; the latter is used to identify stale routing
+    // information."
+    pub nwk_routing_request_sequence_number: u8,
+
+    // This indicates whether the router has Hub Connectivity as defined by a higher
+    // level application. The higher level application sets this value and the stack
+    // advertises it.
+    pub nwk_hub_connectivity: bool,
+
     // nwkMacInterfaceTable
     // nwkNetworkWideBeaconAppendixTLVs
     // nwkDeviceLocalBeaconAppendixTLVs
@@ -262,25 +373,36 @@ pub struct Nib {
     // nwkNextChannelChange = 0
     // nwkPerformAdditionalMacDataPollRetries = 0
     // nwkPreferredParent
-    // nwkHubConnectivity = true
-    // nwkRoutingSequenceNumber = 0
     // nwkGoodParentLQA = 75
     // nwkPanIdConflictCount = 0
     // nwkMaxInitialJoinParentAttempts = 1
     // nwkMaxRejoinParentAttempts = 3
+    pub nwkc_protocol_version: u8,
+    pub nwkc_route_discovery_time: Duration,
+    pub nwkc_max_broadcast_jitter: Duration,
+    pub nwkc_initial_rreq_retries: u8,
+    pub nwkc_rreq_retries: u8,
+    pub nwkc_rreq_retry_interval: Duration,
+    pub nwkc_min_rreq_jitter: Duration,
+    pub nwkc_max_rreq_jitter: Duration,
+    pub nwkc_max_depth: u8,
+    pub nwkc_unicast_retries: u8,
+    pub nwkc_unicast_retry_delay: Duration,
+    pub nwkc_min_router_bootstrap_jitter: Duration,
+    pub nwkc_max_router_bootstrap_jitter: Duration,
+    pub nwkc_broadcast_delivery_time: Duration,
 }
 
 impl Nib {
     pub fn new() -> Nib {
         Nib {
             nwk_sequence_number: 0,
-            nwk_passive_ack_timeout: 500,
+            nwk_passive_ack_timeout: Duration::from_millis(500),
             nwk_max_broadcast_retries: 2,
             nwk_max_children: 32,
             nwk_max_depth: 15,
             nwk_neighbor_table: HashMap::new(),
-            nwk_network_broadcast_delivery_time: 0,
-            nwk_route_table: Vec::new(),
+            nwk_route_table: HashMap::new(),
             nwk_route_discovery_table: HashMap::new(),
             nwk_capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
@@ -303,7 +425,7 @@ impl Nib {
             nwk_route_record_table: HashMap::new(),
             nwk_is_concentrator: true,
             nwk_concentrator_radius: 10,
-            nwk_concentrator_discovery_time: 0,
+            nwk_concentrator_discovery_time: Duration::from_secs(0),
             nwk_security_level: 5,
             nwk_security_material_primary: NwkSecurityDescriptor {
                 key_seq_number: 0,
@@ -321,8 +443,8 @@ impl Nib {
             },
             nwk_active_key_seq_number: 0,
             nwk_all_fresh: false,
-            nwk_concentrator_discovery_separation_time: 0,
-            nwk_link_status_period: 0x0F,
+            nwk_concentrator_discovery_separation_time: Duration::from_secs(0),
+            nwk_link_status_period: Duration::from_secs(15),
             nwk_router_age_limit: 3,
             nwk_address_map: HashMap::new(),
             nwk_time_stamp: false,
@@ -333,6 +455,26 @@ impl Nib {
             nwk_end_device_timeout_default: 0,
             nwk_leave_request_without_rejoin_allowed: false,
             nwk_ieee_address: Eui64::from_hex("0000000000000000"),
+            // TODO: The 16-bit routing sequence number is expected to be
+            // strictly-increasing, it should be persisted to disk
+            nwk_routing_sequence_number: 0x0000,
+            nwk_routing_request_sequence_number: 0x00,
+            nwk_hub_connectivity: true,
+            // Constants. Theoretically.
+            nwkc_protocol_version: 2,
+            nwkc_route_discovery_time: Duration::from_millis(10000),
+            nwkc_max_broadcast_jitter: Duration::from_millis(64),
+            nwkc_initial_rreq_retries: 3,
+            nwkc_rreq_retries: 2,
+            nwkc_rreq_retry_interval: Duration::from_millis(254),
+            nwkc_min_rreq_jitter: Duration::from_millis(2),
+            nwkc_max_rreq_jitter: Duration::from_millis(128),
+            nwkc_max_depth: 15,
+            nwkc_unicast_retries: 3,
+            nwkc_unicast_retry_delay: Duration::from_millis(50),
+            nwkc_min_router_bootstrap_jitter: Duration::from_millis(500),
+            nwkc_max_router_bootstrap_jitter: Duration::from_millis(1000),
+            nwkc_broadcast_delivery_time: Duration::from_millis(9000),
         }
     }
 }
@@ -472,7 +614,7 @@ impl ZigbeeStack {
 
             log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
 
-            match self.receive_802154_frame(&ieee802154_frame) {
+            match self.receive_802154_frame(&ieee802154_frame, packet.lqi, packet.rssi) {
                 Some(nwk_frame) => {
                     let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
                         Ok(ApsFrame::Data(data)) => data,
@@ -616,7 +758,12 @@ impl ZigbeeStack {
         Ok(())
     }
 
-    pub fn receive_802154_frame(&self, frame: &Ieee802154Frame) -> Option<NwkFrame> {
+    pub fn receive_802154_frame(
+        &self,
+        frame: &Ieee802154Frame,
+        lqi: u8,
+        rssi: i8,
+    ) -> Option<NwkFrame> {
         let state = self.state.lock().unwrap();
 
         // 802.15.4 encrypted frames can't be Zigbee NWK
@@ -668,7 +815,8 @@ impl ZigbeeStack {
 
         // Ignore frames that aren't destined for us
         if nwk_frame.nwk_header.destination != state.nib.nwk_network_address
-            && nwk_frame.nwk_header.destination.as_u16() < 0xFFFC
+            && nwk_frame.nwk_header.destination.as_u16()
+                < BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
         {
             log::debug!("Ignoring frame, destination is not us");
             return None;
@@ -760,7 +908,7 @@ impl ZigbeeStack {
         drop(state);
 
         log::info!("Decrypted frame: {:#?}", decrypted_nwk_frame);
-        self.handle_decrypted_frame(&decrypted_nwk_frame);
+        self.handle_decrypted_frame(&decrypted_nwk_frame, lqi, rssi);
 
         return Some(decrypted_nwk_frame);
     }
@@ -783,7 +931,7 @@ impl ZigbeeStack {
         }
     }
 
-    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame) {
+    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, lqi: u8, rssi: i8) {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header {
             match aux_header.extended_source {
@@ -818,15 +966,13 @@ impl ZigbeeStack {
             match NwkCommandId::try_from(nwk_frame.payload[0]) {
                 Ok(NwkCommandId::LinkStatus) => {
                     // TODO: Error handling for decoding?
-                    let link_status_cmd =
-                        NwkLinkStatusCommand::from_bytes(&nwk_frame.payload).unwrap();
-                    log::info!("Link status command frame received: {:#?}", link_status_cmd);
+                    log::info!("Link status command frame received");
+                    self.handle_link_status(nwk_frame);
                 }
                 Ok(NwkCommandId::RouteReply) => {
                     // TODO: Error handling for decoding?
-                    let route_reply_cmd =
-                        NwkRouteReplyCommand::from_bytes(&nwk_frame.payload).unwrap();
-                    log::info!("Route reply command frame received: {:#?}", route_reply_cmd);
+                    log::info!("Route reply command frame received");
+                    self.handle_route_reply(nwk_frame);
                 }
                 Ok(NwkCommandId::RouteRecord) => {
                     // TODO: Error handling for decoding?
@@ -853,6 +999,147 @@ impl ZigbeeStack {
                     log::warn!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
                 }
             }
+        }
+
+        // Handle LQA calculation
+        self.maybe_recompute_lqa(nwk_frame, lqi, rssi);
+    }
+
+    fn maybe_recompute_lqa(&self, nwk_frame: &NwkFrame, lqi: u8, rssi: i8) {
+        if nwk_frame.nwk_header.source_ieee.is_none() {
+            return;
+        }
+
+        let mut state = self.state.lock().unwrap();
+        if let Some(entry) = state
+            .nib
+            .nwk_neighbor_table
+            .get_mut(&nwk_frame.nwk_header.source_ieee.unwrap())
+        {
+            entry.lqas.push_back(lqi);
+
+            if entry.lqas.len() > LINK_QUALITY_SAMPLES {
+                entry.lqas.pop_front();
+            }
+        }
+    }
+
+    fn handle_link_status(&self, nwk_frame: &NwkFrame) {
+        let link_status_cmd = match NwkLinkStatusCommand::from_bytes(&nwk_frame.payload) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing link status command: {:?}", e);
+                return;
+            }
+        };
+
+        log::info!("Link status command frame: {:#?}", link_status_cmd);
+
+        if nwk_frame.nwk_header.source_ieee.is_none() {
+            log::warn!("Link status command source EUI64 is missing");
+            return;
+        }
+
+        // We collect a list of neighbors with non-zero outgoing cost up here, before
+        // mutating the state
+        let neighbors_with_nonzero_outgoing_cost = self
+            .state
+            .lock()
+            .unwrap()
+            .nib
+            .nwk_neighbor_table
+            .iter()
+            .filter_map(|(_, neighbor_entry)| {
+                if neighbor_entry.outgoing_cost > 0 {
+                    Some(neighbor_entry.network_address)
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<Nwk>>();
+
+        let nwk_network_address = self.state.lock().unwrap().nib.nwk_network_address;
+
+        let source_ieee = nwk_frame.nwk_header.source_ieee.unwrap();
+
+        let mut state = self.state.lock().unwrap();
+        let neighbor_entry = match state.nib.nwk_neighbor_table.get_mut(&source_ieee) {
+            Some(entry) => entry,
+            None => {
+                // Create one
+                log::info!("Creating new neighbor entry for {:?}", source_ieee);
+
+                let entry = NwkNeighborTableEntry {
+                    extended_address: source_ieee,
+                    network_address: nwk_frame.nwk_header.source,
+                    device_type: NwkDeviceType::Router,
+                    rx_on_when_idle: true,
+                    end_device_configuration: 0x0000,
+                    timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
+                    device_timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
+                    relationship: NwkNeighborRelationship::Sibling,
+                    transmit_failure: 0,
+                    lqas: VecDeque::new(),
+                    outgoing_cost: 0,
+                    last_link_status_timestamp: Instant::now(),
+                    incoming_beacon_timestamp: 0,
+                    beacon_transmission_time_offset: 0,
+                    keepalive_received: true,
+                    mac_unicast_bytes_transmitted: 0,
+                    mac_unicast_bytes_received: 0,
+                    router_added_timestamp: Instant::now(),
+                    router_connectivity: 0,
+                    router_neighbor_set_diversity: 0,
+                    router_outbound_activity: 0,
+                    router_inbound_activity: 0,
+                    security_timer: 0,
+                };
+
+                state.nib.nwk_neighbor_table.insert(source_ieee, entry);
+                state.nib.nwk_neighbor_table.get_mut(&source_ieee).unwrap()
+            }
+        };
+
+        if link_status_cmd.is_first_frame {
+            neighbor_entry.last_link_status_timestamp = Instant::now();
+            neighbor_entry.router_connectivity = 0;
+            neighbor_entry.router_neighbor_set_diversity = 0;
+            neighbor_entry.outgoing_cost = 0; // If we do not find it in the list, it is 0
+        }
+
+        for link_status in link_status_cmd.link_statuses.iter() {
+            if link_status.outgoing_cost > 0 {
+                let connectivity =
+                    7 - cmp::max(link_status.incoming_cost, link_status.outgoing_cost);
+
+                neighbor_entry.router_connectivity += connectivity;
+
+                if !neighbors_with_nonzero_outgoing_cost.contains(&link_status.address) {
+                    neighbor_entry.router_neighbor_set_diversity += connectivity;
+                }
+            }
+
+            if link_status.address == nwk_network_address {
+                neighbor_entry.outgoing_cost = link_status.incoming_cost;
+            }
+        }
+
+        log::debug!("Updated neighbor table entry: {:#?}", neighbor_entry);
+    }
+
+    fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
+        let route_reply_cmd = match NwkRouteReplyCommand::from_bytes(&nwk_frame.payload) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing route reply command: {:?}", e);
+                return;
+            }
+        };
+
+        log::info!("Route reply command frame: {:#?}", route_reply_cmd);
+
+        if route_reply_cmd.multicast {
+            return;
         }
     }
 
@@ -896,7 +1183,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
-                    protocol_version: 2,
+                    protocol_version: state.nib.nwkc_protocol_version,
                     discover_route: NwkRouteDiscovery::Suppress,
                     multicast: false,
                     security: true,
@@ -981,7 +1268,7 @@ impl ZigbeeStack {
         // Wrap it in a NWK frame
         let destination = nwk_frame.nwk_header.source;
         let outgoing_nwk_frame = self.wrap_aps_frame(destination, 30, &ApsFrame::Ack(ack_frame));
-        let mut ieee802154_frame = self.wrap_nwk_frame(&outgoing_nwk_frame);
+        let ieee802154_frame = self.wrap_nwk_frame(&outgoing_nwk_frame);
 
         let arc_self = self
             .self_weak
@@ -1068,7 +1355,7 @@ impl ZigbeeStack {
                 // At this point, we assume the destination device is in range of the coordinator.
                 destination
             } else {
-                Nwk(0xFFFD)
+                BROADCAST_RX_ON_WHEN_IDLE
             },
             radius,
             &ApsFrame::Data(aps_frame),
@@ -1098,7 +1385,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
-                    protocol_version: 2,
+                    protocol_version: state.nib.nwkc_protocol_version,
                     discover_route: NwkRouteDiscovery::Enable,
                     multicast: false,
                     security: true,
@@ -1149,12 +1436,15 @@ impl ZigbeeStack {
         // Increment the 802.15.4 sequence number
         state.ieee802154_sequence_number = state.ieee802154_sequence_number.wrapping_add(1);
 
-        let destination =
-            Ieee802154Address::Nwk(if nwk_frame.nwk_header.destination.as_u16() >= 0xFFFC {
+        let destination = Ieee802154Address::Nwk(
+            if nwk_frame.nwk_header.destination.as_u16()
+                >= BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
+            {
                 Nwk(0xFFFF)
             } else {
                 nwk_frame.nwk_header.destination
-            });
+            },
+        );
 
         // TODO: support EUI64 addressing
         Ieee802154Frame {
@@ -1217,6 +1507,147 @@ impl ZigbeeStack {
         if status != SpinelStatus::Ok as u8 {
             log::warn!("Failed to send frame ({:?}): {:#?}", status, frame);
         }
+    }
+
+    pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, String> {
+        // TODO: combine concurrent route discovery requests
+        self.discover_route_internal(destination).await
+    }
+
+    pub async fn discover_route_internal(&self, destination: Nwk) -> Result<Nwk, String> {
+        // Discover next hop route
+        let mut state = self.state.lock().unwrap();
+
+        // Get a routing table entry
+        let route_table_entry = match state.nib.nwk_route_table.get(&destination) {
+            Some(route) => route,
+            None => {
+                let entry = NwkRoutingTableEntry {
+                    destination: destination,
+                    status: NwkRouteStatus::Inactive,
+                    no_route_cache: false,
+                    many_to_one: false,
+                    route_record_required: false,
+                    expired: true,
+                    sequence_number_valid: false,
+                    next_hop_address: Nwk(0xFFFF),
+                    sequence_number: 0x0000,
+                    total_usage_count: 0,
+                    recent_activity: state.nib.nwk_router_age_limit,
+                };
+
+                &state
+                    .nib
+                    .nwk_route_table
+                    .insert(destination, entry)
+                    .unwrap()
+            }
+        };
+
+        // If one is active, let's use it
+        if route_table_entry.status == NwkRouteStatus::Active {
+            return Ok(route_table_entry.next_hop_address);
+        }
+
+        // Routing :)
+        return Ok(destination);
+
+        /*
+        // Otherwise, start discovery
+        let mut route_discovery_table_entry = match state
+            .nib.nwk_route_discovery_table
+            .get(&destination)
+        {
+            Some(route) => route,
+            None => {
+                state.nib.nwk_routing_request_sequence_number.wrapping_add(1);
+                state.nib.nwk_route_discovery_table.insert(destination, NwkRouteDiscoveryTableEntry {
+                    route_request_id: state.nib.nwk_routing_request_sequence_number,
+                    source_address: state.nib.nwk_network_address,
+                    sender_address: Nwk(0xFFFF),
+                    forward_cost: 0,
+                    residual_cost: 0,
+                    expiration_time: Instant::now() + state.nib.nwkc_route_discovery_time,
+                }).unwrap()
+            }
+        };
+
+        state.nib.nwk_routing_sequence_number.wrapping_add(1);
+
+        route_table_entry.status = NwkRouteStatus::DiscoveryUnderway;
+        route_table_entry.sequence_number = state.nib.nwk_routing_sequence_number;
+        route_table_entry.sequence_number_valid = true;
+
+        // Construct a frame
+        state
+            .nib
+            .nwk_security_material_primary
+            .outgoing_frame_counter = state
+            .nib
+            .nwk_security_material_primary
+            .outgoing_frame_counter
+            .wrapping_add(1);
+
+        let route_request_frame = NwkFrame {
+            encrypted: false,
+            nwk_header: NwkHeader {
+                frame_control: NwkFrameControl {
+                    frame_type: NwkFrameType::Command,
+                    protocol_version: state.nib.nwkc_protocol_version,
+                    discover_route: NwkRouteDiscovery::Suppress,
+                    multicast: false,
+                    security: true,
+                    source_route: false,
+                    destination: true,
+                    extended_source: true,
+                    end_device_initiator: false,
+                    reserved: 0b00,
+                },
+                destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                source: state.nib.nwk_network_address,
+                radius: 30,
+                sequence_number: nwk_frame.nwk_header.sequence_number,
+                destination_ieee: nwk_frame.nwk_header.source_ieee,
+                source_ieee: Some(state.nib.nwk_ieee_address),
+                multicast_control: None,
+                source_route: None,
+            },
+            aux_header: Some(NwkAuxHeader {
+                security_control: NwkSecurityHeaderControlField {
+                    security_level: NwkSecurityLevel::NoSecurity,
+                    key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                    extended_nonce: true,
+                    require_verified_frame_counter: false,
+                    reserved: 0b0,
+                },
+                frame_counter: state
+                    .nib
+                    .nwk_security_material_primary
+                    .outgoing_frame_counter,
+                extended_source: Some(state.nib.nwk_ieee_address),
+                key_sequence_number: state.nib.nwk_active_key_seq_number,
+            }),
+            payload: NwkRouteRequestCommand {
+                multicast: false,
+                many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
+                route_request_identifier: state.nib.nwk_routing_request_sequence_number,
+                destination_address: destination,
+                path_cost: 0,  // The path cost starts at 0, since we originate it
+            }
+            .serialize(),
+        }
+        .encrypt(&state.nib.nwk_security_material_primary.key)
+        .expect("Encryption somehow failed");
+
+        drop(state);
+
+        let ieee802154_frame = self.wrap_nwk_frame(&route_reply_frame);
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+        */
     }
 
     pub async fn send_aps_command(
@@ -1304,7 +1735,8 @@ impl ZigbeeStack {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            let nwk_link_status_period = { self.state.lock().unwrap().nib.nwk_link_status_period };
+            tokio::time::sleep(nwk_link_status_period).await;
 
             let mut state = self.state.lock().unwrap();
             log::debug!("Sending periodic link status broadcast");
@@ -1314,69 +1746,121 @@ impl ZigbeeStack {
                 continue;
             }
 
-            state
-                .nib
-                .nwk_security_material_primary
-                .outgoing_frame_counter = state
-                .nib
-                .nwk_security_material_primary
-                .outgoing_frame_counter
-                .wrapping_add(1);
-            state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
-
-            let link_status_frame = NwkFrame {
-                encrypted: false,
-                nwk_header: NwkHeader {
-                    frame_control: NwkFrameControl {
-                        frame_type: NwkFrameType::Command,
-                        protocol_version: 2,
-                        discover_route: NwkRouteDiscovery::Suppress,
-                        multicast: false,
-                        security: true,
-                        source_route: false,
-                        destination: false,
-                        extended_source: true,
-                        end_device_initiator: false,
-                        reserved: 0b00,
-                    },
-                    destination: Nwk(0xFFFC),
-                    source: state.nib.nwk_network_address,
-                    radius: 1,
-                    sequence_number: state.nib.nwk_sequence_number,
-                    destination_ieee: None,
-                    source_ieee: Some(state.nib.nwk_ieee_address),
-                    multicast_control: None,
-                    source_route: None,
-                },
-                aux_header: Some(NwkAuxHeader {
-                    security_control: NwkSecurityHeaderControlField {
-                        security_level: NwkSecurityLevel::NoSecurity,
-                        key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                        extended_nonce: true,
-                        require_verified_frame_counter: false,
-                        reserved: 0b0,
-                    },
-                    frame_counter: state
-                        .nib
-                        .nwk_security_material_primary
-                        .outgoing_frame_counter,
-                    extended_source: Some(state.nib.nwk_ieee_address),
-                    key_sequence_number: state.nib.nwk_active_key_seq_number,
-                }),
-                payload: NwkLinkStatusCommand {
-                    is_first_frame: true,
-                    is_last_frame: true,
-                    link_statuses: vec![],
+            // Decrement the `recent_activity` field of every active routing table entry
+            for (_, route_table_entry) in state.nib.nwk_route_table.iter_mut() {
+                if route_table_entry.status == NwkRouteStatus::Active {
+                    if route_table_entry.recent_activity > 0 {
+                        route_table_entry.recent_activity -= 1;
+                    }
                 }
-                .serialize(),
             }
-            .encrypt(&state.nib.nwk_security_material_primary.key)
-            .expect("Encryption somehow failed");
+
+            let mut link_statuses = state
+                .nib
+                .nwk_neighbor_table
+                .iter()
+                .filter_map(|(_, neighbor)| {
+                    // We only calculate link statuses for neighbors for which we have
+                    // seen more than a few packets
+                    neighbor.lqa().map(|lqa| NwkLinkStatus {
+                        address: neighbor.network_address,
+                        incoming_cost: lqa,
+                        outgoing_cost: neighbor.outgoing_cost,
+                    })
+                })
+                .collect::<Vec<_>>();
 
             drop(state);
 
-            let ieee802154_frame = self.wrap_nwk_frame(&link_status_frame);
-            self.send_802154_frame(ieee802154_frame).await;
+            // Link statuses are sorted in ascending order
+            link_statuses.sort_by(|a, b| a.address.as_u16().cmp(&b.address.as_u16()));
+
+            let max_link_statuses = 7;
+            let mut remaining_link_statuses = link_statuses.clone();
+
+            loop {
+                let mut state = self.state.lock().unwrap();
+
+                state
+                    .nib
+                    .nwk_security_material_primary
+                    .outgoing_frame_counter = state
+                    .nib
+                    .nwk_security_material_primary
+                    .outgoing_frame_counter
+                    .wrapping_add(1);
+                state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
+
+                let link_status_frame = NwkFrame {
+                    encrypted: false,
+                    nwk_header: NwkHeader {
+                        frame_control: NwkFrameControl {
+                            frame_type: NwkFrameType::Command,
+                            protocol_version: state.nib.nwkc_protocol_version,
+                            discover_route: NwkRouteDiscovery::Suppress,
+                            multicast: false,
+                            security: true,
+                            source_route: false,
+                            destination: false,
+                            extended_source: true,
+                            end_device_initiator: false,
+                            reserved: 0b00,
+                        },
+                        destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                        source: state.nib.nwk_network_address,
+                        radius: 1,
+                        sequence_number: state.nib.nwk_sequence_number,
+                        destination_ieee: None,
+                        source_ieee: Some(state.nib.nwk_ieee_address),
+                        multicast_control: None,
+                        source_route: None,
+                    },
+                    aux_header: Some(NwkAuxHeader {
+                        security_control: NwkSecurityHeaderControlField {
+                            security_level: NwkSecurityLevel::NoSecurity,
+                            key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                            extended_nonce: true,
+                            require_verified_frame_counter: false,
+                            reserved: 0b0,
+                        },
+                        frame_counter: state
+                            .nib
+                            .nwk_security_material_primary
+                            .outgoing_frame_counter,
+                        extended_source: Some(state.nib.nwk_ieee_address),
+                        key_sequence_number: state.nib.nwk_active_key_seq_number,
+                    }),
+                    payload: NwkLinkStatusCommand {
+                        is_first_frame: remaining_link_statuses.len() == link_statuses.len(),
+                        is_last_frame: remaining_link_statuses.len() <= max_link_statuses,
+                        link_statuses: if remaining_link_statuses.is_empty() {
+                            vec![]
+                        } else {
+                            // Link status frames overlap by a single entry
+                            remaining_link_statuses
+                                .drain(
+                                    ..cmp::min(
+                                        remaining_link_statuses.len(),
+                                        max_link_statuses - 1,
+                                    ),
+                                )
+                                .collect()
+                        },
+                    }
+                    .serialize(),
+                }
+                .encrypt(&state.nib.nwk_security_material_primary.key)
+                .expect("Encryption somehow failed");
+
+                drop(state);
+
+                let ieee802154_frame = self.wrap_nwk_frame(&link_status_frame);
+                self.send_802154_frame(ieee802154_frame).await;
+
+                if remaining_link_statuses.is_empty() {
+                    break;
+                }
+            }
         }
     }
 }

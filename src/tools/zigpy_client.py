@@ -241,31 +241,13 @@ async def main(host, port):
     await app.connect()
     await app.start_network()
 
-    for seq in range(1000):
-        await app.send_packet(
-            t.ZigbeePacket(
-                src_ep=123,
-                dst=t.AddrModeAddress(
-                    addr_mode=t.AddrMode.Group, address=seq % 0xFFF0,
-                ),
-                tsn=12,
-                profile_id=0x0104,
-                cluster_id=0x0006,
-                data=t.SerializableBytes(b"\x01" + bytes([seq % 255]) + b"\x00"),
-                radius=1,
-                non_member_radius=3,
-                tx_options=t.TransmitOptions.NONE,
-            )
-        )
-        await asyncio.sleep(0.1)
-
     dev = app.add_device(nwk=0x26f4, ieee=t.EUI64.convert("00:0d:6f:ff:fe:a4:f1:0b"))
     await dev.schedule_initialize()
 
     while True:
         try:
             async with asyncio.timeout(1):
-                await dev.endpoints[1].on_off.toggle()
+                await dev.endpoints[1].on_off.off()
         except asyncio.TimeoutError:
             _LOGGER.warning("Timed out...")
 

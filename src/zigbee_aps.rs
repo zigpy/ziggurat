@@ -221,8 +221,8 @@ impl ApsDataFrame {
 
         let (frame_control, remaining) = ApsFrameControl::deserialize(bytes)?;
 
-        let mut group_id = None;
-        let mut destination_endpoint = None;
+        let group_id;
+        let destination_endpoint;
 
         if frame_control.delivery_mode == ApsDeliveryMode::Multicast {
             group_id = Some(u16::from_le_bytes([remaining[0], remaining[1]]));
