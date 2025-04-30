@@ -7,7 +7,6 @@ use std::env;
 use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime::LocalRuntime;
 use tokio::sync::broadcast;
 use tokio::task::spawn_local;
 
@@ -272,33 +271,31 @@ impl ZigguratServer {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rt = LocalRuntime::new()?;
-    rt.block_on(async {
-        env_logger::builder()
-            .format_timestamp_micros()
-            .filter(None, LevelFilter::Debug)
-            //.filter_module("ziggurat::spinel", LevelFilter::Info
-            .init();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::builder()
+        .format_timestamp_micros()
+        .filter(None, LevelFilter::Debug)
+        //.filter_module("ziggurat::spinel", LevelFilter::Info
+        .init();
 
-        let args: Vec<String> = env::args().collect();
-        if args.len() < 2 {
-            eprintln!("Usage: {} <serial_path> [tcp_listen_addr]", args[0]);
-            return Ok(());
-        }
-        let serial_path = &args[1];
-        let tcp_listen_addr = args
-            .get(2)
-            .cloned()
-            .unwrap_or_else(|| "0.0.0.0:9999".to_string());
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <serial_path> [tcp_listen_addr]", args[0]);
+        return Ok(());
+    }
+    let serial_path = &args[1];
+    let tcp_listen_addr = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "0.0.0.0:9999".to_string());
 
-        let server = Arc::new(ZigguratServer::new(serial_path)?);
+    let server = Arc::new(ZigguratServer::new(serial_path)?);
 
-        let server_clone = server.clone();
-        spawn_local(async move { server_clone.start().await });
+    let server_clone = server.clone();
+    spawn_local(async move { server_clone.start().await });
 
-        server.run_tcp_server(&tcp_listen_addr).await?;
+    server.run_tcp_server(&tcp_listen_addr).await?;
 
-        Ok(())
-    })
+    Ok(())
 }
