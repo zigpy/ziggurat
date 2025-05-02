@@ -1,0 +1,13 @@
+[package]
+name = "wire-format"
+version = "0.1.0"
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+arbitrary-int = "1.3.0"
+bitvec = "1.0.1"
+thiserror = "2.0.12"
+wire-format-derive = { path = "../wire-format-derive" }

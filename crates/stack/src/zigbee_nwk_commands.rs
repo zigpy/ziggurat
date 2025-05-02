@@ -316,6 +316,7 @@ impl NwkLinkStatus {
     }
 }
 
+/// Zigbee spec compressed: 3.4.8.3
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkLinkStatusCommand {
     pub is_first_frame: bool,
