@@ -114,8 +114,15 @@ impl NwkRouteRequestCommand {
     }
 }
 
+#[wire_format::zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteReplyCommand {
+    // reserved: u3,
+    // #[wire_format(linked(originator_eui64))]
+    // reserved: bool,
+    // #[wire_format(linked(responder_eui64))]
+    // reserved: bool,
+    // reserved: u3,
     pub multicast: bool,
     pub route_request_identifier: u8,
     pub originator_nwk: Nwk,

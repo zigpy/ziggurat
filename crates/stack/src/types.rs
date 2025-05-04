@@ -1,6 +1,7 @@
 use hex;
 use std::fmt;
 
+#[wire_format::zigbee_bytes]
 #[derive(Eq, Hash, Copy, Clone, PartialEq)]
 pub struct Nwk(pub u16);
 

@@ -63,6 +63,7 @@ macro_rules! impl_zigbeebytes_for_UInt {
 impl_zigbeebytes_for_UInt! {u8, write_u8, read_u8}
 impl_zigbeebytes_for_UInt! {u16, write_u16, read_u16}
 impl_zigbeebytes_for_UInt! {u32, write_u32, read_u32}
+impl_zigbeebytes_for_UInt! {u64, write_u64, read_u64}
 
 macro_rules! impl_zigbeebytes_for_core_int {
     ($type:ty, $write_method:ident, $read_method:ident, $bits:literal) => {
@@ -90,6 +91,7 @@ macro_rules! impl_zigbeebytes_for_core_int {
 impl_zigbeebytes_for_core_int! {u8, write_u8, read_u8, 8}
 impl_zigbeebytes_for_core_int! {u16, write_u16, read_u16, 16}
 impl_zigbeebytes_for_core_int! {u32, write_u32, read_u32, 32}
+impl_zigbeebytes_for_core_int! {u64, write_u64, read_u64, 64}
 
 impl ZigbeeBytes for bool {
     fn needed_bits(&self) -> usize {
@@ -166,18 +168,25 @@ impl<'a> BitReader<'a> {
         res
     }
     fn read_u16(&mut self, n_bits: usize) -> u16 {
-        let mut res = [0u8, 0u8];
+        let mut res = [0u8; 2];
         let res_bits = BitSlice::<_, Lsb0>::from_slice_mut(&mut res);
         res_bits.copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
         self.pos += n_bits;
         u16::from_le_bytes(res)
     }
     fn read_u32(&mut self, n_bits: usize) -> u32 {
-        let mut res = [0u8, 0u8, 0u8, 0u8];
+        let mut res = [0u8; 4];
         let res_bits = BitSlice::<_, Lsb0>::from_slice_mut(&mut res);
         res_bits.copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
         self.pos += n_bits;
         u32::from_le_bytes(res)
+    }
+    fn read_u64(&mut self, n_bits: usize) -> u64 {
+        let mut res = [0u8; 8];
+        let res_bits = BitSlice::<_, Lsb0>::from_slice_mut(&mut res);
+        res_bits.copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
+        self.pos += n_bits;
+        u64::from_le_bytes(res)
     }
 }
 
@@ -210,6 +219,12 @@ impl<'a> BitWriter<'a> {
         self.pos += n_bits;
     }
     fn write_u32(&mut self, n_bits: usize, val: u32) {
+        let val = val.to_le_bytes();
+        let val = BitSlice::<_, Lsb0>::from_slice(&val);
+        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(val);
+        self.pos += n_bits;
+    }
+    fn write_u64(&mut self, n_bits: usize, val: u64) {
         let val = val.to_le_bytes();
         let val = BitSlice::<_, Lsb0>::from_slice(&val);
         self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(val);

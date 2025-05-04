@@ -1232,4 +1232,5 @@ dependencies = [
  "shellexpand",
  "strum_macros",
  "tokio",
+ "wire-format",
 ]

@@ -1,9 +1,11 @@
 use proc_macro_error2::OptionExt;
 use proc_macro2::{Punct, Spacing, TokenStream};
-use quote::{ToTokens, TokenStreamExt, quote, quote_spanned};
-use syn::spanned::Spanned;
+use quote::{ToTokens, TokenStreamExt, quote};
 
-use crate::model::{Field, Model, NormalField};
+use crate::model::{Field, Model};
+
+mod read;
+mod write;
 
 pub fn codegen(model: Model) -> TokenStream {
     if model.is_unit {
@@ -61,26 +63,30 @@ fn normal_struct(
         ..
     }: Model,
 ) -> TokenStream {
-    let struct_fields: Vec<_> = fields.iter().filter_map(Field::normal).collect();
+    let struct_fields: Vec<_> = fields.iter().filter_map(Field::needed_in_struct_def).collect();
     let write_code: Vec<_> = fields
         .iter()
         .map(|field| match field {
             Field::Unit(_) => unreachable!("unit fields not possible in normal struct"),
-            Field::Normal(normal_field) => normal_field_write_code(normal_field),
-            Field::PaddBits(in_type) => padding_field_write_code(*in_type),
+            Field::Normal(normal_field) => write::normal_field_code(normal_field),
+            Field::PaddBits(in_type) => write::padding_field_code(*in_type),
+            Field::ControlOption(controlled) => write::control_field_code(controlled),
+            Field::Option{option_stripped, ..} => write::option_field_code(option_stripped),
         })
         .collect();
     let read_code: Vec<_> = fields
         .iter()
         .map(|field| match field {
             Field::Unit(_) => unreachable!("unit fields not possible in normal struct"),
-            Field::Normal(normal_field) => normal_field_read_code(normal_field),
-            Field::PaddBits(n_bits) => padding_field_read_code(*n_bits),
+            Field::Normal(normal_field) => read::normal_field_code(normal_field),
+            Field::PaddBits(n_bits) => read::padding_field_code(*n_bits),
+            Field::ControlOption(ident) => read::control_field_code(ident),
+            Field::Option{option_stripped, ..} => read::option_field_code(option_stripped),
         })
         .collect();
     let out_struct_idents: Vec<_> = fields
         .iter()
-        .filter_map(Field::normal)
+        .filter_map(Field::needed_in_struct_def)
         .map(|f| &f.ident)
         .collect();
 
@@ -112,78 +118,6 @@ fn normal_struct(
             }
         }
     }
-}
-
-fn padding_field_write_code(n_bits: u8) -> TokenStream {
-    let n_bits = proc_macro2::Literal::usize_suffixed(n_bits as usize);
-    quote! { writer.skip(#n_bits); }
-}
-
-//
-
-fn normal_field_write_code(
-    NormalField {
-        ident,
-        out_ty,
-        bits,
-        ..
-    }: &NormalField,
-) -> TokenStream {
-    if let Some(bits) = bits {
-        let utype: syn::Type =
-            syn::parse_str(&format!("::wire_format::u{bits}")).expect("should be valid type path");
-        quote_spanned! {out_ty.span()=>
-            let #ident = #utype::new(self.#ident);
-            #ident.write_zigbee_bytes(writer)?;
-        }
-    } else {
-        quote_spanned! {out_ty.span()=>
-            self.#ident.write_zigbee_bytes(writer)?;
-        }
-    }
-}
-
-fn padding_field_read_code(n_bits: u8) -> TokenStream {
-    let n_bits = proc_macro2::Literal::usize_suffixed(n_bits as usize);
-    quote! { reader.skip(#n_bits); }
-}
-
-fn normal_field_read_code(
-    NormalField {
-        ident,
-        out_ty,
-        bits,
-        ..
-    }: &NormalField,
-) -> TokenStream {
-    if let Some(bits) = bits {
-        let utype: syn::Type =
-            syn::parse_str(&format!("::wire_format::u{bits}")).expect("should be valid type path");
-        quote_spanned! {out_ty.span()=>
-            let #ident = #utype::read_zigbee_bytes(reader)?;
-            let #ident = #ident.value();
-        }
-    } else {
-        let out_ty = generics_to_fully_qualified(out_ty.clone());
-        quote_spanned! {out_ty.span()=>
-            let #ident = #out_ty::read_zigbee_bytes(reader)?;
-        }
-    }
-}
-
-/// Turns `Type<T>` into `Type::<T>` which is needed for 
-/// `Type::<T>::read_zigbee_bytes(reader)`
-fn generics_to_fully_qualified(mut ty: syn::Type) -> syn::Type {
-    if let syn::Type::Path(typath) = &mut ty {
-        let syn::Path { segments, .. } = &mut typath.path;
-        let first_seg = segments.first_mut().expect("type path always has at least one segment");
-        let syn::PathArguments::AngleBracketed(args) = &mut first_seg.arguments else {
-            return ty;
-        };
-
-        args.colon2_token = Some(syn::Token![::](args.span()));
-    }
-    ty
 }
 
 impl ToTokens for super::model::NormalField {
