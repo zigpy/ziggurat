@@ -39,10 +39,17 @@ mod route;
 const LINK_QUALITY_SAMPLES: usize = 3; // For simplicity, keep this odd
 
 fn lqi_to_link_cost(lqi: u8) -> u8 {
-    // TODO: is a linear mapping good enough?
-
-    // Remap 0-255 to 1-7
-    ((1.0 - (lqi as f32) / 255.0) * 6.0 + 1.0).round() as u8
+    // Table 3-72. Link Cost to LQA Mapping
+    match lqi {
+        0..16 => 7,
+        17..32 => 6,
+        33..64 => 5,
+        65..96 => 4,
+        97..128 => 3,
+        129..192 => 2,
+        193..255 => 1,
+        // 0 corresponds to "no LQI"
+    }
 }
 
 #[derive(Debug)]
