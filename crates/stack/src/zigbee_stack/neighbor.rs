@@ -34,28 +34,28 @@ pub struct TableEntry {
     /// listing this device has been received.
     pub outgoing_cost: u8,
 
-    // The number of [`nwkLinkStatusPeriod`] intervals that have passed since
-    // the last link status command frame was received, up to a maximum value
-    // of [`nwkRouterAgeLimit`].
-    // pub age: `u8`,
+    /// The number of [`nwkLinkStatusPeriod`] intervals that have passed since
+    /// the last link status command frame was received, up to a maximum value
+    /// of [`nwkRouterAgeLimit`]
+    // Spec-expected field: `pub age: u8,`
     pub last_link_status_timestamp: Instant,
 
     pub incoming_beacon_timestamp: u32,
     pub beacon_transmission_time_offset: u32,
 
-    /// This value indicates at least one keep-alive has been received from the end device
+    /// This value indicates at least one keepalive has been received from the end device
     /// since the router has rebooted.
     pub keepalive_received: bool,
-    // pub mac_interface_index: u8,
+    /// pub mac_interface_index: u8,
     pub mac_unicast_bytes_transmitted: u32,
     pub mac_unicast_bytes_received: u32,
 
-    // The number of [`nwkLinkStatusPeriod`] intervals, which elapsed since this router
-    // neighbor was added to the neighbor table. This value is only maintained on
-    // routers and the coordinator and is only valid for entries with a relationship
-    // of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating
-    // up-counter, which does not roll-over.
-    //pub router_age: u16,
+    /// The number of [`nwkLinkStatusPeriod`] intervals, which elapsed since this router
+    /// neighbor was added to the neighbor table. This value is only maintained on
+    /// routers and the coordinator and is only valid for entries with a relationship
+    /// of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating
+    /// up-counter, which does not roll-over.
+    // Spec-expected field: `pub router_age: u16,`
     pub router_added_timestamp: Instant,
 
     pub router_connectivity: u8,

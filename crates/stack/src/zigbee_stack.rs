@@ -36,7 +36,7 @@ mod route;
 // The number of the most recent samples taken into consideration SHOULD be n = 3, which
 // eliminates single outliers maintains a fast response to real changes in link quality,
 // and keeps memory requirements to a minimum.
-const LINK_QUALITY_SAMPLES: usize = 3; // For simplicity, keep this odd
+const LINK_QUALITY_SAMPLES: usize = 3;
 
 fn lqi_to_link_cost(lqi: u8) -> u8 {
     // Table 3-72. Link Cost to LQA Mapping
