@@ -11,9 +11,9 @@ use crate::zigbee_aps::{
     ApsFrameType, parse_aps_frame,
 };
 use crate::zigbee_nwk::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_RX_ON_WHEN_IDLE, NwkAuxHeader, NwkFrame,
-    NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery, NwkSecurityHeaderControlField,
-    NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, BROADCAST_RX_ON_WHEN_IDLE,
+    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
+    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 use crate::zigbee_nwk_commands::{
     NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
@@ -1048,6 +1048,163 @@ impl ZigbeeStack {
         if route_reply_cmd.multicast {
             return;
         }
+
+        // Both of these fields SHALL be set according to the spec
+        if route_reply_cmd.responder_eui64.is_none() || route_reply_cmd.originator_eui64.is_none() {
+            return;
+        }
+
+        let sender_nwk = nwk_frame.nwk_header.source;
+        let rrep_id = route_reply_cmd.route_request_identifier;
+        let rrep_originator = route_reply_cmd.originator_nwk;
+        let rrep_responder = route_reply_cmd.responder_nwk;
+        let rrep_originator_eui64 = route_reply_cmd.originator_eui64.unwrap();
+        let rrep_responder_eui64 = route_reply_cmd.responder_eui64.unwrap();
+        let rrep_path_cost = route_reply_cmd.path_cost;
+
+        let mut state = self.state.lock().unwrap();
+        let our_ieee_address = state.nib.nwk_ieee_address;
+
+        let neighbor = match state
+            .nib
+            .nwk_neighbor_table
+            .values()
+            .find(|&entry| entry.network_address == sender_nwk)
+        {
+            Some(neighbor) => neighbor,
+            None => {
+                log::debug!("Ignoring route reply from unknown neighbor");
+                return;
+            }
+        };
+
+        if neighbor.outgoing_cost == 0 {
+            log::debug!("Ignoring route reply from neighbor with zero outgoing cost");
+            return;
+        }
+
+        let updated_path_cost = rrep_path_cost.saturating_add(neighbor.outgoing_cost);
+        let route_discovery_table_key = (rrep_originator, rrep_id);
+
+        // TODO: clean this up, the mutability problems caused by the shared state mutex
+        // make having two mutable borrows at once very difficult
+        let discovery_entry = match state
+            .nib
+            .nwk_route_discovery_table
+            .get(&route_discovery_table_key)
+        {
+            Some(entry) => entry,
+            None => {
+                log::debug!("Route reply for unknown route discovery, ignoring");
+                return;
+            }
+        };
+
+        let routing_entry = match state.nib.nwk_route_table.get(&rrep_responder) {
+            Some(entry) => entry,
+            None => {
+                log::debug!("Route reply with unknown responder, ignoring");
+                return;
+            }
+        };
+
+        // If we are the originator, handling is simplified
+        if rrep_originator_eui64 == our_ieee_address {
+            match routing_entry.status {
+                NwkRouteStatus::Inactive
+                | NwkRouteStatus::DiscoveryFailed  // Is this correct to have?
+                | NwkRouteStatus::DiscoveryUnderway => {
+                    log::debug!("Setting routing entry for NWK {:?} to active, with next hop {:?} (residual cost {})", 
+                        rrep_responder,
+                        sender_nwk,
+                        updated_path_cost);
+
+                    // Mutate the routing entry
+                    {
+                        let routing_entry = state
+                            .nib
+                            .nwk_route_table
+                            .get_mut(&rrep_responder).unwrap();
+                        routing_entry.status = NwkRouteStatus::Active;
+                        routing_entry.next_hop_address = sender_nwk;
+                    }
+
+                    // Mutate the discovery entry
+                    {
+                        let discovery_entry = state
+                            .nib
+                            .nwk_route_discovery_table
+                            .get_mut(&route_discovery_table_key).unwrap();
+                        discovery_entry.residual_cost = updated_path_cost;
+                    }
+
+                },
+                NwkRouteStatus::Active => {
+                    if updated_path_cost >= discovery_entry.residual_cost {
+                        log::debug!("Ignoring route reply for us with higher cost ({} > {})", updated_path_cost, discovery_entry.residual_cost);
+                        return;
+                    }
+
+
+                    log::debug!("Updating routing entry for NWK {:?} from next hop {:?} (residual cost {}) to next hop {:?} (residual cost {})",
+                        rrep_responder,
+                        routing_entry.next_hop_address,
+                        discovery_entry.residual_cost,
+                        sender_nwk,
+                        updated_path_cost);
+
+                    // Mutate the routing entry
+                    {
+                        let routing_entry = state
+                            .nib
+                            .nwk_route_table
+                            .get_mut(&rrep_responder).unwrap();
+                        routing_entry.next_hop_address = sender_nwk;
+                    }
+
+                    // Mutate the discovery entry
+                    {
+                        let discovery_entry = state
+                            .nib
+                            .nwk_route_discovery_table
+                            .get_mut(&route_discovery_table_key).unwrap();
+                        discovery_entry.residual_cost = updated_path_cost;
+                    }
+                },
+            }
+
+            return;
+        }
+
+        /*
+        // Otherwise, we need to decide if we need to update our own routes and possibly
+        // relay the frame
+        if updated_path_cost >= discovery_entry_clone.residual_cost {
+            log::debug!("Ignoring route reply with higher cost");
+            return;
+        }
+
+        routing_entry.next_hop_address = sender_nwk;
+        discovery_entry.residual_cost = updated_path_cost;
+
+        // Find the next hop to the destination
+
+
+        let relayed_route_reply_cmd = NwkRouteReplyCommand {
+            // Fields copied from received RREP:
+            multicast: false,
+            responder_nwk: rrep_responder,
+            originator_nwk: rrep_originator,
+            route_request_identifier: rrep_id,
+            routing_sequence_number: rrep_seq_num,
+            originator_eui64: route_reply_cmd.originator_eui64, // Should be present if originator IEEE was in RREQ
+            responder_eui64: route_reply_cmd.responder_eui64,
+            // Path cost updated with cost from sender:
+            path_cost: total_path_cost,
+            // TLVs not handled in minimal implementation
+            tlvs: vec![],
+        };
+        */
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
@@ -1644,7 +1801,11 @@ impl ZigbeeStack {
         aps_seq: u8,
         data: Vec<u8>,
     ) -> Result<(), String> {
-        let next_hop = self.discover_route(destination).await?;
+        let next_hop = if destination.as_u16() < BROADCAST_LOW_POWER_ROUTERS.as_u16() {
+            self.discover_route(destination).await?
+        } else {
+            destination
+        };
 
         let ieee802154_frame = self.prepare_request(
             delivery_mode,
