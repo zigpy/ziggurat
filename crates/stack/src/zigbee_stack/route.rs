@@ -14,6 +14,7 @@ pub enum Status {
 
 #[derive(Debug)]
 pub struct TableEntry {
+    /// Destination address the routing table entry is for
     pub destination: Nwk,
     pub status: Status,
 
@@ -41,6 +42,7 @@ pub struct TableEntry {
     pub sequence_number_valid: bool,
 
     /// The 16-bit network address of the next hop on the way to the destination.
+    /// This is the routing table entry's primary purpose.
     pub next_hop_address: Nwk,
 
     /// The 16-bit sequence number associated with this entry, obtained from the last

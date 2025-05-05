@@ -38,8 +38,8 @@ mod route;
 // and keeps memory requirements to a minimum.
 const LINK_QUALITY_SAMPLES: usize = 3;
 
+/// Compute the link cost (1-7) based on the LQI (0-255).
 fn lqi_to_link_cost(lqi: u8) -> u8 {
-    // Table 3-72. Link Cost to LQA Mapping
     match lqi {
         0..=16 => 7,
         17..=32 => 6,
@@ -48,7 +48,7 @@ fn lqi_to_link_cost(lqi: u8) -> u8 {
         97..=128 => 3,
         129..=192 => 2,
         193..=255 => 1,
-        // 0 corresponds to "no LQI"
+        // 0 corresponds to "unknown LQI"
     }
 }
 
