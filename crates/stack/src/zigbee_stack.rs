@@ -17,7 +17,7 @@ use crate::zigbee_nwk::{
 };
 use crate::zigbee_nwk_commands::{
     NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
-    NwkRouteRequestCommand,
+    NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
 
 use std::cmp;
@@ -130,7 +130,7 @@ pub struct Nib {
     pub nwk_max_depth: u8,
     pub nwk_neighbor_table: HashMap<Eui64, neighbor::TableEntry>,
     pub nwk_route_table: HashMap<Nwk, route::TableEntry>,
-    pub nwk_route_discovery_table: HashMap<route::RequestId, route::DiscoveryEntry>,
+    pub nwk_route_discovery_table: HashMap<(Nwk, route::RequestId), route::DiscoveryEntry>,
     pub nwk_capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
     pub nwk_max_source_route: u8,
@@ -1070,7 +1070,8 @@ impl ZigbeeStack {
             .nib
             .nwk_neighbor_table
             .values()
-            .find(|&entry| entry.network_address == sender_nwk) {
+            .find(|&entry| entry.network_address == sender_nwk)
+        {
             Some(neighbor) => neighbor,
             None => {
                 // Can we do anything here? Broadcast an unsolicited link status?
@@ -1178,7 +1179,8 @@ impl ZigbeeStack {
             .nib
             .nwk_neighbor_table
             .values()
-            .find(|&entry| entry.network_address == sender_nwk) {
+            .find(|&entry| entry.network_address == sender_nwk)
+        {
             Some(neighbor) => neighbor,
             None => {
                 // Can we do anything here? Broadcast an unsolicited link status?
@@ -1226,6 +1228,7 @@ impl ZigbeeStack {
         &self,
         delivery_mode: ApsDeliveryMode,
         destination: Nwk,
+        next_hop: Nwk,
         src_ep: u8,
         dst_ep: u8,
         cluster_id: u16,
@@ -1460,65 +1463,64 @@ impl ZigbeeStack {
         // Discover next hop route
         let mut state = self.state.lock().unwrap();
 
-        // Get a routing table entry
-        let route_table_entry = match state.nib.nwk_route_table.get(&destination) {
-            Some(route) => route,
-            None => {
-                let entry = route::TableEntry {
-                    destination,
-                    status: route::Status::Inactive,
-                    no_route_cache: false,
-                    many_to_one: false,
-                    route_record_required: false,
-                    expired: true,
-                    sequence_number_valid: false,
-                    next_hop_address: Nwk(0xFFFF),
-                    sequence_number: 0x0000,
-                    total_usage_count: 0,
-                    recent_activity: state.nib.nwk_router_age_limit,
-                };
-
-                &state
-                    .nib
-                    .nwk_route_table
-                    .insert(destination, entry)
-                    .unwrap()
+        // Check if we have an active routing table entry first
+        if let Some(route_table_entry) = state.nib.nwk_route_table.get(&destination) {
+            if route_table_entry.status == route::Status::Active {
+                assert!(route_table_entry.next_hop_address != Nwk(0xFFFF));
+                return Ok(route_table_entry.next_hop_address);
             }
-        };
-
-        // If one is active, let's use it
-        if route_table_entry.status == route::Status::Active {
-            return Ok(route_table_entry.next_hop_address);
         }
 
-        // Routing :)
-        return Ok(destination);
+        // Otherwise, send out a discovery request
+        state.nib.nwk_routing_request_sequence_number = state
+            .nib
+            .nwk_routing_request_sequence_number
+            .wrapping_add(1);
 
-        /*
-        // Otherwise, start discovery
-        let mut route_discovery_table_entry = match state
-            .nib.nwk_route_discovery_table
-            .get(&destination)
+        // Get or create a routing table entry without keeping a mutable reference
         {
-            Some(route) => route,
-            None => {
-                state.nib.nwk_routing_request_sequence_number.wrapping_add(1);
-                state.nib.nwk_route_discovery_table.insert(destination, NwkRouteDiscoveryTableEntry {
-                    route_request_id: state.nib.nwk_routing_request_sequence_number,
-                    source_address: state.nib.nwk_network_address,
-                    sender_address: Nwk(0xFFFF),
-                    forward_cost: 0,
-                    residual_cost: 0,
-                    expiration_time: Instant::now() + state.nib.nwkc_route_discovery_time,
-                }).unwrap()
-            }
-        };
+            let route_table_entry =
+                state
+                    .nib
+                    .nwk_route_table
+                    .entry(destination)
+                    .or_insert_with(|| {
+                        route::TableEntry {
+                            destination: destination,
+                            status: route::Status::Inactive,
+                            no_route_cache: false,
+                            many_to_one: false,
+                            route_record_required: false,
+                            expired: false,
+                            sequence_number_valid: false,
+                            next_hop_address: Nwk(0xFFFF), // Unknown
+                            sequence_number: 0,
+                            total_usage_count: 0,
+                            recent_activity: 0,
+                        }
+                    });
 
-        state.nib.nwk_routing_sequence_number.wrapping_add(1);
+            route_table_entry.status = route::Status::DiscoveryUnderway;
+        }
 
-        route_table_entry.status = NwkRouteStatus::DiscoveryUnderway;
-        route_table_entry.sequence_number = state.nib.nwk_routing_sequence_number;
-        route_table_entry.sequence_number_valid = true;
+        let route_request_identifier = state.nib.nwk_routing_request_sequence_number;
+        let route_discovery_table_key = (state.nib.nwk_network_address, route_request_identifier);
+
+        // We initiated discovery so insert an entry keyed by our NWK and request ID
+        let nwk_network_address = state.nib.nwk_network_address;
+        let nwkc_route_discovery_time = state.nib.nwkc_route_discovery_time;
+        state
+            .nib
+            .nwk_route_discovery_table
+            .entry(route_discovery_table_key)
+            .or_insert_with(|| route::DiscoveryEntry {
+                route_request_id: route_request_identifier,
+                source_address: nwk_network_address,
+                sender_address: Nwk(0xFFFF),
+                forward_cost: 0,
+                residual_cost: 0,
+                expiration_time: Instant::now() + nwkc_route_discovery_time,
+            });
 
         // Construct a frame
         state
@@ -1529,6 +1531,16 @@ impl ZigbeeStack {
             .nwk_security_material_primary
             .outgoing_frame_counter
             .wrapping_add(1);
+        state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
+
+        // If we know the EUI64 corresponding to the NWK, use it
+        let destination_eui64 = state.nib.nwk_address_map.iter().find_map(|(&eui64, &nwk)| {
+            if nwk == destination {
+                Some(eui64)
+            } else {
+                None
+            }
+        });
 
         let route_request_frame = NwkFrame {
             encrypted: false,
@@ -1540,16 +1552,16 @@ impl ZigbeeStack {
                     multicast: false,
                     security: true,
                     source_route: false,
-                    destination: true,
+                    destination: false,
                     extended_source: true,
                     end_device_initiator: false,
                     reserved: 0b00,
                 },
                 destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
                 source: state.nib.nwk_network_address,
-                radius: 30,
-                sequence_number: nwk_frame.nwk_header.sequence_number,
-                destination_ieee: nwk_frame.nwk_header.source_ieee,
+                radius: 2 * state.nib.nwk_max_depth,
+                sequence_number: state.nib.nwk_sequence_number,
+                destination_ieee: None,
                 source_ieee: Some(state.nib.nwk_ieee_address),
                 multicast_control: None,
                 source_route: None,
@@ -1572,9 +1584,11 @@ impl ZigbeeStack {
             payload: NwkRouteRequestCommand {
                 multicast: false,
                 many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
-                route_request_identifier: state.nib.nwk_routing_request_sequence_number,
+                route_request_identifier: route_request_identifier,
                 destination_address: destination,
-                path_cost: 0,  // The path cost starts at 0, since we originate it
+                path_cost: 0, // The path cost starts at 0, since we originate it
+                destination_eui64: destination_eui64,
+                tlvs: vec![],
             }
             .serialize(),
         }
@@ -1583,13 +1597,21 @@ impl ZigbeeStack {
 
         drop(state);
 
-        let ieee802154_frame = self.wrap_nwk_frame(&route_reply_frame);
+        // Send the packet
+        let ieee802154_frame = self.wrap_nwk_frame(&route_request_frame);
 
         let arc_self = self
             .self_weak
             .upgrade()
             .expect("Unable to upgrade self reference");
-        */
+
+        spawn_local(async move {
+            arc_self.send_802154_frame(ieee802154_frame).await;
+        });
+
+        // TODO: wait for route discovery to actually complete. For now, we will be
+        // relatively stateless and stop erroring out once the correct state is computed
+        return Err("Route discovery started".to_string());
     }
 
     pub async fn send_aps_command(
@@ -1605,9 +1627,12 @@ impl ZigbeeStack {
         aps_seq: u8,
         data: Vec<u8>,
     ) -> Result<(), String> {
+        let next_hop = self.discover_route(destination).await?;
+
         let ieee802154_frame = self.prepare_request(
             delivery_mode,
             destination,
+            next_hop,
             src_ep,
             dst_ep,
             cluster_id,
