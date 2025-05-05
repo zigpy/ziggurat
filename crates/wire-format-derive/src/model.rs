@@ -2,25 +2,39 @@ use proc_macro_error2::{OptionExt, abort};
 use proc_macro2::{Span, TokenStream, TokenTree};
 use syn::parse_quote_spanned;
 use syn::spanned::Spanned;
-use syn::{Attribute, Ident, ItemStruct, Type, Visibility, PathArguments, GenericArgument};
+use syn::{Attribute, GenericArgument, Ident, PathArguments, Visibility};
 
 pub struct Model {
-    pub is_unit: bool,
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub ident: Ident,
-    pub fields: Vec<Field>,
+    pub ty: Type,
+}
+
+pub struct EmptyVariant {
+    pub ident: Ident,
+    pub discriminant: usize,
+}
+
+pub enum Type {
+    NormalStruct(Vec<Field>),
+    UnitStruct(syn::Field),
+    Enum {
+        variants: Vec<EmptyVariant>,
+        // Extracted as Ident from parsed AST, no reason to change that
+        repr_type: Ident, 
+    },
 }
 
 #[derive(Debug)]
 pub struct NormalField {
     pub vis: Visibility,
     pub ident: Ident,
-    pub out_ty: Type,
+    pub out_ty: syn::Type,
     pub bits: Option<u8>,
 }
 
-fn out_ty_from_padding(padding: u8, span: Span) -> Type {
+fn out_ty_from_padding(padding: u8, span: Span) -> syn::Type {
     match padding {
         1..=8 => parse_quote_spanned!(span =>u8),
         9..=16 => parse_quote_spanned!(span =>u16),
@@ -52,9 +66,8 @@ impl NormalField {
 
 #[derive(Debug)]
 pub enum Field {
-    Unit(syn::Field),
     Normal(NormalField),
-    Option{
+    Option {
         option_stripped: NormalField,
         option_present: NormalField,
     },
@@ -65,22 +78,22 @@ pub enum Field {
 impl Field {
     pub fn option_stripped(&self) -> Option<&NormalField> {
         match self {
-            Field::Option{option_stripped: field, ..} => Some(field),
+            Field::Option {
+                option_stripped: field,
+                ..
+            } => Some(field),
             _ => None,
         }
     }
 
     pub fn needed_in_struct_def(&self) -> Option<&NormalField> {
         match self {
-            Field::Normal(field) | Field::Option{option_present: field, ..} => Some(field),
+            Field::Normal(field)
+            | Field::Option {
+                option_present: field,
+                ..
+            } => Some(field),
             _ => None,
-        }
-    }
-
-    pub fn unwrap_unit(&self) -> &syn::Field {
-        match self {
-            Field::Unit(field) => field,
-            _ => panic!("can not unwrap a not unit Field as unit, field: {self:?}"),
         }
     }
 }
@@ -112,18 +125,23 @@ impl From<syn::Field> for Field {
                     Self::PaddBits(padding)
                 }
             }
-            Some(_) => if let Some(option_stripped) = strip_option(field.clone()) {
-                Self::Option{option_stripped: NormalField::from(option_stripped), option_present: NormalField::from(field)}
-            } else {
-                Self::Normal(NormalField::from(field))
+            Some(_) => {
+                if let Some(option_stripped) = strip_option(field.clone()) {
+                    Self::Option {
+                        option_stripped: NormalField::from(option_stripped),
+                        option_present: NormalField::from(field),
+                    }
+                } else {
+                    Self::Normal(NormalField::from(field))
+                }
             }
-            None => Self::Unit(field),
+            None => unreachable!("unit structs are not tranformed into model::Field"),
         }
     }
 }
 
 fn strip_option(field: syn::Field) -> Option<syn::Field> {
-    let Type::Path(path) = &field.ty else {
+    let syn::Type::Path(path) = &field.ty else {
         return None;
     };
 
@@ -131,7 +149,7 @@ fn strip_option(field: syn::Field) -> Option<syn::Field> {
     if ty.ident.to_string() != "Option" {
         return None;
     }
-    
+
     let PathArguments::AngleBracketed(generics) = &ty.arguments else {
         return None;
     };
@@ -179,19 +197,51 @@ fn controls_option(field: &syn::Field) -> Option<Ident> {
 }
 
 impl Model {
-    pub(crate) fn try_from(item: ItemStruct, _attr: TokenStream) -> Self {
+    fn reject_item_generics(generics: &syn::Generics) {
+        assert!(generics.lifetimes().count() == 0, "lifetimes not supported");
         assert!(
-            item.generics.lifetimes().count() == 0,
-            "lifetimes not supported"
-        );
-        assert!(
-            item.generics.const_params().count() == 0,
+            generics.const_params().count() == 0,
             "const params not supported"
         );
         assert!(
-            item.generics.type_params().count() == 0,
+            generics.type_params().count() == 0,
             "generic types not supported"
         );
+    }
+
+    pub(crate) fn from_enum(item: syn::ItemEnum, _attr: TokenStream) -> Self {
+        Self::reject_item_generics(&item.generics);
+
+        let repr = require_repr_attr(&item.attrs, item.span());
+        let variants = item
+            .variants
+            .clone()
+            .into_iter()
+            .map(|v| EmptyVariant {
+                ident: v.ident,
+                discriminant: require_usize(
+                    v.discriminant
+                        .clone()
+                        .unwrap_or_else(|| {
+                            abort!(item.span(), "Every enum variant must have an explicit \
+                    discriminant value"; 
+                    note = "Assign a discriminant with = <number>")
+                        })
+                        .1,
+                ),
+            })
+            .collect();
+        let ty = Type::Enum { variants, repr_type: repr };
+
+        Self {
+            attrs: item.attrs,
+            vis: item.vis,
+            ident: item.ident,
+            ty,
+        }
+    }
+    pub(crate) fn from_struct(item: syn::ItemStruct, _attr: TokenStream) -> Self {
+        Self::reject_item_generics(&item.generics);
 
         let is_unit = item
             .fields
@@ -200,16 +250,57 @@ impl Model {
             .expect_or_abort("structs without fields are not supported")
             .ident
             .is_none();
-        let fields: Vec<_> = item.fields.into_iter().map(Field::from).collect();
-        check_controlled_fields(&fields);
+        let ty = if is_unit {
+            let field = item
+                .fields
+                .clone()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| abort!(item.span(), "Zero sized struct not supported"));
+            Type::UnitStruct(field)
+        } else {
+            let fields: Vec<_> = item.fields.into_iter().map(Field::from).collect();
+            check_controlled_fields(&fields);
+            Type::NormalStruct(fields)
+        };
 
         Self {
-            is_unit,
             attrs: item.attrs,
             vis: item.vis,
             ident: item.ident,
-            fields,
+            ty,
         }
+    }
+}
+
+fn require_repr_attr(attrs: &[Attribute], span: Span) -> Ident {
+    let attr = attrs
+        .iter()
+        .find(|a| a.path().is_ident("repr"))
+        .unwrap_or_else(|| abort!(span, "enum must have repr attribute"));
+
+    let list = attr
+        .meta
+        .require_list()
+        .expect("we just found an attribute therefore its non empty");
+
+    let Some(TokenTree::Ident(repr_type)) = list.tokens.clone().into_iter().next() else {
+        abort!(span, "repr attribute on enum should contain repr type");
+    };
+
+    repr_type
+}
+
+fn require_usize(expr: syn::Expr) -> usize {
+    if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Int(d),
+        ..
+    }) = expr
+    {
+        d.base10_parse()
+            .expect("only valid numbers can be enum discriminant")
+    } else {
+        unreachable!("only digits form a valid enum discriminant expression")
     }
 }
 

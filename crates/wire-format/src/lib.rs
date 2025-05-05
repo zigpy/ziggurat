@@ -6,7 +6,8 @@ pub use wire_format_derive::zigbee_bytes;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FromBytesError {
-    // #[error("")]
+    #[error("Got invalid discriminant {got} while deserializing enum {ty}")]
+    InvalidDiscriminant { ty: &'static str, got: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
