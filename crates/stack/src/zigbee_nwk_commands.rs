@@ -121,7 +121,9 @@ pub struct NwkRouteReplyCommand {
     pub originator_nwk: Nwk,
     pub responder_nwk: Nwk,
     pub path_cost: u8,
+    /// According to the spec, the originator EUI64 field technically should always be set
     pub originator_eui64: Option<Eui64>,
+    /// According to the spec, the responder EUI64 field technically should always be set
     pub responder_eui64: Option<Eui64>,
     pub tlvs: Vec<u8>,
 }

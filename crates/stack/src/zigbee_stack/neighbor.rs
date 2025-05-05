@@ -67,18 +67,27 @@ pub struct TableEntry {
 
 impl TableEntry {
     pub fn lqa(&self) -> Option<u8> {
-        if self.lqas.len() < LINK_QUALITY_SAMPLES {
+        let num_samples = self.lqas.len();
+        if num_samples < LINK_QUALITY_SAMPLES {
             return None;
         }
 
-        let mut lqas = Vec::from(self.lqas.clone());
-        lqas.sort_by(|a, b| a.cmp(b));
-        let median = lqas
-            .into_iter()
-            .map(|x| lqi_to_link_cost(x))
-            .collect::<Vec<u8>>()[LINK_QUALITY_SAMPLES / 2];
+        let mut sorted_lqas = Vec::from(self.lqas.clone());
+        sorted_lqas.sort_unstable();
 
-        Some(median)
+        // Calculate median
+        if num_samples % 2 == 1 {
+            return Some(sorted_lqas[num_samples / 2]);
+        } else {
+            // Average of the two middle elements for even number of samples
+            let mid1 = sorted_lqas[num_samples / 2 - 1];
+            let mid2 = sorted_lqas[num_samples / 2];
+            return Some(((mid1 as u16 + mid2 as u16) / 2) as u8);
+        };
+    }
+
+    pub fn incoming_link_cost(&self) -> u8 {
+        self.lqa().map_or(0, |lqa| lqi_to_link_cost(lqa))
     }
 }
 
