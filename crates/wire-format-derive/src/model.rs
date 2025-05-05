@@ -117,7 +117,7 @@ fn padding_from_type(ty: &syn::Type) -> Result<u8, (&'static str, Span)> {
 impl From<syn::Field> for Field {
     fn from(field: syn::Field) -> Self {
         match &field.ident {
-            Some(ident) if ident.to_string() == "reserved" => {
+            Some(ident) if *ident == "reserved" => {
                 if let Some(option_ident) = controls_option(&field) {
                     Self::ControlOption(option_ident)
                 } else {
@@ -147,7 +147,7 @@ fn strip_option(field: syn::Field) -> Option<syn::Field> {
     };
 
     let ty = &path.path.segments.first()?;
-    if ty.ident.to_string() != "Option" {
+    if ty.ident != "Option" {
         return None;
     }
 
@@ -171,7 +171,7 @@ fn controls_option(field: &syn::Field) -> Option<Ident> {
         };
         let mut tokens = list.tokens.clone().into_iter();
         match tokens.next() {
-            Some(TokenTree::Ident(ident)) if ident.to_string() == "controls" => (),
+            Some(TokenTree::Ident(ident)) if ident == "controls" => (),
             _ => return Err(()),
         }
         match tokens.next() {
@@ -302,7 +302,7 @@ fn verify_all_discriminants_fit(variants: &[EmptyVariant], bits: usize) {
 fn get_num_bits(attr: TokenStream) -> Result<usize, ()> {
     let mut tokens = attr.into_iter();
     match tokens.next() {
-        Some(TokenTree::Ident(item)) if item.to_string() == "bits" => (),
+        Some(TokenTree::Ident(item)) if item == "bits" => (),
         _ => return Err(()),
     }
 
@@ -315,7 +315,7 @@ fn get_num_bits(attr: TokenStream) -> Result<usize, ()> {
         return Err(());
     };
 
-    num.to_string().parse().map_err(|_| (()))
+    num.to_string().parse().map_err(|_| ())
 }
 
 fn require_repr_attr(attrs: &[Attribute], span: Span) -> Ident {

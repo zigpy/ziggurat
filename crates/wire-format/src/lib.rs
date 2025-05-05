@@ -175,7 +175,7 @@ pub struct BitReader<'a> {
     buf: &'a BitSlice<u8, Lsb0>,
 }
 
-impl<'a> BitReader<'a> {
+impl BitReader<'_> {
     pub fn skip(&mut self, n_bits: usize) {
         self.pos += n_bits;
     }
@@ -226,7 +226,7 @@ impl<'a> From<&'a [u8]> for BitReader<'a> {
     }
 }
 
-impl<'a> BitWriter<'a> {
+impl BitWriter<'_> {
     pub fn skip(&mut self, n_bits: usize) {
         self.pos += n_bits;
     }
