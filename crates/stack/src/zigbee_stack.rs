@@ -5,6 +5,7 @@ use crate::ieee_802154::{
 use crate::spinel::{SpinelFramePropValueIs, SpinelPropertyId, SpinelStatus};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
 use crate::types::{Eui64, Key, Nwk, PanId};
+
 use crate::zigbee_aps::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl,
     ApsFrameType, parse_aps_frame,
@@ -90,6 +91,9 @@ pub struct NwkBroadcastTransaction {
     pub source_nwk: Nwk,
     pub sequence_number: u8,
     pub expiration_time: Instant,
+    // The spec does not describe how this is supposed to be implemented so we just do
+    // it naively
+    // pub relayed_neighbors: HashMap<Eui64, Instant>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -290,10 +294,10 @@ pub struct Nib {
     pub nwk_manager_addr: Nwk,
     pub nwk_max_source_route: u8,
     pub nwk_update_id: u8,
-    pub nwk_transaction_persistence_time: u16,
+    pub nwk_transaction_persistence_time: Duration,
     pub nwk_network_address: Nwk,
     pub nwk_stack_profile: u8,
-    pub nwk_broadcast_transaction_table: Vec<NwkBroadcastTransaction>,
+    pub nwk_broadcast_transaction_table: HashMap<(Nwk, u8), NwkBroadcastTransaction>,
     pub nwk_extended_pan_id: Eui64,
     pub nwk_route_record_table: HashMap<Nwk, Vec<Nwk>>,
     pub nwk_is_concentrator: bool,
@@ -417,10 +421,10 @@ impl Nib {
             nwk_manager_addr: Nwk(0x0000),
             nwk_max_source_route: 12,
             nwk_update_id: 0,
-            nwk_transaction_persistence_time: 7680,
+            nwk_transaction_persistence_time: Duration::from_millis(7680),
             nwk_network_address: Nwk(0x0000),
             nwk_stack_profile: 2,
-            nwk_broadcast_transaction_table: Vec::new(),
+            nwk_broadcast_transaction_table: HashMap::new(),
             nwk_extended_pan_id: Eui64::from_hex("0000000000000000"),
             nwk_route_record_table: HashMap::new(),
             nwk_is_concentrator: true,
@@ -508,6 +512,7 @@ pub struct ZigbeeStackState {
     pub ieee802154_sequence_number: u8,
     pub nib: Nib,
     pub pending_aps_acks: HashMap<ApsAckData, oneshot::Sender<()>>,
+    pub start_time: Option<Instant>,
 }
 
 impl ZigbeeStackState {
@@ -517,6 +522,7 @@ impl ZigbeeStackState {
             ieee802154_sequence_number: 0,
             nib: Nib::new(),
             pending_aps_acks: HashMap::new(),
+            start_time: None,
         }
     }
 }
@@ -755,6 +761,9 @@ impl ZigbeeStack {
             .await
             .expect("Failed to enable the RAW stream");
 
+        // This is treated as the start time of the stack
+        state.start_time = Some(Instant::now());
+
         Ok(())
     }
 
@@ -931,6 +940,43 @@ impl ZigbeeStack {
         }
     }
 
+    /// Filter broadcast frames based on the NWK broadcast transaction table
+    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let broadcast_delivery_time = state.nib.nwkc_broadcast_delivery_time;
+
+        // We cannot handle broadcasts until the network has been running for at least
+        // the time it takes to deliver one broadcast
+        if state.start_time.is_none() || state.start_time.unwrap() + broadcast_delivery_time > now {
+            log::debug!("Filtering broadcast, network started too recently.");
+            return true;
+        }
+
+        let key = (
+            nwk_frame.nwk_header.source,
+            nwk_frame.nwk_header.sequence_number,
+        );
+
+        // Clean a stale entry first, if one exists.
+        if let Some(entry) = state.nib.nwk_broadcast_transaction_table.get(&key) {
+            if entry.expiration_time > now {
+                return true;
+            }
+        }
+
+        state.nib.nwk_broadcast_transaction_table.insert(
+            key,
+            NwkBroadcastTransaction {
+                source_nwk: nwk_frame.nwk_header.source,
+                sequence_number: nwk_frame.nwk_header.sequence_number,
+                expiration_time: now + broadcast_delivery_time,
+            },
+        );
+
+        return false;
+    }
+
     pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, lqi: u8, rssi: i8) {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header {
@@ -959,6 +1005,18 @@ impl ZigbeeStack {
                 self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
             }
             None => {}
+        }
+
+        // Handle LQA calculation
+        self.maybe_recompute_lqa(nwk_frame, lqi, rssi);
+
+        // Ignore frames that aren't destined for us
+        if nwk_frame.nwk_header.destination.as_u16()
+            >= BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
+            && self.filter_broadcast(&nwk_frame)
+        {
+            log::debug!("Filtering broadcast, stopping further processing");
+            return;
         }
 
         // Handle NWK commands
@@ -1000,9 +1058,6 @@ impl ZigbeeStack {
                 }
             }
         }
-
-        // Handle LQA calculation
-        self.maybe_recompute_lqa(nwk_frame, lqi, rssi);
     }
 
     fn maybe_recompute_lqa(&self, nwk_frame: &NwkFrame, lqi: u8, rssi: i8) {
