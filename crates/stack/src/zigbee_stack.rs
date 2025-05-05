@@ -1101,6 +1101,8 @@ impl ZigbeeStack {
             .outgoing_frame_counter
             .wrapping_add(1);
 
+        state.nib.nwk_sequence_number.wrapping_add(1);
+
         let route_reply_frame = NwkFrame {
             encrypted: false,
             nwk_header: NwkHeader {
@@ -1118,8 +1120,8 @@ impl ZigbeeStack {
                 },
                 destination: nwk_frame.nwk_header.source,
                 source: state.nib.nwk_network_address,
-                radius: 30,
-                sequence_number: nwk_frame.nwk_header.sequence_number,
+                radius: 2 * state.nib.nwk_max_depth,
+                sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: nwk_frame.nwk_header.source_ieee,
                 source_ieee: Some(state.nib.nwk_ieee_address),
                 multicast_control: None,
