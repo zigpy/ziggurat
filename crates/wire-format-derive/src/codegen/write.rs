@@ -5,6 +5,8 @@ use syn::spanned::Spanned;
 
 use crate::model::NormalField;
 
+use super::is_primitive;
+
 pub fn padding_field_code(n_bits: u8) -> TokenStream {
     let n_bits = proc_macro2::Literal::usize_suffixed(n_bits as usize);
     quote! { writer.skip(#n_bits); }
@@ -60,6 +62,21 @@ pub fn control_field_code(controlled: &Ident) -> TokenStream {
             true.write_zigbee_bytes(writer)?;
         } else {
             false.write_zigbee_bytes(writer)?;
+        }
+    }
+}
+
+pub(crate) fn enum_code(repr: Ident, bits: usize) -> TokenStream {
+    if is_primitive(bits) {
+        quote_spanned! {repr.span()=>
+            ::wire_format::ZigbeeBytes::write_zigbee_bytes(&(*self as #repr), writer)
+        }
+    } else {
+    let utype: syn::Type = 
+        syn::parse_str(&format!("::wire_format::u{bits}")).expect("valid type path");
+        quote_spanned! {repr.span()=>
+            let discriminant = #utype::new(*self as #repr);
+            ::wire_format::ZigbeeBytes::write_zigbee_bytes(&discriminant, writer)
         }
     }
 }

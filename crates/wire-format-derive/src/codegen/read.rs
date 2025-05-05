@@ -3,7 +3,8 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::Ident;
 use syn::spanned::Spanned;
 
-use crate::model::NormalField;
+use crate::codegen::is_primitive;
+use crate::model::{EmptyVariant, NormalField};
 
 pub fn padding_field_code(n_bits: u8) -> TokenStream {
     let n_bits = proc_macro2::Literal::usize_suffixed(n_bits as usize);
@@ -44,6 +45,38 @@ pub fn option_field_code(field: &NormalField) -> TokenStream {
         } else {
             None
         };
+    }
+}
+
+pub fn enum_code(variants: &[EmptyVariant], repr: Ident, bits: usize) -> TokenStream {
+    let variants_discriminants = variants
+        .iter()
+        .map(|v| v.discriminant)
+        .map(proc_macro2::Literal::usize_unsuffixed);
+    let variant_idents = variants.iter().map(|v| &v.ident);
+
+    let read_discriminant = if is_primitive(bits) {
+        quote_spanned! {repr.span()=>
+            let discriminant = #repr::read_zigbee_bytes(reader)?;
+        }
+    } else {
+        let utype: syn::Type =
+            syn::parse_str(&format!("::wire_format::u{bits}")).expect("valid type path");
+        quote_spanned! {repr.span()=>
+            let discriminant = #utype::read_zigbee_bytes(reader)?;
+            let discriminant = discriminant.value();
+        }
+    };
+
+    quote! {
+        #read_discriminant;
+        match discriminant {
+            #(#variants_discriminants => Ok(Self::#variant_idents)),*,
+            invalid => Err(::wire_format::FromBytesError::InvalidDiscriminant {
+                ty: std::any::type_name::<Self>(),
+                got: discriminant as usize,
+            }),
+        }
     }
 }
 

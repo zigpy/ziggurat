@@ -5,7 +5,7 @@ use wire_format::{u1, u2, u3, u4, zigbee_bytes};
 // pub struct Eui64(pub [u8; 8]);
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
-#[wire_format::zigbee_bytes] // TODO num bits
+#[wire_format::zigbee_bytes(bits=2)] // TODO num bits
 #[repr(u8)]
 pub enum NwkRouteRequestManyToOne {
     NotManyToOne = 0,
@@ -13,6 +13,7 @@ pub enum NwkRouteRequestManyToOne {
     ManyToOneSenderDoesntSupportRouteRecordTable = 2,
     Reserved = 3,
 }
+
 
 // #[wire_format::zigbee_bytes]
 // struct TestEnum {

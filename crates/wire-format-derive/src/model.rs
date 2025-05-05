@@ -20,9 +20,10 @@ pub enum Type {
     NormalStruct(Vec<Field>),
     UnitStruct(syn::Field),
     Enum {
+        bits: usize,
         variants: Vec<EmptyVariant>,
         // Extracted as Ident from parsed AST, no reason to change that
-        repr_type: Ident, 
+        repr_type: Ident,
     },
 }
 
@@ -209,11 +210,15 @@ impl Model {
         );
     }
 
-    pub(crate) fn from_enum(item: syn::ItemEnum, _attr: TokenStream) -> Self {
+    pub(crate) fn from_enum(item: syn::ItemEnum, attr: TokenStream) -> Self {
+        let Ok(bits) = get_num_bits(attr) else {
+            abort!(item.span(), "Every enum must be attributed with its serialized size \
+                in bits."; note = "Example: #[wire_format::zigbee_bytes(bits=2)]");
+        };
         Self::reject_item_generics(&item.generics);
 
         let repr = require_repr_attr(&item.attrs, item.span());
-        let variants = item
+        let variants: Vec<_> = item
             .variants
             .clone()
             .into_iter()
@@ -231,7 +236,13 @@ impl Model {
                 ),
             })
             .collect();
-        let ty = Type::Enum { variants, repr_type: repr };
+        verify_all_discriminants_fit(&variants, bits);
+
+        let ty = Type::Enum {
+            bits,
+            variants,
+            repr_type: repr,
+        };
 
         Self {
             attrs: item.attrs,
@@ -271,6 +282,40 @@ impl Model {
             ty,
         }
     }
+}
+
+fn verify_all_discriminants_fit(variants: &[EmptyVariant], bits: usize) {
+    let biggest = variants
+        .iter()
+        .max_by_key(|var| var.discriminant)
+        .expect("zero size enums are not supported");
+    if biggest.discriminant >= 2usize.pow(bits as u32) {
+        abort!(
+            biggest.ident.span(),
+            "The discriminant for {} does not fit into {} bits",
+            biggest.ident,
+            bits
+        );
+    }
+}
+
+fn get_num_bits(attr: TokenStream) -> Result<usize, ()> {
+    let mut tokens = attr.into_iter();
+    match tokens.next() {
+        Some(TokenTree::Ident(item)) if item.to_string() == "bits" => (),
+        _ => return Err(()),
+    }
+
+    match tokens.next() {
+        Some(TokenTree::Punct(punct)) if punct.as_char() == '=' => (),
+        _ => return Err(()),
+    }
+
+    let Some(TokenTree::Literal(num)) = tokens.next() else {
+        return Err(());
+    };
+
+    num.to_string().parse().map_err(|_| (()))
 }
 
 fn require_repr_attr(attrs: &[Attribute], span: Span) -> Ident {

@@ -18,7 +18,8 @@ pub fn codegen(model: Model) -> TokenStream {
         crate::model::Type::Enum {
             variants,
             repr_type: repr,
-        } => normal_enum(model.vis, model.ident, model.attrs, variants, repr),
+            bits,
+        } => normal_enum(model.vis, model.ident, model.attrs, variants, repr, bits),
     }
 }
 
@@ -28,14 +29,13 @@ fn normal_enum(
     attrs: Vec<Attribute>,
     variants: Vec<EmptyVariant>,
     repr: Ident,
+    bits: usize,
 ) -> TokenStream {
-    let variants_discriminants = variants
-        .iter()
-        .map(|v| v.discriminant)
-        .map(proc_macro2::Literal::usize_unsuffixed);
-    let variant_idents = variants.iter().map(|v| &v.ident);
 
-    let res = quote! {
+    let write_code = write::enum_code(repr.clone(), bits);
+    let read_code = read::enum_code(&variants, repr, bits);
+
+    quote! {
         #(#attrs)*
         #vis enum #ident {
             #(#variants),*
@@ -44,30 +44,21 @@ fn normal_enum(
         #[automatically_derived]
         impl ::wire_format::ZigbeeBytes for #ident {
             fn needed_bits(&self) -> usize {
-                todo!()
+                #bits
             }
             fn write_zigbee_bytes(&self, writer: &mut ::wire_format::BitWriter)
             -> Result<(), ::wire_format::ToBytesError> {
-                ::wire_format::ZigbeeBytes::write_zigbee_bytes(&(*self as #repr), writer)
+                #write_code
             }
             fn read_zigbee_bytes(reader: &mut ::wire_format::BitReader)
             -> Result<Self, ::wire_format::FromBytesError>
             where
                 Self: Sized
             {
-                let discriminant = #repr::read_zigbee_bytes(reader)?;
-                match discriminant {
-                    #(#variants_discriminants => Ok(#ident::#variant_idents)),*,
-                    invalid => Err(::wire_format::FromBytesError::InvalidDiscriminant {
-                        ty: std::any::type_name::<Self>(),
-                        got: discriminant as usize,
-                    }),
-                }
+                #read_code
             }
         }
-    };
-    eprintln!("{}", res);
-    res
+    }
 }
 
 fn unit_struct(
@@ -187,4 +178,8 @@ impl ToTokens for super::model::EmptyVariant {
 
         proc_macro2::Literal::usize_unsuffixed(self.discriminant).to_tokens(tokens)
     }
+}
+
+pub fn is_primitive(bits: usize) -> bool {
+    bits == 8 || bits == 16 || bits == 32 || bits == 64
 }
