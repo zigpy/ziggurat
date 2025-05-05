@@ -82,7 +82,7 @@ pub fn enum_code(variants: &[EmptyVariant], repr: Ident, bits: usize) -> TokenSt
 
 /// Turns `Type<T>` into `Type::<T>` which is needed for
 /// `Type::<T>::read_zigbee_bytes(reader)`
-fn generics_to_fully_qualified(mut ty: syn::Type) -> syn::Type {
+pub fn generics_to_fully_qualified(mut ty: syn::Type) -> syn::Type {
     if let syn::Type::Path(typath) = &mut ty {
         let syn::Path { segments, .. } = &mut typath.path;
         let first_seg = segments

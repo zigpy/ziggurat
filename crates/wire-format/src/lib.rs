@@ -112,9 +112,35 @@ impl ZigbeeBytes for bool {
     }
 }
 
+impl<const N: usize, T: ZigbeeBytes + Sized> ZigbeeBytes for [T; N] {
+    fn needed_bits(&self) -> usize {
+        self.iter().map(|item| item.needed_bits()).sum()
+    }
+
+    fn write_zigbee_bytes(&self, writer: &mut BitWriter) -> Result<(), ToBytesError> {
+        for element in self.iter() {
+            element.write_zigbee_bytes(writer)?;
+        }
+        Ok(())
+    }
+    fn read_zigbee_bytes(reader: &mut BitReader) -> Result<Self, FromBytesError>
+    where
+        Self: Sized,
+    {
+        let mut res = Vec::new();
+        for _ in 0..N {
+            res.push(T::read_zigbee_bytes(reader)?);
+        }
+
+        res.try_into()
+            .map_err(|_| unreachable!("for loop ensures vec length matches array's"))
+    }
+}
+
 impl<T: ZigbeeBytes> ZigbeeBytes for Vec<T> {
     fn needed_bits(&self) -> usize {
-        self.len() * core::mem::size_of::<T>()
+        const SIZE_OF_LEN: usize = 1;
+        SIZE_OF_LEN + self.iter().map(|item| item.needed_bits()).sum::<usize>()
     }
 
     fn write_zigbee_bytes(&self, writer: &mut BitWriter) -> Result<(), ToBytesError> {

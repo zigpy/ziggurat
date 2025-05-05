@@ -86,7 +86,7 @@ fn unit_struct(
             where
                 Self: Sized
             {
-                Ok(Self(#field_ty::read_zigbee_bytes(reader)?))
+                Ok(Self(<#field_ty>::read_zigbee_bytes(reader)?))
             }
         }
     }
