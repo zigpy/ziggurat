@@ -41,13 +41,13 @@ const LINK_QUALITY_SAMPLES: usize = 3;
 fn lqi_to_link_cost(lqi: u8) -> u8 {
     // Table 3-72. Link Cost to LQA Mapping
     match lqi {
-        0..16 => 7,
-        17..32 => 6,
-        33..64 => 5,
-        65..96 => 4,
-        97..128 => 3,
-        129..192 => 2,
-        193..255 => 1,
+        0..=16 => 7,
+        17..=32 => 6,
+        33..=64 => 5,
+        65..=96 => 4,
+        97..=128 => 3,
+        129..=192 => 2,
+        193..=255 => 1,
         // 0 corresponds to "no LQI"
     }
 }
@@ -757,7 +757,7 @@ impl ZigbeeStack {
 
         // TODO: all 802.15.4 frames should be coming in with 16 bit addressing, right?
         let source_nwk = match frame.src_address {
-            Some(Ieee802154Address::Nwk(nwk)) => nwk,
+            Some(Ieee802154Address::Nwk(nwk)) => Some(nwk),
             _ => None,
         };
 
@@ -1017,18 +1017,6 @@ impl ZigbeeStack {
         log::debug!("Updated neighbor table entry: {neighbor_entry:#?}");
     }
 
-    fn get_neighbor_by_nwk(
-        &self,
-        state: &ZigbeeStackState,
-        nwk_addr: Nwk,
-    ) -> Option<NwkNeighborTableEntry> {
-        state
-            .nib
-            .nwk_neighbor_table
-            .values()
-            .find(|&entry| entry.network_address == nwk_addr)
-    }
-
     fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
         let route_reply_cmd = match NwkRouteReplyCommand::from_bytes(&nwk_frame.payload) {
             Ok(cmd) => cmd,
@@ -1056,10 +1044,33 @@ impl ZigbeeStack {
 
         log::info!("Route request command frame: {:#?}", route_request_cmd);
 
+        let nwk_network_address = self.state.lock().unwrap().nib.nwk_network_address;
+
+        // TODO: for now, only handle route requests back to us
+        if route_request_cmd.destination_address == nwk_network_address
+            || route_request_cmd.destination_eui64 == route_request_cmd.destination_eui64
+        {
+            self.handle_route_request_self(nwk_frame, &route_request_cmd, sender_nwk);
+        } else {
+            self.handle_route_request_relay(nwk_frame, &route_request_cmd, sender_nwk);
+        }
+    }
+
+    /// Handle route requests that are destined for us (or our child)
+    fn handle_route_request_self(
+        &self,
+        nwk_frame: &NwkFrame,
+        route_request_cmd: &NwkRouteRequestCommand,
+        sender_nwk: Nwk,
+    ) {
         let mut state = self.state.lock().unwrap();
 
         // We need to know who sent the frame
-        let neighbor = match self.get_neighbor_by_nwk(sender_nwk) {
+        let sender_neighbor = match state
+            .nib
+            .nwk_neighbor_table
+            .values()
+            .find(|&entry| entry.network_address == sender_nwk) {
             Some(neighbor) => neighbor,
             None => {
                 // Can we do anything here? Broadcast an unsolicited link status?
@@ -1068,24 +1079,6 @@ impl ZigbeeStack {
             }
         };
 
-        // TODO: for now, only handle route requests back to us
-        if route_request_cmd.destination_address == state.nib.nwk_network_address
-            || route_request_cmd.destination_eui64 == Some(route_request_cmd.destination_eui64)
-        {
-            self.handle_route_request_self(state, nwk_frame, &route_request_cmd, &neighbor);
-        } else {
-            self.handle_route_request_relay(state, nwk_frame, &route_request_cmd, &neighbor);
-        }
-    }
-
-    /// Handle route requests that are destined for us (or our child)
-    fn handle_route_request_self(
-        &self,
-        state: &mut ZigbeeStackState,
-        nwk_frame: &NwkFrame,
-        route_request_cmd: &NwkRouteRequestCommand,
-        sender_neighbor: &NwkNeighborTableEntry,
-    ) {
         let path_cost = sender_neighbor.incoming_link_cost();
         if path_cost == 0 {
             log::warn!("Path cost to neighbor is 0, not sending route reply");
@@ -1101,7 +1094,7 @@ impl ZigbeeStack {
             .outgoing_frame_counter
             .wrapping_add(1);
 
-        state.nib.nwk_sequence_number.wrapping_add(1);
+        state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
 
         let route_reply_frame = NwkFrame {
             encrypted: false,
@@ -1174,11 +1167,25 @@ impl ZigbeeStack {
     /// Handle route requests that we should consider relaying
     fn handle_route_request_relay(
         &self,
-        state: &mut ZigbeeStackState,
         nwk_frame: &NwkFrame,
         route_request_cmd: &NwkRouteRequestCommand,
-        sender_neighbor: &NwkNeighborTableEntry,
+        sender_nwk: Nwk,
     ) {
+        let mut state = self.state.lock().unwrap();
+
+        // We need to know who sent the frame
+        let sender_neighbor = match state
+            .nib
+            .nwk_neighbor_table
+            .values()
+            .find(|&entry| entry.network_address == sender_nwk) {
+            Some(neighbor) => neighbor,
+            None => {
+                // Can we do anything here? Broadcast an unsolicited link status?
+                log::warn!("Route request relayer not found in neighbor table");
+                return;
+            }
+        };
     }
 
     fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
@@ -1699,7 +1706,7 @@ impl ZigbeeStack {
                     // seen more than a few packets
                     neighbor.lqa().map(|lqa| NwkLinkStatus {
                         address: neighbor.network_address,
-                        incoming_cost: lqa,
+                        incoming_cost: lqi_to_link_cost(lqa),
                         outgoing_cost: neighbor.outgoing_cost,
                     })
                 })
