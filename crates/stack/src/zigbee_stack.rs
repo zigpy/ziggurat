@@ -355,6 +355,12 @@ pub struct State {
     pub nib: Nib,
     pub pending_aps_acks: HashMap<ApsAckData, oneshot::Sender<()>>,
     pub start_time: Option<Instant>,
+
+    // We intentionally violate the spec with these options
+    /// The spec mandates that broadcasts be deduplicated only after the stack has been
+    /// running for at least 10s, to avoid having our own broadcasts be received. This
+    /// slows down development so we will allow it to be disabled.
+    pub hack_ignore_broadcast_startup_wait_period: bool,
 }
 
 impl State {
@@ -365,6 +371,8 @@ impl State {
             nib: Nib::new(),
             pending_aps_acks: HashMap::new(),
             start_time: None,
+
+            hack_ignore_broadcast_startup_wait_period: true,
         }
     }
 }
@@ -604,6 +612,12 @@ impl ZigbeeStack {
 
         // This is treated as the start time of the stack
         state.start_time = Some(Instant::now());
+        drop(state);
+
+        // To kick things off, send a link status broadcast. Silicon Labs routers will
+        // "respond" to empty link status broadcasts proactively, independent of the
+        // link status period
+        self.send_link_status_broadcast(true).await;
 
         Ok(())
     }
@@ -787,7 +801,10 @@ impl ZigbeeStack {
 
         // We cannot handle broadcasts until the network has been running for at least
         // the time it takes to deliver one broadcast
-        if state.start_time.is_none() || state.start_time.unwrap() + broadcast_delivery_time > now {
+        if !state.hack_ignore_broadcast_startup_wait_period
+            && (state.start_time.is_none()
+                || state.start_time.unwrap() + broadcast_delivery_time > now)
+        {
             log::debug!("Filtering broadcast, network started too recently.");
             return true;
         }
@@ -1700,29 +1717,26 @@ impl ZigbeeStack {
         Ok(())
     }
 
-    pub async fn periodic_link_status_broadcast_task(&self) {
-        loop {
-            let nwk_link_status_period = { self.state.lock().unwrap().nib.nwk_link_status_period };
-            tokio::time::sleep(nwk_link_status_period).await;
+    pub async fn send_link_status_broadcast(&self, empty: bool) {
+        let mut state = self.state.lock().unwrap();
+        log::debug!("Sending periodic link status broadcast");
 
-            let mut state = self.state.lock().unwrap();
-            log::debug!("Sending periodic link status broadcast");
+        if state.nib.nwk_network_address == Nwk(0xFFFF) {
+            log::debug!("Skipping, stack has not been initialized yet");
+            return;
+        }
 
-            if state.nib.nwk_network_address == Nwk(0xFFFF) {
-                log::debug!("Skipping, stack has not been initialized yet");
-                continue;
-            }
-
-            // Decrement the `recent_activity` field of every active routing table entry
-            for (_, route_table_entry) in state.nib.nwk_route_table.iter_mut() {
-                if route_table_entry.status == route::Status::Active {
-                    if route_table_entry.recent_activity > 0 {
-                        route_table_entry.recent_activity -= 1;
-                    }
+        // Decrement the `recent_activity` field of every active routing table entry
+        for (_, route_table_entry) in state.nib.nwk_route_table.iter_mut() {
+            if route_table_entry.status == route::Status::Active {
+                if route_table_entry.recent_activity > 0 {
+                    route_table_entry.recent_activity -= 1;
                 }
             }
+        }
 
-            let mut link_statuses = state
+        let mut link_statuses = if !empty {
+            state
                 .nib
                 .nwk_neighbor_table
                 .iter()
@@ -1735,99 +1749,105 @@ impl ZigbeeStack {
                         outgoing_cost: neighbor.outgoing_cost,
                     })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        drop(state);
+
+        // Link statuses are sorted in ascending order
+        link_statuses.sort_by(|a, b| a.address.as_u16().cmp(&b.address.as_u16()));
+
+        let max_link_statuses = 7;
+        let mut remaining_link_statuses = link_statuses.clone();
+
+        loop {
+            let mut state = self.state.lock().unwrap();
+
+            state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter = state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter
+                .wrapping_add(1);
+            state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
+
+            let link_status_frame = NwkFrame {
+                encrypted: false,
+                nwk_header: NwkHeader {
+                    frame_control: NwkFrameControl {
+                        frame_type: NwkFrameType::Command,
+                        protocol_version: state.nib.nwkc_protocol_version,
+                        discover_route: NwkRouteDiscovery::Suppress,
+                        multicast: false,
+                        security: true,
+                        source_route: false,
+                        destination: false,
+                        extended_source: true,
+                        end_device_initiator: false,
+                        reserved: 0b00,
+                    },
+                    destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                    source: state.nib.nwk_network_address,
+                    radius: 1,
+                    sequence_number: state.nib.nwk_sequence_number,
+                    destination_ieee: None,
+                    source_ieee: Some(state.nib.nwk_ieee_address),
+                    multicast_control: None,
+                    source_route: None,
+                },
+                aux_header: Some(NwkAuxHeader {
+                    security_control: NwkSecurityHeaderControlField {
+                        security_level: NwkSecurityLevel::NoSecurity,
+                        key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                        extended_nonce: true,
+                        require_verified_frame_counter: false,
+                        reserved: 0b0,
+                    },
+                    frame_counter: state
+                        .nib
+                        .nwk_security_material_primary
+                        .outgoing_frame_counter,
+                    extended_source: Some(state.nib.nwk_ieee_address),
+                    key_sequence_number: state.nib.nwk_active_key_seq_number,
+                }),
+                payload: NwkLinkStatusCommand {
+                    is_first_frame: remaining_link_statuses.len() == link_statuses.len(),
+                    is_last_frame: remaining_link_statuses.len() <= max_link_statuses,
+                    link_statuses: if remaining_link_statuses.is_empty() {
+                        vec![]
+                    } else {
+                        // Link status frames overlap by a single entry
+                        remaining_link_statuses
+                            .drain(..cmp::min(remaining_link_statuses.len(), max_link_statuses - 1))
+                            .collect()
+                    },
+                }
+                .serialize(),
+            }
+            .encrypt(&state.nib.nwk_security_material_primary.key)
+            .expect("Encryption somehow failed");
 
             drop(state);
 
-            // Link statuses are sorted in ascending order
-            link_statuses.sort_by(|a, b| a.address.as_u16().cmp(&b.address.as_u16()));
+            let ieee802154_frame = self.wrap_nwk_frame(&link_status_frame);
+            self.send_802154_frame(ieee802154_frame).await;
 
-            let max_link_statuses = 7;
-            let mut remaining_link_statuses = link_statuses.clone();
-
-            loop {
-                let mut state = self.state.lock().unwrap();
-
-                state
-                    .nib
-                    .nwk_security_material_primary
-                    .outgoing_frame_counter = state
-                    .nib
-                    .nwk_security_material_primary
-                    .outgoing_frame_counter
-                    .wrapping_add(1);
-                state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
-
-                let link_status_frame = NwkFrame {
-                    encrypted: false,
-                    nwk_header: NwkHeader {
-                        frame_control: NwkFrameControl {
-                            frame_type: NwkFrameType::Command,
-                            protocol_version: state.nib.nwkc_protocol_version,
-                            discover_route: NwkRouteDiscovery::Suppress,
-                            multicast: false,
-                            security: true,
-                            source_route: false,
-                            destination: false,
-                            extended_source: true,
-                            end_device_initiator: false,
-                            reserved: 0b00,
-                        },
-                        destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                        source: state.nib.nwk_network_address,
-                        radius: 1,
-                        sequence_number: state.nib.nwk_sequence_number,
-                        destination_ieee: None,
-                        source_ieee: Some(state.nib.nwk_ieee_address),
-                        multicast_control: None,
-                        source_route: None,
-                    },
-                    aux_header: Some(NwkAuxHeader {
-                        security_control: NwkSecurityHeaderControlField {
-                            security_level: NwkSecurityLevel::NoSecurity,
-                            key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                            extended_nonce: true,
-                            require_verified_frame_counter: false,
-                            reserved: 0b0,
-                        },
-                        frame_counter: state
-                            .nib
-                            .nwk_security_material_primary
-                            .outgoing_frame_counter,
-                        extended_source: Some(state.nib.nwk_ieee_address),
-                        key_sequence_number: state.nib.nwk_active_key_seq_number,
-                    }),
-                    payload: NwkLinkStatusCommand {
-                        is_first_frame: remaining_link_statuses.len() == link_statuses.len(),
-                        is_last_frame: remaining_link_statuses.len() <= max_link_statuses,
-                        link_statuses: if remaining_link_statuses.is_empty() {
-                            vec![]
-                        } else {
-                            // Link status frames overlap by a single entry
-                            remaining_link_statuses
-                                .drain(
-                                    ..cmp::min(
-                                        remaining_link_statuses.len(),
-                                        max_link_statuses - 1,
-                                    ),
-                                )
-                                .collect()
-                        },
-                    }
-                    .serialize(),
-                }
-                .encrypt(&state.nib.nwk_security_material_primary.key)
-                .expect("Encryption somehow failed");
-
-                drop(state);
-
-                let ieee802154_frame = self.wrap_nwk_frame(&link_status_frame);
-                self.send_802154_frame(ieee802154_frame).await;
-
-                if remaining_link_statuses.is_empty() {
-                    break;
-                }
+            if remaining_link_statuses.is_empty() {
+                break;
             }
+        }
+    }
+
+    pub async fn periodic_link_status_broadcast_task(&self) {
+        loop {
+            let nwk_link_status_period = { self.state.lock().unwrap().nib.nwk_link_status_period };
+            tokio::time::sleep(nwk_link_status_period).await;
+
+            self.send_link_status_broadcast(false).await;
         }
     }
 }
