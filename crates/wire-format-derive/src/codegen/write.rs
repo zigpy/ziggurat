@@ -72,7 +72,6 @@ pub fn control_list_code(controlled: &Ident, bits: usize) -> TokenStream {
         quote_spanned! {controlled.span()=>
             let #len_ident: #ty = self.#controlled.len().try_into()
                 .map_err(|_| ::wire_format::ToBytesError::ListTooLong {
-                    ty: core::any::type_name::<Self>(),
                     max: #ty::MAX as usize,
                     got: self.#controlled.len(),
             })?;
@@ -84,7 +83,6 @@ pub fn control_list_code(controlled: &Ident, bits: usize) -> TokenStream {
         quote_spanned! {controlled.span()=>
             let #len_ident = #utype::new(self.#controlled.len().try_into()
                 .map_err(|_| ::wire_format::ToBytesError::ListTooLong {
-                    ty: core::any::type_name::<Self>(),
                     max: 2usize.pow(#utype::BITS as u32) - 1,
                     got: self.#controlled.len(),
                 })?);

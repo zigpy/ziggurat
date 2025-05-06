@@ -162,30 +162,31 @@ impl BitReader<'_> {
         *res
     }
     fn read_u8(&mut self, n_bits: usize) -> u8 {
+        dbg!(n_bits);
         let mut res = 0u8;
         let res_bits = BitSlice::<_, Lsb0>::from_element_mut(&mut res);
-        res_bits.copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
+        res_bits[0..n_bits].copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
         self.pos += n_bits;
         res
     }
     fn read_u16(&mut self, n_bits: usize) -> u16 {
         let mut res = [0u8; 2];
         let res_bits = BitSlice::<_, Lsb0>::from_slice_mut(&mut res);
-        res_bits.copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
+        res_bits[0..n_bits].copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
         self.pos += n_bits;
         u16::from_le_bytes(res)
     }
     fn read_u32(&mut self, n_bits: usize) -> u32 {
         let mut res = [0u8; 4];
         let res_bits = BitSlice::<_, Lsb0>::from_slice_mut(&mut res);
-        res_bits.copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
+        res_bits[0..n_bits].copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
         self.pos += n_bits;
         u32::from_le_bytes(res)
     }
     fn read_u64(&mut self, n_bits: usize) -> u64 {
         let mut res = [0u8; 8];
         let res_bits = BitSlice::<_, Lsb0>::from_slice_mut(&mut res);
-        res_bits.copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
+        res_bits[0..n_bits].copy_from_bitslice(&self.buf[self.pos..self.pos + n_bits]);
         self.pos += n_bits;
         u64::from_le_bytes(res)
     }
@@ -210,25 +211,25 @@ impl BitWriter<'_> {
     }
     fn write_u8(&mut self, n_bits: usize, val: u8) {
         let val = BitSlice::<_, Lsb0>::from_element(&val);
-        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(val);
+        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(&val[..n_bits]);
         self.pos += n_bits;
     }
     fn write_u16(&mut self, n_bits: usize, val: u16) {
         let val = val.to_le_bytes();
         let val = BitSlice::<_, Lsb0>::from_slice(&val);
-        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(val);
+        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(&val[..n_bits]);
         self.pos += n_bits;
     }
     fn write_u32(&mut self, n_bits: usize, val: u32) {
         let val = val.to_le_bytes();
         let val = BitSlice::<_, Lsb0>::from_slice(&val);
-        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(val);
+        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(&val[..n_bits]);
         self.pos += n_bits;
     }
     fn write_u64(&mut self, n_bits: usize, val: u64) {
         let val = val.to_le_bytes();
         let val = BitSlice::<_, Lsb0>::from_slice(&val);
-        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(val);
+        self.buf[self.pos..self.pos + n_bits].copy_from_bitslice(&val[..n_bits]);
         self.pos += n_bits;
     }
 }
