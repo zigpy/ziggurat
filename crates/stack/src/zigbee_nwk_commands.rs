@@ -33,7 +33,7 @@ pub enum DeserializeError {
         Expected {expected_discriminant} (which represents {expected_variant:?}), \
         found: {found_discriminant:?} instead"
     )]
-    Id {
+    IncorrectId {
         expected_variant: NwkCommandId,
         expected_discriminant: u8,
         found_discriminant: u8,
@@ -64,7 +64,7 @@ fn deserialize<T: ZigbeeBytes>(
     };
 
     if *command_id != correct_id as u8 {
-        return Err(DeserializeError::Id {
+        return Err(DeserializeError::IncorrectId {
             expected_variant: correct_id,
             expected_discriminant: correct_id as u8,
             found_discriminant: *command_id,
@@ -235,7 +235,7 @@ pub struct NwkLeaveCommand {
 }
 
 impl Command for NwkLeaveCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::LinkStatus;
+    const COMMAND_ID: NwkCommandId = NwkCommandId::Leave;
 }
 
 #[zigbee_bytes(bits = 8)]
