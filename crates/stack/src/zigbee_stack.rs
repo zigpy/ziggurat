@@ -1349,7 +1349,7 @@ impl ZigbeeStack {
 
         drop(state);
 
-        self.background_send_nwk_frame(route_reply_frame, &NwkFrameSendOptions::default());
+        self.background_send_nwk_frame(route_reply_frame);
     }
 
     /// Handle route requests that we should consider relaying
@@ -1399,7 +1399,7 @@ impl ZigbeeStack {
         // Wrap it in a NWK frame
         let destination = nwk_frame.nwk_header.source;
         let outgoing_nwk_frame = self.wrap_aps_frame(destination, 30, &ApsFrame::Ack(ack_frame));
-        self.background_send_nwk_frame(outgoing_nwk_frame, &NwkFrameSendOptions::default());
+        self.background_send_nwk_frame(outgoing_nwk_frame);
     }
 
     fn wrap_aps_frame(&self, destination: Nwk, radius: u8, aps_frame: &ApsFrame) -> NwkFrame {
@@ -1540,11 +1540,7 @@ impl ZigbeeStack {
         }
     }
 
-    pub fn background_send_nwk_frame(
-        &self,
-        mut nwk_frame: NwkFrame,
-        send_options: &NwkFrameSendOptions,
-    ) {
+    pub fn background_send_nwk_frame(&self, mut nwk_frame: NwkFrame) {
         let mut state = self.state.lock().unwrap();
 
         // The encryption frame counter always increments
@@ -1557,18 +1553,9 @@ impl ZigbeeStack {
             .outgoing_frame_counter
             .wrapping_add(1);
 
-        // Depending on the send options, we can either increment, ignore, or temporarily
-        // override the NWK sequence number
-        let new_nwk_sequence_number = match send_options.sequence_number {
-            NwkFrameSequenceNumberOption::Keep => state.nib.nwk_sequence_number,
-            NwkFrameSequenceNumberOption::Increment => {
-                state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
-                state.nib.nwk_sequence_number
-            }
-            NwkFrameSequenceNumberOption::FixedValue(seq) => seq,
-        };
-
-        nwk_frame.nwk_header.sequence_number = new_nwk_sequence_number;
+        // For now, as does the NWK sequence number
+        state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
+        nwk_frame.nwk_header.sequence_number = state.nib.nwk_sequence_number;
 
         let encrypted_nwk_frame = nwk_frame
             .encrypt(&state.nib.nwk_security_material_primary.key)
@@ -1736,7 +1723,7 @@ impl ZigbeeStack {
 
         drop(state);
 
-        self.background_send_nwk_frame(route_request_frame, &NwkFrameSendOptions::default());
+        self.background_send_nwk_frame(route_request_frame);
 
         // TODO: wait for route discovery to actually complete. For now, we will be
         // relatively stateless and stop erroring out once the correct state is computed
@@ -1853,7 +1840,7 @@ impl ZigbeeStack {
                 .insert(ack_data, tx);
         }
 
-        self.background_send_nwk_frame(nwk_frame, &NwkFrameSendOptions::default());
+        self.background_send_nwk_frame(nwk_frame);
 
         if let Some(ack_rx) = maybe_ack_rx {
             // With a 5s timeout
@@ -1980,7 +1967,7 @@ impl ZigbeeStack {
 
             drop(state);
 
-            self.background_send_nwk_frame(link_status_frame, &NwkFrameSendOptions::default());
+            self.background_send_nwk_frame(link_status_frame);
 
             if remaining_link_statuses.is_empty() {
                 break;
