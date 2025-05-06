@@ -45,6 +45,7 @@ impl fmt::Debug for Nwk {
     }
 }
 
+#[wire_format::zigbee_bytes]
 #[derive(Eq, PartialEq, Hash, Copy, Clone)]
 pub struct Eui64(pub [u8; 8]);
 

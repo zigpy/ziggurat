@@ -1101,7 +1101,6 @@ impl ZigbeeStack {
                 path_cost: 1, // :)
                 originator_eui64: nwk_frame.nwk_header.source_ieee,
                 responder_eui64: Some(state.nib.nwk_ieee_address),
-                tlvs: vec![],
             }
             .serialize(),
         }

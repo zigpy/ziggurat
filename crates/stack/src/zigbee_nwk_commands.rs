@@ -1,8 +1,21 @@
 use crate::types::{Eui64, Nwk};
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
+use wire_format::zigbee_bytes;
 
+#[expect(dead_code, reason = "only a proposal")]
+trait Request {
+    type REPLY: Reply;
+}
+
+#[expect(dead_code, reason = "only a proposal")]
+trait Reply {
+    type REQUEST: Request;
+}
+
+/// Zigbee spec 3.4
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[zigbee_bytes(bits = 8)]
 #[repr(u8)]
 pub enum NwkCommandId {
     RouteRequest = 0x01,
@@ -22,7 +35,9 @@ pub enum NwkCommandId {
     //NetworkCommissioningResponse = 0x0f,
 }
 
+/// Zigbee spec: 3.4.1.3.1.1
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[zigbee_bytes(bits = 2)]
 #[repr(u8)]
 pub enum NwkRouteRequestManyToOne {
     NotManyToOne = 0,
@@ -31,15 +46,23 @@ pub enum NwkRouteRequestManyToOne {
     Reserved = 3,
 }
 
+/// Zigbee spec: 3.4.1 Route Request Command
+#[zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteRequestCommand {
-    pub multicast: bool,
+    reserved: u3,
     pub many_to_one: NwkRouteRequestManyToOne,
+    #[wire_format(controls = destination_eui64)]
+    reserved: bool,
+    reserved: u2,
     pub route_request_identifier: u8,
     pub destination_address: Nwk,
     pub path_cost: u8,
     pub destination_eui64: Option<Eui64>,
-    pub tlvs: Vec<u8>,
+}
+
+impl Request for NwkRouteRequestCommand {
+    type REPLY = NwkRouteReplyCommand;
 }
 
 impl NwkRouteRequestCommand {
@@ -57,7 +80,6 @@ impl NwkRouteRequestCommand {
             return Err("Not enough data to parse NwkRouteRequestCommand payload");
         }
 
-        let multicast = payload[0] & 0b01000000 != 0;
         let has_destination_eui64 = payload[0] & 0b00100000 != 0;
 
         if has_destination_eui64 && payload.len() < 5 + 8 {
@@ -72,7 +94,7 @@ impl NwkRouteRequestCommand {
         let destination_address = Nwk(u16::from_le_bytes([payload[2], payload[3]]));
         let path_cost = payload[4];
 
-        let (destination_eui64, tlvs) = if has_destination_eui64 {
+        let (destination_eui64, _) = if has_destination_eui64 {
             let (eui64, remaining) = Eui64::deserialize(&payload[5..])?;
             (Some(eui64), remaining)
         } else {
@@ -80,13 +102,11 @@ impl NwkRouteRequestCommand {
         };
 
         Ok(Self {
-            multicast,
             many_to_one,
             route_request_identifier,
             destination_address,
             path_cost,
             destination_eui64,
-            tlvs: tlvs.to_vec(),
         })
     }
 
@@ -95,7 +115,7 @@ impl NwkRouteRequestCommand {
         bytes.push(NwkCommandId::RouteRequest as u8);
 
         let mut byte = 0u8;
-        byte |= (self.multicast as u8) << 6;
+        byte |= (0u8) << 6;
         byte |= (self.destination_eui64.is_some() as u8) << 5;
         byte |= (self.many_to_one as u8) << 3;
         bytes.push(byte);
@@ -108,21 +128,20 @@ impl NwkRouteRequestCommand {
             bytes.extend_from_slice(&destination_eui64.to_bytes());
         }
 
-        bytes.extend_from_slice(&self.tlvs);
-
         bytes
     }
 }
 
+/// Zigbee spec 3.4.2
 #[wire_format::zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteReplyCommand {
-    // reserved: u3,
-    // #[wire_format(linked(originator_eui64))]
-    // reserved: bool,
-    // #[wire_format(linked(responder_eui64))]
-    // reserved: bool,
-    // reserved: u3,
+    reserved: u4,
+    #[wire_format(controls = originator_eui64)]
+    reserved: bool,
+    #[wire_format(controls = responder_eui64)]
+    reserved: bool,
+    reserved: u2,
     pub multicast: bool,
     pub route_request_identifier: u8,
     pub originator_nwk: Nwk,
@@ -130,7 +149,10 @@ pub struct NwkRouteReplyCommand {
     pub path_cost: u8,
     pub originator_eui64: Option<Eui64>,
     pub responder_eui64: Option<Eui64>,
-    pub tlvs: Vec<u8>,
+}
+
+impl Reply for NwkRouteReplyCommand {
+    type REQUEST = NwkRouteRequestCommand;
 }
 
 impl NwkRouteReplyCommand {
@@ -185,7 +207,7 @@ impl NwkRouteReplyCommand {
 
         if has_responder_eui64 {
             let eui64;
-            (eui64, remaining) = Eui64::deserialize(remaining)?;
+            (eui64, _) = Eui64::deserialize(remaining)?;
             responder_eui64 = Some(eui64);
         }
 
@@ -197,7 +219,6 @@ impl NwkRouteReplyCommand {
             path_cost,
             originator_eui64,
             responder_eui64,
-            tlvs: remaining.to_vec(),
         })
     }
 
@@ -224,14 +245,16 @@ impl NwkRouteReplyCommand {
             bytes.extend_from_slice(&responder_eui64.to_bytes());
         }
 
-        bytes.extend_from_slice(&self.tlvs);
-
         bytes
     }
 }
 
+/// Zigbee spec 3.4.5: Route Record Command
+#[zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteRecordCommand {
+    #[wire_format(length_of = relays)]
+    reserved: u8,
     pub relays: Vec<Nwk>,
 }
 
@@ -288,46 +311,15 @@ impl NwkRouteRecordCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct NwkLinkStatus {
-    pub address: Nwk,
-    pub incoming_cost: u8,
-    pub outgoing_cost: u8,
-}
-
-impl NwkLinkStatus {
-    // This struct is a sub-component, its serialization doesn't include the command ID
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        if bytes.len() < 3 {
-            return Err("Not enough data to parse NwkLinkStatus");
-        }
-
-        let address = Nwk(u16::from_le_bytes([bytes[0], bytes[1]]));
-        let incoming_cost = (bytes[2] & 0b00000111) >> 0;
-        let outgoing_cost = (bytes[2] & 0b01110000) >> 4;
-
-        Ok(Self {
-            address,
-            incoming_cost,
-            outgoing_cost,
-        })
-    }
-
-    pub fn serialize(&self) -> [u8; 3] {
-        let mut result = [0x00; 3];
-        result[0..2].copy_from_slice(&self.address.to_bytes());
-        result[2] |= self.incoming_cost << 0;
-        result[2] |= self.outgoing_cost << 4;
-
-        result
-    }
-}
-
 /// Zigbee spec compressed: 3.4.8.3
+#[zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkLinkStatusCommand {
+    #[wire_format(length_of = link_statuses)]
+    reserved: u5,
     pub is_first_frame: bool,
     pub is_last_frame: bool,
+    reserved: u1,
     pub link_statuses: Vec<NwkLinkStatus>,
 }
 
@@ -398,8 +390,50 @@ impl NwkLinkStatusCommand {
     }
 }
 
+/// Zigbee spec 3.4.8
+#[zigbee_bytes]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkLinkStatus {
+    pub address: Nwk,
+    pub incoming_cost: u3,
+    reserved: u1,
+    pub outgoing_cost: u3,
+    reserved: u1,
+}
+
+impl NwkLinkStatus {
+    // This struct is a sub-component, its serialization doesn't include the command ID
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 3 {
+            return Err("Not enough data to parse NwkLinkStatus");
+        }
+
+        let address = Nwk(u16::from_le_bytes([bytes[0], bytes[1]]));
+        let incoming_cost = (bytes[2] & 0b00000111) >> 0;
+        let outgoing_cost = (bytes[2] & 0b01110000) >> 4;
+
+        Ok(Self {
+            address,
+            incoming_cost,
+            outgoing_cost,
+        })
+    }
+
+    pub fn serialize(&self) -> [u8; 3] {
+        let mut result = [0x00; 3];
+        result[0..2].copy_from_slice(&self.address.to_bytes());
+        result[2] |= self.incoming_cost << 0;
+        result[2] |= self.outgoing_cost << 4;
+
+        result
+    }
+}
+
+/// Zigbee spec: 3.4.4 Leave Command
+#[zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkLeaveCommand {
+    reserved: u5,
     pub rejoin: bool,
     pub request: bool,
     pub remove_children: bool,
@@ -439,6 +473,7 @@ impl NwkLeaveCommand {
     }
 }
 
+#[zigbee_bytes(bits = 8)]
 #[derive(Debug, Eq, PartialEq, Clone, TryFromPrimitive, Copy)]
 #[repr(u8)]
 pub enum EndDeviceTimeout {
@@ -459,10 +494,16 @@ pub enum EndDeviceTimeout {
     Minutes16384 = 14,
 }
 
+/// Zigbee spec 3.4.11 End Device Timeout Request Command
+#[zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkEndDeviceTimeoutRequestCommand {
     pub request_timeout_enum: EndDeviceTimeout,
-    pub end_device_configuration: u8,
+    reserved: u8, // reserved for future use
+}
+
+impl Request for NwkEndDeviceTimeoutRequestCommand {
+    type REPLY = NwkEndDeviceTimeoutResponseCommand;
 }
 
 impl NwkEndDeviceTimeoutRequestCommand {
@@ -479,18 +520,15 @@ impl NwkEndDeviceTimeoutRequestCommand {
 
         let request_timeout_enum =
             EndDeviceTimeout::try_from(payload[0]).map_err(|_| "Invalid EndDeviceTimeout value")?;
-        let end_device_configuration = payload[1];
 
         Ok(Self {
             request_timeout_enum,
-            end_device_configuration,
         })
     }
 
     pub fn serialize(&self) -> [u8; 3] {
         let mut payload = [0x00; 2];
         payload[0] = self.request_timeout_enum as u8;
-        payload[1] = self.end_device_configuration;
 
         [
             NwkCommandId::EndDeviceTimeoutRequest as u8,
@@ -500,6 +538,7 @@ impl NwkEndDeviceTimeoutRequestCommand {
     }
 }
 
+#[zigbee_bytes(bits = 8)]
 #[derive(Debug, Eq, PartialEq, Clone, TryFromPrimitive, Copy)]
 #[repr(u8)]
 pub enum NwkEndDeviceTimeoutResponseStatus {
@@ -508,12 +547,19 @@ pub enum NwkEndDeviceTimeoutResponseStatus {
     UnsupportedFeature = 0x02,
 }
 
+/// Zigbee spec: 3.4.11 End Device Timeout Response Command
+#[zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkEndDeviceTimeoutResponseCommand {
     pub status: NwkEndDeviceTimeoutResponseStatus,
     pub mac_data_poll_keepalive_supported: bool,
     pub end_device_timeout_request_keepalive_supported: bool,
     pub power_negotation_support: bool,
+    reserved: u13,
+}
+
+impl Reply for NwkEndDeviceTimeoutResponseCommand {
+    type REQUEST = NwkEndDeviceTimeoutRequestCommand;
 }
 
 impl NwkEndDeviceTimeoutResponseCommand {
@@ -570,13 +616,11 @@ mod test {
         assert_eq!(
             command,
             NwkRouteRequestCommand {
-                multicast: false,
                 many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
                 route_request_identifier: 222,
                 destination_address: Nwk(0x05A3),
                 path_cost: 1,
                 destination_eui64: None,
-                tlvs: vec![],
             }
         );
 
@@ -598,7 +642,6 @@ mod test {
                 path_cost: 3,
                 originator_eui64: Some(Eui64::from_hex("00:17:88:01:05:21:38:71")),
                 responder_eui64: Some(Eui64::from_hex("00:17:88:01:0b:1f:d3:ae")),
-                tlvs: vec![],
             }
         );
 
