@@ -1,16 +1,100 @@
 use crate::types::{Eui64, Nwk};
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
-use wire_format::zigbee_bytes;
+use wire_format::{BitReader, ZigbeeBytes, zigbee_bytes};
 
-#[expect(dead_code, reason = "only a proposal")]
-trait Request {
-    type REPLY: Reply;
+/// 802.15.4 mac layer has a maximum payload length of 104 bytes
+/// see the introduction of this paper for a good overview:
+/// https://www.researchgate.net/publication/305365904_Dissecting_Customized_Protocols_Automatic_Analysis_for_Customized_Protocols_based_on_IEEE_802154
+const MAC_PAYLOAD_MAX_LEN: usize = 104;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Could not serialize {ty}")]
+pub struct SerializeError {
+    ty: &'static str,
+    #[source]
+    cause: wire_format::ToBytesError,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeserializeError {
+    #[error("Could not deserialize payload to {ty}")]
+    Payload {
+        ty: &'static str,
+        #[source]
+        cause: wire_format::FromBytesError,
+    },
+    #[error(
+        "Could not deserialize incorrect Id. \
+        Expected {expected_discriminant} (which represents {expected_variant:?}), \
+        found: {found_discriminant:?} instead"
+    )]
+    Id {
+        expected_variant: NwkCommandId,
+        expected_discriminant: u8,
+        found_discriminant: u8,
+    },
+    #[error("Got zero bytes, no valid command/request/response is zero bytes")]
+    ZeroBytes,
+}
+
+fn serialize<T: ZigbeeBytes>(thing: &T, id: NwkCommandId) -> Result<Vec<u8>, SerializeError> {
+    let mut bytes = vec![0u8; MAC_PAYLOAD_MAX_LEN];
+    bytes[0] = id as u8;
+    let mut writer = wire_format::BitWriter::from(&mut bytes[1..]);
+    thing
+        .write_zigbee_bytes(&mut writer)
+        .map_err(|cause| SerializeError {
+            ty: core::any::type_name::<T>(),
+            cause,
+        })?;
+    Ok(bytes)
+}
+
+fn deserialize<T: ZigbeeBytes>(
+    bytes: &[u8],
+    correct_id: NwkCommandId,
+) -> Result<T, DeserializeError> {
+    let [command_id, payload @ ..] = bytes else {
+        return Err(DeserializeError::ZeroBytes);
+    };
+
+    if *command_id != correct_id as u8 {
+        return Err(DeserializeError::Id {
+            expected_variant: correct_id,
+            expected_discriminant: correct_id as u8,
+            found_discriminant: *command_id,
+        });
+    }
+
+    let mut reader = BitReader::from(payload);
+    T::read_zigbee_bytes(&mut reader).map_err(|cause| DeserializeError::Payload {
+        ty: core::any::type_name::<T>(),
+        cause,
+    })
 }
 
 #[expect(dead_code, reason = "only a proposal")]
-trait Reply {
+trait Request: Command {
+    type REPLY: Response;
+}
+
+#[expect(dead_code, reason = "only a proposal")]
+trait Response: Command {
     type REQUEST: Request;
+}
+
+#[expect(dead_code, reason = "only a proposal")]
+trait Command: ZigbeeBytes + Sized {
+    const COMMAND_ID: NwkCommandId;
+
+    fn serialize(&self) -> Result<Vec<u8>, SerializeError> {
+        serialize(self, Self::COMMAND_ID)
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self, DeserializeError> {
+        deserialize(bytes, Self::COMMAND_ID)
+    }
 }
 
 /// Zigbee spec 3.4
@@ -63,6 +147,10 @@ pub struct NwkRouteRequestCommand {
 
 impl Request for NwkRouteRequestCommand {
     type REPLY = NwkRouteReplyCommand;
+}
+
+impl Command for NwkRouteRequestCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::RouteRequest;
 }
 
 impl NwkRouteRequestCommand {
@@ -151,8 +239,12 @@ pub struct NwkRouteReplyCommand {
     pub responder_eui64: Option<Eui64>,
 }
 
-impl Reply for NwkRouteReplyCommand {
+impl Response for NwkRouteReplyCommand {
     type REQUEST = NwkRouteRequestCommand;
+}
+
+impl Command for NwkRouteReplyCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::RouteReply;
 }
 
 impl NwkRouteReplyCommand {
@@ -258,6 +350,10 @@ pub struct NwkRouteRecordCommand {
     pub relays: Vec<Nwk>,
 }
 
+impl Command for NwkRouteRecordCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::RouteRecord;
+}
+
 impl NwkRouteRecordCommand {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 1 {
@@ -321,6 +417,10 @@ pub struct NwkLinkStatusCommand {
     pub is_last_frame: bool,
     reserved: u1,
     pub link_statuses: Vec<NwkLinkStatus>,
+}
+
+impl Command for NwkLinkStatusCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::LinkStatus;
 }
 
 impl NwkLinkStatusCommand {
@@ -439,6 +539,10 @@ pub struct NwkLeaveCommand {
     pub remove_children: bool,
 }
 
+impl Command for NwkLeaveCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::LinkStatus;
+}
+
 impl NwkLeaveCommand {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         // Requires 1 byte for ID + 1 byte for payload
@@ -505,6 +609,9 @@ pub struct NwkEndDeviceTimeoutRequestCommand {
 impl Request for NwkEndDeviceTimeoutRequestCommand {
     type REPLY = NwkEndDeviceTimeoutResponseCommand;
 }
+impl Command for NwkEndDeviceTimeoutRequestCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutRequest;
+}
 
 impl NwkEndDeviceTimeoutRequestCommand {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
@@ -558,8 +665,12 @@ pub struct NwkEndDeviceTimeoutResponseCommand {
     reserved: u13,
 }
 
-impl Reply for NwkEndDeviceTimeoutResponseCommand {
+impl Response for NwkEndDeviceTimeoutResponseCommand {
     type REQUEST = NwkEndDeviceTimeoutRequestCommand;
+}
+
+impl Command for NwkEndDeviceTimeoutResponseCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutResponse;
 }
 
 impl NwkEndDeviceTimeoutResponseCommand {
@@ -727,7 +838,6 @@ mod test {
             command,
             NwkEndDeviceTimeoutRequestCommand {
                 request_timeout_enum: EndDeviceTimeout::Minutes8,
-                end_device_configuration: 0,
             }
         );
 
