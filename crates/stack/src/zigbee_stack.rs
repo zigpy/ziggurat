@@ -1375,6 +1375,8 @@ impl ZigbeeStack {
                 return;
             }
         };
+
+        // TODO: re-send the route request and update the path cost with our own info
     }
 
     fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
@@ -1563,6 +1565,7 @@ impl ZigbeeStack {
         drop(state);
 
         let ieee802154_frame = self.wrap_nwk_frame(&encrypted_nwk_frame);
+        let relaying_nwk = ieee802154_frame.dest_address;
 
         let arc_self = self
             .self_weak
@@ -1586,7 +1589,42 @@ impl ZigbeeStack {
                 }
             }
 
-            // TODO: increment recent activity counters for route entries
+            match relaying_nwk {
+                Some(Ieee802154Address::Nwk(relaying_nwk)) => {
+                    // TODO: maybe wrap the send state into some sort of struct to avoid
+                    // needing to do this?
+                    if let Some(relaying_ieee) =
+                        state.nib.nwk_address_map.iter().find_map(|(&eui64, &nwk)| {
+                            if nwk == relaying_nwk {
+                                Some(eui64)
+                            } else {
+                                None
+                            }
+                        })
+                    {
+                        if let Some(neighbor_entry) =
+                            state.nib.nwk_neighbor_table.get_mut(&relaying_ieee)
+                        {
+                            // Update the neighbor table counters
+                            neighbor_entry.router_outbound_activity =
+                                neighbor_entry.router_outbound_activity.saturating_add(1);
+                        }
+                    }
+
+                    // And the routing table counters
+                    if let Some(route_entry) = state
+                        .nib
+                        .nwk_route_table
+                        .get_mut(&nwk_frame.nwk_header.destination)
+                    {
+                        route_entry.recent_activity = route_entry.recent_activity.saturating_add(1);
+                        route_entry.total_usage_count =
+                            route_entry.total_usage_count.saturating_add(1);
+                    }
+                }
+                Some(Ieee802154Address::Eui64(_)) => {}
+                None => {}
+            }
         }
     }
 
@@ -1873,10 +1911,17 @@ impl ZigbeeStack {
         // Decrement the `recent_activity` field of every active routing table entry
         for (_, route_table_entry) in state.nib.nwk_route_table.iter_mut() {
             if route_table_entry.status == route::Status::Active {
-                if route_table_entry.recent_activity > 0 {
-                    route_table_entry.recent_activity -= 1;
-                }
+                route_table_entry.recent_activity =
+                    route_table_entry.recent_activity.saturating_sub(1);
             }
+        }
+
+        // Decrement the inbound and outbound activity fields for neighbors
+        for (_, neighbor_entry) in state.nib.nwk_neighbor_table.iter_mut() {
+            neighbor_entry.router_outbound_activity =
+                neighbor_entry.router_outbound_activity.saturating_sub(1);
+            neighbor_entry.router_inbound_activity =
+                neighbor_entry.router_inbound_activity.saturating_sub(1);
         }
 
         let mut link_statuses = if !empty {
