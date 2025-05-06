@@ -12,8 +12,8 @@ pub enum FromBytesError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToBytesError {
-    #[error("List too long to fit in {ty}. Max length {max}, got: {got}")]
-    ListTooLong { ty: &'static str, max: usize, got: usize },
+    #[error("List too long to fit. Max length {max}, got: {got}")]
+    ListTooLong { max: usize, got: usize },
 }
 
 pub trait ZigbeeBytes {
