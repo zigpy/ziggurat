@@ -1231,6 +1231,7 @@ dependencies = [
  "serial2-tokio",
  "shellexpand",
  "strum_macros",
+ "thiserror 2.0.12",
  "tokio",
  "wire-format",
 ]

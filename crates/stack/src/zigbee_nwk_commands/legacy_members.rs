@@ -1,7 +1,8 @@
+use std::convert::TryFrom;
 use super::*;
 
 impl NwkRouteRequestCommand {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 1 {
             return Err("Not enough data for command ID");
         }
@@ -45,7 +46,7 @@ impl NwkRouteRequestCommand {
         })
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         let mut bytes = Vec::new();
         bytes.push(NwkCommandId::RouteRequest as u8);
 
@@ -63,12 +64,12 @@ impl NwkRouteRequestCommand {
             bytes.extend_from_slice(&destination_eui64.to_bytes());
         }
 
-        bytes
+        Ok(bytes)
     }
 }
 
 impl NwkRouteReplyCommand {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 1 {
             return Err("Not enough data for command ID");
         }
@@ -134,7 +135,7 @@ impl NwkRouteReplyCommand {
         })
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         let mut bytes = Vec::new();
         bytes.push(NwkCommandId::RouteReply as u8);
 
@@ -157,12 +158,12 @@ impl NwkRouteReplyCommand {
             bytes.extend_from_slice(&responder_eui64.to_bytes());
         }
 
-        bytes
+        Ok(bytes)
     }
 }
 
 impl NwkRouteRecordCommand {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 1 {
             return Err("Not enough data for command ID");
         }
@@ -198,7 +199,7 @@ impl NwkRouteRecordCommand {
         Ok(Self { relays })
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         let num_relays = self.relays.len();
         // Capacity calculation includes command ID byte
         let mut bytes = Vec::with_capacity(1 + 1 + num_relays * 2);
@@ -210,12 +211,12 @@ impl NwkRouteRecordCommand {
             bytes.extend_from_slice(&relay.to_bytes());
         }
 
-        bytes
+        Ok(bytes)
     }
 }
 
 impl NwkLinkStatusCommand {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 1 {
             return Err("Not enough data for command ID");
         }
@@ -241,11 +242,11 @@ impl NwkLinkStatusCommand {
         let mut remaining = &payload[1..];
 
         for _ in 0..count {
-            // Need to ensure NwkLinkStatus::from_bytes doesn't consume more than available
+            // Need to ensure NwkLinkStatus::deserialize doesn't consume more than available
             if remaining.len() < 3 {
                 return Err("Not enough data for NwkLinkStatus entry in NwkLinkStatusCommand");
             }
-            let link_status = NwkLinkStatus::from_bytes(&remaining[..3])?; // Parse only 3 bytes
+            let link_status = NwkLinkStatus::deserialize(&remaining[..3])?; // Parse only 3 bytes
             link_statuses.push(link_status);
             remaining = &remaining[3..];
         }
@@ -257,7 +258,7 @@ impl NwkLinkStatusCommand {
         })
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         if self.link_statuses.len() > 31 {
             panic!("Cannot encode more than 31 link statuses");
         }
@@ -274,16 +275,16 @@ impl NwkLinkStatusCommand {
         result.push(byte);
 
         for link_status in &self.link_statuses {
-            result.extend_from_slice(&link_status.serialize());
+            result.extend_from_slice(&link_status.serialize().unwrap());
         }
 
-        result
+        Ok(result)
     }
 }
 
 impl NwkLinkStatus {
     // This struct is a sub-component, its serialization doesn't include the command ID
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 3 {
             return Err("Not enough data to parse NwkLinkStatus");
         }
@@ -299,18 +300,18 @@ impl NwkLinkStatus {
         })
     }
 
-    pub fn serialize(&self) -> [u8; 3] {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         let mut result = [0x00; 3];
         result[0..2].copy_from_slice(&self.address.to_bytes());
         result[2] |= self.incoming_cost << 0;
         result[2] |= self.outgoing_cost << 4;
 
-        result
+        Ok(result.to_vec())
     }
 }
 
 impl NwkLeaveCommand {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         // Requires 1 byte for ID + 1 byte for payload
         if bytes.len() < 2 {
             return Err("Not enough data to parse NwkLeaveCommand");
@@ -333,18 +334,18 @@ impl NwkLeaveCommand {
     }
 
     // Returns command ID + payload byte
-    pub fn serialize(&self) -> [u8; 2] {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         let mut payload_byte = 0x00;
         payload_byte |= (self.rejoin as u8) << 5;
         payload_byte |= (self.request as u8) << 6;
         payload_byte |= (self.remove_children as u8) << 7;
 
-        [NwkCommandId::Leave as u8, payload_byte]
+        Ok([NwkCommandId::Leave as u8, payload_byte].to_vec())
     }
 }
 
 impl NwkEndDeviceTimeoutRequestCommand {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         // Requires 1 byte for ID + 2 bytes for payload
         if bytes.len() < 3 {
             return Err("Not enough data to parse NwkEndDeviceTimeoutRequestCommand");
@@ -363,20 +364,20 @@ impl NwkEndDeviceTimeoutRequestCommand {
         })
     }
 
-    pub fn serialize(&self) -> [u8; 3] {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         let mut payload = [0x00; 2];
         payload[0] = self.request_timeout_enum as u8;
 
-        [
+        Ok([
             NwkCommandId::EndDeviceTimeoutRequest as u8,
             payload[0],
             payload[1],
-        ]
+        ].to_vec())
     }
 }
 
 impl NwkEndDeviceTimeoutResponseCommand {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, &'static str> {
         // Requires 1 byte for ID + 2 bytes for payload
         if bytes.len() < 3 {
             return Err("Not enough data to parse NwkEndDeviceTimeoutResponseCommand");
@@ -401,17 +402,17 @@ impl NwkEndDeviceTimeoutResponseCommand {
         })
     }
 
-    pub fn serialize(&self) -> [u8; 3] {
+    pub fn serialize(&self) -> Result<Vec<u8>, DeserializeError> {
         let mut payload = [0x00; 2];
         payload[0] = self.status as u8;
         payload[1] |= (self.mac_data_poll_keepalive_supported as u8) << 0;
         payload[1] |= (self.end_device_timeout_request_keepalive_supported as u8) << 1;
         payload[1] |= (self.power_negotation_support as u8) << 2;
 
-        [
+        Ok([
             NwkCommandId::EndDeviceTimeoutResponse as u8,
             payload[0],
             payload[1],
-        ]
+        ].to_vec())
     }
 }

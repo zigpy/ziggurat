@@ -1,9 +1,8 @@
 use crate::types::{Eui64, Nwk};
 use num_enum::TryFromPrimitive;
-use std::convert::TryFrom;
 use wire_format::{BitReader, ZigbeeBytes, zigbee_bytes};
 
-mod legacy_members;
+// mod legacy_members;
 #[cfg(test)]
 mod tests;
 
@@ -12,7 +11,7 @@ mod tests;
 /// https://www.researchgate.net/publication/305365904_Dissecting_Customized_Protocols_Automatic_Analysis_for_Customized_Protocols_based_on_IEEE_802154
 const MAC_PAYLOAD_MAX_LEN: usize = 104;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("Could not serialize {ty}")]
 pub struct SerializeError {
     ty: &'static str,
@@ -20,7 +19,7 @@ pub struct SerializeError {
     cause: wire_format::ToBytesError,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DeserializeError {
     #[error("Could not deserialize payload to {ty}")]
     Payload {
@@ -52,6 +51,9 @@ fn serialize<T: ZigbeeBytes>(thing: &T, id: NwkCommandId) -> Result<Vec<u8>, Ser
             ty: core::any::type_name::<T>(),
             cause,
         })?;
+    let len = writer.bytes_written();
+    dbg!(len);
+    bytes.truncate(len + 1); // +1 for id
     Ok(bytes)
 }
 
@@ -78,18 +80,15 @@ fn deserialize<T: ZigbeeBytes>(
     })
 }
 
-#[expect(dead_code, reason = "only a proposal")]
-trait Request: Command {
+pub trait Request: Command {
     type REPLY: Response;
 }
 
-#[expect(dead_code, reason = "only a proposal")]
-trait Response: Command {
+pub trait Response: Command {
     type REQUEST: Request;
 }
 
-#[expect(dead_code, reason = "only a proposal")]
-trait Command: ZigbeeBytes + Sized {
+pub trait Command: ZigbeeBytes + Sized {
     const COMMAND_ID: NwkCommandId;
 
     fn serialize(&self) -> Result<Vec<u8>, SerializeError> {
@@ -157,7 +156,7 @@ impl Command for NwkRouteRequestCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::RouteRequest;
 }
 
-/// Zigbee spec 3.4.2
+/// Zigbee spec 3.4.2 Route Reply Command
 #[wire_format::zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteReplyCommand {
@@ -167,7 +166,6 @@ pub struct NwkRouteReplyCommand {
     #[wire_format(controls = responder_eui64)]
     reserved: bool,
     reserved: u2,
-    pub multicast: bool,
     pub route_request_identifier: u8,
     pub originator_nwk: Nwk,
     pub responder_nwk: Nwk,
@@ -283,7 +281,7 @@ pub enum NwkEndDeviceTimeoutResponseStatus {
     UnsupportedFeature = 0x02,
 }
 
-/// Zigbee spec: 3.4.11 End Device Timeout Response Command
+/// Zigbee spec: 3.4.12 End Device Timeout Response Command
 #[zigbee_bytes]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkEndDeviceTimeoutResponseCommand {
@@ -291,7 +289,7 @@ pub struct NwkEndDeviceTimeoutResponseCommand {
     pub mac_data_poll_keepalive_supported: bool,
     pub end_device_timeout_request_keepalive_supported: bool,
     pub power_negotation_support: bool,
-    reserved: u13,
+    reserved: u5,
 }
 
 impl Response for NwkEndDeviceTimeoutResponseCommand {
@@ -301,4 +299,3 @@ impl Response for NwkEndDeviceTimeoutResponseCommand {
 impl Command for NwkEndDeviceTimeoutResponseCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutResponse;
 }
-

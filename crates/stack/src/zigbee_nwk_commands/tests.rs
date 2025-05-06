@@ -3,8 +3,8 @@ use hex_literal::hex;
 
 #[test]
 fn test_nwk_route_request_command() {
-    let bytes = hex!("0100dea30501");
-    let command = NwkRouteRequestCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("0100dea30501").to_vec();
+    let command = NwkRouteRequestCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(
         command,
@@ -17,18 +17,17 @@ fn test_nwk_route_request_command() {
         }
     );
 
-    assert_eq!(command.serialize(), bytes);
+    assert_eq!(command.serialize(), Ok(bytes));
 }
 
 #[test]
 fn test_nwk_route_reply_command() {
-    let bytes = hex!("02305f375f0a93037138210501881700aed31f0b01881700");
-    let command = NwkRouteReplyCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("02305f375f0a93037138210501881700aed31f0b01881700").to_vec();
+    let command = NwkRouteReplyCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(
         command,
         NwkRouteReplyCommand {
-            multicast: false,
             route_request_identifier: 95,
             originator_nwk: Nwk(0x5F37),
             responder_nwk: Nwk(0x930A),
@@ -38,23 +37,23 @@ fn test_nwk_route_reply_command() {
         }
     );
 
-    assert_eq!(command.serialize(), bytes.to_vec());
+    assert_eq!(command.serialize(), Ok(bytes));
 }
 
 #[test]
 fn test_nwk_route_record_command_empty() {
-    let bytes = hex!("0500");
-    let command = NwkRouteRecordCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("0500").to_vec();
+    let command = NwkRouteRecordCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(command, NwkRouteRecordCommand { relays: vec![] });
 
-    assert_eq!(command.serialize(), bytes);
+    assert_eq!(command.serialize(), Ok(bytes));
 }
 
 #[test]
 fn test_nwk_route_record_command() {
-    let bytes = hex!("0501eb1c");
-    let command = NwkRouteRecordCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("0501eb1c").to_vec();
+    let command = NwkRouteRecordCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(
         command,
@@ -63,13 +62,13 @@ fn test_nwk_route_record_command() {
         }
     );
 
-    assert_eq!(command.serialize(), bytes);
+    assert_eq!(command.serialize(), Ok(bytes));
 }
 
 #[test]
 fn test_nwk_link_status_command() {
-    let bytes = hex!("0862e73c120ac711");
-    let command = NwkLinkStatusCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("0862e73c120ac711").to_vec();
+    let command = NwkLinkStatusCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(
         command,
@@ -91,13 +90,13 @@ fn test_nwk_link_status_command() {
         }
     );
 
-    assert_eq!(command.serialize(), bytes);
+    assert_eq!(command.serialize(), Ok(bytes));
 }
 
 #[test]
 fn test_nwk_leave_command() {
-    let bytes = hex!("0400");
-    let command = NwkLeaveCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("0400").to_vec();
+    let command = NwkLeaveCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(
         command,
@@ -108,13 +107,13 @@ fn test_nwk_leave_command() {
         }
     );
 
-    assert_eq!(command.serialize(), bytes);
+    assert_eq!(command.serialize(), Ok(bytes));
 }
 
 #[test]
 fn test_nwk_end_device_timeout_request_command() {
-    let bytes = hex!("0b0300");
-    let command = NwkEndDeviceTimeoutRequestCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("0b0300").to_vec();
+    let command = NwkEndDeviceTimeoutRequestCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(
         command,
@@ -123,13 +122,13 @@ fn test_nwk_end_device_timeout_request_command() {
         }
     );
 
-    assert_eq!(command.serialize(), bytes);
+    assert_eq!(command.serialize(), Ok(bytes));
 }
 
 #[test]
 fn test_nwk_end_device_timeout_response_command() {
-    let bytes = hex!("0c0003");
-    let command = NwkEndDeviceTimeoutResponseCommand::from_bytes(&bytes).unwrap();
+    let bytes = hex!("0c0003").to_vec();
+    let command = NwkEndDeviceTimeoutResponseCommand::deserialize(&bytes).unwrap();
 
     assert_eq!(
         command,
@@ -141,5 +140,5 @@ fn test_nwk_end_device_timeout_response_command() {
         }
     );
 
-    assert_eq!(command.serialize(), bytes);
+    assert_eq!(command.serialize(), Ok(bytes));
 }

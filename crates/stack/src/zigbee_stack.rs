@@ -16,8 +16,8 @@ use crate::zigbee_nwk::{
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 use crate::zigbee_nwk_commands::{
-    NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
-    NwkRouteRequestCommand,
+    Command, NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand,
+    NwkRouteReplyCommand, NwkRouteRequestCommand,
 };
 
 use std::cmp;
@@ -856,7 +856,7 @@ impl ZigbeeStack {
                 Ok(NwkCommandId::RouteRecord) => {
                     // TODO: Error handling for decoding?
                     let route_record_cmd =
-                        NwkRouteRecordCommand::from_bytes(&nwk_frame.payload).unwrap();
+                        NwkRouteRecordCommand::deserialize(&nwk_frame.payload).unwrap();
                     log::info!(
                         "Route record command frame received: {:#?}",
                         route_record_cmd
@@ -901,7 +901,7 @@ impl ZigbeeStack {
     }
 
     fn handle_link_status(&self, nwk_frame: &NwkFrame) {
-        let link_status_cmd = match NwkLinkStatusCommand::from_bytes(&nwk_frame.payload) {
+        let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing link status command: {e:?}");
@@ -1004,7 +1004,7 @@ impl ZigbeeStack {
     }
 
     fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
-        let route_reply_cmd = match NwkRouteReplyCommand::from_bytes(&nwk_frame.payload) {
+        let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing route reply command: {e:?}");
@@ -1013,14 +1013,10 @@ impl ZigbeeStack {
         };
 
         log::info!("Route reply command frame: {:#?}", route_reply_cmd);
-
-        if route_reply_cmd.multicast {
-            return;
-        }
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame) {
-        let route_request_cmd = match NwkRouteRequestCommand::from_bytes(&nwk_frame.payload) {
+        let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing route request command: {e:?}");
@@ -1094,7 +1090,6 @@ impl ZigbeeStack {
                 key_sequence_number: state.nib.nwk_active_key_seq_number,
             }),
             payload: NwkRouteReplyCommand {
-                multicast: false,
                 route_request_identifier: route_request_cmd.route_request_identifier,
                 originator_nwk: nwk_frame.nwk_header.source,
                 responder_nwk: state.nib.nwk_network_address,
@@ -1102,7 +1097,7 @@ impl ZigbeeStack {
                 originator_eui64: nwk_frame.nwk_header.source_ieee,
                 responder_eui64: Some(state.nib.nwk_ieee_address),
             }
-            .serialize(),
+            .serialize().unwrap(),
         }
         .encrypt(&state.nib.nwk_security_material_primary.key)
         .expect("Encryption somehow failed");
@@ -1722,7 +1717,7 @@ impl ZigbeeStack {
                                 .collect()
                         },
                     }
-                    .serialize(),
+                    .serialize().unwrap(),
                 }
                 .encrypt(&state.nib.nwk_security_material_primary.key)
                 .expect("Encryption somehow failed");
