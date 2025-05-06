@@ -1027,8 +1027,9 @@ impl ZigbeeStack {
             }
         };
 
+        neighbor_entry.last_link_status_timestamp = Instant::now();
+
         if link_status_cmd.is_first_frame {
-            neighbor_entry.last_link_status_timestamp = Instant::now();
             neighbor_entry.router_connectivity = 0;
             neighbor_entry.router_neighbor_set_diversity = 0;
             neighbor_entry.outgoing_cost = 0; // If we do not find it in the list, it is 0
