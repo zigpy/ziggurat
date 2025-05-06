@@ -37,7 +37,7 @@ pub struct TableEntry {
     /// The number of [`nwkLinkStatusPeriod`] intervals that have passed since
     /// the last link status command frame was received, up to a maximum value
     /// of [`nwkRouterAgeLimit`]
-    // Spec-expected field: `pub age: u8,`
+    // Spec-expected field: `pub age: u8`, we instead keep track of a timestamp
     pub last_link_status_timestamp: Instant,
 
     pub incoming_beacon_timestamp: u32,
@@ -55,7 +55,7 @@ pub struct TableEntry {
     /// routers and the coordinator and is only valid for entries with a relationship
     /// of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating
     /// up-counter, which does not roll-over.
-    // Spec-expected field: `pub router_age: u16,`
+    // Spec-expected field: `pub router_age: u16`, we instead keep track of a timestamp
     pub router_added_timestamp: Instant,
 
     pub router_connectivity: u8,
