@@ -31,7 +31,6 @@ fn normal_enum(
     repr: Ident,
     bits: usize,
 ) -> TokenStream {
-
     let write_code = write::enum_code(repr.clone(), bits);
     let read_code = read::enum_code(&variants, repr, bits);
 
@@ -107,10 +106,10 @@ fn normal_struct(
         .map(|field| match field {
             Field::Normal(normal_field) => write::normal_field_code(normal_field),
             Field::PaddBits(in_type) => write::padding_field_code(*in_type),
-            Field::ControlOption(controlled) => write::control_field_code(controlled),
-            Field::Option {
-                option_stripped, ..
-            } => write::option_field_code(option_stripped),
+            Field::ControlList { controlled, bits } => write::control_list_code(controlled, *bits),
+            Field::ControlOption(controlled) => write::control_option_code(controlled),
+            Field::Option { inner_type, .. } => write::option_field_code(inner_type),
+            Field::List { inner_type, .. } => write::list_field_code(inner_type),
         })
         .collect();
     let read_code: Vec<_> = fields
@@ -118,10 +117,10 @@ fn normal_struct(
         .map(|field| match field {
             Field::Normal(normal_field) => read::normal_field_code(normal_field),
             Field::PaddBits(n_bits) => read::padding_field_code(*n_bits),
-            Field::ControlOption(ident) => read::control_field_code(ident),
-            Field::Option {
-                option_stripped, ..
-            } => read::option_field_code(option_stripped),
+            Field::ControlList { controlled, bits } => read::control_list_code(controlled, *bits),
+            Field::ControlOption(ident) => read::control_option_code(ident),
+            Field::Option { inner_type, .. } => read::option_field_code(inner_type),
+            Field::List { inner_type, .. } => read::list_field_code(inner_type),
         })
         .collect();
     let out_struct_idents: Vec<_> = fields
@@ -180,6 +179,16 @@ impl ToTokens for super::model::EmptyVariant {
     }
 }
 
-pub fn is_primitive(bits: usize) -> bool {
-    bits == 8 || bits == 16 || bits == 32 || bits == 64
+pub fn list_len_ident(controlled: &Ident) -> Ident {
+    quote::format_ident!("{controlled}_len")
+}
+
+pub fn is_primitive(bits: usize) -> Option<TokenStream> {
+    match bits {
+        8 => Some(quote! {u8}),
+        16 => Some(quote! {u16}),
+        32 => Some(quote! {u32}),
+        64 => Some(quote! {u64}),
+        _ => None,
+    }
 }

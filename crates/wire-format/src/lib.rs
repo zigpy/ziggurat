@@ -12,7 +12,8 @@ pub enum FromBytesError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToBytesError {
-    // #[error("")]
+    #[error("List too long to fit in {ty}. Max length {max}, got: {got}")]
+    ListTooLong { ty: &'static str, max: usize, got: usize },
 }
 
 pub trait ZigbeeBytes {
@@ -134,33 +135,6 @@ impl<const N: usize, T: ZigbeeBytes + Sized> ZigbeeBytes for [T; N] {
 
         res.try_into()
             .map_err(|_| unreachable!("for loop ensures vec length matches array's"))
-    }
-}
-
-impl<T: ZigbeeBytes> ZigbeeBytes for Vec<T> {
-    fn needed_bits(&self) -> usize {
-        const SIZE_OF_LEN: usize = 1;
-        SIZE_OF_LEN + self.iter().map(|item| item.needed_bits()).sum::<usize>()
-    }
-
-    fn write_zigbee_bytes(&self, writer: &mut BitWriter) -> Result<(), ToBytesError> {
-        (self.len() as u8).write_zigbee_bytes(writer)?;
-        for element in self.iter() {
-            element.write_zigbee_bytes(writer)?;
-        }
-        Ok(())
-    }
-
-    fn read_zigbee_bytes(reader: &mut BitReader) -> Result<Self, FromBytesError>
-    where
-        Self: Sized,
-    {
-        let len = u8::read_zigbee_bytes(reader)?;
-        let mut res = Vec::with_capacity(len as usize);
-        for _ in 0..len {
-            res.push(T::read_zigbee_bytes(reader)?);
-        }
-        Ok(res)
     }
 }
 

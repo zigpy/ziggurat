@@ -69,8 +69,16 @@ impl NormalField {
 pub enum Field {
     Normal(NormalField),
     Option {
-        option_stripped: NormalField,
-        option_present: NormalField,
+        full_type: NormalField,
+        inner_type: NormalField,
+    },
+    List {
+        full_type: NormalField,
+        inner_type: NormalField,
+    },
+    ControlList {
+        controlled: Ident,
+        bits: usize,
     },
     ControlOption(Ident),
     PaddBits(u8),
@@ -80,8 +88,7 @@ impl Field {
     pub fn option_stripped(&self) -> Option<&NormalField> {
         match self {
             Field::Option {
-                option_stripped: field,
-                ..
+                inner_type: field, ..
             } => Some(field),
             _ => None,
         }
@@ -90,10 +97,8 @@ impl Field {
     pub fn needed_in_struct_def(&self) -> Option<&NormalField> {
         match self {
             Field::Normal(field)
-            | Field::Option {
-                option_present: field,
-                ..
-            } => Some(field),
+            | Field::Option { full_type: field, .. }
+            | Field::List { full_type: field, .. } => Some(field),
             _ => None,
         }
     }
@@ -114,12 +119,19 @@ fn padding_from_type(ty: &syn::Type) -> Result<u8, (&'static str, Span)> {
     }
 }
 
-impl From<syn::Field> for Field {
+impl Field {
     fn from(field: syn::Field) -> Self {
         match &field.ident {
             Some(ident) if *ident == "reserved" => {
                 if let Some(option_ident) = controls_option(&field) {
                     Self::ControlOption(option_ident)
+                } else if let Some(list_ident) = controls_list(&field) {
+                    let bits = padding_from_type(&field.ty)
+                        .unwrap_or_else(|(msg, span)| abort!(span, msg));
+                    Self::ControlList {
+                        controlled: list_ident,
+                        bits: bits as usize,
+                    }
                 } else {
                     let padding = padding_from_type(&field.ty)
                         .unwrap_or_else(|(msg, span)| abort!(span, msg));
@@ -129,8 +141,13 @@ impl From<syn::Field> for Field {
             Some(_) => {
                 if let Some(option_stripped) = strip_option(field.clone()) {
                     Self::Option {
-                        option_stripped: NormalField::from(option_stripped),
-                        option_present: NormalField::from(field),
+                        inner_type: NormalField::from(option_stripped),
+                        full_type: NormalField::from(field),
+                    }
+                } else if let Some(vec_stripped) = strip_vec(field.clone()) {
+                    Self::List {
+                        inner_type: NormalField::from(vec_stripped),
+                        full_type: NormalField::from(field),
                     }
                 } else {
                     Self::Normal(NormalField::from(field))
@@ -141,13 +158,21 @@ impl From<syn::Field> for Field {
     }
 }
 
+fn strip_vec(field: syn::Field) -> Option<syn::Field> {
+    strip_generic(field, "Vec")
+}
+
 fn strip_option(field: syn::Field) -> Option<syn::Field> {
+    strip_generic(field, "Option")
+}
+
+fn strip_generic(field: syn::Field, outer_ident: &str) -> Option<syn::Field> {
     let syn::Type::Path(path) = &field.ty else {
         return None;
     };
 
     let ty = &path.path.segments.first()?;
-    if ty.ident != "Option" {
+    if ty.ident != outer_ident {
         return None;
     }
 
@@ -165,13 +190,46 @@ fn strip_option(field: syn::Field) -> Option<syn::Field> {
 }
 
 fn controls_option(field: &syn::Field) -> Option<Ident> {
+    fn parse(attr: &Attribute) -> Option<Result<Ident, ()>> {
+        let Ok(list) = attr.meta.require_list() else {
+            return Some(Err(()));
+        };
+        let mut tokens = list.tokens.clone().into_iter();
+        match tokens.next() {
+            Some(TokenTree::Ident(ident)) if ident == "controls" => (),
+            _ => return None,
+        }
+        match tokens.next() {
+            Some(TokenTree::Punct(punct)) if punct.as_char() == '=' => (),
+            _ => return Some(Err(())),
+        }
+        let Some(TokenTree::Ident(target_field)) = tokens.next() else {
+            return Some(Err(()));
+        };
+        Some(Ok(target_field))
+    }
+
+    let attr = field
+        .attrs
+        .iter()
+        .find(|a| a.path().is_ident("wire_format"))?;
+
+    match parse(attr)? {
+        Ok(ident) => Some(ident),
+        Err(_) => abort!(attr.span(), "invalid wire_format attribute"; 
+            help = "The syntax is: #[wire_format(controls = <ident>)] with ident \
+            a later option type field"),
+    }
+}
+
+fn controls_list(field: &syn::Field) -> Option<Ident> {
     fn parse(attr: &Attribute) -> Result<Ident, ()> {
         let Ok(list) = attr.meta.require_list() else {
             return Err(());
         };
         let mut tokens = list.tokens.clone().into_iter();
         match tokens.next() {
-            Some(TokenTree::Ident(ident)) if ident == "controls" => (),
+            Some(TokenTree::Ident(ident)) if ident == "length_of" => (),
             _ => return Err(()),
         }
         match tokens.next() {
@@ -192,7 +250,7 @@ fn controls_option(field: &syn::Field) -> Option<Ident> {
     match parse(attr) {
         Ok(ident) => Some(ident),
         Err(_) => abort!(attr.span(), "invalid wire_format attribute"; 
-            help = "The syntax is: #[wire_format(controls = <ident>)] with ident \
+            help = "The syntax is: #[wire_format(length_of = <ident>)] with ident \
             a later option type field"),
     }
 }
