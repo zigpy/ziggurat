@@ -1319,21 +1319,7 @@ impl ZigbeeStack {
                 multicast_control: None,
                 source_route: None,
             },
-            aux_header: Some(NwkAuxHeader {
-                security_control: NwkSecurityHeaderControlField {
-                    security_level: NwkSecurityLevel::NoSecurity,
-                    key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                    extended_nonce: true,
-                    require_verified_frame_counter: false,
-                    reserved: 0b0,
-                },
-                frame_counter: state
-                    .nib
-                    .nwk_security_material_primary
-                    .outgoing_frame_counter,
-                extended_source: Some(state.nib.nwk_ieee_address),
-                key_sequence_number: state.nib.nwk_active_key_seq_number,
-            }),
+            aux_header: None, // will be replaced
             payload: NwkRouteReplyCommand {
                 multicast: false,
                 route_request_identifier: route_request_cmd.route_request_identifier,
@@ -1432,21 +1418,7 @@ impl ZigbeeStack {
                 multicast_control: None,
                 source_route: None,
             },
-            aux_header: Some(NwkAuxHeader {
-                security_control: NwkSecurityHeaderControlField {
-                    security_level: NwkSecurityLevel::NoSecurity,
-                    key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                    extended_nonce: true,
-                    require_verified_frame_counter: false,
-                    reserved: 0b0,
-                },
-                frame_counter: state
-                    .nib
-                    .nwk_security_material_primary
-                    .outgoing_frame_counter, // will be replaced when sending
-                extended_source: Some(state.nib.nwk_ieee_address),
-                key_sequence_number: state.nib.nwk_active_key_seq_number,
-            }),
+            aux_header: None, // will be replaced
             payload: match aps_frame {
                 ApsFrame::Data(data_frame) => data_frame.to_bytes(),
                 ApsFrame::Ack(ack_frame) => ack_frame.to_bytes(),
@@ -1558,6 +1530,21 @@ impl ZigbeeStack {
         // For now, as does the NWK sequence number
         state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
         nwk_frame.nwk_header.sequence_number = state.nib.nwk_sequence_number;
+        nwk_frame.aux_header = Some(NwkAuxHeader {
+            security_control: NwkSecurityHeaderControlField {
+                security_level: NwkSecurityLevel::NoSecurity,
+                key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                extended_nonce: true,
+                require_verified_frame_counter: false,
+                reserved: 0b0,
+            },
+            frame_counter: state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter,
+            extended_source: Some(state.nib.nwk_ieee_address),
+            key_sequence_number: state.nib.nwk_active_key_seq_number,
+        });
 
         let encrypted_nwk_frame = nwk_frame
             .encrypt(&state.nib.nwk_security_material_primary.key)
@@ -1732,21 +1719,7 @@ impl ZigbeeStack {
                 multicast_control: None,
                 source_route: None,
             },
-            aux_header: Some(NwkAuxHeader {
-                security_control: NwkSecurityHeaderControlField {
-                    security_level: NwkSecurityLevel::NoSecurity,
-                    key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                    extended_nonce: true,
-                    require_verified_frame_counter: false,
-                    reserved: 0b0,
-                },
-                frame_counter: state
-                    .nib
-                    .nwk_security_material_primary
-                    .outgoing_frame_counter,
-                extended_source: Some(state.nib.nwk_ieee_address),
-                key_sequence_number: state.nib.nwk_active_key_seq_number,
-            }),
+            aux_header: None, // will be replaced
             payload: NwkRouteRequestCommand {
                 multicast: false,
                 many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
@@ -1980,21 +1953,7 @@ impl ZigbeeStack {
                     multicast_control: None,
                     source_route: None,
                 },
-                aux_header: Some(NwkAuxHeader {
-                    security_control: NwkSecurityHeaderControlField {
-                        security_level: NwkSecurityLevel::NoSecurity,
-                        key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                        extended_nonce: true,
-                        require_verified_frame_counter: false,
-                        reserved: 0b0,
-                    },
-                    frame_counter: state
-                        .nib
-                        .nwk_security_material_primary
-                        .outgoing_frame_counter,
-                    extended_source: Some(state.nib.nwk_ieee_address),
-                    key_sequence_number: state.nib.nwk_active_key_seq_number,
-                }),
+                aux_header: None, // will be replaced
                 payload: NwkLinkStatusCommand {
                     is_first_frame: remaining_link_statuses.len() == link_statuses.len(),
                     is_last_frame: remaining_link_statuses.len() <= max_link_statuses,
