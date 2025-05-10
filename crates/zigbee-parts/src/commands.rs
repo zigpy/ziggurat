@@ -1,108 +1,11 @@
 use crate::types::{Eui64, Nwk};
+use crate::{Command, Request, Response};
+use abstract_bits::abstract_bits;
 use num_enum::TryFromPrimitive;
-use wire_format::{BitReader, ZigbeeBytes, zigbee_bytes};
-
-// mod legacy_members;
-#[cfg(test)]
-mod tests;
-
-/// 802.15.4 mac layer has a maximum payload length of 104 bytes
-/// see the introduction of this paper for a good overview:
-/// https://www.researchgate.net/publication/305365904_Dissecting_Customized_Protocols_Automatic_Analysis_for_Customized_Protocols_based_on_IEEE_802154
-const MAC_PAYLOAD_MAX_LEN: usize = 104;
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("Could not serialize {ty}")]
-pub struct SerializeError {
-    ty: &'static str,
-    #[source]
-    cause: wire_format::ToBytesError,
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum DeserializeError {
-    #[error("Could not deserialize payload to {ty}")]
-    Payload {
-        ty: &'static str,
-        #[source]
-        cause: wire_format::FromBytesError,
-    },
-    #[error(
-        "Could not deserialize incorrect Id. \
-        Expected {expected_discriminant} (which represents {expected_variant:?}), \
-        found: {found_discriminant:?} instead"
-    )]
-    IncorrectId {
-        expected_variant: NwkCommandId,
-        expected_discriminant: u8,
-        found_discriminant: u8,
-    },
-    #[error("Got zero bytes, no valid command/request/response is zero bytes")]
-    ZeroBytes,
-}
-
-fn serialize<T: ZigbeeBytes>(thing: &T, id: NwkCommandId) -> Result<Vec<u8>, SerializeError> {
-    let mut bytes = vec![0u8; MAC_PAYLOAD_MAX_LEN];
-    bytes[0] = id as u8;
-    let mut writer = wire_format::BitWriter::from(&mut bytes[1..]);
-    thing
-        .write_zigbee_bytes(&mut writer)
-        .map_err(|cause| SerializeError {
-            ty: core::any::type_name::<T>(),
-            cause,
-        })?;
-    let len = writer.bytes_written();
-    dbg!(len);
-    bytes.truncate(len + 1); // +1 for id
-    Ok(bytes)
-}
-
-fn deserialize<T: ZigbeeBytes>(
-    bytes: &[u8],
-    correct_id: NwkCommandId,
-) -> Result<T, DeserializeError> {
-    let [command_id, payload @ ..] = bytes else {
-        return Err(DeserializeError::ZeroBytes);
-    };
-
-    if *command_id != correct_id as u8 {
-        return Err(DeserializeError::IncorrectId {
-            expected_variant: correct_id,
-            expected_discriminant: correct_id as u8,
-            found_discriminant: *command_id,
-        });
-    }
-
-    let mut reader = BitReader::from(payload);
-    T::read_zigbee_bytes(&mut reader).map_err(|cause| DeserializeError::Payload {
-        ty: core::any::type_name::<T>(),
-        cause,
-    })
-}
-
-pub trait Request: Command {
-    type REPLY: Response;
-}
-
-pub trait Response: Command {
-    type REQUEST: Request;
-}
-
-pub trait Command: ZigbeeBytes + Sized {
-    const COMMAND_ID: NwkCommandId;
-
-    fn serialize(&self) -> Result<Vec<u8>, SerializeError> {
-        serialize(self, Self::COMMAND_ID)
-    }
-
-    fn deserialize(bytes: &[u8]) -> Result<Self, DeserializeError> {
-        deserialize(bytes, Self::COMMAND_ID)
-    }
-}
 
 /// Zigbee spec 3.4
+#[abstract_bits(bits = 8)]
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
-#[zigbee_bytes(bits = 8)]
 #[repr(u8)]
 pub enum NwkCommandId {
     RouteRequest = 0x01,
@@ -123,8 +26,8 @@ pub enum NwkCommandId {
 }
 
 /// Zigbee spec: 3.4.1.3.1.1
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
-#[zigbee_bytes(bits = 2)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[abstract_bits(bits = 2)]
 #[repr(u8)]
 pub enum NwkRouteRequestManyToOne {
     NotManyToOne = 0,
@@ -134,12 +37,12 @@ pub enum NwkRouteRequestManyToOne {
 }
 
 /// Zigbee spec: 3.4.1 Route Request Command
-#[zigbee_bytes]
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteRequestCommand {
     reserved: u3,
     pub many_to_one: NwkRouteRequestManyToOne,
-    #[wire_format(controls = destination_eui64)]
+    #[abstract_bits(controls = destination_eui64)]
     reserved: bool,
     reserved: u2,
     pub route_request_identifier: u8,
@@ -157,13 +60,13 @@ impl Command for NwkRouteRequestCommand {
 }
 
 /// Zigbee spec 3.4.2 Route Reply Command
-#[wire_format::zigbee_bytes]
+#[abstract_bits::abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteReplyCommand {
     reserved: u4,
-    #[wire_format(controls = originator_eui64)]
+    #[abstract_bits(controls = originator_eui64)]
     reserved: bool,
-    #[wire_format(controls = responder_eui64)]
+    #[abstract_bits(controls = responder_eui64)]
     reserved: bool,
     reserved: u2,
     pub route_request_identifier: u8,
@@ -183,10 +86,10 @@ impl Command for NwkRouteReplyCommand {
 }
 
 /// Zigbee spec 3.4.5: Route Record Command
-#[zigbee_bytes]
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteRecordCommand {
-    #[wire_format(length_of = relays)]
+    #[abstract_bits(length_of = relays)]
     reserved: u8,
     pub relays: Vec<Nwk>,
 }
@@ -196,10 +99,10 @@ impl Command for NwkRouteRecordCommand {
 }
 
 /// Zigbee spec compressed: 3.4.8.3
-#[zigbee_bytes]
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkLinkStatusCommand {
-    #[wire_format(length_of = link_statuses)]
+    #[abstract_bits(length_of = link_statuses)]
     reserved: u5,
     pub is_first_frame: bool,
     pub is_last_frame: bool,
@@ -212,7 +115,7 @@ impl Command for NwkLinkStatusCommand {
 }
 
 /// Zigbee spec 3.4.8
-#[zigbee_bytes]
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkLinkStatus {
     pub address: Nwk,
@@ -223,7 +126,7 @@ pub struct NwkLinkStatus {
 }
 
 /// Zigbee spec: 3.4.4 Leave Command
-#[zigbee_bytes]
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkLeaveCommand {
     reserved: u5,
@@ -236,8 +139,8 @@ impl Command for NwkLeaveCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::Leave;
 }
 
-#[zigbee_bytes(bits = 8)]
-#[derive(Debug, Eq, PartialEq, Clone, TryFromPrimitive, Copy)]
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 #[repr(u8)]
 pub enum EndDeviceTimeout {
     Seconds10 = 0,
@@ -258,7 +161,7 @@ pub enum EndDeviceTimeout {
 }
 
 /// Zigbee spec 3.4.11 End Device Timeout Request Command
-#[zigbee_bytes]
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkEndDeviceTimeoutRequestCommand {
     pub request_timeout_enum: EndDeviceTimeout,
@@ -272,8 +175,8 @@ impl Command for NwkEndDeviceTimeoutRequestCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutRequest;
 }
 
-#[zigbee_bytes(bits = 8)]
-#[derive(Debug, Eq, PartialEq, Clone, TryFromPrimitive, Copy)]
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 #[repr(u8)]
 pub enum NwkEndDeviceTimeoutResponseStatus {
     Success = 0x00,
@@ -282,7 +185,7 @@ pub enum NwkEndDeviceTimeoutResponseStatus {
 }
 
 /// Zigbee spec: 3.4.12 End Device Timeout Response Command
-#[zigbee_bytes]
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkEndDeviceTimeoutResponseCommand {
     pub status: NwkEndDeviceTimeoutResponseStatus,

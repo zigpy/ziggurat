@@ -4,8 +4,6 @@ use crate::ieee_802154::{
 };
 use crate::spinel::{SpinelFramePropValueIs, SpinelPropertyId, SpinelStatus};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
-use crate::types::{Eui64, Key, Nwk, PanId};
-
 use crate::zigbee_aps::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl,
     ApsFrameType, parse_aps_frame,
@@ -15,9 +13,12 @@ use crate::zigbee_nwk::{
     NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery, NwkSecurityHeaderControlField,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
-use crate::zigbee_nwk_commands::{
-    Command, NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand,
-    NwkRouteReplyCommand, NwkRouteRequestCommand,
+use zigbee_parts::types::{Eui64, Key, Nwk, PanId};
+
+use zigbee_parts::Command;
+use zigbee_parts::commands::{
+    NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
+    NwkRouteRequestCommand,
 };
 
 use std::cmp;
@@ -1097,7 +1098,8 @@ impl ZigbeeStack {
                 originator_eui64: nwk_frame.nwk_header.source_ieee,
                 responder_eui64: Some(state.nib.nwk_ieee_address),
             }
-            .serialize().unwrap(),
+            .serialize()
+            .unwrap(),
         }
         .encrypt(&state.nib.nwk_security_material_primary.key)
         .expect("Encryption somehow failed");
@@ -1717,7 +1719,8 @@ impl ZigbeeStack {
                                 .collect()
                         },
                     }
-                    .serialize().unwrap(),
+                    .serialize()
+                    .unwrap(),
                 }
                 .encrypt(&state.nib.nwk_security_material_primary.key)
                 .expect("Encryption somehow failed");

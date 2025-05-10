@@ -5,7 +5,7 @@ authors = []
 edition = "2024"
 
 [dependencies]
-wire-format = { path = "../wire-format" }
+zigbee-parts = { path = "../zigbee-parts" }
 
 aes = "0.9.0-pre.2"
 cbc = "0.2.0-pre.2"
