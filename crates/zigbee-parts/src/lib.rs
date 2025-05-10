@@ -3,7 +3,6 @@ use commands::NwkCommandId;
 
 pub mod types;
 pub mod commands;
-// mod legacy_members;
 #[cfg(test)]
 mod tests;
 

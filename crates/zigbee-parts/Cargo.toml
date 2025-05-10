@@ -12,3 +12,6 @@ abstract-bits = { git = "https://github.com/dvdsk/abstract-bits" }
 num_enum = "0.7.3"
 hex = "0.4.3"
 thiserror = "2.0.12"
+
+[dev-dependencies]
+hex-literal = "1.0.0"

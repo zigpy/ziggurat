@@ -1,4 +1,7 @@
-use super::*;
+use crate::types::{Eui64, Nwk};
+use crate::Command;
+
+use super::commands::*;
 use hex_literal::hex;
 
 #[test]
