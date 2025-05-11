@@ -3,8 +3,6 @@ use commands::NwkCommandId;
 
 pub mod types;
 pub mod commands;
-#[cfg(test)]
-mod tests;
 
 /// 802.15.4 mac layer has a maximum payload length of 104 bytes
 /// see the introduction of this paper for a good overview:
