@@ -5,7 +5,8 @@ version = 4
 [[package]]
 name = "abstract-bits"
 version = "0.1.0"
-source = "git+https://github.com/dvdsk/abstract-bits#65923535f5be9ee9b0a66e8ab58a7efcce658a57"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57274eff82141f21b4a9707551f540e74471431df9eba816fc8ebf563d93f8cc"
 dependencies = [
  "abstract-bits-derive",
  "arbitrary-int",
@@ -16,7 +17,8 @@ dependencies = [
 [[package]]
 name = "abstract-bits-derive"
 version = "0.1.0"
-source = "git+https://github.com/dvdsk/abstract-bits#65923535f5be9ee9b0a66e8ab58a7efcce658a57"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ed95b24ea1d92a55947dbdc0d08fda020d16690fe5c951e845faa740a5cb71"
 dependencies = [
  "proc-macro-error2",
  "proc-macro2",

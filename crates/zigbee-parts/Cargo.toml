@@ -8,7 +8,7 @@ authors.workspace = true
 
 [dependencies]
 # will be replaced with crates.io dependency later
-abstract-bits = { git = "https://github.com/dvdsk/abstract-bits" }
+abstract-bits = "0.1.0"
 num_enum = "0.7.3"
 hex = "0.4.3"
 thiserror = "2.0.12"
