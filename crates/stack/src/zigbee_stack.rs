@@ -109,48 +109,48 @@ pub struct NwkRoutingTableEntry {
     pub destination: Nwk,
     pub status: NwkRouteStatus,
 
-    // A flag indicating that the destination indicated by this address does not store
-    // source routes.
+    /// A flag indicating that the destination indicated by this address does not store
+    /// source routes.
     pub no_route_cache: bool,
 
-    // A flag indicating that the destination is a concentrator that issued a
-    // many-to-one route request.
+    /// A flag indicating that the destination is a concentrator that issued a
+    /// many-to-one route request.
     pub many_to_one: bool,
 
-    // A flag indicating that a route record command frame SHOULD be sent to the
-    // destination prior to the next data packet.
+    /// A flag indicating that a route record command frame SHOULD be sent to the
+    /// destination prior to the next data packet.
     pub route_record_required: bool,
 
-    // When set to TRUE, this flag indicates that an expected regular many-to-one route
-    // request was missed, i.e. the last many-to-one route request for this destination
-    // was received more than nwkConcentratorDiscoveryTime + nwkRouteDiscoveryTime
-    // seconds ago. When the entry is created, this field is initially set to FALSE.
-    // This flag only has meaning for entries, which have the many-to-one field set to
-    // TRUE.
+    /// When set to TRUE, this flag indicates that an expected regular many-to-one route
+    /// request was missed, i.e. the last many-to-one route request for this destination
+    /// was received more than `nwkConcentratorDiscoveryTime` + `nwkRouteDiscoveryTime`
+    /// seconds ago. When the entry is created, this field is initially set to FALSE.
+    /// This flag only has meaning for entries, which have the many-to-one field set to
+    /// TRUE.
     pub expired: bool,
 
-    // Used for TLVs and a few subsequent fields
+    /// Used for `TLVs` and a few subsequent fields
     pub sequence_number_valid: bool,
 
-    // The 16-bit network address of the next hop on the way to the destination.
+    /// The 16-bit network address of the next hop on the way to the destination.
     pub next_hop_address: Nwk,
 
-    // The 16-bit sequence number associated with this entry, obtained from the last
-    // route message that successfully updated this entry and conveyed a sequence
-    // number. Notice that routers prior to R23 did neither maintain nor convey a
-    // sequence number. The value stored in this field is only valid if the Sequence
-    // Number Valid flag is set.
+    /// The 16-bit sequence number associated with this entry, obtained from the last
+    /// route message that successfully updated this entry and conveyed a sequence
+    /// number. Notice that routers prior to `R23` did neither maintain nor convey a
+    /// sequence number. The value stored in this field is only valid if the Sequence
+    /// Number Valid flag is set.
     pub sequence_number: u16,
 
-    // A 32-bit saturating counter, which is incremented whenever this routing table
-    // entry is used to forward a data packet towards its destination
+    /// A 32-bit saturating counter, which is incremented whenever this routing table
+    /// entry is used to forward a data packet towards its destination
     pub total_usage_count: u32,
 
-    // An 8-bit saturating counter, which is pre-loaded with nwkRouterAgeLimit when the
-    // routing table entry is created; incremented whenever this routing table entry is
-    // used to forward a state packet towards its destination; and decremented
-    // unconditionally once every nwkLinkStatusPeriod. A value of 0 indicates no
-    // packets have recently been forwarded along this route.
+    /// An 8-bit saturating counter, which is pre-loaded with `nwkRouterAgeLimit` when the
+    /// routing table entry is created; incremented whenever this routing table entry is
+    /// used to forward a state packet towards its destination; and decremented
+    /// unconditionally once every `nwkLinkStatusPeriod`. A value of 0 indicates no
+    /// packets have recently been forwarded along this route.
     pub recent_activity: u8,
 }
 
@@ -158,31 +158,31 @@ type RouteRequestId = u8;
 
 #[derive(Debug)]
 pub struct NwkRouteDiscoveryTableEntry {
-    // A sequence number for a route request command frame that is incremented each time
-    // a device initiates a route request. Notice that this 8-bit identifier is
-    // distinct from the 16-bit Routing Sequence Number. The former is used to discern
-    // route requests originating in a particular router; the latter is used to
-    // identify stale routing information.
+    /// A sequence number for a route request command frame that is incremented each time
+    /// a device initiates a route request. Notice that this 8-bit identifier is
+    /// distinct from the 16-bit Routing Sequence Number. The former is used to discern
+    /// route requests originating in a particular router; the latter is used to
+    /// identify stale routing information.
     pub route_request_id: RouteRequestId,
 
-    // The 16-bit network address of the route request’s initiator.
+    /// The 16-bit network address of the route request’s initiator.
     pub source_address: Nwk,
 
-    // The 16-bit network address of the device that has sent the most recent lowest
-    // cost route request command frame corresponding to this entry’s route request
-    // identifier and source address. This field is used to determine the path that an
-    // eventual route reply command frame SHOULD follow.
+    /// The 16-bit network address of the device that has sent the most recent lowest
+    /// cost route request command frame corresponding to this entry’s route request
+    /// identifier and source address. This field is used to determine the path that an
+    /// eventual route reply command frame SHOULD follow.
     pub sender_address: Nwk,
 
-    // The accumulated path cost from the source of the route request to the current
-    // device.
+    /// The accumulated path cost from the source of the route request to the current
+    /// device.
     pub forward_cost: u8,
 
-    // The accumulated path cost from the current device to the destination device.
+    /// The accumulated path cost from the current device to the destination device.
     pub residual_cost: u8,
 
-    // A countdown timer indicating the number of milliseconds until route discovery
-    // expires. The initial value is nwkcRouteDiscoveryTime.
+    /// A countdown timer indicating the number of milliseconds until route discovery
+    /// expires. The initial value is `nwkcRouteDiscoveryTime`.
     pub expiration_time: Instant,
 }
 
@@ -215,40 +215,44 @@ pub struct NwkNeighborTableEntry {
     pub rx_on_when_idle: bool,
     pub end_device_configuration: u16,
 
-    // The current time remaining, in seconds, for the end device
-    pub timeout_at: Instant, // max: 15728640s, ~182 days
+    /// The current time remaining, in seconds, for the end device
+    pub timeout_at: Instant,
+    /// max: 15728640 seconds, ~182 days
 
-    // This field indicates the timeout, in seconds, for the end device child
-    pub device_timeout_at: Instant, // max: 129600s, 36 hours
+    /// This field indicates the timeout, in seconds, for the end device child
+    pub device_timeout_at: Instant,
+    /// max: 129600 seconds, 36 hours
     pub relationship: NwkNeighborRelationship,
 
-    // A value indicating if previous transmissions to the device were successful or
-    // not. Higher values indicate more failures.
+    /// A value indicating if previous transmissions to the device were successful or
+    /// not. Higher values indicate more failures.
     pub transmit_failure: u8,
-    pub lqas: VecDeque<u8>, // TODO: replace with a fixed-size ring buffer
+    pub lqas: VecDeque<u8>,
+    /// TODO: replace with a fixed-size ring buffer
 
-    // The outgoing cost field contains the cost of the link as measured by the
-    // neighbor. The value is obtained from the most recent link status command frame
-    // received from the neighbor. A value of 0 indicates that no link status command
-    // listing this device has been received.
+    /// The outgoing cost field contains the cost of the link as measured by the
+    /// neighbor. The value is obtained from the most recent link status command frame
+    /// received from the neighbor. A value of 0 indicates that no link status command
+    /// listing this device has been received.
     pub outgoing_cost: u8,
 
-    // The number of nwkLinkStatusPeriod intervals that have passed since the last link
-    // status command frame was received, up to a maximum value of nwkRouterAgeLimit.
-    // pub age: u8,
+    // The number of [`nwkLinkStatusPeriod`] intervals that have passed since
+    // the last link status command frame was received, up to a maximum value
+    // of [`nwkRouterAgeLimit`].
+    // pub age: `u8`,
     pub last_link_status_timestamp: Instant,
 
     pub incoming_beacon_timestamp: u32,
     pub beacon_transmission_time_offset: u32,
 
-    // This value indicates at least one keepalive has been received from the end device
-    // since the router has rebooted.
+    /// This value indicates at least one keep-alive has been received from the end device
+    /// since the router has rebooted.
     pub keepalive_received: bool,
     // pub mac_interface_index: u8,
     pub mac_unicast_bytes_transmitted: u32,
     pub mac_unicast_bytes_received: u32,
 
-    // The number of nwkLinkStatusPeriod intervals, which elapsed since this router
+    // The number of [`nwkLinkStatusPeriod`] intervals, which elapsed since this router
     // neighbor was added to the neighbor table. This value is only maintained on
     // routers and the coordinator and is only valid for entries with a relationship
     // of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating
@@ -309,63 +313,63 @@ pub struct Nib {
     pub nwk_active_key_seq_number: u8,
     pub nwk_all_fresh: bool,
 
-    // The minimum time, in seconds, between two consecutive concentrator route
-    // discoveries. If set to 0x00, there is no minimum separation. This only applies
-    // when the device is operating as a Concentrator.
+    /// The minimum time, in seconds, between two consecutive concentrator route
+    /// discoveries. If set to 0x00, there is no minimum separation. This only applies
+    /// when the device is operating as a Concentrator.
     pub nwk_concentrator_discovery_separation_time: Duration,
 
-    // The time between link status command frames.
+    /// The time between link status command frames.
     pub nwk_link_status_period: Duration,
 
-    // The number of missed link status command frames before resetting the link costs
-    // to zero.
+    /// The number of missed link status command frames before resetting the link costs
+    /// to zero.
     pub nwk_router_age_limit: u8,
     pub nwk_address_map: HashMap<Eui64, Nwk>,
 
-    // A flag that determines if a time stamp indication is provided on incoming and
-    // outgoing packets.
+    /// A flag that determines if a time stamp indication is provided on incoming and
+    /// outgoing packets.
     pub nwk_time_stamp: bool,
 
     pub nwk_pan_id: PanId,
 
-    // A count of unicast transmissions made by the NNK layer on this device. Each time
-    // the NWK layer transmits a unicast frame, by invoking the MCPS-state.request
-    // primitive of the MAC sub-layer, it SHALL increment this counter. When either the
-    // NHL performs an NLME-SET.request on this attribute or if the value of nwkTxTotal
-    // rolls over past 0xffff the NWK layer SHALL reset to 0x00 each Transmit Failure
-    // field contained in the neighbor table.
+    /// A count of unicast transmissions made by the NNK layer on this device. Each time
+    /// the NWK layer transmits a unicast frame, by invoking the MCPS-state.request
+    /// primitive of the MAC sub-layer, it SHALL increment this counter. When either the
+    /// NHL performs an NLME-SET.request on this attribute or if the value of nwkTxTotal
+    /// rolls over past 0xffff the NWK layer SHALL reset to 0x00 each Transmit Failure
+    /// field contained in the neighbor table.
     pub nwk_tx_total: u16,
 
-    // This policy determines whether or not a remote NWK leave request command frame
-    // received by the local device is accepted.
+    /// This policy determines whether or not a remote NWK leave request command frame
+    /// received by the local device is accepted.
     pub nwk_leave_request_allowed: bool,
 
     pub nwk_parent_information: u8,
 
-    // This is an index into Table 3-54. It indicates the default timeout in minutes for
-    // any end device that does not negotiate a different timeout value.
+    /// This is an index into Table 3-54. It indicates the default timeout in minutes for
+    /// any end device that does not negotiate a different timeout value.
     pub nwk_end_device_timeout_default: u8,
 
-    // This policy determines whether a NWK leave request is accepted when the Rejoin
-    // bit in the message is set to FALSE
+    /// This policy determines whether a NWK leave request is accepted when the Rejoin
+    /// bit in the message is set to FALSE
     pub nwk_leave_request_without_rejoin_allowed: bool,
 
     pub nwk_ieee_address: Eui64,
 
-    // A strictly increasing sequence number included in all route request and route
-    // reply command frames to allow other routers to determine the chronological order
-    // of such route discovery messages.
+    /// A strictly increasing sequence number included in all route request and route
+    /// reply command frames to allow other routers to determine the chronological order
+    /// of such route discovery messages.
     pub nwk_routing_sequence_number: u16,
 
-    // Implied from the spec: "notice that this 8-bit identifier is distinct from the
-    // 16-bit Routing Sequence Number. The former is used to discern route requests
-    // originating in a particular router; the latter is used to identify stale routing
-    // information."
+    /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
+    /// 16-bit Routing Sequence Number. The former is used to discern route requests
+    /// originating in a particular router; the latter is used to identify stale routing
+    /// information."
     pub nwk_routing_request_sequence_number: u8,
 
-    // This indicates whether the router has Hub Connectivity as defined by a higher
-    // level application. The higher level application sets this value and the stack
-    // advertises it.
+    /// This indicates whether the router has Hub Connectivity as defined by a higher
+    /// level application. The higher level application sets this value and the stack
+    /// advertises it.
     pub nwk_hub_connectivity: bool,
 
     // nwkMacInterfaceTable
@@ -496,7 +500,7 @@ pub struct ApsAckData {
 impl ApsAckData {
     pub fn from_aps_ack(src: Nwk, ack: &ApsAckFrame) -> Self {
         ApsAckData {
-            src: src,
+            src,
             destination_endpoint: ack.destination_endpoint,
             cluster_id: ack.cluster_id,
             profile_id: ack.profile_id,
@@ -560,8 +564,8 @@ impl ZigbeeStack {
         let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
             self_weak: weak_self.clone(),
             state: Mutex::new(ZigbeeStackState::new()),
-            spinel: spinel,
-            notification_tx: notification_tx,
+            spinel,
+            notification_tx,
             raw_frame_rx: Mutex::new(raw_frame_rx),
         });
 
@@ -786,9 +790,7 @@ impl ZigbeeStack {
                 // Ignored, OpenThread RCP takes care of it
                 return None;
             }
-            Ieee802154FrameType::Data => {
-                // Process it below
-            }
+            Ieee802154FrameType::Data => (),
             _ => {
                 log::debug!("Ignoring frame, not a data frame");
                 return None;
@@ -801,16 +803,15 @@ impl ZigbeeStack {
                 log::debug!("Ignoring frame, destination PAN ID is not present");
                 return None;
             }
-            Some(dest_pan_id) => {
-                if dest_pan_id != state.nib.nwk_pan_id {
-                    log::debug!(
-                        "Ignoring frame, PAN ID does not match {:?} != {:?}",
-                        dest_pan_id,
-                        state.nib.nwk_pan_id
-                    );
-                    return None;
-                }
+            Some(dest_pan_id) if dest_pan_id != state.nib.nwk_pan_id => {
+                log::debug!(
+                    "Ignoring frame, PAN ID does not match {:?} != {:?}",
+                    dest_pan_id,
+                    state.nib.nwk_pan_id
+                );
+                return None;
             }
+            Some(_) => (),
         }
 
         // Next, try to parse the NWK frame
@@ -888,8 +889,7 @@ impl ZigbeeStack {
             Some(last_stored_frame_counter) => {
                 if aux_header.frame_counter <= *last_stored_frame_counter {
                     log::debug!(
-                        "Ignoring frame, frame counter has rolled backward from {} to {}",
-                        last_stored_frame_counter,
+                        "Ignoring frame, frame counter has rolled backward from {last_stored_frame_counter} to {}",
                         aux_header.frame_counter
                     );
                     return None;
@@ -908,7 +908,7 @@ impl ZigbeeStack {
             match nwk_frame.decrypt(&state.nib.nwk_security_material_primary.key) {
                 Ok(decrypted_frame) => decrypted_frame,
                 Err(err) => {
-                    log::warn!("Ignoring frame, decryption failed: {:?}", err);
+                    log::warn!("Ignoring frame, decryption failed: {err:?}");
                     return None;
                 }
             };
@@ -916,7 +916,7 @@ impl ZigbeeStack {
         // At this point we no longer need to lock `state`
         drop(state);
 
-        log::info!("Decrypted frame: {:#?}", decrypted_nwk_frame);
+        log::info!("Decrypted frame: {decrypted_nwk_frame:#?}");
         self.handle_decrypted_frame(&decrypted_nwk_frame, lqi, rssi);
 
         return Some(decrypted_nwk_frame);
@@ -927,15 +927,10 @@ impl ZigbeeStack {
 
         match state.nib.nwk_address_map.insert(eui64, nwk) {
             None => {
-                log::debug!("Added new address mapping: {:?} -> {:?}", eui64, nwk)
+                log::debug!("Added new address mapping: {eui64:?} -> {nwk:?}")
             }
             Some(old_nwk) => {
-                log::warn!(
-                    "Updated address mapping: {:?} -> {:?} (was {:?})",
-                    eui64,
-                    nwk,
-                    old_nwk,
-                )
+                log::warn!("Updated address mapping: {eui64:?} -> {nwk:?} (was {old_nwk:?})",)
             }
         }
     }
@@ -990,8 +985,7 @@ impl ZigbeeStack {
                         .insert(relaying_eui64, aux_header.frame_counter);
 
                     log::debug!(
-                        "Incremented frame counter for {:?} to {}",
-                        relaying_eui64,
+                        "Incremented frame counter for {relaying_eui64:?} to {}",
                         aux_header.frame_counter
                     );
                 }
@@ -1000,11 +994,8 @@ impl ZigbeeStack {
         }
 
         // Update the address cache
-        match nwk_frame.nwk_header.source_ieee {
-            Some(src_eui64) => {
-                self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
-            }
-            None => {}
+        if let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
+            self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
         }
 
         // Handle LQA calculation
@@ -1083,12 +1074,12 @@ impl ZigbeeStack {
         let link_status_cmd = match NwkLinkStatusCommand::from_bytes(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing link status command: {:?}", e);
+                log::warn!("Error parsing link status command: {e:?}");
                 return;
             }
         };
 
-        log::info!("Link status command frame: {:#?}", link_status_cmd);
+        log::info!("Link status command frame: {link_status_cmd:#?}");
 
         if nwk_frame.nwk_header.source_ieee.is_none() {
             log::warn!("Link status command source EUI64 is missing");
@@ -1122,7 +1113,7 @@ impl ZigbeeStack {
             Some(entry) => entry,
             None => {
                 // Create one
-                log::info!("Creating new neighbor entry for {:?}", source_ieee);
+                log::info!("Creating new neighbor entry for {source_ieee:?}");
 
                 let entry = NwkNeighborTableEntry {
                     extended_address: source_ieee,
@@ -1179,14 +1170,14 @@ impl ZigbeeStack {
             }
         }
 
-        log::debug!("Updated neighbor table entry: {:#?}", neighbor_entry);
+        log::debug!("Updated neighbor table entry: {neighbor_entry:#?}");
     }
 
     fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
         let route_reply_cmd = match NwkRouteReplyCommand::from_bytes(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing route reply command: {:?}", e);
+                log::warn!("Error parsing route reply command: {e:?}");
                 return;
             }
         };
@@ -1202,7 +1193,7 @@ impl ZigbeeStack {
         let route_request_cmd = match NwkRouteRequestCommand::from_bytes(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing route request command: {:?}", e);
+                log::warn!("Error parsing route request command: {e:?}");
                 return;
             }
         };
@@ -1578,7 +1569,7 @@ impl ZigbeeStack {
             Some(route) => route,
             None => {
                 let entry = NwkRoutingTableEntry {
-                    destination: destination,
+                    destination,
                     status: NwkRouteStatus::Inactive,
                     no_route_cache: false,
                     many_to_one: false,
