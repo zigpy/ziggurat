@@ -415,47 +415,9 @@ impl ZigbeeStack {
         });
 
         loop {
-            // Parse incoming 802.15.4 frames from Spinel
-            let maybe_spinel_frame = {
-                self.raw_frame_rx
-                    .lock()
-                    .expect("Failed to receive frame")
-                    .recv()
-                    .await
-            };
+            let (packet, ieee802154_frame) = self.recv_frame().await;
 
-            if maybe_spinel_frame.is_none() {
-                log::warn!("Frame sender hung up");
-                continue;
-            }
-
-            let spinel_frame = maybe_spinel_frame.unwrap();
-
-            let packet = match SpinelRxFrame::from_bytes(&spinel_frame.value) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!("Error parsing spinel frame: {:?}", e);
-                    continue;
-                }
-            };
-
-            if packet.psdu.len() < 2 {
-                log::warn!("Packet too short to contain FCS");
-                continue;
-            }
-            let frame_data = &packet.psdu[..packet.psdu.len() - 2];
-
-            let ieee802154_frame = match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
-                Ok(f) => f,
-                Err(e) => {
-                    log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
-                    continue;
-                }
-            };
-
-            log::debug!("Received 802.15.4 frame: {:?}", ieee802154_frame);
-
-            match self.receive_802154_frame(&ieee802154_frame, packet.lqi, packet.rssi) {
+            match self.process_802154_frame(&ieee802154_frame, packet.lqi, packet.rssi) {
                 Some(nwk_frame) => {
                     let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
                         Ok(ApsFrame::Data(data)) => data,
@@ -501,6 +463,43 @@ impl ZigbeeStack {
                 }
                 None => {}
             }
+        }
+    }
+
+    async fn recv_frame(&self) -> (SpinelRxFrame, Ieee802154Frame) {
+        loop {
+            let Some(spinal_frame) = self
+                .raw_frame_rx
+                .lock()
+                .expect("No thread should panic")
+                .recv()
+                .await
+            else {
+                log::warn!("Frame sender hung up");
+                continue;
+            };
+            let packet = match SpinelRxFrame::from_bytes(&spinal_frame.value) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("Error parsing spinel frame: {:?}", e);
+                    continue;
+                }
+            };
+            if packet.psdu.len() < 2 {
+                log::warn!("Packet too short to contain FCS");
+                continue;
+            }
+            let frame_data = &packet.psdu[..packet.psdu.len() - 2];
+            match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
+                Ok(frame) => {
+                    log::debug!("Received 802.15.4 frame: {:?}", frame);
+                    return (packet, frame);
+                }
+                Err(e) => {
+                    log::warn!("Error parsing IEEE 802.15.4 frame: {:?}", e);
+                    continue;
+                }
+            };
         }
     }
 
@@ -602,7 +601,7 @@ impl ZigbeeStack {
         Ok(())
     }
 
-    pub fn receive_802154_frame(
+    pub fn process_802154_frame(
         &self,
         frame: &Ieee802154Frame,
         lqi: u8,

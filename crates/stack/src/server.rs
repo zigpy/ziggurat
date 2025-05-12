@@ -79,6 +79,7 @@ impl ZigguratServer {
         }
     }
 
+    // TODO replace with tokio-serde
     async fn handle_client(
         &self,
         stream: TcpStream,
