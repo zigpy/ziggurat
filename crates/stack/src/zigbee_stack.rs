@@ -30,6 +30,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
 
+mod route;
+
 // The number of the most recent samples taken into consideration SHOULD be n = 3, which
 // eliminates single outliers maintains a fast response to real changes in link quality,
 // and keeps memory requirements to a minimum.
@@ -94,96 +96,6 @@ pub struct NwkBroadcastTransaction {
     // The spec does not describe how this is supposed to be implemented so we just do
     // it naively
     // pub relayed_neighbors: HashMap<Eui64, Instant>,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum NwkRouteStatus {
-    Active = 0,
-    DiscoveryUnderway = 1,
-    DiscoveryFailed = 2,
-    Inactive = 3,
-}
-
-#[derive(Debug)]
-pub struct NwkRoutingTableEntry {
-    pub destination: Nwk,
-    pub status: NwkRouteStatus,
-
-    /// A flag indicating that the destination indicated by this address does not store
-    /// source routes.
-    pub no_route_cache: bool,
-
-    /// A flag indicating that the destination is a concentrator that issued a
-    /// many-to-one route request.
-    pub many_to_one: bool,
-
-    /// A flag indicating that a route record command frame SHOULD be sent to the
-    /// destination prior to the next data packet.
-    pub route_record_required: bool,
-
-    /// When set to TRUE, this flag indicates that an expected regular many-to-one route
-    /// request was missed, i.e. the last many-to-one route request for this destination
-    /// was received more than `nwkConcentratorDiscoveryTime` + `nwkRouteDiscoveryTime`
-    /// seconds ago. When the entry is created, this field is initially set to FALSE.
-    /// This flag only has meaning for entries, which have the many-to-one field set to
-    /// TRUE.
-    pub expired: bool,
-
-    /// Used for `TLVs` and a few subsequent fields
-    pub sequence_number_valid: bool,
-
-    /// The 16-bit network address of the next hop on the way to the destination.
-    pub next_hop_address: Nwk,
-
-    /// The 16-bit sequence number associated with this entry, obtained from the last
-    /// route message that successfully updated this entry and conveyed a sequence
-    /// number. Notice that routers prior to `R23` did neither maintain nor convey a
-    /// sequence number. The value stored in this field is only valid if the Sequence
-    /// Number Valid flag is set.
-    pub sequence_number: u16,
-
-    /// A 32-bit saturating counter, which is incremented whenever this routing table
-    /// entry is used to forward a data packet towards its destination
-    pub total_usage_count: u32,
-
-    /// An 8-bit saturating counter, which is pre-loaded with `nwkRouterAgeLimit` when the
-    /// routing table entry is created; incremented whenever this routing table entry is
-    /// used to forward a state packet towards its destination; and decremented
-    /// unconditionally once every `nwkLinkStatusPeriod`. A value of 0 indicates no
-    /// packets have recently been forwarded along this route.
-    pub recent_activity: u8,
-}
-
-type RouteRequestId = u8;
-
-#[derive(Debug)]
-pub struct NwkRouteDiscoveryTableEntry {
-    /// A sequence number for a route request command frame that is incremented each time
-    /// a device initiates a route request. Notice that this 8-bit identifier is
-    /// distinct from the 16-bit Routing Sequence Number. The former is used to discern
-    /// route requests originating in a particular router; the latter is used to
-    /// identify stale routing information.
-    pub route_request_id: RouteRequestId,
-
-    /// The 16-bit network address of the route request’s initiator.
-    pub source_address: Nwk,
-
-    /// The 16-bit network address of the device that has sent the most recent lowest
-    /// cost route request command frame corresponding to this entry’s route request
-    /// identifier and source address. This field is used to determine the path that an
-    /// eventual route reply command frame SHOULD follow.
-    pub sender_address: Nwk,
-
-    /// The accumulated path cost from the source of the route request to the current
-    /// device.
-    pub forward_cost: u8,
-
-    /// The accumulated path cost from the current device to the destination device.
-    pub residual_cost: u8,
-
-    /// A countdown timer indicating the number of milliseconds until route discovery
-    /// expires. The initial value is `nwkcRouteDiscoveryTime`.
-    pub expiration_time: Instant,
 }
 
 #[derive(Debug)]
@@ -284,6 +196,12 @@ impl NwkNeighborTableEntry {
     }
 }
 
+/// Zigbee spec: 3.5.2 NWK Information Base
+///
+/// The NWK information base (NIB) comprises the attributes required to manage
+/// the NWK layer of a device. Each of these attributes can be read or
+/// written using the NLME-GET.request and NLME-SET.request primitives,
+/// respectively. Except those who are read only
 #[derive(Debug)]
 pub struct Nib {
     pub nwk_sequence_number: u8,
@@ -292,8 +210,8 @@ pub struct Nib {
     pub nwk_max_children: u8,
     pub nwk_max_depth: u8,
     pub nwk_neighbor_table: HashMap<Eui64, NwkNeighborTableEntry>,
-    pub nwk_route_table: HashMap<Nwk, NwkRoutingTableEntry>,
-    pub nwk_route_discovery_table: HashMap<RouteRequestId, NwkRouteDiscoveryTableEntry>,
+    pub nwk_route_table: HashMap<Nwk, route::TableEntry>,
+    pub nwk_route_discovery_table: HashMap<route::RequestId, route::DiscoveryEntry>,
     pub nwk_capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
     pub nwk_max_source_route: u8,
@@ -1351,10 +1269,10 @@ impl ZigbeeStack {
                 },
                 group_id: None,
                 destination_endpoint: Some(dst_ep),
-                cluster_id: cluster_id,
-                profile_id: profile_id,
+                cluster_id,
+                profile_id,
                 source_endpoint: src_ep,
-                counter: counter,
+                counter,
                 asdu: asdu.to_vec(),
             },
             ApsDeliveryMode::Broadcast => ApsDataFrame {
@@ -1368,10 +1286,10 @@ impl ZigbeeStack {
                 },
                 group_id: None,
                 destination_endpoint: Some(dst_ep),
-                cluster_id: cluster_id,
-                profile_id: profile_id,
+                cluster_id,
+                profile_id,
                 source_endpoint: src_ep,
-                counter: counter,
+                counter,
                 asdu: asdu.to_vec(),
             },
             ApsDeliveryMode::Multicast => ApsDataFrame {
@@ -1385,10 +1303,10 @@ impl ZigbeeStack {
                 },
                 group_id: Some(destination.as_u16()),
                 destination_endpoint: None,
-                cluster_id: cluster_id,
-                profile_id: profile_id,
+                cluster_id,
+                profile_id,
                 source_endpoint: src_ep,
-                counter: counter,
+                counter,
                 asdu: asdu.to_vec(),
             },
         };
@@ -1441,9 +1359,9 @@ impl ZigbeeStack {
                     end_device_initiator: false,
                     reserved: 0b00,
                 },
-                destination: destination,
+                destination,
                 source: state.nib.nwk_network_address,
-                radius: radius,
+                radius,
                 sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: None,
                 source_ieee: None,
@@ -1568,9 +1486,9 @@ impl ZigbeeStack {
         let route_table_entry = match state.nib.nwk_route_table.get(&destination) {
             Some(route) => route,
             None => {
-                let entry = NwkRoutingTableEntry {
+                let entry = route::TableEntry {
                     destination,
-                    status: NwkRouteStatus::Inactive,
+                    status: route::Status::Inactive,
                     no_route_cache: false,
                     many_to_one: false,
                     route_record_required: false,
@@ -1591,7 +1509,7 @@ impl ZigbeeStack {
         };
 
         // If one is active, let's use it
-        if route_table_entry.status == NwkRouteStatus::Active {
+        if route_table_entry.status == route::Status::Active {
             return Ok(route_table_entry.next_hop_address);
         }
 
@@ -1794,7 +1712,7 @@ impl ZigbeeStack {
 
             // Decrement the `recent_activity` field of every active routing table entry
             for (_, route_table_entry) in state.nib.nwk_route_table.iter_mut() {
-                if route_table_entry.status == NwkRouteStatus::Active {
+                if route_table_entry.status == route::Status::Active {
                     if route_table_entry.recent_activity > 0 {
                         route_table_entry.recent_activity -= 1;
                     }
