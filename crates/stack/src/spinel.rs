@@ -442,9 +442,9 @@ impl SpinelFrame {
         let payload = bytes[2..].to_vec();
 
         Ok(Self {
-            header: header,
-            command_id: command_id,
-            payload: payload,
+            header,
+            command_id,
+            payload,
         })
     }
 
@@ -469,7 +469,7 @@ impl SpinelFramePropValueIs {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         match packed_uint21_deserialize(bytes) {
             Ok((property_id, remaining)) => Ok(Self {
-                property_id: property_id,
+                property_id,
                 value: remaining.to_vec(),
             }),
             Err(err) => Err(err),
