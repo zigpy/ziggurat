@@ -30,6 +30,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
 
+mod neighbor;
 mod route;
 
 // The number of the most recent samples taken into consideration SHOULD be n = 3, which
@@ -105,96 +106,7 @@ pub enum NwkDeviceType {
     EndDevice = 0x02,
 }
 
-#[derive(Debug)]
-pub enum NwkNeighborRelationship {
-    Parent = 0x00,
-    Child = 0x01,
-    Sibling = 0x02,
-    NoneOfTheAbove = 0x03, // NotParentChildOrSibling?
-    PreviousChild = 0x04,
-    UnauthenticatedChild = 0x05,
-    UnauthorizedChildWithRelayAllowed = 0x06,
-    LostChild = 0x07,
-    AddressConflictChild = 0x08,
-    BackboneMeshSibling = 0x09,
-}
-
-#[derive(Debug)]
-pub struct NwkNeighborTableEntry {
-    pub extended_address: Eui64,
-    pub network_address: Nwk,
-    pub device_type: NwkDeviceType,
-    pub rx_on_when_idle: bool,
-    pub end_device_configuration: u16,
-
-    /// The current time remaining, in seconds, for the end device
-    pub timeout_at: Instant,
-    /// max: 15728640 seconds, ~182 days
-
-    /// This field indicates the timeout, in seconds, for the end device child
-    pub device_timeout_at: Instant,
-    /// max: 129600 seconds, 36 hours
-    pub relationship: NwkNeighborRelationship,
-
-    /// A value indicating if previous transmissions to the device were successful or
-    /// not. Higher values indicate more failures.
-    pub transmit_failure: u8,
-    pub lqas: VecDeque<u8>,
-    /// TODO: replace with a fixed-size ring buffer
-
-    /// The outgoing cost field contains the cost of the link as measured by the
-    /// neighbor. The value is obtained from the most recent link status command frame
-    /// received from the neighbor. A value of 0 indicates that no link status command
-    /// listing this device has been received.
-    pub outgoing_cost: u8,
-
-    // The number of [`nwkLinkStatusPeriod`] intervals that have passed since
-    // the last link status command frame was received, up to a maximum value
-    // of [`nwkRouterAgeLimit`].
-    // pub age: `u8`,
-    pub last_link_status_timestamp: Instant,
-
-    pub incoming_beacon_timestamp: u32,
-    pub beacon_transmission_time_offset: u32,
-
-    /// This value indicates at least one keep-alive has been received from the end device
-    /// since the router has rebooted.
-    pub keepalive_received: bool,
-    // pub mac_interface_index: u8,
-    pub mac_unicast_bytes_transmitted: u32,
-    pub mac_unicast_bytes_received: u32,
-
-    // The number of [`nwkLinkStatusPeriod`] intervals, which elapsed since this router
-    // neighbor was added to the neighbor table. This value is only maintained on
-    // routers and the coordinator and is only valid for entries with a relationship
-    // of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating
-    // up-counter, which does not roll-over.
-    //pub router_age: u16,
-    pub router_added_timestamp: Instant,
-
-    pub router_connectivity: u8,
-    pub router_neighbor_set_diversity: u8,
-    pub router_outbound_activity: u8,
-    pub router_inbound_activity: u8,
-    pub security_timer: u8,
-}
-
-impl NwkNeighborTableEntry {
-    pub fn lqa(&self) -> Option<u8> {
-        if self.lqas.len() < LINK_QUALITY_SAMPLES {
-            return None;
-        }
-
-        let mut lqas = Vec::from(self.lqas.clone());
-        lqas.sort_by(|a, b| a.cmp(b));
-        let median = lqas
-            .into_iter()
-            .map(|x| lqi_to_link_cost(x))
-            .collect::<Vec<u8>>()[LINK_QUALITY_SAMPLES / 2];
-
-        Some(median)
-    }
-}
+// TODO, cut this up (nib) into multiple structs
 
 /// Zigbee spec: 3.5.2 NWK Information Base
 ///
@@ -209,7 +121,7 @@ pub struct Nib {
     pub nwk_max_broadcast_retries: u8,
     pub nwk_max_children: u8,
     pub nwk_max_depth: u8,
-    pub nwk_neighbor_table: HashMap<Eui64, NwkNeighborTableEntry>,
+    pub nwk_neighbor_table: HashMap<Eui64, neighbor::TableEntry>,
     pub nwk_route_table: HashMap<Nwk, route::TableEntry>,
     pub nwk_route_discovery_table: HashMap<route::RequestId, route::DiscoveryEntry>,
     pub nwk_capability_information: NwkCapabilityInformation,
@@ -244,18 +156,19 @@ pub struct Nib {
     pub nwk_router_age_limit: u8,
     pub nwk_address_map: HashMap<Eui64, Nwk>,
 
-    /// A flag that determines if a time stamp indication is provided on incoming and
+    /// A flag that determines if a timestamp indication is provided on incoming and
     /// outgoing packets.
     pub nwk_time_stamp: bool,
 
     pub nwk_pan_id: PanId,
 
-    /// A count of unicast transmissions made by the NNK layer on this device. Each time
-    /// the NWK layer transmits a unicast frame, by invoking the MCPS-state.request
-    /// primitive of the MAC sub-layer, it SHALL increment this counter. When either the
-    /// NHL performs an NLME-SET.request on this attribute or if the value of nwkTxTotal
-    /// rolls over past 0xffff the NWK layer SHALL reset to 0x00 each Transmit Failure
-    /// field contained in the neighbor table.
+    /// A count of Unicast transmissions made by the NNK layer on this device.
+    /// Each time the NWK layer transmits a Unicast frame, by invoking the
+    /// MCPS-state.request primitive of the MAC sub-layer, it SHALL increment
+    /// this counter. When either the NHL performs an NLME-SET.request on this
+    /// attribute or if the value of `nwk_tx_total` rolls over past 0xffff the
+    /// NWK layer SHALL reset to 0x00 each Transmit Failure field contained in
+    /// the neighbor table.
     pub nwk_tx_total: u16,
 
     /// This policy determines whether or not a remote NWK leave request command frame
@@ -429,7 +342,7 @@ impl ApsAckData {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStackState {
+pub struct State {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,
     pub nib: Nib,
@@ -437,9 +350,9 @@ pub struct ZigbeeStackState {
     pub start_time: Option<Instant>,
 }
 
-impl ZigbeeStackState {
+impl State {
     pub fn new() -> Self {
-        ZigbeeStackState {
+        State {
             channel: 0,
             ieee802154_sequence_number: 0,
             nib: Nib::new(),
@@ -467,7 +380,7 @@ pub enum ZigbeeNotification {
 pub struct ZigbeeStack {
     self_weak: Weak<ZigbeeStack>,
 
-    pub state: Mutex<ZigbeeStackState>,
+    pub state: Mutex<State>,
     pub spinel: SpinelClient,
     pub notification_tx: broadcast::Sender<ZigbeeNotification>,
     pub raw_frame_rx: Mutex<mpsc::Receiver<SpinelFramePropValueIs>>,
@@ -481,7 +394,7 @@ impl ZigbeeStack {
 
         let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
             self_weak: weak_self.clone(),
-            state: Mutex::new(ZigbeeStackState::new()),
+            state: Mutex::new(State::new()),
             spinel,
             notification_tx,
             raw_frame_rx: Mutex::new(raw_frame_rx),
@@ -1033,7 +946,7 @@ impl ZigbeeStack {
                 // Create one
                 log::info!("Creating new neighbor entry for {source_ieee:?}");
 
-                let entry = NwkNeighborTableEntry {
+                let entry = neighbor::TableEntry {
                     extended_address: source_ieee,
                     network_address: nwk_frame.nwk_header.source,
                     device_type: NwkDeviceType::Router,
@@ -1041,7 +954,7 @@ impl ZigbeeStack {
                     end_device_configuration: 0x0000,
                     timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
                     device_timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
-                    relationship: NwkNeighborRelationship::Sibling,
+                    relationship: neighbor::Relationship::Sibling,
                     transmit_failure: 0,
                     lqas: VecDeque::new(),
                     outgoing_cost: 0,

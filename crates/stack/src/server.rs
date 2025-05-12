@@ -52,8 +52,8 @@ impl ZigguratServer {
 
         let (zigbee_stack, notification_rx) = ZigbeeStack::new(spinel);
         let server = ZigguratServer {
-            zigbee_stack: zigbee_stack,
-            notification_rx: notification_rx,
+            zigbee_stack,
+            notification_rx,
         };
 
         Ok(server)

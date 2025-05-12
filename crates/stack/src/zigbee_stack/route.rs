@@ -70,7 +70,7 @@ pub struct DiscoveryEntry {
     /// distinct from the 16-bit Routing Sequence Number. The former is used to discern
     /// route requests originating in a particular router; the latter is used to
     /// identify stale routing information.
-    pub route_request_id: RouteRequestId,
+    pub route_request_id: RequestId,
     /// The 16-bit network address of the route request’s initiator.
     pub source_address: Nwk,
     /// The 16-bit network address of the device that has sent the most recent lowest
