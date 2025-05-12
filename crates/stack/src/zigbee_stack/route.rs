@@ -4,7 +4,7 @@ use crate::types::Nwk;
 
 pub type RequestId = u8;
 
-#[derive(Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Status {
     Active = 0,
     DiscoveryUnderway = 1,
@@ -88,4 +88,8 @@ pub struct DiscoveryEntry {
     /// A countdown timer indicating the number of milliseconds until route discovery
     /// expires. The initial value is `nwkcRouteDiscoveryTime`.
     pub expiration_time: Instant,
+    /// The 16-bit network address of the device this route discovery entry is
+    /// identifying a route for. This isn't mentioned in the spec as being a required
+    /// field.
+    pub destination_address: Nwk,
 }

@@ -19,6 +19,7 @@ use crate::zigbee_nwk_commands::{
     NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
     NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
+use tokio::time::timeout;
 
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -28,6 +29,7 @@ use std::sync::Mutex;
 use std::sync::Weak;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
+use tokio::time::error::Elapsed;
 use tokio::time::{Duration, Instant};
 
 mod neighbor;
@@ -374,6 +376,7 @@ pub struct State {
     pub ieee802154_sequence_number: u8,
     pub nib: Nib,
     pub pending_aps_acks: HashMap<ApsAckData, oneshot::Sender<()>>,
+    pub pending_route_notifications: HashMap<Nwk, broadcast::Sender<()>>,
     pub start_time: Option<Instant>,
 
     // We intentionally violate the spec with these options
@@ -390,6 +393,7 @@ impl State {
             ieee802154_sequence_number: 0,
             nib: Nib::new(),
             pending_aps_acks: HashMap::new(),
+            pending_route_notifications: HashMap::new(),
             start_time: None,
 
             hack_ignore_broadcast_startup_wait_period: true,
@@ -1055,6 +1059,15 @@ impl ZigbeeStack {
         log::debug!("Updated neighbor table entry: {neighbor_entry:#?}");
     }
 
+    fn notify_routing_change(&self, state: &ZigbeeStackState, nwk: &Nwk) {
+        if !state.pending_route_notifications.contains_key(nwk) {
+            return;
+        }
+
+        let tx = state.pending_route_notifications.get(nwk).unwrap();
+        let _ = tx.send(());
+    }
+
     fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
         let route_reply_cmd = match NwkRouteReplyCommand::from_bytes(&nwk_frame.payload) {
             Ok(cmd) => cmd,
@@ -1159,6 +1172,7 @@ impl ZigbeeStack {
                         discovery_entry.residual_cost = updated_path_cost;
                     }
 
+                    self.notify_routing_change(&state, &rrep_responder);
                 },
                 NwkRouteStatus::Active => {
                     if updated_path_cost >= discovery_entry.residual_cost {
@@ -1191,6 +1205,8 @@ impl ZigbeeStack {
                             .get_mut(&route_discovery_table_key).unwrap();
                         discovery_entry.residual_cost = updated_path_cost;
                     }
+
+                    self.notify_routing_change(&state, &rrep_responder);
                 },
             }
 
@@ -1223,6 +1239,8 @@ impl ZigbeeStack {
                 .unwrap();
             discovery_entry.residual_cost = updated_path_cost;
         }
+
+        self.notify_routing_change(&state, &rrep_responder);
 
         // Find the next hop to the destination
 
@@ -1364,6 +1382,7 @@ impl ZigbeeStack {
         };
 
         // TODO: re-send the route request and update the path cost with our own info
+        // ... Update NwkRouteDiscoveryTableEntry.sender_address ...
     }
 
     fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
@@ -1617,27 +1636,109 @@ impl ZigbeeStack {
     }
 
     pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, String> {
-        // TODO: combine concurrent route discovery requests
-        self.discover_route_internal(destination).await
-    }
+        if !self
+            .state
+            .lock()
+            .unwrap()
+            .nib
+            .nwk_route_table
+            .contains_key(&destination)
+        {
+            log::debug!("Starting route discovery for NWK {destination:?}");
+            self.send_route_discovery(destination).await;
+        }
 
-    pub async fn discover_route_internal(&self, destination: Nwk) -> Result<Nwk, String> {
-        // Discover next hop route
-        let mut state = self.state.lock().unwrap();
+        let (route_entry_status, route_entry_next_hop_address) = {
+            let state = self.state.lock().unwrap();
+            let entry = state.nib.nwk_route_table.get(&destination).unwrap();
 
-        // Check if we have an active routing table entry first
-        if let Some(route_table_entry) = state.nib.nwk_route_table.get(&destination) {
-            if route_table_entry.status == route::Status::Active {
-                assert!(route_table_entry.next_hop_address != Nwk(0xFFFF));
-                return Ok(route_table_entry.next_hop_address);
+            (entry.status, entry.next_hop_address)
+        };
+
+        log::debug!("Routing table status: {route_entry_status:?}");
+
+        // A route table entry will now exist
+        match route_entry_status {
+            route::Status::Active => {
+                assert!(route_entry_next_hop_address != Nwk(0xFFFF));
+                return Ok(route_entry_next_hop_address);
+            }
+            route::Status::DiscoveryUnderway => {
+                // Do nothing
+            }
+            route::Status::DiscoveryFailed | route::Status::Inactive => {
+                self.send_route_discovery(destination).await;
             }
         }
 
-        // Otherwise, send out a discovery request
-        state.nib.nwk_routing_request_sequence_number = state
-            .nib
-            .nwk_routing_request_sequence_number
-            .wrapping_add(1);
+        // Create a pending route notification
+        let mut rx = {
+            let mut state = self.state.lock().unwrap();
+            let mut tx = state
+                .pending_route_notifications
+                .entry(destination)
+                .or_insert_with(|| {
+                    let (tx, _) = broadcast::channel(1);
+                    tx
+                });
+
+            tx.subscribe()
+        };
+
+        // Pull the current route discovery entry for the device to determine the timeout
+        let discovery_timeout = {
+            let now = Instant::now();
+
+            // One should exist
+            let state = self.state.lock().unwrap();
+            let route_discovery_entry = state
+                .nib
+                .nwk_route_discovery_table
+                .iter()
+                .find_map(|(&(_, _), entry)| {
+                    if entry.expiration_time >= now && entry.destination_address == destination {
+                        Some(entry)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+
+            route_discovery_entry.expiration_time - now
+        };
+
+        match timeout(discovery_timeout, rx.recv()).await {
+            Ok(Ok(nwk)) => {
+                log::debug!("Route discovery completed for NWK {nwk:?}");
+            }
+            Ok(Err(_)) => {
+                log::debug!("Route discovery timed out");
+                return Err("Route discovery timed out".to_string());
+            }
+            Err(_) => {
+                log::debug!("Route discovery timed out");
+                return Err("Route discovery timed out".to_string());
+            }
+        };
+
+        let next_hop_address = {
+            let state = self.state.lock().unwrap();
+            state
+                .nib
+                .nwk_route_table
+                .get(&destination)
+                .unwrap()
+                .next_hop_address
+        };
+
+        Ok(next_hop_address)
+    }
+
+    pub async fn send_route_discovery(&self, destination: Nwk) {
+        // Discover next hop route
+        let mut state = self.state.lock().unwrap();
+
+        log::debug!("Sending route discovery for NWK {destination:?}");
 
         // Get or create a routing table entry without keeping a mutable reference
         {
@@ -1665,13 +1766,18 @@ impl ZigbeeStack {
             route_table_entry.status = route::Status::DiscoveryUnderway;
         }
 
+        state.nib.nwk_routing_request_sequence_number = state
+            .nib
+            .nwk_routing_request_sequence_number
+            .wrapping_add(1);
+
         let route_request_identifier = state.nib.nwk_routing_request_sequence_number;
         let route_discovery_table_key = (state.nib.nwk_network_address, route_request_identifier);
 
         // We initiated discovery so insert an entry keyed by our NWK and request ID
         let nwk_network_address = state.nib.nwk_network_address;
         let nwkc_route_discovery_time = state.nib.nwkc_route_discovery_time;
-        state
+        let route_discovery_entry = state
             .nib
             .nwk_route_discovery_table
             .entry(route_discovery_table_key)
@@ -1682,7 +1788,11 @@ impl ZigbeeStack {
                 forward_cost: 0,
                 residual_cost: 0,
                 expiration_time: Instant::now() + nwkc_route_discovery_time,
+                destination_address: destination,
             });
+
+        log::debug!("Route discovery entry: {route_discovery_entry:#?}");
+        drop(route_discovery_entry);
 
         // Construct a frame
         state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
@@ -1736,10 +1846,6 @@ impl ZigbeeStack {
         drop(state);
 
         self.background_send_nwk_frame(route_request_frame);
-
-        // TODO: wait for route discovery to actually complete. For now, we will be
-        // relatively stateless and stop erroring out once the correct state is computed
-        return Err("Route discovery started".to_string());
     }
 
     pub async fn send_aps_command(
