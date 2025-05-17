@@ -29,7 +29,6 @@ use std::sync::Mutex;
 use std::sync::Weak;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
-use tokio::time::error::Elapsed;
 use tokio::time::{Duration, Instant};
 
 mod neighbor;
@@ -936,7 +935,7 @@ impl ZigbeeStack {
         }
     }
 
-    fn maybe_recompute_lqa(&self, nwk_frame: &NwkFrame, lqi: u8, rssi: i8) {
+    fn maybe_recompute_lqa(&self, nwk_frame: &NwkFrame, lqi: u8, _rssi: i8) {
         if nwk_frame.nwk_header.source_ieee.is_none() {
             return;
         }
@@ -1093,7 +1092,6 @@ impl ZigbeeStack {
         let rrep_originator = route_reply_cmd.originator_nwk;
         let rrep_responder = route_reply_cmd.responder_nwk;
         let rrep_originator_eui64 = route_reply_cmd.originator_eui64.unwrap();
-        let rrep_responder_eui64 = route_reply_cmd.responder_eui64.unwrap();
         let rrep_path_cost = route_reply_cmd.path_cost;
 
         let mut state = self.state.lock().unwrap();
@@ -1291,7 +1289,7 @@ impl ZigbeeStack {
         route_request_cmd: &NwkRouteRequestCommand,
         sender_nwk: Nwk,
     ) {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
 
         // We need to know who sent the frame
         let sender_neighbor = match state
@@ -1364,7 +1362,7 @@ impl ZigbeeStack {
         route_request_cmd: &NwkRouteRequestCommand,
         sender_nwk: Nwk,
     ) {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
 
         // We need to know who sent the frame
         let sender_neighbor = match state
@@ -1412,7 +1410,7 @@ impl ZigbeeStack {
 
     fn wrap_aps_frame(&self, destination: Nwk, radius: u8, aps_frame: &ApsFrame) -> NwkFrame {
         // TODO: TX frame counter wrapping is an error condition
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
 
         let plaintext_nwk_frame = NwkFrame {
             encrypted: false,
@@ -1449,7 +1447,7 @@ impl ZigbeeStack {
     }
 
     fn wrap_nwk_frame(&self, nwk_frame: &NwkFrame) -> Ieee802154Frame {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
 
         let destination = Ieee802154Address::Nwk(
             if nwk_frame.nwk_header.destination.as_u16()
@@ -1674,7 +1672,7 @@ impl ZigbeeStack {
         // Create a pending route notification
         let mut rx = {
             let mut state = self.state.lock().unwrap();
-            let mut tx = state
+            let tx = state
                 .pending_route_notifications
                 .entry(destination)
                 .or_insert_with(|| {
@@ -1777,22 +1775,24 @@ impl ZigbeeStack {
         // We initiated discovery so insert an entry keyed by our NWK and request ID
         let nwk_network_address = state.nib.nwk_network_address;
         let nwkc_route_discovery_time = state.nib.nwkc_route_discovery_time;
-        let route_discovery_entry = state
-            .nib
-            .nwk_route_discovery_table
-            .entry(route_discovery_table_key)
-            .or_insert_with(|| route::DiscoveryEntry {
-                route_request_id: route_request_identifier,
-                source_address: nwk_network_address,
-                sender_address: Nwk(0xFFFF),
-                forward_cost: 0,
-                residual_cost: 0,
-                expiration_time: Instant::now() + nwkc_route_discovery_time,
-                destination_address: destination,
-            });
 
-        log::debug!("Route discovery entry: {route_discovery_entry:#?}");
-        drop(route_discovery_entry);
+        {
+            let route_discovery_entry = state
+                .nib
+                .nwk_route_discovery_table
+                .entry(route_discovery_table_key)
+                .or_insert_with(|| route::DiscoveryEntry {
+                    route_request_id: route_request_identifier,
+                    source_address: nwk_network_address,
+                    sender_address: Nwk(0xFFFF),
+                    forward_cost: 0,
+                    residual_cost: 0,
+                    expiration_time: Instant::now() + nwkc_route_discovery_time,
+                    destination_address: destination,
+                });
+
+            log::debug!("Route discovery entry: {route_discovery_entry:#?}");
+        }
 
         // Construct a frame
         state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
