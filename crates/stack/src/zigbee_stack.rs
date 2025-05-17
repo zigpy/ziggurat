@@ -1059,7 +1059,7 @@ impl ZigbeeStack {
         log::debug!("Updated neighbor table entry: {neighbor_entry:#?}");
     }
 
-    fn notify_routing_change(&self, state: &ZigbeeStackState, nwk: &Nwk) {
+    fn notify_routing_change(&self, state: &State, nwk: &Nwk) {
         if !state.pending_route_notifications.contains_key(nwk) {
             return;
         }
@@ -1145,9 +1145,9 @@ impl ZigbeeStack {
         // If we are the originator, handling is simplified
         if rrep_originator_eui64 == our_ieee_address {
             match routing_entry.status {
-                NwkRouteStatus::Inactive
-                | NwkRouteStatus::DiscoveryFailed  // Is this correct to have?
-                | NwkRouteStatus::DiscoveryUnderway => {
+                route::Status::Inactive
+                | route::Status::DiscoveryFailed  // Is this correct to have?
+                | route::Status::DiscoveryUnderway => {
                     log::debug!("Setting routing entry for NWK {:?} to active, with next hop {:?} (residual cost {})", 
                         rrep_responder,
                         sender_nwk,
@@ -1159,7 +1159,7 @@ impl ZigbeeStack {
                             .nib
                             .nwk_route_table
                             .get_mut(&rrep_responder).unwrap();
-                        routing_entry.status = NwkRouteStatus::Active;
+                        routing_entry.status = route::Status::Active;
                         routing_entry.next_hop_address = sender_nwk;
                     }
 
@@ -1174,7 +1174,7 @@ impl ZigbeeStack {
 
                     self.notify_routing_change(&state, &rrep_responder);
                 },
-                NwkRouteStatus::Active => {
+                route::Status::Active => {
                     if updated_path_cost >= discovery_entry.residual_cost {
                         log::debug!("Ignoring route reply for us with higher cost ({} > {})", updated_path_cost, discovery_entry.residual_cost);
                         return;
