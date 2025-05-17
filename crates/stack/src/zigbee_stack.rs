@@ -1043,10 +1043,14 @@ impl ZigbeeStack {
                 let connectivity =
                     7 - cmp::max(link_status.incoming_cost, link_status.outgoing_cost);
 
-                neighbor_entry.router_connectivity += connectivity;
+                neighbor_entry
+                    .router_connectivity
+                    .saturating_add(connectivity);
 
                 if !neighbors_with_nonzero_outgoing_cost.contains(&link_status.address) {
-                    neighbor_entry.router_neighbor_set_diversity += connectivity;
+                    neighbor_entry
+                        .router_neighbor_set_diversity
+                        .saturating_add(connectivity);
                 }
             }
 
