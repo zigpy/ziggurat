@@ -3,7 +3,7 @@ use tokio::time::Instant;
 
 use crate::types::{Eui64, Nwk};
 
-use super::{lqi_to_link_cost, NwkDeviceType, LINK_QUALITY_SAMPLES};
+use super::{LINK_QUALITY_SAMPLES, NwkDeviceType, lqi_to_link_cost};
 
 #[derive(Debug)]
 pub struct TableEntry {

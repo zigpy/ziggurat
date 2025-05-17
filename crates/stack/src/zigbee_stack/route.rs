@@ -64,7 +64,6 @@ pub struct TableEntry {
     pub recent_activity: u8,
 }
 
-
 #[derive(Debug)]
 pub struct DiscoveryEntry {
     /// A sequence number for a route request command frame that is incremented each time

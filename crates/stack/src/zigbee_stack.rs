@@ -200,7 +200,7 @@ pub struct Nib {
     // reply command frames to allow other routers to determine the chronological order
     // of such route discovery messages.
     // pub nwk_routing_sequence_number: u16,  // Only needed for R23 TLVs
-
+    //
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
     /// originating in a particular router; the latter is used to identify stale routing
