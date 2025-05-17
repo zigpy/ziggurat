@@ -263,6 +263,7 @@ impl ZigguratServer {
                     data: json!({"status": if status.is_ok() { "success" } else { "error" } }),
                 }
             }
+
             _ => CommandResponse {
                 tid: cmd.tid,
                 cmd: cmd.cmd,

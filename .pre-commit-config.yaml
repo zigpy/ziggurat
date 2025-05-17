@@ -11,11 +11,9 @@ repos:
     hooks:
       - id: rust-linting
         name: Rust linting
-        entry: bash -c "cd src && cargo fmt --all --"
-        pass_filenames: true
-        types: [file, rust]
+        entry: cargo fmt --all
         language: system
-        files: ^src/
+        pass_filenames: false
 
 #      - id: rust-clippy
 #        name: Rust clippy
