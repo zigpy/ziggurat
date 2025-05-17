@@ -8,6 +8,7 @@ import zigpy.serial
 import zigpy.application
 import zigpy.types as t
 import zigpy.zdo.types as zdo_t
+from zigpy.exceptions import DeliveryError
 from zigpy.state import NetworkInfo, NodeInfo, Key
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,7 +82,12 @@ class ZigguratProtocol(zigpy.serial.SerialProtocol):
         _LOGGER.debug("Sending: %r", line)
         self._transport.write(line.encode("utf-8"))
 
-        return await fut
+        rsp = await fut
+
+        if rsp["data"]["status"] == "error":
+            raise DeliveryError(f"Error sending command: {rsp['error']}")
+
+        return rsp
 
 
 class ZigguratControllerApplication(zigpy.application.ControllerApplication):

@@ -1711,10 +1711,16 @@ impl ZigbeeStack {
             }
             Ok(Err(_)) => {
                 log::debug!("Route discovery timed out");
+                let mut state = self.state.lock().unwrap();
+                let entry = state.nib.nwk_route_table.get_mut(&destination).unwrap();
+                entry.status = route::Status::DiscoveryFailed;
                 return Err("Route discovery timed out".to_string());
             }
             Err(_) => {
                 log::debug!("Route discovery timed out");
+                let mut state = self.state.lock().unwrap();
+                let entry = state.nib.nwk_route_table.get_mut(&destination).unwrap();
+                entry.status = route::Status::DiscoveryFailed;
                 return Err("Route discovery timed out".to_string());
             }
         };
@@ -1791,7 +1797,9 @@ impl ZigbeeStack {
                     destination_address: destination,
                 });
 
-            log::debug!("Route discovery entry: {route_discovery_entry:#?}");
+            log::debug!(
+                "Route discovery entry: [{route_discovery_table_key:?}] = {route_discovery_entry:#?}"
+            );
         }
 
         // Construct a frame
