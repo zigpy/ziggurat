@@ -38,7 +38,11 @@ class ZigguratProtocol(zigpy.serial.SerialProtocol):
                 _LOGGER.debug("Failed to parse line as JSON: %r: %r", line, e)
                 continue
 
-            self.handle_message(msg)
+            try:
+                self.handle_message(msg)
+            except Exception:
+                _LOGGER.exception("Failed to handle message: %r", msg)
+                continue
 
     def handle_message(self, message: dict):
         tid = message.get("tid", 0)
@@ -52,7 +56,9 @@ class ZigguratProtocol(zigpy.serial.SerialProtocol):
         # Response to a pending request
         fut = self.pending_requests.pop(tid, None)
         if not fut or fut.done():
-            _LOGGER.debug(f"Received response for unknown or finished TID={tid}: {message}")
+            _LOGGER.debug(
+                f"Received response for unknown or finished TID={tid}: {message}"
+            )
             return
 
         fut.set_result(message)
@@ -90,8 +96,9 @@ class ZigguratProtocol(zigpy.serial.SerialProtocol):
         return rsp
 
 
-class ZigguratControllerApplication(zigpy.application.ControllerApplication):
+class ControllerApplication(zigpy.application.ControllerApplication):
     def __init__(self, config):
+        config["device"]["path"] = "socket://127.0.0.1:9999"
         super().__init__(config)
         self._api = None
 
@@ -112,40 +119,60 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
                 self._api = None
 
     async def start_network(self):
-        network_info = NetworkInfo(
-            extended_pan_id=t.ExtendedPanId.convert("3a:9f:44:01:0b:3c:cb:93"),
-            pan_id=t.PanId(0x4072),
-            nwk_update_id=0,
-            nwk_manager_id=t.NWK(0x0000),
-            channel=t.uint8_t(20),
-            channel_mask=t.Channels.from_channel_list([20]),
-            security_level=t.uint8_t(5),
-            network_key=Key(
-                key=t.KeyData.convert(
-                    "ee:83:0c:e4:85:57:9c:8c:b1:3f:87:00:b6:5d:4b:e8"
+        self._get_network_settings()
+        await self.write_network_info(network_info=self.state.network_info, node_info=self.state.node_info)
+
+    async def load_network_info(self, *, load_devices=False):
+        self._get_network_settings()
+
+    def _get_network_settings(self):
+        try:
+            # Use the most recent backup from the zigpy database, if supported
+            latest_backup = self.backups[-1]
+        except IndexError:
+            # Hard-coded network settings as a fallback
+            network_info = NetworkInfo(
+                extended_pan_id=t.ExtendedPanId.convert("3a:9f:44:01:0b:3c:cb:93"),
+                pan_id=t.PanId(0x4072),
+                nwk_update_id=0,
+                nwk_manager_id=t.NWK(0x0000),
+                channel=t.uint8_t(20),
+                channel_mask=t.Channels.from_channel_list([20]),
+                security_level=t.uint8_t(5),
+                network_key=Key(
+                    key=t.KeyData.convert(
+                        "ee:83:0c:e4:85:57:9c:8c:b1:3f:87:00:b6:5d:4b:e8"
+                    ),
+                    seq=0,
+                    tx_counter=((int(time.time()) - 1742079562) * 1000),
                 ),
-                seq=0,
-                tx_counter=((int(time.time()) - 1742079562) * 1000),
-            ),
-            tc_link_key=Key(
-                key=t.KeyData(b"ZigBeeAlliance09"),
-                partner_ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
-                tx_counter=0,
-            ),
-            key_table=[],
-            children=[],
-            nwk_addresses={},
-            stack_specific={},
-            metadata={},
-        )
+                tc_link_key=Key(
+                    key=t.KeyData(b"ZigBeeAlliance09"),
+                    partner_ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
+                    tx_counter=0,
+                ),
+                key_table=[],
+                children=[],
+                nwk_addresses={},
+                stack_specific={},
+                metadata={},
+            )
 
-        node_info = NodeInfo(
-            ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
-            nwk=t.NWK(0x0000),
-            logical_type=zdo_t.LogicalType.Coordinator,
-        )
+            node_info = NodeInfo(
+                ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
+                nwk=t.NWK(0x0000),
+                logical_type=zdo_t.LogicalType.Coordinator,
+            )
+        else:
+            network_info = latest_backup.network_info.replace(
+                network_key=latest_backup.network_info.network_key.replace(
+                    tx_counter=latest_backup.network_info.network_key.tx_counter + 5000
+                )
+            )
+            node_info = latest_backup.node_info
 
-        await self.write_network_info(network_info=network_info, node_info=node_info)
+        self.state.network_info = network_info
+        self.state.node_info = node_info
 
     async def force_remove(self, dev):
         _LOGGER.debug("Not implemented")
@@ -188,7 +215,9 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
             packet = t.ZigbeePacket(
                 src=t.AddrModeAddress(
                     addr_mode=t.AddrMode.NWK,
-                    address=t.NWK.deserialize(bytes.fromhex(event["data"]["source"]))[0],
+                    address=t.NWK.deserialize(bytes.fromhex(event["data"]["source"]))[
+                        0
+                    ],
                 ),
                 dst=t.AddrModeAddress(
                     addr_mode=t.AddrMode.NWK,
@@ -235,7 +264,7 @@ class ZigguratControllerApplication(zigpy.application.ControllerApplication):
 async def main(host, port):
     loop = asyncio.get_running_loop()
 
-    app = ZigguratControllerApplication(
+    app = ControllerApplication(
         {
             "device": {"path": f"socket://{host}:{port}"},
             "backup_enabled": False,
@@ -247,7 +276,7 @@ async def main(host, port):
     await app.connect()
     await app.start_network()
 
-    dev = app.add_device(nwk=0x26f4, ieee=t.EUI64.convert("00:0d:6f:ff:fe:a4:f1:0b"))
+    dev = app.add_device(nwk=0x26F4, ieee=t.EUI64.convert("00:0d:6f:ff:fe:a4:f1:0b"))
     await dev.schedule_initialize()
 
     while True:
@@ -261,6 +290,7 @@ async def main(host, port):
 if __name__ == "__main__":
     import sys
     import coloredlogs
+
     coloredlogs.install(level=logging.DEBUG)
 
     host, port = sys.argv[1].split(":")
