@@ -6,12 +6,57 @@ import time
 
 import zigpy.serial
 import zigpy.application
+import zigpy.backups
 import zigpy.types as t
 import zigpy.zdo.types as zdo_t
 from zigpy.exceptions import DeliveryError
 from zigpy.state import NetworkInfo, NodeInfo, Key
 
 _LOGGER = logging.getLogger(__name__)
+
+FALLBACK_NETWORK_SETTINGS = zigpy.backups.NetworkBackup.from_dict(
+    {
+        "version": 1,
+        "backup_time": "2025-05-18T15:53:33.000847+00:00",
+        "network_info": {
+            "extended_pan_id": "3a:9f:44:01:0b:3c:cb:93",
+            "pan_id": "4072",
+            "nwk_update_id": 0,
+            "nwk_manager_id": "0000",
+            "channel": 20,
+            "channel_mask": [20],
+            "security_level": 5,
+            "network_key": {
+                "key": "ee:83:0c:e4:85:57:9c:8c:b1:3f:87:00:b6:5d:4b:e8",
+                "tx_counter": 5504029000,
+                "rx_counter": 0,
+                "seq": 0,
+                "partner_ieee": "ff:ff:ff:ff:ff:ff:ff:ff",
+            },
+            "tc_link_key": {
+                "key": "5a:69:67:42:65:65:41:6c:6c:69:61:6e:63:65:30:39",
+                "tx_counter": 0,
+                "rx_counter": 0,
+                "seq": 0,
+                "partner_ieee": "bc:02:6e:ff:fe:24:db:90",
+            },
+            "key_table": [],
+            "children": [],
+            "nwk_addresses": {},
+            "stack_specific": {},
+            "metadata": {},
+            "source": None,
+        },
+        "node_info": {
+            "nwk": "0000",
+            "ieee": "bc:02:6e:ff:fe:24:db:90",
+            "logical_type": "coordinator",
+            "model": None,
+            "manufacturer": None,
+            "version": None,
+        },
+    }
+)
 
 
 class ZigguratProtocol(zigpy.serial.SerialProtocol):
@@ -91,14 +136,18 @@ class ZigguratProtocol(zigpy.serial.SerialProtocol):
         rsp = await fut
 
         if rsp["data"]["status"] == "error":
-            raise DeliveryError(f"Error sending command: {rsp['error']}")
+            raise DeliveryError(
+                f"Error sending command: {rsp.get('error', 'unknown error')}"
+            )
 
         return rsp
 
 
 class ControllerApplication(zigpy.application.ControllerApplication):
     def __init__(self, config):
-        config["device"]["path"] = "socket://127.0.0.1:9999"
+        if not config["device"]["path"].startswith("socket://"):
+            config["device"]["path"] = "socket://127.0.0.1:9999"
+
         super().__init__(config)
         self._api = None
 
@@ -120,7 +169,9 @@ class ControllerApplication(zigpy.application.ControllerApplication):
 
     async def start_network(self):
         self._get_network_settings()
-        await self.write_network_info(network_info=self.state.network_info, node_info=self.state.node_info)
+        await self.write_network_info(
+            network_info=self.state.network_info, node_info=self.state.node_info
+        )
 
     async def load_network_info(self, *, load_devices=False):
         self._get_network_settings()
@@ -130,49 +181,26 @@ class ControllerApplication(zigpy.application.ControllerApplication):
             # Use the most recent backup from the zigpy database, if supported
             latest_backup = self.backups[-1]
         except IndexError:
-            # Hard-coded network settings as a fallback
-            network_info = NetworkInfo(
-                extended_pan_id=t.ExtendedPanId.convert("3a:9f:44:01:0b:3c:cb:93"),
-                pan_id=t.PanId(0x4072),
-                nwk_update_id=0,
-                nwk_manager_id=t.NWK(0x0000),
-                channel=t.uint8_t(20),
-                channel_mask=t.Channels.from_channel_list([20]),
-                security_level=t.uint8_t(5),
-                network_key=Key(
-                    key=t.KeyData.convert(
-                        "ee:83:0c:e4:85:57:9c:8c:b1:3f:87:00:b6:5d:4b:e8"
-                    ),
-                    seq=0,
-                    tx_counter=((int(time.time()) - 1742079562) * 1000),
-                ),
-                tc_link_key=Key(
-                    key=t.KeyData(b"ZigBeeAlliance09"),
-                    partner_ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
-                    tx_counter=0,
-                ),
-                key_table=[],
-                children=[],
-                nwk_addresses={},
-                stack_specific={},
-                metadata={},
-            )
-
-            node_info = NodeInfo(
-                ieee=t.EUI64.convert("bc:02:6e:ff:fe:24:db:90"),
-                nwk=t.NWK(0x0000),
-                logical_type=zdo_t.LogicalType.Coordinator,
-            )
-        else:
-            network_info = latest_backup.network_info.replace(
-                network_key=latest_backup.network_info.network_key.replace(
-                    tx_counter=latest_backup.network_info.network_key.tx_counter + 5000
+            latest_backup = FALLBACK_NETWORK_SETTINGS.replace(
+                network_info=FALLBACK_NETWORK_SETTINGS.network_info.replace(
+                    network_key=FALLBACK_NETWORK_SETTINGS.network_info.network_key.replace(
+                        tx_counter=((int(time.time()) - 1742079562) * 1000)
+                    )
                 )
             )
-            node_info = latest_backup.node_info
+        else:
+            latest_backup = latest_backup.replace(
+                network_info=latest_backup.network_info.replace(
+                    network_key=latest_backup.network_info.network_key.replace(
+                        tx_counter=(
+                            latest_backup.network_info.network_key.tx_counter + 5000
+                        )
+                    )
+                )
+            )
 
-        self.state.network_info = network_info
-        self.state.node_info = node_info
+        self.state.network_info = latest_backup.network_info
+        self.state.node_info = latest_backup.node_info
 
     async def force_remove(self, dev):
         _LOGGER.debug("Not implemented")
