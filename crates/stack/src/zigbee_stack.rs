@@ -379,10 +379,16 @@ pub struct State {
     pub start_time: Option<Instant>,
 
     // We intentionally violate the spec with these options
+    //
     /// The spec mandates that broadcasts be deduplicated only after the stack has been
     /// running for at least 10s, to avoid having our own broadcasts be received. This
     /// slows down development so we will allow it to be disabled.
     pub hack_ignore_broadcast_startup_wait_period: bool,
+    /// To allow testing deserialization logic with real networks, allow running the
+    /// stack without TX abilities. Note that this will still permit the firmware to
+    /// auto-ACK, but this is generally innocuous and won't collide with a second
+    /// coordinator running at the same time.
+    pub hack_disable_tx: bool,
 }
 
 impl State {
@@ -396,6 +402,7 @@ impl State {
             start_time: None,
 
             hack_ignore_broadcast_startup_wait_period: true,
+            hack_disable_tx: false,
         }
     }
 }
@@ -1504,10 +1511,16 @@ impl ZigbeeStack {
             frame.sequence_number = Some(state.ieee802154_sequence_number);
         }
 
-        drop(state);
-
         log::info!("Sending 802.15.4 frame: {:#?}", frame);
         log::info!("Sending 802.15.4 frame bytes: {:02X?}", frame.to_bytes());
+
+        if state.hack_disable_tx {
+            drop(state);
+            log::debug!("Not transmitting the frame, TX is disabled");
+            return;
+        }
+
+        drop(state);
 
         let status = self
             .spinel
