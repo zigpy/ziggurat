@@ -464,6 +464,10 @@ impl ZigbeeStack {
 
             match self.process_802154_frame(&ieee802154_frame, packet.lqi, packet.rssi) {
                 Some(nwk_frame) => {
+                    if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
+                        continue;
+                    }
+
                     let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
                         Ok(ApsFrame::Data(data)) => data,
                         Ok(ApsFrame::Ack(ack)) => {
