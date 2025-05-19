@@ -1097,20 +1097,17 @@ impl ZigbeeStack {
             return;
         }
 
-        // Both of these fields SHALL be set according to the spec
-        if route_reply_cmd.responder_eui64.is_none() || route_reply_cmd.originator_eui64.is_none() {
-            return;
-        }
+        // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
+        // R23 spec but real devices do not do this
 
         let sender_nwk = nwk_frame.nwk_header.source;
         let rrep_id = route_reply_cmd.route_request_identifier;
         let rrep_originator = route_reply_cmd.originator_nwk;
         let rrep_responder = route_reply_cmd.responder_nwk;
-        let rrep_originator_eui64 = route_reply_cmd.originator_eui64.unwrap();
         let rrep_path_cost = route_reply_cmd.path_cost;
 
         let mut state = self.state.lock().unwrap();
-        let our_ieee_address = state.nib.nwk_ieee_address;
+        let our_nwk_address = state.nib.nwk_network_address;
 
         let neighbor = match state
             .nib
@@ -1156,7 +1153,7 @@ impl ZigbeeStack {
         };
 
         // If we are the originator, handling is simplified
-        if rrep_originator_eui64 == our_ieee_address {
+        if rrep_originator == our_nwk_address {
             match routing_entry.status {
                 route::Status::Inactive
                 | route::Status::DiscoveryFailed  // Is this correct to have?
@@ -1284,7 +1281,10 @@ impl ZigbeeStack {
             }
         };
 
-        log::info!("Route request command frame: {:#?}", route_request_cmd);
+        log::info!(
+            "Route request command frame (sender {sender_nwk:#?}): {:#?}",
+            route_request_cmd
+        );
 
         let nwk_network_address = self.state.lock().unwrap().nib.nwk_network_address;
 
@@ -1674,7 +1674,7 @@ impl ZigbeeStack {
             (entry.status, entry.next_hop_address)
         };
 
-        log::debug!("Routing table status: {route_entry_status:?}");
+        log::debug!("Routing table status for {destination:?}: {route_entry_status:?}");
 
         // A route table entry will now exist
         match route_entry_status {
@@ -1727,8 +1727,8 @@ impl ZigbeeStack {
         };
 
         match timeout(discovery_timeout, rx.recv()).await {
-            Ok(Ok(nwk)) => {
-                log::debug!("Route discovery completed for NWK {nwk:?}");
+            Ok(Ok(_)) => {
+                log::debug!("Route discovery completed for NWK {destination:#?}");
             }
             Ok(Err(_)) => {
                 log::debug!("Route discovery timed out");
