@@ -1958,7 +1958,7 @@ impl ZigbeeStack {
             } else {
                 BROADCAST_RX_ON_WHEN_IDLE
             },
-            radius,
+            cmp::max(radius, 1),
             &ApsFrame::Data(aps_frame),
         );
 
