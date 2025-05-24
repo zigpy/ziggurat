@@ -450,11 +450,6 @@ impl ZigbeeStack {
     }
 
     pub async fn run(&self) {
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
         loop {
             let (packet, ieee802154_frame) = self.recv_frame().await;
 
@@ -1099,10 +1094,6 @@ impl ZigbeeStack {
 
         log::info!("Route reply command frame: {:#?}", route_reply_cmd);
 
-        if route_reply_cmd.multicast {
-            return;
-        }
-
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
 
@@ -1273,7 +1264,6 @@ impl ZigbeeStack {
             // Path cost updated with cost from sender:
             path_cost: total_path_cost,
             // TLVs not handled in minimal implementation
-            tlvs: vec![],
         };
         */
     }
@@ -1870,15 +1860,14 @@ impl ZigbeeStack {
             },
             aux_header: None, // will be replaced
             payload: NwkRouteRequestCommand {
-                multicast: false,
                 many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
                 route_request_identifier: route_request_identifier,
                 destination_address: destination,
                 path_cost: 0, // The path cost starts at 0, since we originate it
                 destination_eui64: destination_eui64,
-                tlvs: vec![],
             }
-            .serialize(),
+            .serialize()
+            .unwrap(),
         };
 
         drop(state);
