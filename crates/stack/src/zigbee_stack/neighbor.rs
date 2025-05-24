@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use tokio::time::Instant;
 
-use crate::types::{Eui64, Nwk};
+use zigbee_parts::types::{Eui64, Nwk};
 
 use super::{LINK_QUALITY_SAMPLES, NwkDeviceType, lqi_to_link_cost};
 

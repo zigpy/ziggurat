@@ -4,8 +4,6 @@ use crate::ieee_802154::{
 };
 use crate::spinel::{SpinelFramePropValueIs, SpinelPropertyId, SpinelStatus};
 use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
-use crate::types::{Eui64, Key, Nwk, PanId};
-
 use crate::zigbee_aps::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl,
     ApsFrameType, parse_aps_frame,
@@ -15,11 +13,14 @@ use crate::zigbee_nwk::{
     NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
     NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
-use crate::zigbee_nwk_commands::{
+use zigbee_parts::types::{Eui64, Key, Nwk, PanId};
+
+use tokio::time::timeout;
+use zigbee_parts::Command;
+use zigbee_parts::commands::{
     NwkCommandId, NwkLinkStatus, NwkLinkStatusCommand, NwkRouteRecordCommand, NwkRouteReplyCommand,
     NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
-use tokio::time::timeout;
 
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -926,7 +927,7 @@ impl ZigbeeStack {
                 Ok(NwkCommandId::RouteRecord) => {
                     // TODO: Error handling for decoding?
                     let route_record_cmd =
-                        NwkRouteRecordCommand::from_bytes(&nwk_frame.payload).unwrap();
+                        NwkRouteRecordCommand::deserialize(&nwk_frame.payload).unwrap();
                     log::info!(
                         "Route record command frame received: {:#?}",
                         route_record_cmd
@@ -971,7 +972,7 @@ impl ZigbeeStack {
     }
 
     fn handle_link_status(&self, nwk_frame: &NwkFrame) {
-        let link_status_cmd = match NwkLinkStatusCommand::from_bytes(&nwk_frame.payload) {
+        let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing link status command: {e:?}");
@@ -1088,7 +1089,7 @@ impl ZigbeeStack {
     }
 
     fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
-        let route_reply_cmd = match NwkRouteReplyCommand::from_bytes(&nwk_frame.payload) {
+        let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing route reply command: {e:?}");
@@ -1278,7 +1279,7 @@ impl ZigbeeStack {
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
-        let route_request_cmd = match NwkRouteRequestCommand::from_bytes(&nwk_frame.payload) {
+        let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing route request command: {e:?}");
@@ -1358,16 +1359,15 @@ impl ZigbeeStack {
             },
             aux_header: None, // will be replaced
             payload: NwkRouteReplyCommand {
-                multicast: false,
                 route_request_identifier: route_request_cmd.route_request_identifier,
                 originator_nwk: nwk_frame.nwk_header.source,
                 responder_nwk: state.nib.nwk_network_address,
                 path_cost: path_cost,
                 originator_eui64: nwk_frame.nwk_header.source_ieee,
                 responder_eui64: Some(state.nib.nwk_ieee_address),
-                tlvs: vec![],
             }
-            .serialize(),
+            .serialize()
+            .unwrap(),
         };
 
         drop(state);
@@ -2111,7 +2111,8 @@ impl ZigbeeStack {
                             .collect()
                     },
                 }
-                .serialize(),
+                .serialize()
+                .unwrap(),
             };
 
             drop(state);

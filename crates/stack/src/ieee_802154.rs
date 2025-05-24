@@ -1,4 +1,4 @@
-use crate::types::{Eui64, Nwk, PanId, format_hex};
+use zigbee_parts::types::{Eui64, Nwk, PanId, format_hex};
 
 use derivative::Derivative;
 use std::convert::TryFrom;
