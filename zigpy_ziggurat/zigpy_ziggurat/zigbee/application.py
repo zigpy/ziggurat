@@ -1,6 +1,7 @@
 import asyncio
 import json
 import itertools
+import pathlib
 import logging
 import time
 
@@ -17,18 +18,35 @@ _LOGGER = logging.getLogger(__name__)
 FALLBACK_NETWORK_SETTINGS = zigpy.backups.NetworkBackup.from_dict(
     {
         "version": 1,
-        "backup_time": "2025-05-18T15:53:33.000847+00:00",
+        "backup_time": "2025-05-18T15:51:45.589743+00:00",
         "network_info": {
-            "extended_pan_id": "3a:9f:44:01:0b:3c:cb:93",
-            "pan_id": "4072",
-            "nwk_update_id": 0,
+            "extended_pan_id": "fe:ed:fa:ce:de:ad:be:ef",
+            "pan_id": "BEEF",
+            "nwk_update_id": 2,
             "nwk_manager_id": "0000",
-            "channel": 20,
-            "channel_mask": [20],
+            "channel": 25,
+            "channel_mask": [
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+            ],
             "security_level": 5,
             "network_key": {
-                "key": "ee:83:0c:e4:85:57:9c:8c:b1:3f:87:00:b6:5d:4b:e8",
-                "tx_counter": 5504029000,
+                "key": "37:66:8f:d6:4e:35:e0:33:42:e5:ef:9f:35:cc:f4:ab",
+                "tx_counter": 19398801,
                 "rx_counter": 0,
                 "seq": 0,
                 "partner_ieee": "ff:ff:ff:ff:ff:ff:ff:ff",
@@ -38,32 +56,49 @@ FALLBACK_NETWORK_SETTINGS = zigpy.backups.NetworkBackup.from_dict(
                 "tx_counter": 0,
                 "rx_counter": 0,
                 "seq": 0,
-                "partner_ieee": "bc:02:6e:ff:fe:24:db:90",
+                "partner_ieee": "00:12:4b:00:1c:a1:b8:46",
             },
             "key_table": [],
-            "children": [],
-            "nwk_addresses": {},
-            "stack_specific": {},
-            "metadata": {},
-            "source": None,
+            "children": ["28:2c:02:bf:ff:e7:ba:8c"],
+            "nwk_addresses": {
+                "28:2c:02:bf:ff:ea:05:68": "12D8",
+                "28:2c:02:bf:ff:e7:ba:8c": "ED4B",
+                "00:15:bc:00:33:00:76:9a": "C4C5",
+                "00:0d:6f:00:03:57:f1:be": "0E0D",
+                "00:15:bc:00:1a:10:8a:e5": "2477",
+                "00:15:bc:00:44:01:11:f9": "6C9D",
+            },
+            "stack_specific": {
+                "ezsp": {"hashed_tclk": "eb1bfcf9cb33d0d609c466c7a35df7a7"}
+            },
+            "metadata": {
+                "ezsp": {
+                    "stack_version": 13,
+                    "can_burn_userdata_custom_eui64": False,
+                    "can_rewrite_custom_eui64": True,
+                    "flow_control": "hardware",
+                }
+            },
+            "source": "bellows@0.45.0",
         },
         "node_info": {
             "nwk": "0000",
-            "ieee": "bc:02:6e:ff:fe:24:db:90",
+            "ieee": "00:12:4b:00:1c:a1:b8:46",
             "logical_type": "coordinator",
-            "model": None,
-            "manufacturer": None,
-            "version": None,
+            "model": "Yellow v1.2",
+            "manufacturer": "Nabu Casa",
+            "version": "7.5.0.0 build 0",
         },
     }
 )
 
 
 class ZigguratProtocol(zigpy.serial.SerialProtocol):
-    def __init__(self, on_async_event):
+    def __init__(self, on_async_event, on_disconnect):
         super().__init__()
 
         self.on_async_event = on_async_event
+        self.on_disconnect = on_disconnect
         self.tid = 1
         self.pending_requests: Dict[int, asyncio.Future] = {}
 
@@ -109,6 +144,8 @@ class ZigguratProtocol(zigpy.serial.SerialProtocol):
         fut.set_result(message)
 
     def connection_lost(self, exc):
+        self.on_disconnect(exc)
+
         for tid, fut in self.pending_requests.items():
             if not fut.done():
                 fut.set_exception(ConnectionError("Connection lost"))
@@ -154,7 +191,7 @@ class ControllerApplication(zigpy.application.ControllerApplication):
     async def connect(self):
         _, api = await zigpy.serial.create_serial_connection(
             loop=asyncio.get_running_loop(),
-            protocol_factory=lambda: ZigguratProtocol(self.on_async_event),
+            protocol_factory=lambda: ZigguratProtocol(self.on_async_event, self.connection_lost),
             url=self._config[zigpy.config.CONF_DEVICE][zigpy.config.CONF_DEVICE_PATH],
         )
         await api.wait_until_connected()
@@ -193,7 +230,7 @@ class ControllerApplication(zigpy.application.ControllerApplication):
                 network_info=latest_backup.network_info.replace(
                     network_key=latest_backup.network_info.network_key.replace(
                         tx_counter=(
-                            latest_backup.network_info.network_key.tx_counter + 5000
+                            latest_backup.network_info.network_key.tx_counter + 100000
                         )
                     )
                 )
@@ -231,9 +268,6 @@ class ControllerApplication(zigpy.application.ControllerApplication):
                 "network_key_tx_counter": network_info.network_key.tx_counter,
             },
         )
-
-    async def load_network_info(self, *, load_devices=False):
-        pass
 
     async def reset_network_info(self):
         pass
@@ -282,7 +316,7 @@ class ControllerApplication(zigpy.application.ControllerApplication):
                 "src_ep": packet.src_ep,
                 "dst_ep": packet.dst_ep or 0,
                 "aps_ack": t.TransmitOptions.ACK in packet.tx_options,
-                "radius": packet.radius,
+                "radius": packet.radius or 30,
                 "aps_seq": packet.tsn,
                 "data": packet.data.serialize().hex(),
             },
@@ -298,12 +332,17 @@ async def main(host, port):
             "backup_enabled": False,
             "startup_energy_scan": False,
             "use_thread": False,
+            "database_path": str(pathlib.Path(__file__).parent.parent.parent.parent.parent / "zigbee.db"),
         }
     )
+    await app._load_db()
 
     await app.connect()
     await app.start_network()
 
+    await asyncio.sleep(100000)
+
+    '''
     dev = app.add_device(nwk=0x26F4, ieee=t.EUI64.convert("00:0d:6f:ff:fe:a4:f1:0b"))
     await dev.schedule_initialize()
 
@@ -313,6 +352,7 @@ async def main(host, port):
                 await dev.endpoints[1].on_off.off()
         except asyncio.TimeoutError:
             _LOGGER.warning("Timed out...")
+    '''
 
 
 if __name__ == "__main__":
@@ -320,6 +360,7 @@ if __name__ == "__main__":
     import coloredlogs
 
     coloredlogs.install(level=logging.DEBUG)
+    logging.getLogger("aiosqlite").setLevel(logging.INFO)
 
     host, port = sys.argv[1].split(":")
     port = int(port)
