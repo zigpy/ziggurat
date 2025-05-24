@@ -14,7 +14,7 @@ use tokio::task::spawn_local;
 use std::sync::Arc;
 
 use ziggurat::spinel_client::SpinelClient;
-use ziggurat::types::{Eui64, Key, Nwk, PanId};
+use ziggurat::zigbee_parts::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_aps::ApsDeliveryMode;
 use ziggurat::zigbee_stack::{ZigbeeNotification, ZigbeeStack};
 
@@ -52,8 +52,8 @@ impl ZigguratServer {
 
         let (zigbee_stack, notification_rx) = ZigbeeStack::new(spinel);
         let server = ZigguratServer {
-            zigbee_stack,
-            notification_rx,
+            zigbee_stack: zigbee_stack,
+            notification_rx: notification_rx,
         };
 
         Ok(server)

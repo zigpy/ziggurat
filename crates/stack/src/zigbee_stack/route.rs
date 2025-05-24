@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::types::Nwk;
+use zigbee_parts::types::Nwk;
 
 pub type RequestId = u8;
 

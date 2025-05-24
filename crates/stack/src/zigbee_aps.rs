@@ -105,7 +105,7 @@ impl ApsAckFrameControl {
 
         Ok((
             Self {
-                frame_type: frame_type,
+                frame_type,
                 delivery_mode: ApsDeliveryMode::try_from((bytes[0] >> 2) & 0b11)?,
                 ack_format: (bytes[0] >> 4) & 0b1 == 1,
                 security: (bytes[0] >> 5) & 0b1 == 1,
@@ -169,12 +169,12 @@ impl ApsAckFrame {
         }
 
         Ok(Self {
-            frame_control: frame_control,
-            destination_endpoint: destination_endpoint,
-            cluster_id: cluster_id,
-            profile_id: profile_id,
-            source_endpoint: source_endpoint,
-            counter: counter,
+            frame_control,
+            destination_endpoint,
+            cluster_id,
+            profile_id,
+            source_endpoint,
+            counter,
         })
     }
 
@@ -239,14 +239,14 @@ impl ApsDataFrame {
         let asdu = remaining[7..].to_vec();
 
         Ok(Self {
-            frame_control: frame_control,
-            group_id: group_id,
-            destination_endpoint: destination_endpoint,
-            cluster_id: cluster_id,
-            profile_id: profile_id,
-            source_endpoint: source_endpoint,
-            counter: counter,
-            asdu: asdu,
+            frame_control,
+            group_id,
+            destination_endpoint,
+            cluster_id,
+            profile_id,
+            source_endpoint,
+            counter,
+            asdu,
         })
     }
 
@@ -311,7 +311,8 @@ mod test {
                 ack_request: true,
                 extended_header: false,
             },
-            destination_endpoint: 1,
+            group_id: None,
+            destination_endpoint: Some(1),
             cluster_id: 0x0006,
             profile_id: 0x0104,
             source_endpoint: 1,
@@ -337,7 +338,8 @@ mod test {
                 ack_request: false,
                 extended_header: false,
             },
-            destination_endpoint: 0,
+            group_id: None,
+            destination_endpoint: Some(0),
             cluster_id: 0x0013,
             profile_id: 0x0000,
             source_endpoint: 0,

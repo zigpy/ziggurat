@@ -6,7 +6,7 @@ use pcap_parser::{PcapBlockOwned, PcapError, create_reader};
 use shellexpand;
 
 use ziggurat::ieee_802154::{Ieee802154Frame, Ieee802154FrameType};
-use ziggurat::types::Key;
+use ziggurat::zigbee_parts::types::Key;
 use ziggurat::zigbee_nwk::NwkFrame;
 
 fn main() {
