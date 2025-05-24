@@ -71,8 +71,8 @@ combine-as-imports = true
 split-on-trailing-comma = false
 
 [tool.codespell]
-ignore-words-list = ["hass"]
-skip = ["./.*", "tests/*", "pyproject.toml"]
+ignore-words-list = ["hass", "crate"]
+skip = ["./.*", "tests/*", "pyproject.toml", "Cargo.lock"]
 quiet-level = 2
 
 [tool.mypy]

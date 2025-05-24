@@ -3,9 +3,8 @@ repos:
     rev: v2.3.0
     hooks:
       - id: codespell
-        args: [
-          "--ignore-words-list", "crate,inout",
-        ]
+        additional_dependencies: [tomli]
+        args: ["--toml", "zigpy_ziggurat/pyproject.toml"]
 
   - repo: local
     hooks:
