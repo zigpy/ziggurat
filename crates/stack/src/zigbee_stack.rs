@@ -454,11 +454,6 @@ impl ZigbeeStack {
             .upgrade()
             .expect("Unable to upgrade self reference");
 
-        // Start the background link status broadcaster task
-        spawn_local(async move {
-            arc_self.periodic_link_status_broadcast_task().await;
-        });
-
         loop {
             let (packet, ieee802154_frame) = self.recv_frame().await;
 
@@ -517,7 +512,7 @@ impl ZigbeeStack {
 
     async fn recv_frame(&self) -> (SpinelRxFrame, Ieee802154Frame) {
         loop {
-            let Some(spinal_frame) = self
+            let Some(spinel_frame) = self
                 .raw_frame_rx
                 .lock()
                 .expect("No thread should panic")
@@ -527,7 +522,7 @@ impl ZigbeeStack {
                 log::warn!("Frame sender hung up");
                 continue;
             };
-            let packet = match SpinelRxFrame::from_bytes(&spinal_frame.value) {
+            let packet = match SpinelRxFrame::from_bytes(&spinel_frame.value) {
                 Ok(p) => p,
                 Err(e) => {
                     log::warn!("Error parsing spinel frame: {:?}", e);
@@ -652,6 +647,16 @@ impl ZigbeeStack {
         // "respond" to empty link status broadcasts proactively, independent of the
         // link status period
         self.send_link_status_broadcast(true).await;
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        // Start the background link status broadcaster task
+        spawn_local(async move {
+            arc_self.periodic_link_status_broadcast_task().await;
+        });
 
         Ok(())
     }
@@ -1725,6 +1730,10 @@ impl ZigbeeStack {
 
             route_discovery_entry.expiration_time - now
         };
+
+        log::debug!(
+            "Waiting for route discovery notification for NWK {destination:?} with timeout {discovery_timeout:?}"
+        );
 
         match timeout(discovery_timeout, rx.recv()).await {
             Ok(Ok(_)) => {
