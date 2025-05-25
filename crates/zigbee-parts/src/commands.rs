@@ -42,7 +42,7 @@ pub enum NwkRouteRequestManyToOne {
 pub struct NwkRouteRequestCommand {
     reserved: u3,
     pub many_to_one: NwkRouteRequestManyToOne,
-    #[abstract_bits(controls = destination_eui64)]
+    #[abstract_bits(presence_of = destination_eui64)]
     reserved: bool,
     reserved: u2,
     pub route_request_identifier: u8,
@@ -64,9 +64,9 @@ impl Command for NwkRouteRequestCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRouteReplyCommand {
     reserved: u4,
-    #[abstract_bits(controls = originator_eui64)]
+    #[abstract_bits(presence_of = originator_eui64)]
     reserved: bool,
-    #[abstract_bits(controls = responder_eui64)]
+    #[abstract_bits(presence_of = responder_eui64)]
     reserved: bool,
     reserved: u2,
     pub route_request_identifier: u8,
