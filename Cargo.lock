@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "abstract-bits"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57274eff82141f21b4a9707551f540e74471431df9eba816fc8ebf563d93f8cc"
+checksum = "2c265591a83d97ca12d32d679e8e0df1b11ff21b333a1679a52ff1bec2e16add"
 dependencies = [
  "abstract-bits-derive",
  "arbitrary-int",
@@ -16,9 +16,9 @@ dependencies = [
 
 [[package]]
 name = "abstract-bits-derive"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7ed95b24ea1d92a55947dbdc0d08fda020d16690fe5c951e845faa740a5cb71"
+checksum = "00ad589d11a94666dca636f13148a47005575d58034ed0f9d63d24b661c9d622"
 dependencies = [
  "proc-macro-error2",
  "proc-macro2",
