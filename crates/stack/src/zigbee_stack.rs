@@ -1985,6 +1985,7 @@ impl ZigbeeStack {
             log::debug!("APS ACK requested, waiting for {:?}", ack_data);
             state.pending_aps_acks.insert(ack_data, tx);
         }
+        drop(state);
 
         self.background_send_nwk_frame(nwk_frame);
 
