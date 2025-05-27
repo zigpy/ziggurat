@@ -9,9 +9,9 @@ use crate::zigbee_aps::{
     ApsFrameType, parse_aps_frame,
 };
 use crate::zigbee_nwk::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, BROADCAST_RX_ON_WHEN_IDLE,
-    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
-    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, NwkAuxHeader, NwkFrame,
+    NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery, NwkSecurityHeaderControlField,
+    NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 use zigbee_parts::types::{Eui64, Key, Nwk, PanId};
 
@@ -1055,12 +1055,12 @@ impl ZigbeeStack {
                 let connectivity =
                     7 - cmp::max(link_status.incoming_cost, link_status.outgoing_cost);
 
-                neighbor_entry
+                neighbor_entry.router_connectivity = neighbor_entry
                     .router_connectivity
                     .saturating_add(connectivity);
 
                 if !neighbors_with_nonzero_outgoing_cost.contains(&link_status.address) {
-                    neighbor_entry
+                    neighbor_entry.router_neighbor_set_diversity = neighbor_entry
                         .router_neighbor_set_diversity
                         .saturating_add(connectivity);
                 }
