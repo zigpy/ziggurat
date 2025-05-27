@@ -1440,6 +1440,7 @@ impl ZigbeeStack {
             }
             .to_bytes(),
         };
+        drop(state);
 
         self.background_send_nwk_frame(aps_ack_frame);
     }
@@ -1514,8 +1515,6 @@ impl ZigbeeStack {
     }
 
     pub async fn send_nwk_frame(&self, mut nwk_frame: NwkFrame) -> Result<(), String> {
-        let mut state = self.state.lock().unwrap();
-
         // Compute a next-hop address, if necessary. All broadcasts are sent to the
         // 802.15.4 broadcast address, since the distinction between different types of
         // devices is at a higher layer.
@@ -1526,6 +1525,8 @@ impl ZigbeeStack {
             } else {
                 Nwk(0xFFFF)
             };
+
+        let mut state = self.state.lock().unwrap();
 
         // The encryption frame counter always increments
         state
