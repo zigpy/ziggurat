@@ -1396,33 +1396,8 @@ impl ZigbeeStack {
     fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
         log::debug!("Sending back an APS ACK");
 
-        let ack_frame = ApsAckFrame {
-            frame_control: ApsAckFrameControl {
-                frame_type: ApsFrameType::Ack,
-                delivery_mode: ApsDeliveryMode::Unicast,
-                ack_format: false,
-                security: false,
-                ack_request: false,
-                extended_header: false,
-            },
-            destination_endpoint: Some(aps_frame.source_endpoint),
-            cluster_id: Some(aps_frame.cluster_id),
-            profile_id: Some(aps_frame.profile_id),
-            source_endpoint: aps_frame.destination_endpoint,
-            counter: aps_frame.counter,
-        };
-
-        // Wrap it in a NWK frame
-        let destination = nwk_frame.nwk_header.source;
-        let outgoing_nwk_frame = self.wrap_aps_frame(destination, 30, &ApsFrame::Ack(ack_frame));
-        self.background_send_nwk_frame(outgoing_nwk_frame);
-    }
-
-    fn wrap_aps_frame(&self, destination: Nwk, radius: u8, aps_frame: &ApsFrame) -> NwkFrame {
-        // TODO: TX frame counter wrapping is an error condition
         let state = self.state.lock().unwrap();
-
-        let plaintext_nwk_frame = NwkFrame {
+        let aps_ack_frame = NwkFrame {
             encrypted: false,
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -1437,23 +1412,36 @@ impl ZigbeeStack {
                     end_device_initiator: false,
                     reserved: 0b00,
                 },
-                destination,
+                // Send our ACK back to the sender
+                destination: nwk_frame.nwk_header.source,
                 source: state.nib.nwk_network_address,
-                radius: radius,
-                sequence_number: state.nib.nwk_sequence_number, // will be replaced when sending
+                radius: 2 * state.nib.nwk_max_depth,
+                sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: None,
                 source_ieee: None,
                 multicast_control: None,
                 source_route: None,
             },
             aux_header: None, // will be replaced
-            payload: match aps_frame {
-                ApsFrame::Data(data_frame) => data_frame.to_bytes(),
-                ApsFrame::Ack(ack_frame) => ack_frame.to_bytes(),
-            },
+            payload: ApsAckFrame {
+                frame_control: ApsAckFrameControl {
+                    frame_type: ApsFrameType::Ack,
+                    delivery_mode: ApsDeliveryMode::Unicast,
+                    ack_format: false,
+                    security: false,
+                    ack_request: false,
+                    extended_header: false,
+                },
+                destination_endpoint: Some(aps_frame.source_endpoint),
+                cluster_id: Some(aps_frame.cluster_id),
+                profile_id: Some(aps_frame.profile_id),
+                source_endpoint: aps_frame.destination_endpoint,
+                counter: aps_frame.counter,
+            }
+            .to_bytes(),
         };
 
-        plaintext_nwk_frame
+        self.background_send_nwk_frame(aps_ack_frame);
     }
 
     async fn send_802154_frame(&self, mut frame: Ieee802154Frame) -> Result<(), String> {
@@ -1947,8 +1935,34 @@ impl ZigbeeStack {
 
         log::debug!("Prepared APS frame: {:#?}", aps_frame);
 
-        let nwk_frame =
-            self.wrap_aps_frame(destination, cmp::max(radius, 1), &ApsFrame::Data(aps_frame));
+        let mut state = self.state.lock().unwrap();
+        let nwk_frame = NwkFrame {
+            encrypted: false,
+            nwk_header: NwkHeader {
+                frame_control: NwkFrameControl {
+                    frame_type: NwkFrameType::Data,
+                    protocol_version: state.nib.nwkc_protocol_version,
+                    discover_route: NwkRouteDiscovery::Enable,
+                    multicast: false,
+                    security: true,
+                    source_route: false,
+                    destination: false,
+                    extended_source: false,
+                    end_device_initiator: false,
+                    reserved: 0b00,
+                },
+                destination: destination,
+                source: state.nib.nwk_network_address,
+                radius: cmp::max(radius, 1),
+                sequence_number: state.nib.nwk_sequence_number,
+                destination_ieee: None,
+                source_ieee: None,
+                multicast_control: None,
+                source_route: None,
+            },
+            aux_header: None, // will be replaced
+            payload: aps_frame.to_bytes(),
+        };
 
         log::debug!("Prepared NWK frame: {:#?}", nwk_frame);
 
@@ -1968,11 +1982,7 @@ impl ZigbeeStack {
             maybe_ack_rx = Some(rx);
 
             log::debug!("APS ACK requested, waiting for {:?}", ack_data);
-            self.state
-                .lock()
-                .unwrap()
-                .pending_aps_acks
-                .insert(ack_data, tx);
+            state.pending_aps_acks.insert(ack_data, tx);
         }
 
         self.background_send_nwk_frame(nwk_frame);
