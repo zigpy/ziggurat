@@ -1250,22 +1250,69 @@ impl ZigbeeStack {
         self.notify_routing_change(&state, &rrep_responder);
 
         // Find the next hop to the destination
+        let next_hop_nwk = {
+            let discovery_entry = state
+                .nib
+                .nwk_route_discovery_table
+                .get_mut(&route_discovery_table_key)
+                .unwrap();
 
-        /*
-        let relayed_route_reply_cmd = NwkRouteReplyCommand {
-            // Fields copied from received RREP:
-            multicast: false,
-            responder_nwk: rrep_responder,
-            originator_nwk: rrep_originator,
-            route_request_identifier: rrep_id,
-            routing_sequence_number: rrep_seq_num,
-            originator_eui64: route_reply_cmd.originator_eui64, // Should be present if originator IEEE was in RREQ
-            responder_eui64: route_reply_cmd.responder_eui64,
-            // Path cost updated with cost from sender:
-            path_cost: total_path_cost,
-            // TLVs not handled in minimal implementation
+            discovery_entry.sender_address
         };
-        */
+
+        let next_hop_neighbor = match state
+            .nib
+            .nwk_neighbor_table
+            .values()
+            .find(|&entry| entry.network_address == next_hop_nwk)
+        {
+            Some(neighbor) => neighbor,
+            None => {
+                log::warn!("Next hop neighbor not found in neighbor table");
+                return;
+            }
+        };
+
+        let relayed_route_reply_frame = NwkFrame {
+            encrypted: false,
+            nwk_header: NwkHeader {
+                frame_control: NwkFrameControl {
+                    frame_type: NwkFrameType::Command,
+                    protocol_version: state.nib.nwkc_protocol_version,
+                    discover_route: NwkRouteDiscovery::Suppress,
+                    multicast: false,
+                    security: true,
+                    source_route: false,
+                    destination: true,
+                    extended_source: true,
+                    end_device_initiator: false,
+                    reserved: 0b00,
+                },
+                destination: next_hop_nwk,
+                source: state.nib.nwk_network_address,
+                radius: 2 * state.nib.nwk_max_depth,
+                sequence_number: state.nib.nwk_sequence_number,
+                destination_ieee: nwk_frame.nwk_header.source_ieee,
+                source_ieee: Some(state.nib.nwk_ieee_address),
+                multicast_control: None,
+                source_route: None,
+            },
+            aux_header: None,
+            payload: NwkRouteReplyCommand {
+                route_request_identifier: rrep_id,
+                originator_nwk: rrep_originator,
+                responder_nwk: rrep_responder,
+                // We increment the path cost
+                path_cost: updated_path_cost + next_hop_neighbor.incoming_link_cost(),
+                originator_eui64: route_reply_cmd.originator_eui64,
+                responder_eui64: route_reply_cmd.responder_eui64,
+            }
+            .serialize()
+            .unwrap(),
+        };
+
+        drop(state);
+        self.background_send_nwk_frame(relayed_route_reply_frame);
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
