@@ -1132,28 +1132,22 @@ impl ZigbeeStack {
 
         // TODO: clean this up, the mutability problems caused by the shared state mutex
         // make having two mutable borrows at once very difficult
-        let discovery_entry = match state
+        let Some(discovery_entry) = state
             .nib
             .nwk_route_discovery_table
             .get(&route_discovery_table_key)
-        {
-            Some(entry) => entry,
-            None => {
-                log::debug!("Route reply for unknown route discovery, ignoring");
-                return;
-            }
+        else {
+            log::debug!("Route reply for unknown route discovery, ignoring");
+            return;
         };
 
-        let routing_entry = match state
+        let Some(routing_entry) = state
             .nib
             .nwk_route_table
             .get(&route_reply_cmd.responder_nwk)
-        {
-            Some(entry) => entry,
-            None => {
-                log::debug!("Route reply with unknown responder, ignoring");
-                return;
-            }
+        else {
+            log::debug!("Route reply with unknown responder, ignoring");
+            return;
         };
 
         // If we are the originator, handling is simplified
@@ -1271,17 +1265,14 @@ impl ZigbeeStack {
             discovery_entry.sender_address
         };
 
-        let next_hop_neighbor = match state
+        let Some(next_hop_neighbor) = state
             .nib
             .nwk_neighbor_table
             .values()
             .find(|&entry| entry.network_address == next_hop_nwk)
-        {
-            Some(neighbor) => neighbor,
-            None => {
-                log::warn!("Next hop neighbor not found in neighbor table");
-                return;
-            }
+        else {
+            log::warn!("Next hop neighbor not found in neighbor table");
+            return;
         };
 
         let relayed_route_reply_frame = NwkFrame {
@@ -1368,18 +1359,15 @@ impl ZigbeeStack {
 
         let nwk_network_address = state.nib.nwk_network_address;
         // We need to know who sent the frame
-        let sender_neighbor = match state
+        let Some(sender_neighbor) = state
             .nib
             .nwk_neighbor_table
             .values()
             .find(|&entry| entry.network_address == sender_nwk)
-        {
-            Some(neighbor) => neighbor,
-            None => {
-                // Can we do anything here? Broadcast an unsolicited link status?
-                log::warn!("Route request relayer not found in neighbor table");
-                return;
-            }
+        else {
+            // Can we do anything here? Broadcast an unsolicited link status?
+            log::warn!("Route request relayer not found in neighbor table");
+            return;
         };
 
         if sender_neighbor.outgoing_cost == 0 {
