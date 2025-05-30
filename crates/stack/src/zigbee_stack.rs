@@ -806,9 +806,10 @@ impl ZigbeeStack {
         let source_nwk = match frame.src_address {
             Some(Ieee802154Address::Nwk(nwk)) => Some(nwk),
             _ => None,
-        };
+        }
+        .unwrap();
 
-        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk.unwrap(), lqi, rssi);
+        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, lqi, rssi);
 
         return Some(decrypted_nwk_frame);
     }
