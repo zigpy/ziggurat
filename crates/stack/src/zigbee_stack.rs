@@ -25,9 +25,7 @@ use zigbee_parts::commands::{
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::drop;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::Weak;
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
@@ -1071,6 +1069,11 @@ impl ZigbeeStack {
             }
         }
 
+        if link_status_cmd.link_statuses.is_empty() {
+            // TODO: Initiate a gratuitous link status broadcast, jittered by
+            // nwkcMinRouterBootstrapJitter < nwkcMaxRouterBootstrapJitter
+        }
+
         log::debug!("Updated neighbor table entry: {neighbor_entry:#?}");
     }
 
@@ -1303,7 +1306,7 @@ impl ZigbeeStack {
                 originator_nwk: rrep_originator,
                 responder_nwk: rrep_responder,
                 // We increment the path cost
-                path_cost: updated_path_cost + next_hop_neighbor.incoming_link_cost(),
+                path_cost: updated_path_cost.saturating_add(next_hop_neighbor.incoming_link_cost()),
                 originator_eui64: route_reply_cmd.originator_eui64,
                 responder_eui64: route_reply_cmd.responder_eui64,
             }
@@ -1313,6 +1316,31 @@ impl ZigbeeStack {
 
         drop(state);
         self.background_send_nwk_frame(relayed_route_reply_frame);
+    }
+
+    /// Clean expired entries from the route discovery table. Their lifetime is ~10s.
+    ///
+    /// TODO: This table is going to be quite small so there is little benefit from
+    /// making this a non-linear search. That being said, changing to a HashMap
+    /// implementation that orders by expiration time while maintaining fast lookups
+    /// would not hurt.
+    ///
+    /// TODO: Alternatively, we can look into a way to tie timers to these entries and
+    /// expire them directly from the event loop.
+    fn clean_route_discovery_table(
+        &self,
+        nwk_route_discovery_table: &mut HashMap<(Nwk, u8), route::DiscoveryEntry>,
+    ) {
+        let now = Instant::now();
+
+        nwk_route_discovery_table.retain(|_, entry| {
+            if entry.expiration_time <= now {
+                log::debug!("Removing expired route discovery entry: {entry:#?}");
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
@@ -1329,26 +1357,9 @@ impl ZigbeeStack {
             route_request_cmd
         );
 
-        let nwk_network_address = self.state.lock().unwrap().nib.nwk_network_address;
+        let mut state = self.state.lock().unwrap();
 
-        if route_request_cmd.destination_address == nwk_network_address
-            || route_request_cmd.destination_eui64 == route_request_cmd.destination_eui64
-        {
-            self.handle_route_request_self(nwk_frame, &route_request_cmd, sender_nwk);
-        } else {
-            self.handle_route_request_relay(nwk_frame, &route_request_cmd, sender_nwk);
-        }
-    }
-
-    /// Handle route requests that are destined for us (or our child)
-    fn handle_route_request_self(
-        &self,
-        nwk_frame: &NwkFrame,
-        route_request_cmd: &NwkRouteRequestCommand,
-        sender_nwk: Nwk,
-    ) {
-        let state = self.state.lock().unwrap();
-
+        let nwk_network_address = state.nib.nwk_network_address;
         // We need to know who sent the frame
         let sender_neighbor = match state
             .nib
@@ -1364,80 +1375,236 @@ impl ZigbeeStack {
             }
         };
 
-        let path_cost = sender_neighbor.incoming_link_cost();
-        if path_cost == 0 {
+        if sender_neighbor.outgoing_cost == 0 {
             log::warn!("Path cost to neighbor is 0, not sending route reply");
             return;
         }
 
-        let route_reply_frame = NwkFrame {
-            encrypted: false,
-            nwk_header: NwkHeader {
-                frame_control: NwkFrameControl {
-                    frame_type: NwkFrameType::Command,
-                    protocol_version: state.nib.nwkc_protocol_version,
-                    discover_route: NwkRouteDiscovery::Suppress,
-                    multicast: false,
-                    security: true,
-                    source_route: false,
-                    destination: true,
-                    extended_source: true,
-                    end_device_initiator: false,
-                    reserved: 0b00,
-                },
-                destination: nwk_frame.nwk_header.source,
-                source: state.nib.nwk_network_address,
-                radius: 2 * state.nib.nwk_max_depth,
-                sequence_number: state.nib.nwk_sequence_number,
-                destination_ieee: nwk_frame.nwk_header.source_ieee,
-                source_ieee: Some(state.nib.nwk_ieee_address),
-                multicast_control: None,
-                source_route: None,
-            },
-            aux_header: None, // will be replaced
-            payload: NwkRouteReplyCommand {
-                route_request_identifier: route_request_cmd.route_request_identifier,
-                originator_nwk: nwk_frame.nwk_header.source,
-                responder_nwk: state.nib.nwk_network_address,
-                path_cost: path_cost,
-                originator_eui64: nwk_frame.nwk_header.source_ieee,
-                responder_eui64: Some(state.nib.nwk_ieee_address),
-            }
-            .serialize()
-            .unwrap(),
-        };
+        // The maximum of the incoming and outgoing costs is used for computations to
+        // deprioritize asymmetric routes
+        let contributing_path_cost = cmp::max(
+            sender_neighbor.outgoing_cost,
+            sender_neighbor.incoming_link_cost(),
+        );
+        let updated_path_cost = route_request_cmd
+            .path_cost
+            .saturating_add(contributing_path_cost);
 
-        drop(state);
-
-        self.background_send_nwk_frame(route_reply_frame);
-    }
-
-    /// Handle route requests that we should consider relaying
-    fn handle_route_request_relay(
-        &self,
-        nwk_frame: &NwkFrame,
-        route_request_cmd: &NwkRouteRequestCommand,
-        sender_nwk: Nwk,
-    ) {
-        let state = self.state.lock().unwrap();
-
-        // We need to know who sent the frame
-        let sender_neighbor = match state
-            .nib
-            .nwk_neighbor_table
-            .values()
-            .find(|&entry| entry.network_address == sender_nwk)
+        // A route request contains enough information to build a provisional route
+        // table entry via the relaying device. This is free routing information and
+        // should be used.
         {
-            Some(neighbor) => neighbor,
-            None => {
-                // Can we do anything here? Broadcast an unsolicited link status?
-                log::warn!("Route request relayer not found in neighbor table");
+            let route_table_entry = state
+                .nib
+                .nwk_route_table
+                .entry(route_request_cmd.destination_address)
+                .or_insert_with(|| {
+                    route::TableEntry {
+                        destination: route_request_cmd.destination_address,
+                        status: route::Status::DiscoveryUnderway,
+                        no_route_cache: false,
+                        many_to_one: false,
+                        route_record_required: false,
+                        expired: false,
+                        sequence_number_valid: false,
+                        next_hop_address: Nwk(0xFFFF), // Unknown
+                        sequence_number: 0,
+                        total_usage_count: 0,
+                        recent_activity: 0,
+                    }
+                });
+
+            if route_table_entry.status != route::Status::Active {
+                route_table_entry.status = route::Status::Active;
+                route_table_entry.next_hop_address = sender_nwk;
+            }
+
+            self.notify_routing_change(&state, &route_request_cmd.destination_address);
+        }
+
+        // Create a routing table entry that assigns the node that last-relayed the
+        // route request command to be the next-hop for the original sender
+        {
+            let route_table_entry = state
+                .nib
+                .nwk_route_table
+                .entry(nwk_frame.nwk_header.source)
+                .or_insert_with(|| route::TableEntry {
+                    destination: nwk_frame.nwk_header.source,
+                    status: route::Status::Active,
+                    no_route_cache: false,
+                    many_to_one: false,
+                    route_record_required: false,
+                    expired: false,
+                    sequence_number_valid: false,
+                    next_hop_address: sender_nwk,
+                    sequence_number: 0,
+                    total_usage_count: 0,
+                    recent_activity: 0,
+                });
+
+            if route_table_entry.status != route::Status::Active {
+                route_table_entry.status = route::Status::Active;
+                route_table_entry.next_hop_address = sender_nwk;
+            }
+
+            self.notify_routing_change(&state, &nwk_frame.nwk_header.source);
+        }
+
+        // TODO: what do we do if one of these values doesn't match? This would be
+        // an error, some device on the network is storing invalid information about
+        // either us or a child.
+        let is_for_self_or_child = route_request_cmd.destination_address == nwk_network_address
+            || route_request_cmd.destination_eui64 == route_request_cmd.destination_eui64
+            /* || destination_is_child */;
+
+        // Check for a route discovery table entry. If one already exists and the
+        // forward cost is better than what this route request advertises, we can drop
+        // this frame.
+        let route_discovery_table_key = (
+            nwk_frame.nwk_header.source,
+            route_request_cmd.route_request_identifier,
+        );
+
+        let nwkc_route_discovery_time = state.nib.nwkc_route_discovery_time;
+
+        if !is_for_self_or_child {
+            self.clean_route_discovery_table(&mut state.nib.nwk_route_discovery_table);
+
+            let route_discovery_entry = state
+                .nib
+                .nwk_route_discovery_table
+                .entry(route_discovery_table_key)
+                .or_insert_with(|| route::DiscoveryEntry {
+                    route_request_id: route_request_cmd.route_request_identifier,
+                    source_address: nwk_frame.nwk_header.source,
+                    sender_address: sender_nwk,
+                    forward_cost: updated_path_cost,
+                    residual_cost: 0,
+                    expiration_time: Instant::now() + nwkc_route_discovery_time,
+                    destination_address: route_request_cmd.destination_address,
+                });
+
+            log::debug!(
+                "Route discovery entry: [{route_discovery_table_key:?}] = {route_discovery_entry:#?}"
+            );
+
+            if route_discovery_entry.forward_cost < updated_path_cost {
+                log::debug!(
+                    "Ignoring route request with higher cost ({} > {})",
+                    updated_path_cost,
+                    route_discovery_entry.forward_cost
+                );
                 return;
             }
-        };
 
-        // TODO: re-send the route request and update the path cost with our own info
-        // ... Update NwkRouteDiscoveryTableEntry.sender_address ...
+            // Create an entry in the routing table as well
+            state
+                .nib
+                .nwk_route_table
+                .entry(route_request_cmd.destination_address)
+                .or_insert_with(|| route::TableEntry {
+                    destination: route_request_cmd.destination_address,
+                    status: route::Status::DiscoveryUnderway,
+                    no_route_cache: false,
+                    many_to_one: false,
+                    route_record_required: false,
+                    expired: false,
+                    sequence_number_valid: false,
+                    next_hop_address: Nwk(0xFFFF),
+                    sequence_number: 0,
+                    total_usage_count: 0,
+                    recent_activity: 0,
+                });
+
+            // If we get here, we have a reason to relay
+            let rebroadcast_radius = nwk_frame.nwk_header.radius.saturating_sub(1);
+
+            if rebroadcast_radius == 0 {
+                log::debug!("Not relaying route request, re-broadcast radius is 0");
+                return;
+            }
+
+            let relayed_route_request_cmd = NwkFrame {
+                encrypted: false,
+                nwk_header: NwkHeader {
+                    frame_control: NwkFrameControl {
+                        frame_type: NwkFrameType::Command,
+                        protocol_version: state.nib.nwkc_protocol_version,
+                        discover_route: NwkRouteDiscovery::Suppress,
+                        multicast: false,
+                        security: true,
+                        source_route: false,
+                        destination: true,
+                        extended_source: true,
+                        end_device_initiator: false,
+                        reserved: 0b00,
+                    },
+                    destination: nwk_frame.nwk_header.destination,
+                    source: nwk_frame.nwk_header.source,
+                    radius: rebroadcast_radius,
+                    sequence_number: state.nib.nwk_sequence_number, // TODO: do we change this?
+                    destination_ieee: nwk_frame.nwk_header.source_ieee,
+                    source_ieee: nwk_frame.nwk_header.source_ieee,
+                    multicast_control: None,
+                    source_route: None,
+                },
+                aux_header: None, // will be replaced
+                payload: NwkRouteRequestCommand {
+                    many_to_one: route_request_cmd.many_to_one,
+                    route_request_identifier: route_request_cmd.route_request_identifier,
+                    destination_address: route_request_cmd.destination_address,
+                    path_cost: updated_path_cost, // We update only the path cost
+                    destination_eui64: route_request_cmd.destination_eui64,
+                }
+                .serialize()
+                .unwrap(),
+            };
+
+            drop(state);
+            self.background_send_nwk_frame(relayed_route_request_cmd);
+        } else {
+            let route_reply_frame = NwkFrame {
+                encrypted: false,
+                nwk_header: NwkHeader {
+                    frame_control: NwkFrameControl {
+                        frame_type: NwkFrameType::Command,
+                        protocol_version: state.nib.nwkc_protocol_version,
+                        discover_route: NwkRouteDiscovery::Suppress,
+                        multicast: false,
+                        security: true,
+                        source_route: false,
+                        destination: true,
+                        extended_source: true,
+                        end_device_initiator: false,
+                        reserved: 0b00,
+                    },
+                    destination: nwk_frame.nwk_header.source,
+                    source: state.nib.nwk_network_address,
+                    radius: 2 * state.nib.nwk_max_depth,
+                    sequence_number: state.nib.nwk_sequence_number,
+                    destination_ieee: nwk_frame.nwk_header.source_ieee,
+                    source_ieee: Some(state.nib.nwk_ieee_address),
+                    multicast_control: None,
+                    source_route: None,
+                },
+                aux_header: None,
+                payload: NwkRouteReplyCommand {
+                    route_request_identifier: route_request_cmd.route_request_identifier,
+                    originator_nwk: nwk_frame.nwk_header.source,
+                    responder_nwk: state.nib.nwk_network_address,
+                    path_cost: updated_path_cost,
+                    originator_eui64: nwk_frame.nwk_header.source_ieee,
+                    responder_eui64: Some(state.nib.nwk_ieee_address),
+                }
+                .serialize()
+                .unwrap(),
+            };
+
+            drop(state);
+
+            self.background_send_nwk_frame(route_reply_frame);
+        }
     }
 
     fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
@@ -1842,6 +2009,8 @@ impl ZigbeeStack {
         let nwkc_route_discovery_time = state.nib.nwkc_route_discovery_time;
 
         {
+            self.clean_route_discovery_table(&mut state.nib.nwk_route_discovery_table);
+
             let route_discovery_entry = state
                 .nib
                 .nwk_route_discovery_table
