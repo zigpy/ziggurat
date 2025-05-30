@@ -1100,12 +1100,6 @@ impl ZigbeeStack {
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
 
-        let sender_nwk = nwk_frame.nwk_header.source;
-        let rrep_id = route_reply_cmd.route_request_identifier;
-        let rrep_originator = route_reply_cmd.originator_nwk;
-        let rrep_responder = route_reply_cmd.responder_nwk;
-        let rrep_path_cost = route_reply_cmd.path_cost;
-
         let mut state = self.state.lock().unwrap();
         let our_nwk_address = state.nib.nwk_network_address;
 
@@ -1113,7 +1107,7 @@ impl ZigbeeStack {
             .nib
             .nwk_neighbor_table
             .values()
-            .find(|&entry| entry.network_address == sender_nwk)
+            .find(|&entry| entry.network_address == nwk_frame.nwk_header.source)
         {
             Some(neighbor) => neighbor,
             None => {
@@ -1127,8 +1121,13 @@ impl ZigbeeStack {
             return;
         }
 
-        let updated_path_cost = rrep_path_cost.saturating_add(neighbor.outgoing_cost);
-        let route_discovery_table_key = (rrep_originator, rrep_id);
+        let updated_path_cost = route_reply_cmd
+            .path_cost
+            .saturating_add(neighbor.outgoing_cost);
+        let route_discovery_table_key = (
+            route_reply_cmd.originator_nwk,
+            route_reply_cmd.route_request_identifier,
+        );
 
         // TODO: clean this up, the mutability problems caused by the shared state mutex
         // make having two mutable borrows at once very difficult
@@ -1144,7 +1143,11 @@ impl ZigbeeStack {
             }
         };
 
-        let routing_entry = match state.nib.nwk_route_table.get(&rrep_responder) {
+        let routing_entry = match state
+            .nib
+            .nwk_route_table
+            .get(&route_reply_cmd.responder_nwk)
+        {
             Some(entry) => entry,
             None => {
                 log::debug!("Route reply with unknown responder, ignoring");
@@ -1153,14 +1156,14 @@ impl ZigbeeStack {
         };
 
         // If we are the originator, handling is simplified
-        if rrep_originator == our_nwk_address {
+        if route_reply_cmd.originator_nwk == our_nwk_address {
             match routing_entry.status {
                 route::Status::Inactive
                 | route::Status::DiscoveryFailed  // Is this correct to have?
                 | route::Status::DiscoveryUnderway => {
                     log::debug!("Setting routing entry for NWK {:?} to active, with next hop {:?} (residual cost {})", 
-                        rrep_responder,
-                        sender_nwk,
+                        route_reply_cmd.responder_nwk,
+                        nwk_frame.nwk_header.source,
                         updated_path_cost);
 
                     // Mutate the routing entry
@@ -1168,9 +1171,9 @@ impl ZigbeeStack {
                         let routing_entry = state
                             .nib
                             .nwk_route_table
-                            .get_mut(&rrep_responder).unwrap();
+                            .get_mut(&route_reply_cmd.responder_nwk).unwrap();
                         routing_entry.status = route::Status::Active;
-                        routing_entry.next_hop_address = sender_nwk;
+                        routing_entry.next_hop_address = nwk_frame.nwk_header.source;
                     }
 
                     // Mutate the discovery entry
@@ -1182,7 +1185,7 @@ impl ZigbeeStack {
                         discovery_entry.residual_cost = updated_path_cost;
                     }
 
-                    self.notify_routing_change(&state, &rrep_responder);
+                    self.notify_routing_change(&state, &route_reply_cmd.responder_nwk);
                 },
                 route::Status::Active => {
                     if updated_path_cost >= discovery_entry.residual_cost {
@@ -1192,10 +1195,10 @@ impl ZigbeeStack {
 
 
                     log::debug!("Updating routing entry for NWK {:?} from next hop {:?} (residual cost {}) to next hop {:?} (residual cost {})",
-                        rrep_responder,
+                        route_reply_cmd.responder_nwk,
                         routing_entry.next_hop_address,
                         discovery_entry.residual_cost,
-                        sender_nwk,
+                        nwk_frame.nwk_header.source,
                         updated_path_cost);
 
                     // Mutate the routing entry
@@ -1203,8 +1206,8 @@ impl ZigbeeStack {
                         let routing_entry = state
                             .nib
                             .nwk_route_table
-                            .get_mut(&rrep_responder).unwrap();
-                        routing_entry.next_hop_address = sender_nwk;
+                            .get_mut(&route_reply_cmd.responder_nwk).unwrap();
+                        routing_entry.next_hop_address = nwk_frame.nwk_header.source;
                     }
 
                     // Mutate the discovery entry
@@ -1216,7 +1219,7 @@ impl ZigbeeStack {
                         discovery_entry.residual_cost = updated_path_cost;
                     }
 
-                    self.notify_routing_change(&state, &rrep_responder);
+                    self.notify_routing_change(&state, &route_reply_cmd.responder_nwk);
                 },
             }
 
@@ -1236,8 +1239,12 @@ impl ZigbeeStack {
 
         // Mutate the routing entry
         {
-            let routing_entry = state.nib.nwk_route_table.get_mut(&rrep_responder).unwrap();
-            routing_entry.next_hop_address = sender_nwk;
+            let routing_entry = state
+                .nib
+                .nwk_route_table
+                .get_mut(&route_reply_cmd.responder_nwk)
+                .unwrap();
+            routing_entry.next_hop_address = nwk_frame.nwk_header.source;
         }
 
         // Mutate the discovery entry
@@ -1250,7 +1257,7 @@ impl ZigbeeStack {
             discovery_entry.residual_cost = updated_path_cost;
         }
 
-        self.notify_routing_change(&state, &rrep_responder);
+        self.notify_routing_change(&state, &route_reply_cmd.responder_nwk);
 
         // Find the next hop to the destination
         let next_hop_nwk = {
@@ -1302,9 +1309,9 @@ impl ZigbeeStack {
             },
             aux_header: None,
             payload: NwkRouteReplyCommand {
-                route_request_identifier: rrep_id,
-                originator_nwk: rrep_originator,
-                responder_nwk: rrep_responder,
+                route_request_identifier: route_reply_cmd.route_request_identifier,
+                originator_nwk: route_reply_cmd.originator_nwk,
+                responder_nwk: route_reply_cmd.responder_nwk,
                 // We increment the path cost
                 path_cost: updated_path_cost.saturating_add(next_hop_neighbor.incoming_link_cost()),
                 originator_eui64: route_reply_cmd.originator_eui64,
