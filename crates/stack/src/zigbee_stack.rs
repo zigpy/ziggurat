@@ -25,7 +25,7 @@ use zigbee_parts::commands::{
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::drop;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
@@ -1314,8 +1314,7 @@ impl ZigbeeStack {
             .unwrap(),
         };
 
-        drop(state);
-        self.background_send_nwk_frame(relayed_route_reply_frame);
+        self.background_send_nwk_frame(state, relayed_route_reply_frame);
     }
 
     /// Clean expired entries from the route discovery table. Their lifetime is ~10s.
@@ -1561,8 +1560,7 @@ impl ZigbeeStack {
                 .unwrap(),
             };
 
-            drop(state);
-            self.background_send_nwk_frame(relayed_route_request_cmd);
+            self.background_send_nwk_frame(state, relayed_route_request_cmd);
         } else {
             let route_reply_frame = NwkFrame {
                 encrypted: false,
@@ -1601,9 +1599,7 @@ impl ZigbeeStack {
                 .unwrap(),
             };
 
-            drop(state);
-
-            self.background_send_nwk_frame(route_reply_frame);
+            self.background_send_nwk_frame(state, route_reply_frame);
         }
     }
 
@@ -1654,9 +1650,8 @@ impl ZigbeeStack {
             }
             .to_bytes(),
         };
-        drop(state);
 
-        self.background_send_nwk_frame(aps_ack_frame);
+        self.background_send_nwk_frame(state, aps_ack_frame);
     }
 
     async fn send_802154_frame(&self, mut frame: Ieee802154Frame) -> Result<(), String> {
@@ -1712,7 +1707,11 @@ impl ZigbeeStack {
         Ok(())
     }
 
-    pub fn background_send_nwk_frame(&self, nwk_frame: NwkFrame) {
+    pub fn background_send_nwk_frame(&self, state: MutexGuard<State>, nwk_frame: NwkFrame) {
+        // This function takes ownership of `state` to force it to be dropped before we
+        // transmit.
+        drop(state);
+
         let arc_self = self
             .self_weak
             .upgrade()
@@ -2078,9 +2077,7 @@ impl ZigbeeStack {
             .unwrap(),
         };
 
-        drop(state);
-
-        self.background_send_nwk_frame(route_request_frame);
+        self.background_send_nwk_frame(state, route_request_frame);
     }
 
     pub async fn send_aps_command(
@@ -2201,9 +2198,8 @@ impl ZigbeeStack {
             log::debug!("APS ACK requested, waiting for {:?}", ack_data);
             state.pending_aps_acks.insert(ack_data, tx);
         }
-        drop(state);
 
-        self.background_send_nwk_frame(nwk_frame);
+        self.background_send_nwk_frame(state, nwk_frame);
 
         if let Some(ack_rx) = maybe_ack_rx {
             // With a 5s timeout
@@ -2322,9 +2318,7 @@ impl ZigbeeStack {
                 .unwrap(),
             };
 
-            drop(state);
-
-            self.background_send_nwk_frame(link_status_frame);
+            self.background_send_nwk_frame(state, link_status_frame);
 
             if remaining_link_statuses.is_empty() {
                 break;
