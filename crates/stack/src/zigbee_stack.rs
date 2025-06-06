@@ -1725,14 +1725,15 @@ impl ZigbeeStack {
             .await
             .expect("Failed to transmit frame");
 
-        log::info!("Send status: {:?}", status);
-
-        if status != SpinelStatus::Ok as u8 {
-            log::warn!("Failed to send frame ({:?}): {:#?}", status, frame);
+        if status == SpinelStatus::Ok as u8 {
+            return Ok(());
+        } else if status == SpinelStatus::NoAck as u8 {
+            return Err("No ACK".to_string());
+        } else if status == SpinelStatus::CcaFailure as u8 {
+            return Err("CCA failure".to_string());
+        } else {
+            return Err("Unknown failure: {status:#?}".to_string());
         }
-
-        // For now, hide 802.15.4 CCA and no-ACK failures
-        Ok(())
     }
 
     pub fn background_send_nwk_frame(&self, state: MutexGuard<State>, nwk_frame: NwkFrame) {
