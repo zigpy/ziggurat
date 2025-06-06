@@ -894,7 +894,11 @@ impl ZigbeeStack {
         }
 
         // Handle LQA calculation
-        self.maybe_recompute_lqa(nwk_frame, lqi, rssi);
+        {
+            let mut state = self.state.lock().unwrap();
+            self.maybe_age_neighbors(&mut state);
+            self.maybe_recompute_lqa(&mut state, nwk_frame, lqi, rssi);
+        }
 
         // Ignore frames that aren't destined for us
         if nwk_frame.nwk_header.destination.as_u16()
@@ -946,21 +950,47 @@ impl ZigbeeStack {
         }
     }
 
-    fn maybe_recompute_lqa(&self, nwk_frame: &NwkFrame, lqi: u8, _rssi: i8) {
-        if nwk_frame.nwk_header.source_ieee.is_none() {
-            return;
+    fn maybe_recompute_lqa(&self, state: &mut State, nwk_frame: &NwkFrame, lqi: u8, _rssi: i8) {
+        // Find the source node via its EUI64 address (preferred) or its NWK address
+        match if nwk_frame.nwk_header.source_ieee.is_some() {
+            state
+                .nib
+                .nwk_neighbor_table
+                .get_mut(&nwk_frame.nwk_header.source_ieee.unwrap())
+        } else {
+            state
+                .nib
+                .nwk_neighbor_table
+                .values_mut()
+                .find(|e| e.network_address == nwk_frame.nwk_header.source)
+        } {
+            None => {
+                return;
+            }
+            Some(entry) => {
+                entry.lqas.push_back(lqi);
+
+                if entry.lqas.len() > LINK_QUALITY_SAMPLES {
+                    entry.lqas.pop_front();
+                }
+            }
         }
+    }
 
-        let mut state = self.state.lock().unwrap();
-        if let Some(entry) = state
-            .nib
-            .nwk_neighbor_table
-            .get_mut(&nwk_frame.nwk_header.source_ieee.unwrap())
-        {
-            entry.lqas.push_back(lqi);
+    fn maybe_age_neighbors(&self, state: &mut State) {
+        // TODO: this function should be replaced by real timers
+        let now = Instant::now();
+        let max_neighbor_age =
+            (state.nib.nwk_router_age_limit as u32) * state.nib.nwk_link_status_period;
 
-            if entry.lqas.len() > LINK_QUALITY_SAMPLES {
-                entry.lqas.pop_front();
+        for neighbor in state.nib.nwk_neighbor_table.values_mut() {
+            if neighbor.outgoing_cost > 0
+                && neighbor.last_link_status_timestamp >= now + max_neighbor_age
+            {
+                neighbor.lqas.truncate(0);
+                neighbor.outgoing_cost = 0;
+
+                log::warn!("Neighbor {neighbor:?} has ceased communicating, resetting link costs")
             }
         }
     }
@@ -983,21 +1013,23 @@ impl ZigbeeStack {
 
         // We collect a list of neighbors with non-zero outgoing cost up here, before
         // mutating the state
-        let neighbors_with_nonzero_outgoing_cost = self
-            .state
-            .lock()
-            .unwrap()
-            .nib
-            .nwk_neighbor_table
-            .iter()
-            .filter_map(|(_, neighbor_entry)| {
-                if neighbor_entry.outgoing_cost > 0 {
-                    Some(neighbor_entry.network_address)
-                } else {
-                    None
-                }
-            })
-            .collect::<HashSet<Nwk>>();
+        let neighbors_with_nonzero_outgoing_cost = {
+            let mut state = self.state.lock().unwrap();
+            self.maybe_age_neighbors(&mut state);
+
+            state
+                .nib
+                .nwk_neighbor_table
+                .iter()
+                .filter_map(|(_, neighbor_entry)| {
+                    if neighbor_entry.outgoing_cost > 0 {
+                        Some(neighbor_entry.network_address)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<HashSet<Nwk>>()
+        };
 
         let nwk_network_address = self.state.lock().unwrap().nib.nwk_network_address;
 
@@ -2234,6 +2266,8 @@ impl ZigbeeStack {
         }
 
         // Decrement the inbound and outbound activity fields for neighbors
+        self.maybe_age_neighbors(&mut state);
+
         for (_, neighbor_entry) in state.nib.nwk_neighbor_table.iter_mut() {
             neighbor_entry.router_outbound_activity =
                 neighbor_entry.router_outbound_activity.saturating_sub(1);
@@ -2324,7 +2358,7 @@ impl ZigbeeStack {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            let nwk_link_status_period = { self.state.lock().unwrap().nib.nwk_link_status_period };
+            let nwk_link_status_period = self.state.lock().unwrap().nib.nwk_link_status_period;
             tokio::time::sleep(nwk_link_status_period).await;
 
             self.send_link_status_broadcast(false).await;
