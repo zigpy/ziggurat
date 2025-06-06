@@ -1,11 +1,4 @@
 repos:
-  - repo: https://github.com/codespell-project/codespell
-    rev: v2.3.0
-    hooks:
-      - id: codespell
-        additional_dependencies: [tomli]
-        args: ["--toml", "zigpy_ziggurat/pyproject.toml"]
-
   - repo: local
     hooks:
       - id: rust-linting
