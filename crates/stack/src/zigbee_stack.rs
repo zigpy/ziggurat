@@ -1823,57 +1823,47 @@ impl ZigbeeStack {
             payload: encrypted_nwk_frame.to_bytes(),
             fcs: 0x0000, // It'll be replaced
         };
-        let relaying_nwk = ieee802154_frame.dest_address;
 
-        // Increment counters before sending
+        // When forwarding packets to another node, update the counters for the neighbor
         if next_hop_address != Nwk(0xFFFF) {
-            state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
-
-            // Handle `nwk_tx_total` wrapping
-            if state.nib.nwk_tx_total == 0x0000 {
-                for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
-                    neighbor.transmit_failure = 0;
+            // TODO: maybe wrap the send state into some sort of struct to avoid
+            // needing to do this?
+            if let Some(relaying_ieee) =
+                state.nib.nwk_address_map.iter().find_map(|(&eui64, &nwk)| {
+                    if nwk == next_hop_address {
+                        Some(eui64)
+                    } else {
+                        None
+                    }
+                })
+            {
+                if let Some(neighbor_entry) = state.nib.nwk_neighbor_table.get_mut(&relaying_ieee) {
+                    // Update the neighbor table counters
+                    neighbor_entry.router_outbound_activity =
+                        neighbor_entry.router_outbound_activity.saturating_add(1);
                 }
             }
 
-            match relaying_nwk {
-                Some(Ieee802154Address::Nwk(relaying_nwk)) => {
-                    // TODO: maybe wrap the send state into some sort of struct to avoid
-                    // needing to do this?
-                    if let Some(relaying_ieee) =
-                        state.nib.nwk_address_map.iter().find_map(|(&eui64, &nwk)| {
-                            if nwk == relaying_nwk {
-                                Some(eui64)
-                            } else {
-                                None
-                            }
-                        })
-                    {
-                        if let Some(neighbor_entry) =
-                            state.nib.nwk_neighbor_table.get_mut(&relaying_ieee)
-                        {
-                            // Update the neighbor table counters
-                            neighbor_entry.router_outbound_activity =
-                                neighbor_entry.router_outbound_activity.saturating_add(1);
-                        }
-                    }
-
-                    // And the routing table counters
-                    if let Some(route_entry) = state
-                        .nib
-                        .nwk_route_table
-                        .get_mut(&nwk_frame.nwk_header.destination)
-                    {
-                        route_entry.recent_activity = route_entry.recent_activity.saturating_add(1);
-                        route_entry.total_usage_count =
-                            route_entry.total_usage_count.saturating_add(1);
-                    }
-                }
-                Some(Ieee802154Address::Eui64(_)) => {}
-                None => {}
+            // And the routing table counters
+            if let Some(route_entry) = state
+                .nib
+                .nwk_route_table
+                .get_mut(&nwk_frame.nwk_header.destination)
+            {
+                route_entry.recent_activity = route_entry.recent_activity.saturating_add(1);
+                route_entry.total_usage_count = route_entry.total_usage_count.saturating_add(1);
             }
         }
 
+        // Increment counters before sending
+        state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
+
+        // Handle `nwk_tx_total` wrapping
+        if state.nib.nwk_tx_total == 0x0000 {
+            for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
+                neighbor.transmit_failure = 0;
+            }
+        }
         drop(state);
 
         self.send_802154_frame(ieee802154_frame).await
