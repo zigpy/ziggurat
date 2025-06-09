@@ -1929,18 +1929,25 @@ impl ZigbeeStack {
 
             // One should exist
             let state = self.state.lock().unwrap();
-            let route_discovery_entry = state
-                .nib
-                .nwk_route_discovery_table
-                .iter()
-                .find_map(|(&(_, _), entry)| {
-                    if entry.expiration_time >= now && entry.destination_address == destination {
-                        Some(entry)
-                    } else {
-                        None
+            let route_discovery_entry =
+                match state
+                    .nib
+                    .nwk_route_discovery_table
+                    .iter()
+                    .find_map(|(&(_, _), entry)| {
+                        if entry.expiration_time >= now && entry.destination_address == destination
+                        {
+                            Some(entry)
+                        } else {
+                            None
+                        }
+                    }) {
+                    Some(entry) => entry,
+                    None => {
+                        log::warn!("No route discovery entry found for {destination:?}");
+                        return Err("No route discovery entry found".to_string());
                     }
-                })
-                .unwrap();
+                };
 
             route_discovery_entry.expiration_time - now
         };
