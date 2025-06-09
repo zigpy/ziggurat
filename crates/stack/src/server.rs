@@ -14,8 +14,8 @@ use tokio::task::spawn_local;
 use std::sync::Arc;
 
 use ziggurat::spinel_client::SpinelClient;
-use ziggurat::zigbee_parts::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_aps::ApsDeliveryMode;
+use ziggurat::zigbee_parts::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::{ZigbeeNotification, ZigbeeStack};
 
 #[derive(Deserialize, Debug)]
@@ -263,6 +263,7 @@ impl ZigguratServer {
                     data: json!({"status": if status.is_ok() { "success" } else { "error" } }),
                 }
             }
+
             _ => CommandResponse {
                 tid: cmd.tid,
                 cmd: cmd.cmd,

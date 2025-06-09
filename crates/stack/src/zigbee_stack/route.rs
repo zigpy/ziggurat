@@ -1,10 +1,10 @@
-use std::time::Instant;
+use tokio::time::Instant;
 
 use zigbee_parts::types::Nwk;
 
 pub type RequestId = u8;
 
-#[derive(Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Status {
     Active = 0,
     DiscoveryUnderway = 1,
@@ -14,6 +14,7 @@ pub enum Status {
 
 #[derive(Debug)]
 pub struct TableEntry {
+    /// Destination address the routing table entry is for
     pub destination: Nwk,
     pub status: Status,
 
@@ -41,6 +42,7 @@ pub struct TableEntry {
     pub sequence_number_valid: bool,
 
     /// The 16-bit network address of the next hop on the way to the destination.
+    /// This is the routing table entry's primary purpose.
     pub next_hop_address: Nwk,
 
     /// The 16-bit sequence number associated with this entry, obtained from the last
@@ -61,7 +63,6 @@ pub struct TableEntry {
     /// packets have recently been forwarded along this route.
     pub recent_activity: u8,
 }
-
 
 #[derive(Debug)]
 pub struct DiscoveryEntry {
@@ -86,4 +87,8 @@ pub struct DiscoveryEntry {
     /// A countdown timer indicating the number of milliseconds until route discovery
     /// expires. The initial value is `nwkcRouteDiscoveryTime`.
     pub expiration_time: Instant,
+    /// The 16-bit network address of the device this route discovery entry is
+    /// identifying a route for. This isn't mentioned in the spec as being a required
+    /// field.
+    pub destination_address: Nwk,
 }
