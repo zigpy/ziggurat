@@ -125,7 +125,8 @@ pub enum NwkDeviceType {
 pub struct Nib {
     pub nwk_sequence_number: u8,
     pub nwk_passive_ack_timeout: Duration,
-    pub nwk_max_broadcast_retries: u8,
+    /// The maximum number of retries allowed after a broadcast transmission failure.
+    pub nwkc_max_broadcast_retries: u8,
     pub nwk_max_children: u8,
     pub nwk_max_depth: u8,
     pub nwk_neighbor_table: HashMap<Eui64, neighbor::TableEntry>,
@@ -244,7 +245,7 @@ impl Nib {
         Nib {
             nwk_sequence_number: 0,
             nwk_passive_ack_timeout: Duration::from_millis(500),
-            nwk_max_broadcast_retries: 2,
+            nwkc_max_broadcast_retries: 2,
             nwk_max_children: 32,
             nwk_max_depth: 15,
             nwk_neighbor_table: HashMap::new(),
@@ -388,6 +389,9 @@ pub struct State {
     /// auto-ACK, but this is generally innocuous and won't collide with a second
     /// coordinator running at the same time.
     pub hack_disable_tx: bool,
+    /// Instead of caching route information, always perform route discovery. This is
+    /// much slower but ensures that routing logic is always followed.
+    pub hack_force_route_discovery: bool,
 }
 
 impl State {
@@ -402,6 +406,7 @@ impl State {
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
+            hack_force_route_discovery: true,
         }
     }
 }
@@ -1756,31 +1761,21 @@ impl ZigbeeStack {
         });
     }
 
-    pub async fn send_nwk_frame(&self, mut nwk_frame: NwkFrame) -> Result<(), String> {
-        // Compute a next-hop address, if necessary. All broadcasts are sent to the
-        // 802.15.4 broadcast address, since the distinction between different types of
-        // devices is at a higher layer.
-        let next_hop_address =
-            if nwk_frame.nwk_header.destination.as_u16() < BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-                self.discover_route(nwk_frame.nwk_header.destination)
-                    .await?
-            } else {
-                Nwk(0xFFFF)
-            };
+    pub async fn send_nwk_frame(&self, nwk_frame: NwkFrame) -> Result<(), String> {
+        if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
+            self.send_broadcast_nwk_frame(nwk_frame).await
+        } else {
+            self.send_unicast_nwk_frame(nwk_frame).await
+        }
+    }
 
+    pub async fn send_unicast_nwk_frame(&self, mut nwk_frame: NwkFrame) -> Result<(), String> {
+        // Compute a next-hop address
+        let next_hop_address = self
+            .discover_route(nwk_frame.nwk_header.destination)
+            .await?;
         let mut state = self.state.lock().unwrap();
 
-        // The encryption frame counter always increments
-        state
-            .nib
-            .nwk_security_material_primary
-            .outgoing_frame_counter = state
-            .nib
-            .nwk_security_material_primary
-            .outgoing_frame_counter
-            .wrapping_add(1);
-
-        // For now, as does the NWK sequence number
         state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
         nwk_frame.nwk_header.sequence_number = state.nib.nwk_sequence_number;
         nwk_frame.aux_header = Some(NwkAuxHeader {
@@ -1791,42 +1786,61 @@ impl ZigbeeStack {
                 require_verified_frame_counter: false,
                 reserved: 0b0,
             },
-            frame_counter: state
-                .nib
-                .nwk_security_material_primary
-                .outgoing_frame_counter,
+            frame_counter: 0, // This field is rewritten and is always up-to-date
             extended_source: Some(state.nib.nwk_ieee_address),
             key_sequence_number: state.nib.nwk_active_key_seq_number,
         });
 
-        let encrypted_nwk_frame =
-            nwk_frame.encrypt(&state.nib.nwk_security_material_primary.key)?;
+        let nwkc_unicast_retries = state.nib.nwkc_unicast_retries;
+        let nwkc_unicast_retry_delay = state.nib.nwkc_unicast_retry_delay;
 
-        let ieee802154_frame = Ieee802154Frame {
-            frame_control: Ieee802154FrameControl {
-                frame_type: Ieee802154FrameType::Data,
-                security_enabled: false,
-                frame_pending: false,
-                ack_request: (next_hop_address != Nwk(0xFFFF)),
-                pan_id_compression: true,
-                reserved: false,
-                sequence_number_suppression: false,
-                information_elements_present: false,
-                dest_addr_mode: Ieee802154AddressingMode::Short,
-                frame_version: 0,
-                src_addr_mode: Ieee802154AddressingMode::Short,
-            },
-            sequence_number: Some(state.ieee802154_sequence_number),
-            dest_pan_id: Some(state.nib.nwk_pan_id),
-            dest_address: Some(Ieee802154Address::Nwk(next_hop_address)),
-            src_pan_id: None,
-            src_address: Some(Ieee802154Address::Nwk(state.nib.nwk_network_address)),
-            payload: encrypted_nwk_frame.to_bytes(),
-            fcs: 0x0000, // It'll be replaced
-        };
+        drop(state);
 
-        // When forwarding packets to another node, update the counters for the neighbor
-        if next_hop_address != Nwk(0xFFFF) {
+        for attempt in 0..=nwkc_unicast_retries {
+            state = self.state.lock().unwrap();
+
+            // The encryption frame counter always increments
+            state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter = state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter
+                .wrapping_add(1);
+
+            nwk_frame.aux_header.as_mut().unwrap().frame_counter = state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter;
+
+            let encrypted_nwk_frame =
+                nwk_frame.encrypt(&state.nib.nwk_security_material_primary.key)?;
+
+            let ieee802154_frame = Ieee802154Frame {
+                frame_control: Ieee802154FrameControl {
+                    frame_type: Ieee802154FrameType::Data,
+                    security_enabled: false,
+                    frame_pending: false,
+                    ack_request: true,
+                    pan_id_compression: true,
+                    reserved: false,
+                    sequence_number_suppression: false,
+                    information_elements_present: false,
+                    dest_addr_mode: Ieee802154AddressingMode::Short,
+                    frame_version: 0,
+                    src_addr_mode: Ieee802154AddressingMode::Short,
+                },
+                sequence_number: Some(state.ieee802154_sequence_number),
+                dest_pan_id: Some(state.nib.nwk_pan_id),
+                dest_address: Some(Ieee802154Address::Nwk(next_hop_address)),
+                src_pan_id: None,
+                src_address: Some(Ieee802154Address::Nwk(state.nib.nwk_network_address)),
+                payload: encrypted_nwk_frame.to_bytes(),
+                fcs: 0x0000, // It'll be replaced
+            };
+
+            // When forwarding packets to another node, update the counters for the neighbor
             // TODO: maybe wrap the send state into some sort of struct to avoid
             // needing to do this?
             if let Some(relaying_ieee) =
@@ -1854,33 +1868,152 @@ impl ZigbeeStack {
                 route_entry.recent_activity = route_entry.recent_activity.saturating_add(1);
                 route_entry.total_usage_count = route_entry.total_usage_count.saturating_add(1);
             }
-        }
 
-        // Increment counters before sending
-        state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
+            // Increment counters before sending
+            state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
 
-        // Handle `nwk_tx_total` wrapping
-        if state.nib.nwk_tx_total == 0x0000 {
-            for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
-                neighbor.transmit_failure = 0;
+            // Handle `nwk_tx_total` wrapping
+            if state.nib.nwk_tx_total == 0x0000 {
+                for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
+                    neighbor.transmit_failure = 0;
+                }
+            }
+            drop(state);
+
+            match self.send_802154_frame(ieee802154_frame).await {
+                Ok(_) => {
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("Failed to send unicast frame: {e}");
+
+                    if attempt + 1 > nwkc_unicast_retries {
+                        log::error!("Failed to send unicast frame after {} attempts", attempt);
+                        return Err(e);
+                    }
+                    log::debug!(
+                        "Retrying unicast frame send, attempt {} of {}",
+                        attempt,
+                        nwkc_unicast_retries
+                    );
+
+                    tokio::time::sleep(nwkc_unicast_retry_delay).await;
+                }
             }
         }
+
+        Ok(())
+    }
+
+    pub async fn send_broadcast_nwk_frame(&self, mut nwk_frame: NwkFrame) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+
+        state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
+        nwk_frame.nwk_header.sequence_number = state.nib.nwk_sequence_number;
+        nwk_frame.aux_header = Some(NwkAuxHeader {
+            security_control: NwkSecurityHeaderControlField {
+                security_level: NwkSecurityLevel::NoSecurity,
+                key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                extended_nonce: true,
+                require_verified_frame_counter: false,
+                reserved: 0b0,
+            },
+            frame_counter: 0, // This field is rewritten and is always up-to-date
+            extended_source: Some(state.nib.nwk_ieee_address),
+            key_sequence_number: state.nib.nwk_active_key_seq_number,
+        });
+
+        let nwkc_broadcast_retries = state.nib.nwkc_max_broadcast_retries;
+        let nwkc_max_broadcast_jitter = state.nib.nwkc_max_broadcast_jitter;
+
         drop(state);
 
-        self.send_802154_frame(ieee802154_frame).await
+        for attempt in 0..=nwkc_broadcast_retries {
+            state = self.state.lock().unwrap();
+
+            // The encryption frame counter always increments
+            state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter = state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter
+                .wrapping_add(1);
+
+            nwk_frame.aux_header.as_mut().unwrap().frame_counter = state
+                .nib
+                .nwk_security_material_primary
+                .outgoing_frame_counter;
+
+            let encrypted_nwk_frame =
+                nwk_frame.encrypt(&state.nib.nwk_security_material_primary.key)?;
+
+            let ieee802154_frame = Ieee802154Frame {
+                frame_control: Ieee802154FrameControl {
+                    frame_type: Ieee802154FrameType::Data,
+                    security_enabled: false,
+                    frame_pending: false,
+                    ack_request: false,
+                    pan_id_compression: true,
+                    reserved: false,
+                    sequence_number_suppression: false,
+                    information_elements_present: false,
+                    dest_addr_mode: Ieee802154AddressingMode::Short,
+                    frame_version: 0,
+                    src_addr_mode: Ieee802154AddressingMode::Short,
+                },
+                sequence_number: Some(state.ieee802154_sequence_number),
+                dest_pan_id: Some(state.nib.nwk_pan_id),
+                // All broadcasts are sent to the 802.15.4 broadcast address, since the
+                // distinction between Zigbee groups and broadcasts is at a higher layer
+                dest_address: Some(Ieee802154Address::Nwk(Nwk(0xFFFF))),
+                src_pan_id: None,
+                src_address: Some(Ieee802154Address::Nwk(state.nib.nwk_network_address)),
+                payload: encrypted_nwk_frame.to_bytes(),
+                fcs: 0x0000, // It'll be replaced
+            };
+
+            // Increment counters before sending
+            state.nib.nwk_tx_total = state.nib.nwk_tx_total.wrapping_add(1);
+
+            // Handle `nwk_tx_total` wrapping
+            if state.nib.nwk_tx_total == 0x0000 {
+                for (_, neighbor) in state.nib.nwk_neighbor_table.iter_mut() {
+                    neighbor.transmit_failure = 0;
+                }
+            }
+            drop(state);
+
+            // TODO: implement logic to detect when broadcasts have been successfully
+            // sent. This is done by keeping track of which neighbor routers have been
+            // "heard" relaying it. For now, we just retry a few times.
+            let _ = self.send_802154_frame(ieee802154_frame).await;
+
+            let sleep_time = nwkc_max_broadcast_jitter.mul_f32(rand::random::<f32>());
+            log::debug!(
+                "Retrying broadcast frame send, attempt {} of {} in {:?}",
+                attempt,
+                nwkc_broadcast_retries,
+                sleep_time,
+            );
+
+            tokio::time::sleep(sleep_time).await;
+        }
+
+        Ok(())
     }
 
     pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, String> {
-        if !self
-            .state
-            .lock()
-            .unwrap()
-            .nib
-            .nwk_route_table
-            .contains_key(&destination)
+        let state = self.state.lock().unwrap();
+
+        if state.hack_force_route_discovery || !state.nib.nwk_route_table.contains_key(&destination)
         {
+            drop(state);
             log::debug!("Starting route discovery for NWK {destination:?}");
             self.send_route_discovery(destination).await;
+        } else {
+            drop(state);
         }
 
         let (route_entry_status, route_entry_next_hop_address) = {
