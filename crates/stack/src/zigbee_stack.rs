@@ -22,7 +22,6 @@ use zigbee_parts::commands::{
     NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
 
-use rand::prelude::*;
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::drop;
