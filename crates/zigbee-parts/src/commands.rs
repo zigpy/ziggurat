@@ -10,7 +10,7 @@ use num_enum::TryFromPrimitive;
 pub enum NwkCommandId {
     RouteRequest = 0x01,
     RouteReply = 0x02,
-    //NetworkStatus = 0x03,
+    NetworkStatus = 0x03,
     Leave = 0x04,
     RouteRecord = 0x05,
     //RejoinRequest = 0x06,
@@ -83,6 +83,84 @@ impl Response for NwkRouteReplyCommand {
 
 impl Command for NwkRouteReplyCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::RouteReply;
+}
+
+/// Zigbee spec 3.4.3: Network Status Command
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum NwkNetworkStatus {
+    /// This link code indicates a failure to route across a link. This was used in
+    /// previous specifications. Revision 23 devices SHALL no longer send this error
+    /// code but SHALL accept and act on it. It SHALL be treated the same as 0x02, Link
+    /// failure.
+    LegacyNoRouteAvailable = 0x00,
+    /// This link code indicates a failure to route across a link. This was used in
+    /// previous specifications. Revision 23 devices SHALL no longer send this error
+    /// code but SHALL accept and act on it. It SHALL be treated the same as 0x02, Link
+    /// failure.
+    LegacyLinkFailure = 0x01,
+    /// This link code indicates a failure to route across a link.
+    LinkFailure = 0x02,
+
+    /// Deprecated in R23. From R22: Low battery level.
+    LowBatteryLevel = 0x03,
+    /// Deprecated in R23. From R22: No routing capacity.
+    NoRoutingCapacity = 0x04,
+    /// Deprecated in R23. From R22: No indirect capacity.
+    NoIndirectCapacity = 0x05,
+    /// Deprecated in R23. From R22: Indirect transaction expiry.
+    IndirectTransactionExpiry = 0x06,
+    /// Deprecated in R23. From R22: Target device unavailable.
+    TargetDeviceUnavailable = 0x07,
+    /// Deprecated in R23. From R22: Target address unallocated.
+    TargetAddressUnallocated = 0x08,
+
+    /// The failure occurred as a result of a failure in the RF link to the device's
+    /// parent. This status is only used locally on a device to indicate loss of
+    /// communication with the parent, it is not sent over-the-air.
+    ParentLinkFailure = 0x09,
+
+    /// Deprecated in R23. From R22: Validate route.
+    ValidateRoute = 0x0A,
+
+    /// Source routing has failed, probably indicating a link failure in one
+    /// of the source route's links.
+    SourceRouteFailure = 0x0B,
+    /// A route established as a result of a many-to-one route request has
+    /// failed.
+    ManyToOneRouteFailure = 0x0C,
+    /// The address in the destination address field has been determined to be
+    /// in use by two or more devices.
+    AddressConflict = 0x0D,
+
+    /// Deprecated in R23. From R22: Verify addresses.
+    VerifyAddresses = 0x0E,
+
+    /// The operational network PAN identifier of the device has been updated.
+    PanIdentifierUpdate = 0x0F,
+    /// The network address of the local device has been updated.
+    NetworkAddressUpdate = 0x10,
+    /// Removed in R23. From R22: Bad frame counter.
+    BadFrameCounter = 0x11,
+    /// Removed in R23. From R22: Bad key sequence number.
+    BadKeySequenceNumber = 0x12,
+    /// The NWK command ID is not known to the device.
+    UnknownCommand = 0x13,
+    /// Notification to the local application that a PAN ID Conflict Report has been
+    /// received by the local Network Manager. It is not sent over the air.
+    PanIdConflictReport = 0x14,
+}
+
+#[abstract_bits::abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkStatusCommand {
+    pub status_code: NwkNetworkStatus,
+    pub network_address: Nwk,
+}
+
+impl Command for NwkNetworkStatusCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkStatus;
 }
 
 /// Zigbee spec 3.4.5: Route Record Command
