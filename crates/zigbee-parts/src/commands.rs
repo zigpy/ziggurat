@@ -1,6 +1,7 @@
-use crate::types::{Eui64, Nwk};
 use crate::{Command, Request, Response};
 use abstract_bits::abstract_bits;
+use ieee_802154::Ieee802154AssociationStatus;
+use ieee_802154::types::{Eui64, Nwk};
 use num_enum::TryFromPrimitive;
 
 /// Zigbee spec 3.4
@@ -13,8 +14,8 @@ pub enum NwkCommandId {
     NetworkStatus = 0x03,
     Leave = 0x04,
     RouteRecord = 0x05,
-    //RejoinRequest = 0x06,
-    //RejoinResponse = 0x07,
+    RejoinRequest = 0x06,
+    RejoinResponse = 0x07,
     LinkStatus = 0x08,
     //NetworkReport = 0x09
     //NetworkUpdate = 0x0a,
@@ -174,6 +175,83 @@ pub struct NwkRouteRecordCommand {
 
 impl Command for NwkRouteRecordCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::RouteRecord;
+}
+
+/// Zigbee spec 3.4.7
+#[abstract_bits(bits = 1)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum NwkRejoinCapabilityInformationDeviceType {
+    Router = 0,
+    EndDevice = 1,
+}
+
+#[abstract_bits(bits = 1)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum NwkRejoinCapabilityInformationPowerSource {
+    OtherPowerSource = 0,
+    MainsPowered = 1,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRejoinCapabilityInformation {
+    /// This field will always have a value of 0 in implementations of this
+    /// specification.
+    pub alternate_pan_coordinator: bool,
+    /// This field will have a value of 1 if the joining device is a Zigbee router. It
+    /// will have a value of 0 if the device is a Zigbee end device or else a
+    /// router-capable device that is joining as an end device.
+    pub device_type: NwkRejoinCapabilityInformationDeviceType,
+    /// This field will be set to the value of lowest-order bit of the PowerSource
+    /// parameter passed to the NLME-JOIN-request primitive.
+    pub power_source: NwkRejoinCapabilityInformationPowerSource,
+    /// This field will be set to the value of the lowest-order bit of the RxOnWhenIdle
+    /// parameter passed to the NLME-JOIN.request primitive.
+    pub receiver_on_when_idle: bool,
+    /// This field will always have a value of 0 in implementations of this
+    /// specification.
+    reserved1: u1,
+    /// This field will always have a value of 0 in implementations of this
+    /// specification.
+    reserved2: u1,
+    /// This field SHALL have a value of 0. Note that this overrides the default meaning
+    /// specified in [B1] (802.15.4-2020, IEEE Standard for Local and metropolitan area
+    /// networks--Part 15.4: Low-Rate Wireless Personal Area Networks (LR-WPANs))
+    pub security_capability: bool,
+    /// This field will have a value of 1 in implementations of this specification.
+    pub allocate_address: bool,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRejoinRequestCommand {
+    pub capability_information: NwkRejoinCapabilityInformation,
+}
+
+impl Request for NwkRejoinRequestCommand {
+    type REPLY = NwkRejoinResponseCommand;
+}
+
+impl Command for NwkRejoinRequestCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::RejoinRequest;
+}
+
+/// Zigbee spec: 3.4.7 Rejoin Response Command
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRejoinResponseCommand {
+    pub network_address: Nwk,
+    pub rejoin_status: Ieee802154AssociationStatus,
+}
+
+impl Response for NwkRejoinResponseCommand {
+    type REQUEST = NwkRejoinRequestCommand;
+}
+
+impl Command for NwkRejoinResponseCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::RejoinResponse;
 }
 
 /// Zigbee spec compressed: 3.4.8.3

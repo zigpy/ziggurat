@@ -374,6 +374,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ieee-802154"
+version = "0.1.0"
+dependencies = [
+ "abstract-bits",
+ "derivative",
+ "hex",
+ "hex-literal 1.0.0",
+ "num_enum",
+ "thiserror",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1174,6 +1186,7 @@ dependencies = [
  "abstract-bits",
  "hex",
  "hex-literal 1.0.0",
+ "ieee-802154",
  "num_enum",
  "thiserror",
 ]
@@ -1190,6 +1203,7 @@ dependencies = [
  "env_logger",
  "hex",
  "hex-literal 0.4.1",
+ "ieee-802154",
  "inline_colorization",
  "log",
  "num_enum",

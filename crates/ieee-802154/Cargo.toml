@@ -1,5 +1,5 @@
 [package]
-name = "zigbee-parts"
+name = "ieee-802154"
 version = "0.1.0"
 rust-version.workspace = true
 edition.workspace = true
@@ -7,8 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-ieee-802154 = { path = "../ieee-802154" }
-
+derivative = "2.2.0"
 abstract-bits = "0.2.0"
 num_enum = "0.7.3"
 hex = "0.4.3"

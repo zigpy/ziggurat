@@ -13,9 +13,9 @@ use tokio::task::spawn_local;
 
 use std::sync::Arc;
 
+use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::spinel_client::SpinelClient;
 use ziggurat::zigbee_aps::ApsDeliveryMode;
-use ziggurat::zigbee_parts::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::{ZigbeeNotification, ZigbeeStack};
 
 #[derive(Deserialize, Debug)]

@@ -1,4 +1,6 @@
-use zigbee_parts::types::{Eui64, Nwk, PanId, format_hex};
+pub mod types;
+use crate::types::{Eui64, Nwk, PanId, format_hex};
+use abstract_bits::abstract_bits;
 
 use derivative::Derivative;
 use std::convert::TryFrom;
@@ -21,6 +23,32 @@ impl TryFrom<u8> for Ieee802154FrameType {
             0b011 => Ok(Ieee802154FrameType::Command),
             0b010 => Ok(Ieee802154FrameType::Ack),
             _ => Err("Invalid frame type"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 8)]
+#[repr(u8)]
+pub enum Ieee802154AssociationStatus {
+    AssociationSuccessful = 0x00,
+    PanAtCapacity = 0x01,
+    PanAccessDenied = 0x02,
+    HoppingSequenceOffsetDuplication = 0x03,
+    FastAssociationSuccessful = 0x80,
+}
+
+impl TryFrom<u8> for Ieee802154AssociationStatus {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(Ieee802154AssociationStatus::AssociationSuccessful),
+            0x01 => Ok(Ieee802154AssociationStatus::PanAtCapacity),
+            0x02 => Ok(Ieee802154AssociationStatus::PanAccessDenied),
+            0x03 => Ok(Ieee802154AssociationStatus::HoppingSequenceOffsetDuplication),
+            0x80 => Ok(Ieee802154AssociationStatus::FastAssociationSuccessful),
+            _ => Err("Invalid association status"),
         }
     }
 }

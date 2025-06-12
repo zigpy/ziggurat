@@ -13,7 +13,7 @@ use crate::zigbee_nwk::{
     NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery, NwkSecurityHeaderControlField,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
-use zigbee_parts::types::{Eui64, Key, Nwk, PanId};
+use ieee_802154::types::{Eui64, Key, Nwk, PanId};
 
 use tokio::time::timeout;
 use zigbee_parts::Command;

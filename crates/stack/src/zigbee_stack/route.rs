@@ -1,6 +1,6 @@
 use tokio::time::Instant;
 
-use zigbee_parts::types::Nwk;
+use ieee_802154::types::Nwk;
 
 pub type RequestId = u8;
 

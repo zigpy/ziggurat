@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use zigbee_parts::types::{Eui64, Key, Nwk, format_hex};
+use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 
 use std::convert::TryFrom;
 
