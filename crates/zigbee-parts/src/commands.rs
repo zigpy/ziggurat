@@ -1,6 +1,5 @@
 use crate::{Command, Request, Response};
 use abstract_bits::abstract_bits;
-use ieee_802154::Ieee802154AssociationStatus;
 use ieee_802154::types::{Eui64, Nwk, PanId};
 use num_enum::TryFromPrimitive;
 
@@ -239,11 +238,24 @@ impl Command for NwkRejoinRequestCommand {
 }
 
 /// Zigbee spec: 3.4.7 Rejoin Response Command
+#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 8)]
+#[repr(u8)]
+pub enum Nwk802154AssociationStatus {
+    AssociationSuccessful = 0x00,
+    PanAtCapacity = 0x01,
+    PanAccessDenied = 0x02,
+    HoppingSequenceOffsetDuplication = 0x03,
+    FastAssociationSuccessful = 0x80,
+    // This is not part of the 802.15.4 standard but used in Zigbee
+    ZigbeeAddressConflict = 0xF0,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkRejoinResponseCommand {
     pub network_address: Nwk,
-    pub rejoin_status: Ieee802154AssociationStatus,
+    pub rejoin_status: Nwk802154AssociationStatus,
 }
 
 impl Response for NwkRejoinResponseCommand {
@@ -477,7 +489,7 @@ pub struct NwkNetworkCommissioningResponseCommand {
     pub network_address: Nwk,
     /// Association status.  A value of 0xF0 (`ZigbeeAddressConflict` in this codebase)
     /// indicates an address conflict and the request may be retried.
-    pub status: Ieee802154AssociationStatus,
+    pub status: Nwk802154AssociationStatus,
 }
 
 impl Response for NwkNetworkCommissioningResponseCommand {

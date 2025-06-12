@@ -36,8 +36,6 @@ pub enum Ieee802154AssociationStatus {
     PanAccessDenied = 0x02,
     HoppingSequenceOffsetDuplication = 0x03,
     FastAssociationSuccessful = 0x80,
-    // This is not part of the standard but used in Zigbee
-    ZigbeeAddressConflict = 0xF0,
 }
 
 impl TryFrom<u8> for Ieee802154AssociationStatus {
