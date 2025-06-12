@@ -1,7 +1,7 @@
 use crate::{Command, Request, Response};
 use abstract_bits::abstract_bits;
 use ieee_802154::Ieee802154AssociationStatus;
-use ieee_802154::types::{Eui64, Nwk};
+use ieee_802154::types::{Eui64, Nwk, PanId};
 use num_enum::TryFromPrimitive;
 
 /// Zigbee spec 3.4
@@ -17,13 +17,13 @@ pub enum NwkCommandId {
     RejoinRequest = 0x06,
     RejoinResponse = 0x07,
     LinkStatus = 0x08,
-    //NetworkReport = 0x09
-    //NetworkUpdate = 0x0a,
+    NetworkReport = 0x09,
+    NetworkUpdate = 0x0a,
     EndDeviceTimeoutRequest = 0x0b,
     EndDeviceTimeoutResponse = 0x0c,
-    //LinkPowerDelta = 0x0d,
-    //NetworkCommissioningRequest = 0x0e,
-    //NetworkCommissioningResponse = 0x0f,
+    LinkPowerDelta = 0x0d,
+    NetworkCommissioningRequest = 0x0e,
+    NetworkCommissioningResponse = 0x0f,
 }
 
 /// Zigbee spec: 3.4.1.3.1.1
@@ -316,6 +316,58 @@ pub enum EndDeviceTimeout {
     Minutes16384 = 14,
 }
 
+/// Zigbee spec 3.4.9: Network Report Command
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkReportCommandIdentifier {
+    PanIdentifierConflict = 0x00,
+    // All other values are reserved
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkReportCommand {
+    #[abstract_bits(length_of = pan_ids)]
+    report_information_count: u5,
+    pub report_command_identifier: NwkReportCommandIdentifier,
+    pub epid: Eui64,
+    /// A list of 16-bit PAN identifiers that are in conflict. This field's format is
+    /// determined by the `report_command_identifier` but the only defined type is
+    /// `PanIdentifierConflict`.
+    pub pan_ids: Vec<PanId>,
+}
+
+impl Command for NwkNetworkReportCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkReport;
+}
+
+/// Zigbee spec 3.4.10: Network Update Command
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkUpdateCommandIdentifier {
+    PanIdentifierUpdate = 0x00,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkUpdateCommand {
+    /// For a PAN Identifier Update, this value SHALL be 1.
+    update_information_count: u5,
+    pub update_command_identifier: NwkUpdateCommandIdentifier,
+    pub epid: Eui64,
+    pub update_id: u8,
+    /// The new 16-bit PAN identifier for the network. This field's format is dependent
+    /// on the `update_command_identifier` but the only defined type is
+    /// `PanIdentifierUpdate`.
+    pub new_pan_id: Nwk,
+}
+
+impl Command for NwkNetworkUpdateCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkUpdate;
+}
+
 /// Zigbee spec 3.4.11 End Device Timeout Request Command
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
@@ -357,4 +409,81 @@ impl Response for NwkEndDeviceTimeoutResponseCommand {
 
 impl Command for NwkEndDeviceTimeoutResponseCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutResponse;
+}
+
+/// Zigbee spec 3.4.13: Link Power Delta Command
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkLinkPowerDeltaType {
+    Notification = 0,
+    Request = 1,
+    Response = 2,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkPowerListEntry {
+    pub device_address: Nwk,
+    /// Delta power calculated as the difference between the optimal power level and the
+    /// received power level of the last packet received from the end device parent
+    /// device.
+    pub power_delta: u8,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkLinkPowerDeltaCommand {
+    pub command_type: NwkLinkPowerDeltaType,
+    reserved: u6,
+    #[abstract_bits(length_of = power_list)]
+    list_count: u8,
+    pub power_list: Vec<NwkPowerListEntry>,
+}
+
+impl Command for NwkLinkPowerDeltaCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::LinkPowerDelta;
+}
+
+/// Zigbee spec 3.4.14: Network Commissioning Request Command
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkCommissioningType {
+    InitialJoin = 0x00,
+    Rejoin = 0x01,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkCommissioningRequestCommand {
+    pub commissioning_type: NwkCommissioningType,
+    pub capability_information: NwkRejoinCapabilityInformation,
+}
+
+impl Request for NwkNetworkCommissioningRequestCommand {
+    type REPLY = NwkNetworkCommissioningResponseCommand;
+}
+
+impl Command for NwkNetworkCommissioningRequestCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkCommissioningRequest;
+}
+
+/// Zigbee spec 3.4.15: Network Commissioning Response Command
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkCommissioningResponseCommand {
+    /// The network address assigned to the joining device.
+    pub network_address: Nwk,
+    /// Association status.  A value of 0xF0 (`ZigbeeAddressConflict` in this codebase)
+    /// indicates an address conflict and the request may be retried.
+    pub status: Ieee802154AssociationStatus,
+}
+
+impl Response for NwkNetworkCommissioningResponseCommand {
+    type REQUEST = NwkNetworkCommissioningRequestCommand;
+}
+
+impl Command for NwkNetworkCommissioningResponseCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkCommissioningResponse;
 }

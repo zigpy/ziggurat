@@ -106,7 +106,8 @@ pub enum Address {
     Eui64(Eui64),
 }
 
-#[derive(PartialEq, Copy, Clone)]
+#[abstract_bits::abstract_bits]
+#[derive(Eq, Hash, Copy, Clone, PartialEq)]
 pub struct PanId(pub u16);
 
 impl PanId {
