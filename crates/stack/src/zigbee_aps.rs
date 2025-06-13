@@ -1,86 +1,38 @@
 #![allow(dead_code)]
 
-use std::convert::TryFrom;
+use abstract_bits::{AbstractBits, abstract_bits};
+use num_enum::TryFromPrimitive;
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum ApsFrameType {
     Data = 0b00,
     Ack = 0b10,
     Interpan = 0b11,
 }
 
-impl TryFrom<u8> for ApsFrameType {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0b00 => Ok(ApsFrameType::Data),
-            0b10 => Ok(ApsFrameType::Ack),
-            0b11 => Ok(ApsFrameType::Interpan),
-            _ => Err("Invalid APS frame type"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum ApsDeliveryMode {
     Unicast = 0b00,
     Broadcast = 0b10,
     Multicast = 0b11,
 }
 
-impl TryFrom<u8> for ApsDeliveryMode {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0b00 => Ok(ApsDeliveryMode::Unicast),
-            0b10 => Ok(ApsDeliveryMode::Broadcast),
-            0b11 => Ok(ApsDeliveryMode::Multicast),
-            _ => Err("Invalid APS delivery mode"),
-        }
-    }
-}
-
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApsFrameControl {
     pub frame_type: ApsFrameType,
     pub delivery_mode: ApsDeliveryMode,
-    pub reserved: u8,
+    pub reserved1: u1,
     pub security: bool,
     pub ack_request: bool,
     pub extended_header: bool,
 }
 
-impl ApsFrameControl {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if bytes.len() < 1 {
-            return Err("Not enough data to parse ApsFrameControl");
-        }
-
-        Ok((
-            Self {
-                frame_type: ApsFrameType::try_from((bytes[0] >> 0) & 0b11)?,
-                delivery_mode: ApsDeliveryMode::try_from((bytes[0] >> 2) & 0b11)?,
-                reserved: (bytes[0] >> 4) & 0b1,
-                security: (bytes[0] >> 5) & 0b1 == 1,
-                ack_request: (bytes[0] >> 6) & 0b1 == 1,
-                extended_header: (bytes[0] >> 7) & 0b1 == 1,
-            },
-            &bytes[1..],
-        ))
-    }
-
-    pub fn to_bytes(&self) -> [u8; 1] {
-        [(((self.frame_type as u8) & 0b11) << 0)
-            | (((self.delivery_mode as u8) & 0b11) << 2)
-            | (((self.reserved as u8) & 0b1) << 4)
-            | (((self.security as u8) & 0b1) << 5)
-            | (((self.ack_request as u8) & 0b1) << 6)
-            | (((self.extended_header as u8) & 0b1) << 7)]
-    }
-}
-
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApsAckFrameControl {
     pub frame_type: ApsFrameType,
@@ -89,41 +41,6 @@ pub struct ApsAckFrameControl {
     pub security: bool,
     pub ack_request: bool,
     pub extended_header: bool,
-}
-
-impl ApsAckFrameControl {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if bytes.len() < 1 {
-            return Err("Not enough data to parse ApsAckFrameControl");
-        }
-
-        let frame_type = ApsFrameType::try_from((bytes[0] >> 0) & 0b11)?;
-
-        if frame_type != ApsFrameType::Ack {
-            return Err("Invalid frame type for ApsAckFrameControl");
-        }
-
-        Ok((
-            Self {
-                frame_type,
-                delivery_mode: ApsDeliveryMode::try_from((bytes[0] >> 2) & 0b11)?,
-                ack_format: (bytes[0] >> 4) & 0b1 == 1,
-                security: (bytes[0] >> 5) & 0b1 == 1,
-                ack_request: (bytes[0] >> 6) & 0b1 == 1,
-                extended_header: (bytes[0] >> 7) & 0b1 == 1,
-            },
-            &bytes[1..],
-        ))
-    }
-
-    pub fn to_bytes(&self) -> [u8; 1] {
-        [(((self.frame_type as u8) & 0b11) << 0)
-            | (((self.delivery_mode as u8) & 0b11) << 2)
-            | (((self.ack_format as u8) & 0b1) << 4)
-            | (((self.security as u8) & 0b1) << 5)
-            | (((self.ack_request as u8) & 0b1) << 6)
-            | (((self.extended_header as u8) & 0b1) << 7)]
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,7 +59,9 @@ impl ApsAckFrame {
             return Err("Not enough data to parse ApsAckFrame");
         }
 
-        let (frame_control, remaining) = ApsAckFrameControl::deserialize(bytes)?;
+        let frame_control = ApsAckFrameControl::from_abstract_bits(bytes)
+            .map_err(|_| "Failed to parse ApsAckFrameControl")?;
+        let remaining = &bytes[1..];
 
         if frame_control.frame_type != ApsFrameType::Ack {
             return Err("Invalid frame type for ApsAckFrame");
@@ -181,7 +100,7 @@ impl ApsAckFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.frame_control.to_bytes());
+        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
 
         if let Some(destination_endpoint) = self.destination_endpoint {
             bytes.extend(destination_endpoint.to_le_bytes());
@@ -219,7 +138,9 @@ impl ApsDataFrame {
             return Err("Not enough data to parse ApsDataFrame");
         }
 
-        let (frame_control, remaining) = ApsFrameControl::deserialize(bytes)?;
+        let frame_control = ApsFrameControl::from_abstract_bits(bytes)
+            .map_err(|_| "Failed to parse ApsFrameControl")?;
+        let remaining = &bytes[1..];
 
         let group_id;
         let destination_endpoint;
@@ -253,7 +174,7 @@ impl ApsDataFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.frame_control.to_bytes());
+        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
 
         if let Some(group_id) = self.group_id {
             bytes.extend(group_id.to_le_bytes());
@@ -283,7 +204,8 @@ pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, &'static str> {
         return Err("Not enough data to parse ApsFrame");
     }
 
-    let frame_type = ApsFrameType::try_from((bytes[0] >> 0) & 0b11)?;
+    let frame_type =
+        ApsFrameType::try_from((bytes[0] >> 0) & 0b11).map_err(|_| "Invalid frame type")?;
 
     match frame_type {
         ApsFrameType::Data => Ok(ApsFrame::Data(ApsDataFrame::from_bytes(bytes)?)),
@@ -306,7 +228,7 @@ mod test {
             frame_control: ApsFrameControl {
                 frame_type: ApsFrameType::Data,
                 delivery_mode: ApsDeliveryMode::Unicast,
-                reserved: 0b0,
+                reserved1: 0b0,
                 security: false,
                 ack_request: true,
                 extended_header: false,
@@ -333,7 +255,7 @@ mod test {
             frame_control: ApsFrameControl {
                 frame_type: ApsFrameType::Data,
                 delivery_mode: ApsDeliveryMode::Broadcast,
-                reserved: 0b0,
+                reserved1: 0b0,
                 security: false,
                 ack_request: false,
                 extended_header: false,

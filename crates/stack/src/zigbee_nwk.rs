@@ -4,8 +4,6 @@ use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 
-use std::convert::TryFrom;
-
 use aes::Aes128;
 use aes::Block;
 use aes::cipher::BlockModeEncrypt;

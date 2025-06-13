@@ -2250,7 +2250,7 @@ impl ZigbeeStack {
                 frame_control: ApsFrameControl {
                     frame_type: ApsFrameType::Data,
                     delivery_mode: ApsDeliveryMode::Unicast,
-                    reserved: 0b0,
+                    reserved1: 0b0,
                     security: false,
                     ack_request: aps_ack,
                     extended_header: false,
@@ -2267,7 +2267,7 @@ impl ZigbeeStack {
                 frame_control: ApsFrameControl {
                     frame_type: ApsFrameType::Data,
                     delivery_mode: ApsDeliveryMode::Broadcast,
-                    reserved: 0b0,
+                    reserved1: 0b0,
                     security: false,
                     ack_request: false,
                     extended_header: false,
@@ -2284,7 +2284,7 @@ impl ZigbeeStack {
                 frame_control: ApsFrameControl {
                     frame_type: ApsFrameType::Data,
                     delivery_mode: ApsDeliveryMode::Multicast,
-                    reserved: 0b0,
+                    reserved1: 0b0,
                     security: false,
                     ack_request: false,
                     extended_header: false,
