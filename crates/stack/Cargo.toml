@@ -8,6 +8,7 @@ edition = "2024"
 zigbee-parts = { path = "../zigbee-parts" }
 ieee-802154 = { path = "../ieee-802154" }
 
+abstract-bits = "0.2.0"
 aes = "0.9.0-pre.2"
 cbc = "0.2.0-pre.2"
 constant_time_eq = "0.3.1"
