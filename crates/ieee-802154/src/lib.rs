@@ -274,7 +274,7 @@ mod test {
         assert_eq!(frame_control.src_addr_mode, Ieee802154AddressingMode::Short);
 
         assert_eq!(remaining, [0xFF]);
-        assert_eq!(frame_control.to_bytes(), bytes[..2]);
+        assert_eq!(frame_control.to_abstract_bits().unwrap(), bytes[..2]);
     }
 
     #[test]

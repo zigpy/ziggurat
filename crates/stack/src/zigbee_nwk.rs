@@ -23,7 +23,7 @@ pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
 pub const BROADCAST_ALL_ROUTERS_AND_COORDINATOR: Nwk = Nwk(0xFFFC);
 pub const BROADCAST_LOW_POWER_ROUTERS: Nwk = Nwk(0xFFFB);
 
-#[abstract_bits(bits = 3)]
+#[abstract_bits(bits = 2)]
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum NwkFrameType {
