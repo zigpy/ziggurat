@@ -1,6 +1,6 @@
-use crate::types::{Eui64, Nwk};
 use crate::{Command, Request, Response};
 use abstract_bits::abstract_bits;
+use ieee_802154::types::{Eui64, Nwk, PanId};
 use num_enum::TryFromPrimitive;
 
 /// Zigbee spec 3.4
@@ -10,19 +10,19 @@ use num_enum::TryFromPrimitive;
 pub enum NwkCommandId {
     RouteRequest = 0x01,
     RouteReply = 0x02,
-    //NetworkStatus = 0x03,
+    NetworkStatus = 0x03,
     Leave = 0x04,
     RouteRecord = 0x05,
-    //RejoinRequest = 0x06,
-    //RejoinResponse = 0x07,
+    RejoinRequest = 0x06,
+    RejoinResponse = 0x07,
     LinkStatus = 0x08,
-    //NetworkReport = 0x09
-    //NetworkUpdate = 0x0a,
+    NetworkReport = 0x09,
+    NetworkUpdate = 0x0a,
     EndDeviceTimeoutRequest = 0x0b,
     EndDeviceTimeoutResponse = 0x0c,
-    //LinkPowerDelta = 0x0d,
-    //NetworkCommissioningRequest = 0x0e,
-    //NetworkCommissioningResponse = 0x0f,
+    LinkPowerDelta = 0x0d,
+    NetworkCommissioningRequest = 0x0e,
+    NetworkCommissioningResponse = 0x0f,
 }
 
 /// Zigbee spec: 3.4.1.3.1.1
@@ -85,6 +85,84 @@ impl Command for NwkRouteReplyCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::RouteReply;
 }
 
+/// Zigbee spec 3.4.3: Network Status Command
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum NwkNetworkStatus {
+    /// This link code indicates a failure to route across a link. This was used in
+    /// previous specifications. Revision 23 devices SHALL no longer send this error
+    /// code but SHALL accept and act on it. It SHALL be treated the same as 0x02, Link
+    /// failure.
+    LegacyNoRouteAvailable = 0x00,
+    /// This link code indicates a failure to route across a link. This was used in
+    /// previous specifications. Revision 23 devices SHALL no longer send this error
+    /// code but SHALL accept and act on it. It SHALL be treated the same as 0x02, Link
+    /// failure.
+    LegacyLinkFailure = 0x01,
+    /// This link code indicates a failure to route across a link.
+    LinkFailure = 0x02,
+
+    /// Deprecated in R23. From R22: Low battery level.
+    LowBatteryLevel = 0x03,
+    /// Deprecated in R23. From R22: No routing capacity.
+    NoRoutingCapacity = 0x04,
+    /// Deprecated in R23. From R22: No indirect capacity.
+    NoIndirectCapacity = 0x05,
+    /// Deprecated in R23. From R22: Indirect transaction expiry.
+    IndirectTransactionExpiry = 0x06,
+    /// Deprecated in R23. From R22: Target device unavailable.
+    TargetDeviceUnavailable = 0x07,
+    /// Deprecated in R23. From R22: Target address unallocated.
+    TargetAddressUnallocated = 0x08,
+
+    /// The failure occurred as a result of a failure in the RF link to the device's
+    /// parent. This status is only used locally on a device to indicate loss of
+    /// communication with the parent, it is not sent over-the-air.
+    ParentLinkFailure = 0x09,
+
+    /// Deprecated in R23. From R22: Validate route.
+    ValidateRoute = 0x0A,
+
+    /// Source routing has failed, probably indicating a link failure in one
+    /// of the source route's links.
+    SourceRouteFailure = 0x0B,
+    /// A route established as a result of a many-to-one route request has
+    /// failed.
+    ManyToOneRouteFailure = 0x0C,
+    /// The address in the destination address field has been determined to be
+    /// in use by two or more devices.
+    AddressConflict = 0x0D,
+
+    /// Deprecated in R23. From R22: Verify addresses.
+    VerifyAddresses = 0x0E,
+
+    /// The operational network PAN identifier of the device has been updated.
+    PanIdentifierUpdate = 0x0F,
+    /// The network address of the local device has been updated.
+    NetworkAddressUpdate = 0x10,
+    /// Removed in R23. From R22: Bad frame counter.
+    BadFrameCounter = 0x11,
+    /// Removed in R23. From R22: Bad key sequence number.
+    BadKeySequenceNumber = 0x12,
+    /// The NWK command ID is not known to the device.
+    UnknownCommand = 0x13,
+    /// Notification to the local application that a PAN ID Conflict Report has been
+    /// received by the local Network Manager. It is not sent over the air.
+    PanIdConflictReport = 0x14,
+}
+
+#[abstract_bits::abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkStatusCommand {
+    pub status_code: NwkNetworkStatus,
+    pub network_address: Nwk,
+}
+
+impl Command for NwkNetworkStatusCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkStatus;
+}
+
 /// Zigbee spec 3.4.5: Route Record Command
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +174,96 @@ pub struct NwkRouteRecordCommand {
 
 impl Command for NwkRouteRecordCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::RouteRecord;
+}
+
+/// Zigbee spec 3.4.7
+#[abstract_bits(bits = 1)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum NwkRejoinCapabilityInformationDeviceType {
+    Router = 0,
+    EndDevice = 1,
+}
+
+#[abstract_bits(bits = 1)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum NwkRejoinCapabilityInformationPowerSource {
+    OtherPowerSource = 0,
+    MainsPowered = 1,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRejoinCapabilityInformation {
+    /// This field will always have a value of 0 in implementations of this
+    /// specification.
+    pub alternate_pan_coordinator: bool,
+    /// This field will have a value of 1 if the joining device is a Zigbee router. It
+    /// will have a value of 0 if the device is a Zigbee end device or else a
+    /// router-capable device that is joining as an end device.
+    pub device_type: NwkRejoinCapabilityInformationDeviceType,
+    /// This field will be set to the value of lowest-order bit of the PowerSource
+    /// parameter passed to the NLME-JOIN-request primitive.
+    pub power_source: NwkRejoinCapabilityInformationPowerSource,
+    /// This field will be set to the value of the lowest-order bit of the RxOnWhenIdle
+    /// parameter passed to the NLME-JOIN.request primitive.
+    pub receiver_on_when_idle: bool,
+    /// This field will always have a value of 0 in implementations of this
+    /// specification.
+    reserved1: u1,
+    /// This field will always have a value of 0 in implementations of this
+    /// specification.
+    reserved2: u1,
+    /// This field SHALL have a value of 0. Note that this overrides the default meaning
+    /// specified in [B1] (802.15.4-2020, IEEE Standard for Local and metropolitan area
+    /// networks--Part 15.4: Low-Rate Wireless Personal Area Networks (LR-WPANs))
+    pub security_capability: bool,
+    /// This field will have a value of 1 in implementations of this specification.
+    pub allocate_address: bool,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRejoinRequestCommand {
+    pub capability_information: NwkRejoinCapabilityInformation,
+}
+
+impl Request for NwkRejoinRequestCommand {
+    type REPLY = NwkRejoinResponseCommand;
+}
+
+impl Command for NwkRejoinRequestCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::RejoinRequest;
+}
+
+/// Zigbee spec: 3.4.7 Rejoin Response Command
+#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 8)]
+#[repr(u8)]
+pub enum Nwk802154AssociationStatus {
+    AssociationSuccessful = 0x00,
+    PanAtCapacity = 0x01,
+    PanAccessDenied = 0x02,
+    HoppingSequenceOffsetDuplication = 0x03,
+    FastAssociationSuccessful = 0x80,
+    // This is not part of the 802.15.4 standard but used in Zigbee
+    ZigbeeAddressConflict = 0xF0,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkRejoinResponseCommand {
+    pub network_address: Nwk,
+    pub rejoin_status: Nwk802154AssociationStatus,
+}
+
+impl Response for NwkRejoinResponseCommand {
+    type REQUEST = NwkRejoinRequestCommand;
+}
+
+impl Command for NwkRejoinResponseCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::RejoinResponse;
 }
 
 /// Zigbee spec compressed: 3.4.8.3
@@ -160,6 +328,58 @@ pub enum EndDeviceTimeout {
     Minutes16384 = 14,
 }
 
+/// Zigbee spec 3.4.9: Network Report Command
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkReportCommandIdentifier {
+    PanIdentifierConflict = 0x00,
+    // All other values are reserved
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkReportCommand {
+    #[abstract_bits(length_of = pan_ids)]
+    report_information_count: u5,
+    pub report_command_identifier: NwkReportCommandIdentifier,
+    pub epid: Eui64,
+    /// A list of 16-bit PAN identifiers that are in conflict. This field's format is
+    /// determined by the `report_command_identifier` but the only defined type is
+    /// `PanIdentifierConflict`.
+    pub pan_ids: Vec<PanId>,
+}
+
+impl Command for NwkNetworkReportCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkReport;
+}
+
+/// Zigbee spec 3.4.10: Network Update Command
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkUpdateCommandIdentifier {
+    PanIdentifierUpdate = 0x00,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkUpdateCommand {
+    /// For a PAN Identifier Update, this value SHALL be 1.
+    update_information_count: u5,
+    pub update_command_identifier: NwkUpdateCommandIdentifier,
+    pub epid: Eui64,
+    pub update_id: u8,
+    /// The new 16-bit PAN identifier for the network. This field's format is dependent
+    /// on the `update_command_identifier` but the only defined type is
+    /// `PanIdentifierUpdate`.
+    pub new_pan_id: Nwk,
+}
+
+impl Command for NwkNetworkUpdateCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkUpdate;
+}
+
 /// Zigbee spec 3.4.11 End Device Timeout Request Command
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
@@ -201,4 +421,81 @@ impl Response for NwkEndDeviceTimeoutResponseCommand {
 
 impl Command for NwkEndDeviceTimeoutResponseCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutResponse;
+}
+
+/// Zigbee spec 3.4.13: Link Power Delta Command
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkLinkPowerDeltaType {
+    Notification = 0,
+    Request = 1,
+    Response = 2,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkPowerListEntry {
+    pub device_address: Nwk,
+    /// Delta power calculated as the difference between the optimal power level and the
+    /// received power level of the last packet received from the end device parent
+    /// device.
+    pub power_delta: u8,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkLinkPowerDeltaCommand {
+    pub command_type: NwkLinkPowerDeltaType,
+    reserved: u6,
+    #[abstract_bits(length_of = power_list)]
+    list_count: u8,
+    pub power_list: Vec<NwkPowerListEntry>,
+}
+
+impl Command for NwkLinkPowerDeltaCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::LinkPowerDelta;
+}
+
+/// Zigbee spec 3.4.14: Network Commissioning Request Command
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NwkCommissioningType {
+    InitialJoin = 0x00,
+    Rejoin = 0x01,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkCommissioningRequestCommand {
+    pub commissioning_type: NwkCommissioningType,
+    pub capability_information: NwkRejoinCapabilityInformation,
+}
+
+impl Request for NwkNetworkCommissioningRequestCommand {
+    type REPLY = NwkNetworkCommissioningResponseCommand;
+}
+
+impl Command for NwkNetworkCommissioningRequestCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkCommissioningRequest;
+}
+
+/// Zigbee spec 3.4.15: Network Commissioning Response Command
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NwkNetworkCommissioningResponseCommand {
+    /// The network address assigned to the joining device.
+    pub network_address: Nwk,
+    /// Association status.  A value of 0xF0 (`ZigbeeAddressConflict` in this codebase)
+    /// indicates an address conflict and the request may be retried.
+    pub status: Nwk802154AssociationStatus,
+}
+
+impl Response for NwkNetworkCommissioningResponseCommand {
+    type REQUEST = NwkNetworkCommissioningRequestCommand;
+}
+
+impl Command for NwkNetworkCommissioningResponseCommand {
+    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkCommissioningResponse;
 }

@@ -13,7 +13,7 @@ use crate::zigbee_nwk::{
     NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery, NwkSecurityHeaderControlField,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
-use zigbee_parts::types::{Eui64, Key, Nwk, PanId};
+use ieee_802154::types::{Eui64, Key, Nwk, PanId};
 
 use tokio::time::timeout;
 use zigbee_parts::Command;
@@ -406,7 +406,7 @@ impl State {
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
-            hack_force_route_discovery: true,
+            hack_force_route_discovery: false,
         }
     }
 }

@@ -6,6 +6,7 @@ edition = "2024"
 
 [dependencies]
 zigbee-parts = { path = "../zigbee-parts" }
+ieee-802154 = { path = "../ieee-802154" }
 
 aes = "0.9.0-pre.2"
 cbc = "0.2.0-pre.2"
