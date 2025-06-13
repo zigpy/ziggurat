@@ -34,7 +34,3 @@ rand = "0.9.1"
 [[bin]]
 name = "ziggurat"
 path = "src/server.rs"
-
-[[bin]]
-name = "ziggurat-pcap"
-path = "src/tools/dump_pcap.rs"

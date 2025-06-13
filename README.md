@@ -26,15 +26,6 @@ python src/tools/zigpy_client.py 127.0.0.1:9999
 ```
 
 
-### Other tools
-A few other independent tools exist to test functionality:
-
-```bash
-# Parse a PCAP file with loaded Wireshark Zigbee network keys, printing decryption and parsing statistics
-cargo run --bin ziggurat-pcap capture.pcap
-```
-
-
 ### Status
 - [x] 802.15.4, Zigbee APS, and Zigbee NWK layers are implemented, cryptography included
 - [x] Rudimentary network management is implemented, allowing for simple one-hop networks to be controlled:
