@@ -406,7 +406,7 @@ impl State {
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
-            hack_force_route_discovery: true,
+            hack_force_route_discovery: false,
         }
     }
 }
