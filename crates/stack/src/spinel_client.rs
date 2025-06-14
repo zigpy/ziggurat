@@ -287,15 +287,10 @@ impl SpinelClient {
             .await?;
 
         let response_payload = response.payload;
-        let (_rsp_property_id, payload) = match packed_uint21_deserialize(&response_payload) {
-            Ok((property_id, payload)) => (property_id, payload),
-            Err(e) => {
-                return Err(SpinelSendError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e,
-                )));
-            }
-        };
+        let (_rsp_property_id, payload) =
+            packed_uint21_deserialize(&response_payload).map_err(|e| {
+                SpinelSendError::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
 
         Ok(payload.to_vec())
     }
@@ -317,15 +312,10 @@ impl SpinelClient {
             .await?;
 
         let response_payload = response.payload;
-        let (rsp_property_id, payload) = match packed_uint21_deserialize(&response_payload) {
-            Ok((property_id, payload)) => (property_id, payload),
-            Err(e) => {
-                return Err(SpinelSendError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e,
-                )));
-            }
-        };
+        let (rsp_property_id, payload) =
+            packed_uint21_deserialize(&response_payload).map_err(|e| {
+                SpinelSendError::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
 
         log::info!(
             "Setting property {}={:02X?}, result {}={:02X?}",
