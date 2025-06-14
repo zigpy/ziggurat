@@ -1,6 +1,6 @@
 use crate::spinel::{
-    HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelFramePropValueIs, SpinelPropertyId,
-    SpinelProtocol, packed_uint21_deserialize, packed_uint21_to_bytes,
+    HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelFrameParsingError, SpinelFramePropValueIs,
+    SpinelPropertyId, SpinelProtocol, packed_uint21_deserialize, packed_uint21_to_bytes,
 };
 use serial2_tokio::SerialPort;
 use std::string::String;
@@ -165,13 +165,17 @@ impl SpinelRxFrame {
 }
 
 #[derive(Error, Debug)]
-pub enum SpinelSendError {
+pub enum SpinelError {
     #[error("io error")]
     IoError(#[from] std::io::Error),
     #[error("client has disconnected")]
     ChannelClosed,
     #[error("timeout")]
     Timeout,
+    #[error("spinel U21 parsing error")]
+    U21ParsingError(#[from] SpinelFrameParsingError),
+    #[error("spinel parsing error: {reason}")]
+    InvalidResponseError { reason: String },
 }
 
 #[derive(Debug)]
@@ -235,7 +239,7 @@ impl SpinelClient {
         &self,
         command_id: u8,
         payload: Vec<u8>,
-    ) -> Result<SpinelFrame, SpinelSendError> {
+    ) -> Result<SpinelFrame, SpinelError> {
         let (frame, rx) = {
             self.protocol
                 .lock()
@@ -252,33 +256,30 @@ impl SpinelClient {
         let data = hdlc_frame.to_bytes_with_flags();
 
         log::debug!("Writing {:02X?}", data);
-        self.port
-            .write(&data)
-            .await
-            .map_err(SpinelSendError::IoError)?;
+        self.port.write(&data).await.map_err(SpinelError::IoError)?;
 
         match timeout(TIMEOUT, rx).await {
             Ok(Ok(response_frame)) => Ok(response_frame),
-            Ok(Err(_recv_closed)) => {
+            Ok(Err(_)) => {
                 self.protocol
                     .lock()
                     .expect("Failed to lock Spinel")
                     .cancel_request(frame.header.transaction_id);
 
-                Err(SpinelSendError::ChannelClosed)
+                Err(SpinelError::ChannelClosed)
             }
-            Err(_elapsed) => {
+            Err(_) => {
                 self.protocol
                     .lock()
                     .expect("Failed to lock Spinel")
                     .cancel_request(frame.header.transaction_id);
 
-                Err(SpinelSendError::Timeout)
+                Err(SpinelError::Timeout)
             }
         }
     }
 
-    pub async fn prop_value_get(&self, property_id: u32) -> Result<Vec<u8>, SpinelSendError> {
+    pub async fn prop_value_get(&self, property_id: u32) -> Result<Vec<u8>, SpinelError> {
         let response = self
             .send_command(
                 SpinelCommandId::PropValueGet as u8,
@@ -288,9 +289,7 @@ impl SpinelClient {
 
         let response_payload = response.payload;
         let (_rsp_property_id, payload) =
-            packed_uint21_deserialize(&response_payload).map_err(|e| {
-                SpinelSendError::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?;
+            packed_uint21_deserialize(&response_payload).map_err(SpinelError::U21ParsingError)?;
 
         Ok(payload.to_vec())
     }
@@ -299,7 +298,7 @@ impl SpinelClient {
         &self,
         property_id: u32,
         value: Vec<u8>,
-    ) -> Result<(u32, Vec<u8>), SpinelSendError> {
+    ) -> Result<(u32, Vec<u8>), SpinelError> {
         let response = self
             .send_command(
                 SpinelCommandId::PropValueSet as u8,
@@ -313,9 +312,7 @@ impl SpinelClient {
 
         let response_payload = response.payload;
         let (rsp_property_id, payload) =
-            packed_uint21_deserialize(&response_payload).map_err(|e| {
-                SpinelSendError::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?;
+            packed_uint21_deserialize(&response_payload).map_err(SpinelError::U21ParsingError)?;
 
         log::info!(
             "Setting property {}={:02X?}, result {}={:02X?}",
@@ -329,7 +326,7 @@ impl SpinelClient {
     }
 
     // Convenience method wrapping broad functionality are below
-    pub async fn get_ncp_version(&self) -> Result<String, SpinelSendError> {
+    pub async fn get_ncp_version(&self) -> Result<String, SpinelError> {
         let ncp_version_rsp = self
             .prop_value_get(SpinelPropertyId::NcpVersion as u32)
             .await
@@ -343,7 +340,7 @@ impl SpinelClient {
             .to_string())
     }
 
-    pub async fn transmit_frame(&self, tx_frame: &SpinelTxFrame) -> Result<u8, SpinelSendError> {
+    pub async fn transmit_frame(&self, tx_frame: &SpinelTxFrame) -> Result<u8, SpinelError> {
         let _send_lock = self.send_lock.lock().await;
 
         let (rsp_prop_id, rsp) = self
@@ -352,17 +349,15 @@ impl SpinelClient {
             .unwrap();
 
         if rsp_prop_id != SpinelPropertyId::LastStatus as u32 {
-            return Err(SpinelSendError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Unexpected response property ID",
-            )));
+            return Err(SpinelError::InvalidResponseError {
+                reason: "Unexpected response property ID".to_string(),
+            });
         }
 
         if rsp.len() < 1 {
-            return Err(SpinelSendError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Unexpected response length",
-            )));
+            return Err(SpinelError::InvalidResponseError {
+                reason: "Unexpected response length".to_string(),
+            });
         }
 
         let status = rsp[0];
