@@ -439,7 +439,7 @@ impl ZigbeeStack {
     pub fn new(spinel: SpinelClient) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
         let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
-        spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw as u32, raw_frame_tx);
+        spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw, raw_frame_tx);
 
         let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
             self_weak: weak_self.clone(),
@@ -574,24 +574,24 @@ impl ZigbeeStack {
 
         // Update the hardware with new settings.
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
+            .prop_value_set(SpinelPropertyId::PhyEnabled, vec![true as u8])
             .await
             .expect("Failed to enable the PHY");
 
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![nwk_channel])
+            .prop_value_set(SpinelPropertyId::PhyChan, vec![nwk_channel])
             .await
             .map_err(|e| format!("Failed to set PHY channel: {:?}", e))?;
 
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyTxPower as u32, vec![8])
+            .prop_value_set(SpinelPropertyId::PhyTxPower, vec![8])
             .await
             .map_err(|e| format!("Failed to set PHY TX power: {:?}", e))?;
 
         /*
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::MacPromiscuousMode as u32,
+                SpinelPropertyId::MacPromiscuousMode,
                 vec![SpinelMacPromiscuousMode::Full as u8],
             )
             .await
@@ -600,7 +600,7 @@ impl ZigbeeStack {
 
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::Mac154Laddr as u32,
+                SpinelPropertyId::Mac154Laddr,
                 state.nib.nwk_ieee_address.to_bytes().to_vec(),
             )
             .await
@@ -608,7 +608,7 @@ impl ZigbeeStack {
 
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::Mac154Saddr as u32,
+                SpinelPropertyId::Mac154Saddr,
                 state.nib.nwk_network_address.to_bytes().to_vec(),
             )
             .await
@@ -616,25 +616,19 @@ impl ZigbeeStack {
 
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::Mac154Panid as u32,
+                SpinelPropertyId::Mac154Panid,
                 state.nib.nwk_pan_id.to_bytes().to_vec(),
             )
             .await
             .map_err(|e| format!("Failed to set MAC PAN ID: {:?}", e))?;
 
         self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacRxOnWhenIdleMode as u32,
-                vec![true as u8],
-            )
+            .prop_value_set(SpinelPropertyId::MacRxOnWhenIdleMode, vec![true as u8])
             .await
             .expect("Failed to set RX on when idle");
 
         self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacRawStreamEnabled as u32,
-                vec![true as u8],
-            )
+            .prop_value_set(SpinelPropertyId::MacRawStreamEnabled, vec![true as u8])
             .await
             .expect("Failed to enable the RAW stream");
 
@@ -1726,11 +1720,11 @@ impl ZigbeeStack {
             .await
             .expect("Failed to transmit frame");
 
-        if status == SpinelStatus::Ok as u8 {
+        if status == SpinelStatus::Ok {
             return Ok(());
-        } else if status == SpinelStatus::NoAck as u8 {
+        } else if status == SpinelStatus::NoAck {
             return Err("No ACK".to_string());
-        } else if status == SpinelStatus::CcaFailure as u8 {
+        } else if status == SpinelStatus::CcaFailure {
             return Err("CCA failure".to_string());
         } else {
             return Err("Unknown failure: {status:#?}".to_string());

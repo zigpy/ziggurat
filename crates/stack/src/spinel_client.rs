@@ -1,6 +1,7 @@
 use crate::spinel::{
     HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelFrameParsingError, SpinelFramePropValueIs,
-    SpinelPropertyId, SpinelProtocol, packed_uint21_deserialize, packed_uint21_to_bytes,
+    SpinelPropertyId, SpinelProtocol, SpinelStatus, packed_uint21_deserialize,
+    packed_uint21_to_bytes,
 };
 use serial2_tokio::SerialPort;
 use std::string::String;
@@ -198,7 +199,7 @@ impl SpinelClient {
 
     pub fn set_property_update_receiver(
         &self,
-        property_id: u32,
+        property_id: SpinelPropertyId,
         tx: mpsc::Sender<SpinelFramePropValueIs>,
     ) {
         self.protocol
@@ -237,7 +238,7 @@ impl SpinelClient {
 
     pub async fn send_command(
         &self,
-        command_id: u8,
+        command_id: SpinelCommandId,
         payload: Vec<u8>,
     ) -> Result<SpinelFrame, SpinelError> {
         let (frame, rx) = {
@@ -279,11 +280,14 @@ impl SpinelClient {
         }
     }
 
-    pub async fn prop_value_get(&self, property_id: u32) -> Result<Vec<u8>, SpinelError> {
+    pub async fn prop_value_get(
+        &self,
+        property_id: SpinelPropertyId,
+    ) -> Result<Vec<u8>, SpinelError> {
         let response = self
             .send_command(
-                SpinelCommandId::PropValueGet as u8,
-                packed_uint21_to_bytes(property_id),
+                SpinelCommandId::PropValueGet,
+                packed_uint21_to_bytes(property_id as u32),
             )
             .await?;
 
@@ -296,13 +300,13 @@ impl SpinelClient {
 
     pub async fn prop_value_set(
         &self,
-        property_id: u32,
+        property_id: SpinelPropertyId,
         value: Vec<u8>,
-    ) -> Result<(u32, Vec<u8>), SpinelError> {
+    ) -> Result<(SpinelPropertyId, Vec<u8>), SpinelError> {
         let response = self
             .send_command(
-                SpinelCommandId::PropValueSet as u8,
-                packed_uint21_to_bytes(property_id)
+                SpinelCommandId::PropValueSet,
+                packed_uint21_to_bytes(property_id as u32)
                     .iter()
                     .chain(value.iter())
                     .cloned()
@@ -315,20 +319,27 @@ impl SpinelClient {
             packed_uint21_deserialize(&response_payload).map_err(SpinelError::U21ParsingError)?;
 
         log::info!(
-            "Setting property {}={:02X?}, result {}={:02X?}",
+            "Setting property {:?}={:02X?}, result {}={:02X?}",
             property_id,
             value,
             rsp_property_id,
             payload
         );
 
-        Ok((rsp_property_id, payload.to_vec()))
+        Ok((
+            SpinelPropertyId::try_from(rsp_property_id).map_err(|_| {
+                SpinelError::InvalidResponseError {
+                    reason: "Invalid property ID in response".to_string(),
+                }
+            })?,
+            payload.to_vec(),
+        ))
     }
 
     // Convenience method wrapping broad functionality are below
     pub async fn get_ncp_version(&self) -> Result<String, SpinelError> {
         let ncp_version_rsp = self
-            .prop_value_get(SpinelPropertyId::NcpVersion as u32)
+            .prop_value_get(SpinelPropertyId::NcpVersion)
             .await
             .unwrap();
 
@@ -340,15 +351,18 @@ impl SpinelClient {
             .to_string())
     }
 
-    pub async fn transmit_frame(&self, tx_frame: &SpinelTxFrame) -> Result<u8, SpinelError> {
+    pub async fn transmit_frame(
+        &self,
+        tx_frame: &SpinelTxFrame,
+    ) -> Result<SpinelStatus, SpinelError> {
         let _send_lock = self.send_lock.lock().await;
 
         let (rsp_prop_id, rsp) = self
-            .prop_value_set(SpinelPropertyId::StreamRaw as u32, tx_frame.to_bytes())
+            .prop_value_set(SpinelPropertyId::StreamRaw, tx_frame.to_bytes())
             .await
             .unwrap();
 
-        if rsp_prop_id != SpinelPropertyId::LastStatus as u32 {
+        if rsp_prop_id != SpinelPropertyId::LastStatus {
             return Err(SpinelError::InvalidResponseError {
                 reason: "Unexpected response property ID".to_string(),
             });
@@ -360,7 +374,8 @@ impl SpinelClient {
             });
         }
 
-        let status = rsp[0];
-        Ok(status)
+        SpinelStatus::try_from(rsp[0]).map_err(|_| SpinelError::InvalidResponseError {
+            reason: "Invalid Spinel status".to_string(),
+        })
     }
 }

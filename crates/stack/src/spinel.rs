@@ -2,8 +2,8 @@
 
 use crc_all::CrcAlgo;
 use log;
+use num_enum::TryFromPrimitive;
 use std::collections::HashMap;
-use strum_macros::FromRepr;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -13,7 +13,8 @@ const U21_MAX: u32 = 1 << 21;
 #[derive(Error, Debug)]
 pub enum SpinelSendError {}
 
-#[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
+#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[repr(u8)]
 pub enum SpinelCommandId {
     Noop = 0,
     Reset = 1,
@@ -41,7 +42,8 @@ pub enum SpinelCommandId {
     HboDropped = 17,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
+#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive, Hash, Eq)]
+#[repr(u32)]
 pub enum SpinelPropertyId {
     // Core Properties
     LastStatus = 0,
@@ -178,14 +180,16 @@ pub enum SpinelPropertyId {
     NestStreamMfg = 0x3BC0,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
+#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[repr(u8)]
 pub enum SpinelResetReason {
     Platform = 1,
     Stack = 2,
     Bootloader = 3,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
+#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[repr(u8)]
 pub enum SpinelStatus {
     Ok = 0,
     Failure = 1,
@@ -223,7 +227,8 @@ pub enum SpinelStatus {
     ResetWatchdog = 120,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
+#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[repr(u8)]
 pub enum SpinelMacPromiscuousMode {
     //  Normal MAC filtering is in place.
     Off = 0,
@@ -241,6 +246,10 @@ pub enum SpinelFrameParsingError {
     NotSpinelFrame { flag: u8 },
     #[error("packed uint21 did not terminate")]
     PackedU21DidNotTerminate,
+    #[error("invalid property id: {property_id}")]
+    InvalidPropertyId { property_id: u32 },
+    #[error("invalid command id: {command_id}")]
+    InvalidCommandId { command_id: u8 },
 }
 
 pub fn packed_uint21_deserialize(bytes: &[u8]) -> Result<(u32, &[u8]), SpinelFrameParsingError> {
@@ -286,7 +295,8 @@ pub fn packed_uint21_to_bytes(value: u32) -> Vec<u8> {
     chunks
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
+#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[repr(u8)]
 pub enum HdlcSpecial {
     Flag = 0x7E,
     Escape = 0x7D,
@@ -449,7 +459,7 @@ impl SpinelHeader {
 #[derive(Debug, PartialEq, Clone)]
 pub struct SpinelFrame {
     pub header: SpinelHeader,
-    pub command_id: u8,
+    pub command_id: SpinelCommandId,
     pub payload: Vec<u8>,
 }
 
@@ -473,7 +483,8 @@ impl SpinelFrame {
 
         Ok(Self {
             header,
-            command_id,
+            command_id: SpinelCommandId::try_from(command_id)
+                .map_err(|_| SpinelFrameParsingError::InvalidCommandId { command_id })?,
             payload,
         })
     }
@@ -482,7 +493,7 @@ impl SpinelFrame {
         let mut result = Vec::new();
 
         result.extend(&self.header.to_bytes());
-        result.push(self.command_id);
+        result.push(self.command_id as u8);
         result.extend(self.payload.iter());
 
         result
@@ -491,7 +502,7 @@ impl SpinelFrame {
 
 #[derive(Debug, Clone)]
 pub struct SpinelFramePropValueIs {
-    pub property_id: u32,
+    pub property_id: SpinelPropertyId,
     pub value: Vec<u8>,
 }
 
@@ -499,7 +510,8 @@ impl SpinelFramePropValueIs {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
         match packed_uint21_deserialize(bytes) {
             Ok((property_id, remaining)) => Ok(Self {
-                property_id,
+                property_id: SpinelPropertyId::try_from(property_id)
+                    .map_err(|_| SpinelFrameParsingError::InvalidPropertyId { property_id })?,
                 value: remaining.to_vec(),
             }),
             Err(err) => Err(err),
@@ -507,7 +519,7 @@ impl SpinelFramePropValueIs {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut result = packed_uint21_to_bytes(self.property_id);
+        let mut result = packed_uint21_to_bytes(self.property_id as u32);
         result.extend(self.value.iter());
 
         result
@@ -521,7 +533,7 @@ pub struct SpinelProtocol {
     pub next_tid: u8,
     pub pending_frames: HashMap<u8, oneshot::Sender<SpinelFrame>>,
     pub unsolicited_frame_receiver: Option<mpsc::Sender<SpinelFrame>>,
-    pub property_update_receivers: HashMap<u32, mpsc::Sender<SpinelFramePropValueIs>>,
+    pub property_update_receivers: HashMap<SpinelPropertyId, mpsc::Sender<SpinelFramePropValueIs>>,
 }
 
 impl SpinelProtocol {
@@ -542,7 +554,7 @@ impl SpinelProtocol {
 
     pub fn set_property_update_receiver(
         &mut self,
-        property_id: u32,
+        property_id: SpinelPropertyId,
         tx: mpsc::Sender<SpinelFramePropValueIs>,
     ) {
         self.property_update_receivers.insert(property_id, tx);
@@ -583,6 +595,10 @@ impl SpinelProtocol {
                         Err(SpinelFrameParsingError::PayloadTooShort { .. })
                         | Err(SpinelFrameParsingError::PackedU21DidNotTerminate { .. })
                         | Err(SpinelFrameParsingError::NotSpinelFrame { .. }) => {}
+                        Err(SpinelFrameParsingError::InvalidPropertyId { .. }) => { /* This cannot happen */
+                        }
+                        Err(SpinelFrameParsingError::InvalidCommandId { .. }) => { /* This cannot happen */
+                        }
                         Ok(parsed_frame) => {
                             into.push(parsed_frame);
                             num_parsed_frames += 1;
@@ -617,7 +633,7 @@ impl SpinelProtocol {
         let tid = frame.header.transaction_id;
 
         if tid == 0 {
-            if frame.command_id == SpinelCommandId::PropValueIs as u8 {
+            if frame.command_id == SpinelCommandId::PropValueIs {
                 match SpinelFramePropValueIs::from_bytes(&frame.payload) {
                     Ok(prop_value_is) => {
                         match self
@@ -648,7 +664,7 @@ impl SpinelProtocol {
 
     pub fn prepare_request(
         &mut self,
-        command_id: u8,
+        command_id: SpinelCommandId,
         payload: Vec<u8>,
     ) -> (SpinelFrame, oneshot::Receiver<SpinelFrame>) {
         // Cycle TIDs from 1..7
@@ -802,7 +818,7 @@ mod test {
                         network_link_id: 0,
                         transaction_id: 1
                     },
-                    command_id: 2,
+                    command_id: SpinelCommandId::PropValueGet,
                     payload: vec![2]
                 },
                 SpinelFrame {
@@ -811,7 +827,7 @@ mod test {
                         network_link_id: 0,
                         transaction_id: 1
                     },
-                    command_id: 2,
+                    command_id: SpinelCommandId::PropValueGet,
                     payload: vec![2]
                 },
                 SpinelFrame {
@@ -820,7 +836,7 @@ mod test {
                         network_link_id: 0,
                         transaction_id: 1
                     },
-                    command_id: 2,
+                    command_id: SpinelCommandId::PropValueGet,
                     payload: vec![2]
                 }
             ]
@@ -847,7 +863,7 @@ mod test {
                         network_link_id: 0,
                         transaction_id: 1
                     },
-                    command_id: 2,
+                    command_id: SpinelCommandId::PropValueGet,
                     payload: vec![2]
                 },
                 SpinelFrame {
@@ -856,7 +872,7 @@ mod test {
                         network_link_id: 0,
                         transaction_id: 1
                     },
-                    command_id: 2,
+                    command_id: SpinelCommandId::PropValueGet,
                     payload: vec![2]
                 },
                 SpinelFrame {
@@ -865,7 +881,7 @@ mod test {
                         network_link_id: 0,
                         transaction_id: 1
                     },
-                    command_id: 2,
+                    command_id: SpinelCommandId::PropValueGet,
                     payload: vec![2]
                 }
             ]
@@ -881,7 +897,7 @@ mod test {
         protocol.next_tid = 3;
 
         let (request, mut rx) = protocol.prepare_request(
-            SpinelCommandId::PropValueGet as u8,
+            SpinelCommandId::PropValueGet,
             packed_uint21_to_bytes(SpinelPropertyId::NcpVersion as u32),
         );
         assert_eq!(
@@ -892,7 +908,7 @@ mod test {
                     network_link_id: 0,
                     transaction_id: 3,
                 },
-                command_id: SpinelCommandId::PropValueGet as u8,
+                command_id: SpinelCommandId::PropValueGet,
                 payload: packed_uint21_to_bytes(SpinelPropertyId::NcpVersion as u32)
             }
         );
@@ -912,7 +928,7 @@ mod test {
                     network_link_id: 0,
                     transaction_id: 3,
                 },
-                command_id: SpinelCommandId::PropValueIs as u8,
+                command_id: SpinelCommandId::PropValueIs,
                 payload:
                     b"\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 14:40:57\x00"
                         .to_vec()
