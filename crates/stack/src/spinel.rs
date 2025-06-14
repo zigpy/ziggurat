@@ -723,7 +723,7 @@ mod test {
         let mut rng = StdRng::seed_from_u64(0);
 
         for _ in 0..1000 {
-            let len = rng.gen_range(1..1000);
+            let len = rng.random_range(1..1000);
             let mut data = Vec::new();
 
             for _ in 0..len {

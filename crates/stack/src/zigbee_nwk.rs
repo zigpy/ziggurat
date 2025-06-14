@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
+use abstract_bits::AbstractBits;
+use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
-
-use std::convert::TryFrom;
 
 use aes::Aes128;
 use aes::Block;
@@ -12,6 +12,7 @@ use aes::cipher::KeyIvInit;
 use cbc::Encryptor;
 use cbc::cipher::BlockCipherEncrypt;
 use constant_time_eq::constant_time_eq;
+use num_enum::TryFromPrimitive;
 
 use derivative::Derivative;
 
@@ -20,50 +21,29 @@ pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
 pub const BROADCAST_ALL_ROUTERS_AND_COORDINATOR: Nwk = Nwk(0xFFFC);
 pub const BROADCAST_LOW_POWER_ROUTERS: Nwk = Nwk(0xFFFB);
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum NwkFrameType {
     Data = 0b00,
     Command = 0b01,
     Interpan = 0b11,
 }
 
-impl TryFrom<u8> for NwkFrameType {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0b00 => Ok(NwkFrameType::Data),
-            0b01 => Ok(NwkFrameType::Command),
-            0b11 => Ok(NwkFrameType::Interpan),
-            _ => Err("Invalid frame type"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum NwkRouteDiscovery {
     Suppress = 0b00,
     Enable = 0b01,
     WithMulticast = 0b10,
 }
 
-impl TryFrom<u8> for NwkRouteDiscovery {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0b00 => Ok(NwkRouteDiscovery::Suppress),
-            0b01 => Ok(NwkRouteDiscovery::Enable),
-            0b10 => Ok(NwkRouteDiscovery::WithMulticast),
-            _ => Err("Invalid route discovery"),
-        }
-    }
-}
-
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkFrameControl {
     pub frame_type: NwkFrameType,
-    pub protocol_version: u8,
+    pub protocol_version: u4,
     pub discover_route: NwkRouteDiscovery,
     pub multicast: bool,
     pub security: bool,
@@ -71,99 +51,16 @@ pub struct NwkFrameControl {
     pub destination: bool,
     pub extended_source: bool,
     pub end_device_initiator: bool,
-    pub reserved: u8,
+    reserved: u2,
 }
 
-impl NwkFrameControl {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if bytes.len() < 2 {
-            return Err("Not enough data to parse NwkFrameControl");
-        }
-
-        Ok((
-            Self {
-                frame_type: NwkFrameType::try_from((bytes[0] >> 0) & 0b11)?,
-                protocol_version: (bytes[0] >> 2) & 0b1111,
-                discover_route: NwkRouteDiscovery::try_from((bytes[0] >> 6) & 0b11)?,
-                multicast: (bytes[1] >> 0) & 0b1 == 1,
-                security: (bytes[1] >> 1) & 0b1 == 1,
-                source_route: (bytes[1] >> 2) & 0b1 == 1,
-                destination: (bytes[1] >> 3) & 0b1 == 1,
-                extended_source: (bytes[1] >> 4) & 0b1 == 1,
-                end_device_initiator: (bytes[1] >> 5) & 0b1 == 1,
-                reserved: (bytes[1] >> 6) & 0b11,
-            },
-            &bytes[2..],
-        ))
-    }
-
-    pub fn to_bytes(&self) -> [u8; 2] {
-        [
-            (((self.frame_type as u8) & 0b11) << 0)
-                | (((self.protocol_version as u8) & 0b1111) << 2)
-                | (((self.discover_route as u8) & 0b11) << 6),
-            (((self.multicast as u8) & 0b1) << 0)
-                | (((self.security as u8) & 0b1) << 1)
-                | (((self.source_route as u8) & 0b1) << 2)
-                | (((self.destination as u8) & 0b1) << 3)
-                | (((self.extended_source as u8) & 0b1) << 4)
-                | (((self.end_device_initiator as u8) & 0b1) << 5)
-                | (((self.reserved as u8) & 0b11) << 6),
-        ]
-    }
-}
-
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkSourceRoute {
-    pub relay_count: u8, // Technically unnecessary to store but maybe we'll need it
+    #[abstract_bits(length_of = relays)]
+    relay_count: u8,
     pub relay_index: u8,
     pub relays: Vec<Nwk>,
-}
-
-impl NwkSourceRoute {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if bytes.len() < 2 {
-            return Err("Not enough data to parse NwkSourceRoute");
-        }
-
-        let relay_count = bytes[0];
-        let relay_index = bytes[1];
-        let mut remaining = &bytes[2..];
-
-        let mut relays = Vec::new();
-
-        for _ in 0..relay_count {
-            let nwk;
-            (nwk, remaining) = Nwk::deserialize(remaining)?;
-            relays.push(nwk);
-        }
-
-        Ok((
-            Self {
-                relay_count: relay_count,
-                relay_index: relay_index,
-                relays: relays,
-            },
-            remaining,
-        ))
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        if self.relay_count != self.relays.len() as u8 {
-            panic!("Relay count does not match number of relays");
-        }
-
-        let mut bytes = Vec::new();
-
-        bytes.push(self.relay_count);
-        bytes.push(self.relay_index);
-
-        for nwk in &self.relays {
-            bytes.extend(nwk.to_bytes());
-        }
-
-        bytes
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,10 +82,9 @@ impl NwkHeader {
             return Err("Not enough data to parse NwkHeader");
         }
 
-        let mut remaining = bytes;
-
-        let frame_control;
-        (frame_control, remaining) = NwkFrameControl::deserialize(remaining)?;
+        let frame_control = NwkFrameControl::from_abstract_bits(bytes)
+            .map_err(|_| "Failed to parse NwkFrameControl")?;
+        let mut remaining = &bytes[frame_control.to_abstract_bits().unwrap().len()..];
 
         let destination;
         (destination, remaining) = Nwk::deserialize(remaining)?;
@@ -231,8 +127,9 @@ impl NwkHeader {
 
         let source_route = match frame_control.source_route {
             true => {
-                let source_route;
-                (source_route, remaining) = NwkSourceRoute::deserialize(remaining)?;
+                let source_route = NwkSourceRoute::from_abstract_bits(remaining)
+                    .map_err(|_| "Failed to parse NwkSourceRoute")?;
+                remaining = &remaining[source_route.to_abstract_bits().unwrap().len()..];
                 Some(source_route)
             }
             false => None,
@@ -257,7 +154,7 @@ impl NwkHeader {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.frame_control.to_bytes());
+        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
         bytes.extend(self.destination.to_bytes());
         bytes.extend(self.source.to_bytes());
         bytes.push(self.radius);
@@ -276,14 +173,16 @@ impl NwkHeader {
         }
 
         if let Some(source_route) = &self.source_route {
-            bytes.extend(source_route.to_bytes());
+            bytes.extend(source_route.to_abstract_bits().unwrap());
         }
 
         bytes
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum NwkSecurityHeaderKeyId {
     DataKey = 0x00,
     NetworkKey = 0x01,
@@ -291,21 +190,9 @@ pub enum NwkSecurityHeaderKeyId {
     KeyLoadKey = 0x03,
 }
 
-impl TryFrom<u8> for NwkSecurityHeaderKeyId {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x00 => Ok(NwkSecurityHeaderKeyId::DataKey),
-            0x01 => Ok(NwkSecurityHeaderKeyId::NetworkKey),
-            0x02 => Ok(NwkSecurityHeaderKeyId::KeyTransportKey),
-            0x03 => Ok(NwkSecurityHeaderKeyId::KeyLoadKey),
-            _ => Err("Invalid Nwk security header key ID"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum NwkSecurityLevel {
     NoSecurity = 0x00,
     Mic32 = 0x01,
@@ -317,58 +204,14 @@ pub enum NwkSecurityLevel {
     EncMic128 = 0x07,
 }
 
-impl TryFrom<u8> for NwkSecurityLevel {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x00 => Ok(NwkSecurityLevel::NoSecurity),
-            0x01 => Ok(NwkSecurityLevel::Mic32),
-            0x02 => Ok(NwkSecurityLevel::Mic64),
-            0x03 => Ok(NwkSecurityLevel::Mic128),
-            0x04 => Ok(NwkSecurityLevel::Enc),
-            0x05 => Ok(NwkSecurityLevel::EncMic32),
-            0x06 => Ok(NwkSecurityLevel::EncMic64),
-            0x07 => Ok(NwkSecurityLevel::EncMic128),
-            _ => Err("Invalid Nwk security level"),
-        }
-    }
-}
-
+#[abstract_bits]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NwkSecurityHeaderControlField {
     pub security_level: NwkSecurityLevel,
     pub key_id: NwkSecurityHeaderKeyId,
     pub extended_nonce: bool,
     pub require_verified_frame_counter: bool,
-    pub reserved: u8,
-}
-
-impl NwkSecurityHeaderControlField {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if bytes.len() < 1 {
-            return Err("Not enough data to parse NwkSecurityHeaderControlField");
-        }
-
-        Ok((
-            Self {
-                security_level: NwkSecurityLevel::try_from((bytes[0] >> 0) & 0b111)?,
-                key_id: NwkSecurityHeaderKeyId::try_from((bytes[0] >> 3) & 0b11)?,
-                extended_nonce: (bytes[0] >> 5) & 0b1 == 1,
-                require_verified_frame_counter: (bytes[0] >> 6) & 0b1 == 1,
-                reserved: (bytes[0] >> 7) & 0b1,
-            },
-            &bytes[1..],
-        ))
-    }
-
-    pub fn to_bytes(&self) -> [u8; 1] {
-        [((self.security_level as u8) & 0b111)
-            | (((self.key_id as u8) & 0b11) << 3)
-            | ((self.extended_nonce as u8) << 5)
-            | ((self.require_verified_frame_counter as u8) << 6)
-            | ((self.reserved & 0b1) << 7)]
-    }
+    reserved: u1,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,10 +228,9 @@ impl NwkAuxHeader {
             return Err("Not enough data to parse NwkAuxHeader");
         }
 
-        let mut remaining = bytes;
-
-        let security_control;
-        (security_control, remaining) = NwkSecurityHeaderControlField::deserialize(remaining)?;
+        let security_control = NwkSecurityHeaderControlField::from_abstract_bits(bytes)
+            .map_err(|_| "Failed to parse NwkSecurityHeaderControlField")?;
+        let mut remaining = &bytes[security_control.to_abstract_bits().unwrap().len()..];
 
         let frame_counter =
             u32::from_le_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]);
@@ -419,7 +261,7 @@ impl NwkAuxHeader {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.security_control.to_bytes());
+        bytes.extend(self.security_control.to_abstract_bits().unwrap());
         bytes.extend(self.frame_counter.to_le_bytes().to_vec());
 
         if let Some(ieee) = self.extended_source {
@@ -621,7 +463,7 @@ impl NwkFrame {
         let mut nonce = [0; 13];
         nonce[..8].copy_from_slice(&source.to_bytes());
         nonce[8..12].copy_from_slice(&aux_header.frame_counter.to_le_bytes());
-        nonce[12..13].copy_from_slice(&aux_header.security_control.to_bytes());
+        nonce[12..13].copy_from_slice(&aux_header.security_control.to_abstract_bits().unwrap());
 
         nonce
     }
@@ -709,7 +551,6 @@ mod test {
                     destination: false,
                     extended_source: false,
                     end_device_initiator: false,
-                    reserved: 0b00,
                 },
                 destination: Nwk(0x6b42),
                 source: Nwk(0x0000),
@@ -726,7 +567,6 @@ mod test {
                     key_id: NwkSecurityHeaderKeyId::NetworkKey,
                     extended_nonce: true,
                     require_verified_frame_counter: false,
-                    reserved: 0b0,
                 },
                 frame_counter: 2682,
                 extended_source: Some(Eui64::from_hex("00:12:4b:00:1e:17:ef:a8")),
@@ -775,7 +615,6 @@ mod test {
                     destination: false,
                     extended_source: false,
                     end_device_initiator: false,
-                    reserved: 0b00,
                 },
                 destination: Nwk(0x3ce7),
                 source: Nwk(0x5f37),
@@ -785,7 +624,6 @@ mod test {
                 source_ieee: None,
                 multicast_control: None,
                 source_route: Some(NwkSourceRoute {
-                    relay_count: 1,
                     relay_index: 0,
                     relays: vec![Nwk(0xf939)],
                 }),
@@ -796,7 +634,6 @@ mod test {
                     key_id: NwkSecurityHeaderKeyId::NetworkKey,
                     extended_nonce: true,
                     require_verified_frame_counter: false,
-                    reserved: 0b0,
                 },
                 frame_counter: 41854,
                 extended_source: Some(Eui64::from_hex("00:17:88:01:0c:71:3c:02")),

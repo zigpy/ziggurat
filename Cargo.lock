@@ -1195,6 +1195,7 @@ dependencies = [
 name = "ziggurat"
 version = "0.0.1"
 dependencies = [
+ "abstract-bits",
  "aes",
  "cbc",
  "constant_time_eq",

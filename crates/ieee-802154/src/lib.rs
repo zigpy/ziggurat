@@ -1,30 +1,18 @@
 pub mod types;
 use crate::types::{Eui64, Nwk, PanId, format_hex};
-use abstract_bits::abstract_bits;
+use abstract_bits::{AbstractBits, abstract_bits};
+use num_enum::TryFromPrimitive;
 
 use derivative::Derivative;
-use std::convert::TryFrom;
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum Ieee802154FrameType {
     Beacon = 0b000,
     Data = 0b001,
     Command = 0b011,
     Ack = 0b010,
-}
-
-impl TryFrom<u8> for Ieee802154FrameType {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0b000 => Ok(Ieee802154FrameType::Beacon),
-            0b001 => Ok(Ieee802154FrameType::Data),
-            0b011 => Ok(Ieee802154FrameType::Command),
-            0b010 => Ok(Ieee802154FrameType::Ack),
-            _ => Err("Invalid frame type"),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -38,98 +26,34 @@ pub enum Ieee802154AssociationStatus {
     FastAssociationSuccessful = 0x80,
 }
 
-impl TryFrom<u8> for Ieee802154AssociationStatus {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x00 => Ok(Ieee802154AssociationStatus::AssociationSuccessful),
-            0x01 => Ok(Ieee802154AssociationStatus::PanAtCapacity),
-            0x02 => Ok(Ieee802154AssociationStatus::PanAccessDenied),
-            0x03 => Ok(Ieee802154AssociationStatus::HoppingSequenceOffsetDuplication),
-            0x80 => Ok(Ieee802154AssociationStatus::FastAssociationSuccessful),
-            _ => Err("Invalid association status"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
 pub enum Ieee802154AddressingMode {
     None = 0b00,
     Short = 0b10,
     Long = 0b11,
 }
 
-impl TryFrom<u8> for Ieee802154AddressingMode {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0b00 => Ok(Ieee802154AddressingMode::None),
-            0b10 => Ok(Ieee802154AddressingMode::Short),
-            0b11 => Ok(Ieee802154AddressingMode::Long),
-            _ => Err("Invalid addressing mode"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Ieee802154FrameControl {
     pub frame_type: Ieee802154FrameType,
     pub security_enabled: bool,
     pub frame_pending: bool,
     pub ack_request: bool,
     pub pan_id_compression: bool,
-    pub reserved: bool,
+    pub reserved1: bool,
     pub sequence_number_suppression: bool,
     pub information_elements_present: bool,
     pub dest_addr_mode: Ieee802154AddressingMode,
-    pub frame_version: u8,
+    pub frame_version: u2,
     pub src_addr_mode: Ieee802154AddressingMode,
 }
 
-impl Ieee802154FrameControl {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if bytes.len() < 2 {
-            return Err("Not enough data to parse Ieee802154FrameControl");
-        }
-
-        Ok((
-            Self {
-                frame_type: Ieee802154FrameType::try_from(bytes[0] & 0b0000_0111)?,
-                security_enabled: (bytes[0] & 0b0000_1000) != 0,
-                frame_pending: (bytes[0] & 0b0001_0000) != 0,
-                ack_request: (bytes[0] & 0b0010_0000) != 0,
-                pan_id_compression: (bytes[0] & 0b0100_0000) != 0,
-                reserved: (bytes[0] & 0b1000_0000) != 0,
-                sequence_number_suppression: (bytes[1] & 0b0000_0001) != 0,
-                information_elements_present: (bytes[1] & 0b0000_0010) != 0,
-                dest_addr_mode: Ieee802154AddressingMode::try_from((bytes[1] >> 2) & 0b0000_0011)?,
-                frame_version: (bytes[1] >> 4) & 0b0000_0011,
-                src_addr_mode: Ieee802154AddressingMode::try_from((bytes[1] >> 6) & 0b0000_0011)?,
-            },
-            &bytes[2..],
-        ))
-    }
-
-    pub fn to_bytes(&self) -> [u8; 2] {
-        [
-            ((self.frame_type as u8) << 0)
-                | ((self.security_enabled as u8) << 3)
-                | ((self.frame_pending as u8) << 4)
-                | ((self.ack_request as u8) << 5)
-                | ((self.pan_id_compression as u8) << 6)
-                | ((self.reserved as u8) << 7),
-            ((self.sequence_number_suppression as u8) << 0)
-                | ((self.information_elements_present as u8) << 1)
-                | ((self.dest_addr_mode as u8) << 2)
-                | ((self.frame_version as u8) << 4)
-                | ((self.src_addr_mode as u8) << 6),
-        ]
-    }
-}
-
 #[derive(Debug, PartialEq, Copy, Clone)]
+#[abstract_bits(bits = 8)]
+#[repr(u8)]
 pub enum Ieee802154CommandId {
     NotAMacCommand = 0x00,
     AssociationRequest = 0x01,
@@ -141,26 +65,6 @@ pub enum Ieee802154CommandId {
     BeaconRequest = 0x07,
     CoordinatorRealignment = 0x08,
     GtsRequest = 0x09,
-}
-
-impl TryFrom<u8> for Ieee802154CommandId {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x00 => Ok(Ieee802154CommandId::NotAMacCommand),
-            0x01 => Ok(Ieee802154CommandId::AssociationRequest),
-            0x02 => Ok(Ieee802154CommandId::AssociationResponse),
-            0x03 => Ok(Ieee802154CommandId::DisassociationNotification),
-            0x04 => Ok(Ieee802154CommandId::DataRequest),
-            0x05 => Ok(Ieee802154CommandId::PanIdConflictNotification),
-            0x06 => Ok(Ieee802154CommandId::OrphanNotification),
-            0x07 => Ok(Ieee802154CommandId::BeaconRequest),
-            0x08 => Ok(Ieee802154CommandId::CoordinatorRealignment),
-            0x09 => Ok(Ieee802154CommandId::GtsRequest),
-            _ => Err("Invalid addressing mode"),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -197,8 +101,9 @@ impl Ieee802154Frame {
         }
 
         // Parse frame control
-        let frame_control;
-        (frame_control, remaining) = Ieee802154FrameControl::deserialize(remaining)?;
+        let frame_control = Ieee802154FrameControl::from_abstract_bits(remaining)
+            .map_err(|_| "Failed to parse frame control")?;
+        remaining = &remaining[frame_control.to_abstract_bits().unwrap().len()..];
 
         // Parse sequence number
         let sequence_number = if frame_control.sequence_number_suppression {
@@ -283,7 +188,7 @@ impl Ieee802154Frame {
         let mut data = Vec::new();
 
         // Serialize frame control
-        data.extend(self.frame_control.to_bytes());
+        data.extend(self.frame_control.to_abstract_bits().unwrap());
 
         // Serialize sequence number
         if let Some(seq) = self.sequence_number {
@@ -351,14 +256,14 @@ mod test {
     #[test]
     fn test_frame_control() {
         let bytes = [0x61, 0x88, 0xFF];
-        let (frame_control, remaining) = Ieee802154FrameControl::deserialize(&bytes).unwrap();
+        let frame_control = Ieee802154FrameControl::from_abstract_bits(&bytes).unwrap();
+        let remaining = &bytes[2..];
 
         assert_eq!(frame_control.frame_type, Ieee802154FrameType::Data);
         assert_eq!(frame_control.security_enabled, false);
         assert_eq!(frame_control.frame_pending, false);
         assert_eq!(frame_control.ack_request, true);
         assert_eq!(frame_control.pan_id_compression, true);
-        assert_eq!(frame_control.reserved, false);
         assert_eq!(frame_control.sequence_number_suppression, false);
         assert_eq!(frame_control.information_elements_present, false);
         assert_eq!(
@@ -369,7 +274,7 @@ mod test {
         assert_eq!(frame_control.src_addr_mode, Ieee802154AddressingMode::Short);
 
         assert_eq!(remaining, [0xFF]);
-        assert_eq!(frame_control.to_bytes(), bytes[..2]);
+        assert_eq!(frame_control.to_abstract_bits().unwrap(), bytes[..2]);
     }
 
     #[test]
@@ -389,7 +294,6 @@ mod test {
         assert_eq!(frame.frame_control.frame_pending, false);
         assert_eq!(frame.frame_control.ack_request, true);
         assert_eq!(frame.frame_control.pan_id_compression, true);
-        assert_eq!(frame.frame_control.reserved, false);
         assert_eq!(frame.frame_control.sequence_number_suppression, false);
         assert_eq!(frame.frame_control.information_elements_present, false);
         assert_eq!(
@@ -444,7 +348,6 @@ mod test {
         assert_eq!(frame.frame_control.frame_pending, false);
         assert_eq!(frame.frame_control.ack_request, false);
         assert_eq!(frame.frame_control.pan_id_compression, false);
-        assert_eq!(frame.frame_control.reserved, false);
         assert_eq!(frame.frame_control.sequence_number_suppression, false);
         assert_eq!(frame.frame_control.information_elements_present, false);
         assert_eq!(
@@ -483,7 +386,7 @@ mod test {
                 frame_pending: false,
                 ack_request: true,
                 pan_id_compression: true,
-                reserved: false,
+                reserved1: false,
                 sequence_number_suppression: false,
                 information_elements_present: false,
                 dest_addr_mode: Ieee802154AddressingMode::Short,
@@ -516,7 +419,7 @@ mod test {
                 frame_pending: false,
                 ack_request: true,
                 pan_id_compression: true,
-                reserved: false,
+                reserved1: false,
                 sequence_number_suppression: false,
                 information_elements_present: false,
                 dest_addr_mode: Ieee802154AddressingMode::Short,
@@ -553,7 +456,7 @@ mod test {
                 frame_pending: false,
                 ack_request: false,
                 pan_id_compression: true,
-                reserved: false,
+                reserved1: false,
                 sequence_number_suppression: false,
                 information_elements_present: false,
                 dest_addr_mode: Ieee802154AddressingMode::Short,
