@@ -4,6 +4,7 @@ use crate::spinel::{
 };
 use serial2_tokio::SerialPort;
 use std::string::String;
+use thiserror::Error;
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -163,10 +164,13 @@ impl SpinelRxFrame {
     }
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum SpinelSendError {
-    IoError(std::io::Error),
+    #[error("io error")]
+    IoError(#[from] std::io::Error),
+    #[error("client has disconnected")]
     ChannelClosed,
+    #[error("timeout")]
     Timeout,
 }
 

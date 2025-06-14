@@ -4,10 +4,14 @@ use crc_all::CrcAlgo;
 use log;
 use std::collections::HashMap;
 use strum_macros::FromRepr;
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 const CRC_KERMIT: CrcAlgo<u16> = CrcAlgo::<u16>::new(0x1021, 16, 0xFFFF, 0xFFFF, true);
 const U21_MAX: u32 = 1 << 21;
+
+#[derive(Error, Debug)]
+pub enum SpinelSendError {}
 
 #[derive(Debug, PartialEq, Copy, Clone, FromRepr)]
 pub enum SpinelCommandId {
@@ -229,7 +233,17 @@ pub enum SpinelMacPromiscuousMode {
     Full = 2,
 }
 
-pub fn packed_uint21_deserialize(bytes: &[u8]) -> Result<(u32, &[u8]), &'static str> {
+#[derive(Error, Debug)]
+pub enum SpinelFrameParsingError {
+    #[error("payload is too short, expected at least {expected} bytes, got {got}")]
+    PayloadTooShort { expected: usize, got: usize },
+    #[error("not a spinel frame, expected flag 0b10, got {flag}")]
+    NotSpinelFrame { flag: u8 },
+    #[error("packed uint21 did not terminate")]
+    PackedU21DidNotTerminate,
+}
+
+pub fn packed_uint21_deserialize(bytes: &[u8]) -> Result<(u32, &[u8]), SpinelFrameParsingError> {
     let mut result = 0u32;
 
     for (index, byte) in bytes.iter().enumerate() {
@@ -244,7 +258,7 @@ pub fn packed_uint21_deserialize(bytes: &[u8]) -> Result<(u32, &[u8]), &'static 
         }
     }
 
-    return Err("Packed uint21 did not terminate");
+    return Err(SpinelFrameParsingError::PackedU21DidNotTerminate);
 }
 
 pub fn packed_uint21_to_bytes(value: u32) -> Vec<u8> {
@@ -281,11 +295,16 @@ pub enum HdlcSpecial {
     Vendor = 0xF8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Error, Debug)]
 pub enum HdlcLiteFrameParsingError {
-    BadEscapeByte,
-    InvalidCrc,
-    BadLength,
+    #[error("bad escape byte encountered: {byte}")]
+    BadEscapeByte { byte: u8 },
+    #[error("invalid crc, expected {expected_crc}, got {got_crc}")]
+    InvalidCrc { expected_crc: u16, got_crc: u16 },
+    #[error("frame is too short, expected at least {expected} bytes, got {got}")]
+    FrameTooShort { expected: usize, got: usize },
+    #[error("payload is too short, expected at least {expected} bytes, got {got}")]
+    PayloadTooShort { expected: usize, got: usize },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -296,7 +315,10 @@ pub struct HdlcLiteFrame {
 impl HdlcLiteFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, HdlcLiteFrameParsingError> {
         if bytes.len() < 2 {
-            return Err(HdlcLiteFrameParsingError::BadLength);
+            return Err(HdlcLiteFrameParsingError::FrameTooShort {
+                expected: 2,
+                got: bytes.len(),
+            });
         }
 
         let mut data = Vec::new();
@@ -315,7 +337,7 @@ impl HdlcLiteFrame {
                     && result_byte != (HdlcSpecial::Xoff as u8)
                     && result_byte != (HdlcSpecial::Vendor as u8)
                 {
-                    return Err(HdlcLiteFrameParsingError::BadEscapeByte);
+                    return Err(HdlcLiteFrameParsingError::BadEscapeByte { byte: result_byte });
                 }
             } else if result_byte == HdlcSpecial::Escape as u8 {
                 unescaping = true;
@@ -328,7 +350,10 @@ impl HdlcLiteFrame {
         }
 
         if data.len() < 2 {
-            return Err(HdlcLiteFrameParsingError::BadLength);
+            return Err(HdlcLiteFrameParsingError::PayloadTooShort {
+                expected: 2,
+                got: data.len(),
+            });
         }
 
         let mut crc = 0x0000u16;
@@ -337,8 +362,13 @@ impl HdlcLiteFrame {
         CRC_KERMIT.finish_crc(&mut crc);
         crc ^= 0xFFFF;
 
-        if crc != u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]) {
-            return Err(HdlcLiteFrameParsingError::InvalidCrc);
+        let expected_crc = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
+
+        if crc != expected_crc {
+            return Err(HdlcLiteFrameParsingError::InvalidCrc {
+                expected_crc: expected_crc,
+                got_crc: crc,
+            });
         }
 
         Ok(Self {
@@ -393,9 +423,12 @@ pub struct SpinelHeader {
 }
 
 impl SpinelHeader {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
         if bytes.len() < 1 {
-            return Err("Not enough data to parse SpinelHeader");
+            return Err(SpinelFrameParsingError::PayloadTooShort {
+                expected: 1,
+                got: bytes.len(),
+            });
         }
 
         let byte = bytes[0];
@@ -413,12 +446,6 @@ impl SpinelHeader {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum SpinelFrameParsingError {
-    PayloadTooShort,
-    NotSpinelFrame,
-}
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct SpinelFrame {
     pub header: SpinelHeader,
@@ -429,13 +456,16 @@ pub struct SpinelFrame {
 impl SpinelFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
         if bytes.len() < 3 {
-            return Err(SpinelFrameParsingError::PayloadTooShort);
+            return Err(SpinelFrameParsingError::PayloadTooShort {
+                expected: 3,
+                got: bytes.len(),
+            });
         }
 
-        let header = SpinelHeader::from_bytes(&bytes[..1]).unwrap();
+        let header = SpinelHeader::from_bytes(&bytes[..1])?;
 
         if header.flag != 0b10 {
-            return Err(SpinelFrameParsingError::NotSpinelFrame);
+            return Err(SpinelFrameParsingError::NotSpinelFrame { flag: header.flag });
         }
 
         let command_id = bytes[1];
@@ -466,7 +496,7 @@ pub struct SpinelFramePropValueIs {
 }
 
 impl SpinelFramePropValueIs {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
         match packed_uint21_deserialize(bytes) {
             Ok((property_id, remaining)) => Ok(Self {
                 property_id,
@@ -545,12 +575,14 @@ impl SpinelProtocol {
             // Ignore consecutive flags
             if index.unwrap() > 0 {
                 match HdlcLiteFrame::from_bytes(&self.buffer[0..index.unwrap()]) {
-                    Err(HdlcLiteFrameParsingError::BadEscapeByte)
-                    | Err(HdlcLiteFrameParsingError::InvalidCrc)
-                    | Err(HdlcLiteFrameParsingError::BadLength) => {}
+                    Err(HdlcLiteFrameParsingError::BadEscapeByte { .. })
+                    | Err(HdlcLiteFrameParsingError::InvalidCrc { .. })
+                    | Err(HdlcLiteFrameParsingError::FrameTooShort { .. })
+                    | Err(HdlcLiteFrameParsingError::PayloadTooShort { .. }) => {}
                     Ok(frame) => match SpinelFrame::from_bytes(&frame.data) {
-                        Err(SpinelFrameParsingError::PayloadTooShort)
-                        | Err(SpinelFrameParsingError::NotSpinelFrame) => {}
+                        Err(SpinelFrameParsingError::PayloadTooShort { .. })
+                        | Err(SpinelFrameParsingError::PackedU21DidNotTerminate { .. })
+                        | Err(SpinelFrameParsingError::NotSpinelFrame { .. }) => {}
                         Ok(parsed_frame) => {
                             into.push(parsed_frame);
                             num_parsed_frames += 1;
