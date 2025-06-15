@@ -15,11 +15,18 @@ use constant_time_eq::constant_time_eq;
 use num_enum::TryFromPrimitive;
 
 use derivative::Derivative;
+use thiserror::Error;
 
 pub const BROADCAST_ALL_DEVICES: Nwk = Nwk(0xFFFF);
 pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
 pub const BROADCAST_ALL_ROUTERS_AND_COORDINATOR: Nwk = Nwk(0xFFFC);
 pub const BROADCAST_LOW_POWER_ROUTERS: Nwk = Nwk(0xFFFB);
+
+#[derive(Error, Debug)]
+pub enum NwkDecryptionError {
+    #[error("Invalid MAC tag")]
+    InvalidMacTag,
+}
 
 #[abstract_bits(bits = 2)]
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
@@ -391,52 +398,23 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
 
 #[derive(Derivative)]
 #[derivative(Debug, Clone, PartialEq)]
-pub struct NwkFrame {
+pub struct EncryptedNwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
     #[derivative(Debug(format_with = "format_hex"))]
-    pub payload: Vec<u8>,
-    pub encrypted: bool,
+    pub ciphertext: Vec<u8>,
 }
 
-impl NwkFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        let mut remaining;
-        let nwk_header;
-        (nwk_header, remaining) = NwkHeader::deserialize(bytes)?;
+#[derive(Derivative)]
+#[derivative(Debug, Clone, PartialEq)]
+pub struct DecryptedNwkFrame {
+    pub nwk_header: NwkHeader,
+    pub aux_header: Option<NwkAuxHeader>,
+    #[derivative(Debug(format_with = "format_hex"))]
+    pub plaintext: Vec<u8>,
+}
 
-        let mut aux_header = None;
-
-        if nwk_header.frame_control.security {
-            let unwrapped_aux_header;
-            (unwrapped_aux_header, remaining) = NwkAuxHeader::deserialize(remaining)?;
-            aux_header = Some(unwrapped_aux_header);
-        }
-
-        let encrypted = nwk_header.frame_control.security;
-
-        Ok(Self {
-            nwk_header: nwk_header,
-            aux_header: aux_header,
-            payload: remaining.to_vec(),
-            encrypted: encrypted,
-        })
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        bytes.extend(self.nwk_header.to_bytes());
-
-        if let Some(aux_header) = &self.aux_header {
-            bytes.extend(aux_header.to_bytes());
-        }
-
-        bytes.extend(self.payload.clone());
-
-        bytes
-    }
-
+impl EncryptedNwkFrame {
     pub fn get_modified_aux_header(&self, nib_security_level: NwkSecurityLevel) -> NwkAuxHeader {
         if self.aux_header.is_none() {
             panic!("Auxiliary header is missing");
@@ -474,56 +452,119 @@ impl NwkFrame {
         NwkCrypto::<2, 4>
     }
 
-    pub fn decrypt(&self, key: &Key) -> Result<Self, &'static str> {
-        if !self.encrypted {
-            return Err("Cannot decrypt unencrypted frame");
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        let mut remaining;
+        let nwk_header;
+        (nwk_header, remaining) = NwkHeader::deserialize(bytes)?;
+
+        let mut aux_header = None;
+
+        if nwk_header.frame_control.security {
+            let unwrapped_aux_header;
+            (unwrapped_aux_header, remaining) = NwkAuxHeader::deserialize(remaining)?;
+            aux_header = Some(unwrapped_aux_header);
         }
 
+        Ok(Self {
+            nwk_header: nwk_header,
+            aux_header: aux_header,
+            ciphertext: remaining.to_vec(),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        bytes.extend(self.nwk_header.to_bytes());
+
+        if let Some(aux_header) = &self.aux_header {
+            bytes.extend(aux_header.to_bytes());
+        }
+
+        bytes.extend(self.ciphertext.clone());
+
+        bytes
+    }
+
+    pub fn decrypt(&self, key: &Key) -> Result<DecryptedNwkFrame, NwkDecryptionError> {
         let crypto = self.get_crypto();
 
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
-        let (ciphertext, encrypted_mac_tag) = crypto.split_mac_tag(&self.payload);
+        let (ciphertext, encrypted_mac_tag) = crypto.split_mac_tag(&self.ciphertext);
         let (provided_mac_tag, plaintext) =
             crypto.encrypt_decrypt(key, &nonce, &encrypted_mac_tag, &ciphertext);
         let mac_tag = crypto.compute_mac(&self, key, &plaintext, &aux_header, &nonce);
 
         if !constant_time_eq(&provided_mac_tag, &mac_tag) {
-            return Err("Decryption failed, invalid MAC tag");
+            return Err(NwkDecryptionError::InvalidMacTag);
         }
 
-        Ok(Self {
+        Ok(DecryptedNwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
-            payload: plaintext,
-            encrypted: false,
+            plaintext: plaintext,
         })
     }
+}
 
-    pub fn encrypt(&self, key: &Key) -> Result<Self, &'static str> {
-        if self.encrypted {
-            return Err("Cannot encrypt already encrypted frame");
+impl DecryptedNwkFrame {
+    pub fn get_modified_aux_header(&self, nib_security_level: NwkSecurityLevel) -> NwkAuxHeader {
+        if self.aux_header.is_none() {
+            panic!("Auxiliary header is missing");
         }
 
+        let mut aux_header = self.aux_header.clone().unwrap();
+        aux_header.security_control.security_level = nib_security_level;
+
+        aux_header
+    }
+
+    pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
+        let source;
+
+        if !aux_header.extended_source.is_none() {
+            source = aux_header.extended_source.unwrap();
+        } else if !self.nwk_header.source_ieee.is_none() {
+            source = self.nwk_header.source_ieee.unwrap();
+        } else {
+            // XXX: this can't happen
+            panic!("Cannot compute nonce with no source address");
+        }
+
+        let mut nonce = [0; 13];
+        nonce[..8].copy_from_slice(&source.to_bytes());
+        nonce[8..12].copy_from_slice(&aux_header.frame_counter.to_le_bytes());
+        nonce[12..13].copy_from_slice(&aux_header.security_control.to_abstract_bits().unwrap());
+
+        nonce
+    }
+
+    pub fn get_crypto(&self) -> NwkCrypto<2, 4> {
+        // Only a single configuration is supported but to keep the cryptography code
+        // readable, it's useful to be generic here
+        NwkCrypto::<2, 4>
+    }
+
+    pub fn encrypt(&self, key: &Key) -> EncryptedNwkFrame {
         let crypto = self.get_crypto();
 
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
-        let plaintext = &self.payload;
+        let plaintext = &self.plaintext;
 
         let mac_tag = crypto.compute_mac(&self, key, &plaintext, &aux_header, &nonce);
         let (encrypted_mac_tag, ciphertext) =
             crypto.encrypt_decrypt(key, &nonce, &mac_tag, &plaintext);
 
-        let mut payload = ciphertext;
-        payload.extend(encrypted_mac_tag);
+        let mut ciphertext_with_tag = ciphertext;
+        ciphertext_with_tag.extend(encrypted_mac_tag);
 
-        Ok(Self {
+        EncryptedNwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
-            payload: payload,
-            encrypted: true,
-        })
+            ciphertext: ciphertext_with_tag,
+        }
     }
 }
 
@@ -536,10 +577,9 @@ mod test {
     fn test_nwk_decryption_unicast() {
         let bytes =
             hex!("0802426b00000f2e287a0a0000a8ef171e004b120000f7a7e37b47adb47593c8a375c98ba6");
-        let nwk_frame = NwkFrame::from_bytes(&bytes).unwrap();
+        let nwk_frame = EncryptedNwkFrame::from_bytes(&bytes).unwrap();
 
-        let expected_nwk_frame = NwkFrame {
-            encrypted: true,
+        let expected_nwk_frame = EncryptedNwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -572,7 +612,7 @@ mod test {
                 extended_source: Some(Eui64::from_hex("00:12:4b:00:1e:17:ef:a8")),
                 key_sequence_number: 0,
             }),
-            payload: hex!("f7a7e37b47adb47593c8a375c98ba6").to_vec(),
+            ciphertext: hex!("f7a7e37b47adb47593c8a375c98ba6").to_vec(),
         };
 
         assert_eq!(nwk_frame, expected_nwk_frame);
@@ -580,17 +620,16 @@ mod test {
         let key = Key::from_hex("e8785a1ed5996b3ef715cb3fbdd69187");
         let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
 
-        let expected_decrypted_nwk_frame = NwkFrame {
-            encrypted: false,
+        let expected_decrypted_nwk_frame = DecryptedNwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: hex!("00010600040101a9015701").to_vec(),
+            plaintext: hex!("00010600040101a9015701").to_vec(),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
 
         // Make sure encryption is round trip
-        let re_encrypted_nwk_frame = decrypted_nwk_frame.encrypt(&key).unwrap();
+        let re_encrypted_nwk_frame = decrypted_nwk_frame.encrypt(&key);
         assert_eq!(nwk_frame.to_bytes(), bytes);
         assert_eq!(re_encrypted_nwk_frame, nwk_frame);
         assert_eq!(re_encrypted_nwk_frame.to_bytes(), bytes);
@@ -600,10 +639,9 @@ mod test {
     fn test_source_route() {
         let bytes =
             hex!("0806e73c375f1dcc010039f9287ea30000023c710c01881700000b73db5468c7cbc47caf8705");
-        let nwk_frame = NwkFrame::from_bytes(&bytes).unwrap();
+        let nwk_frame = EncryptedNwkFrame::from_bytes(&bytes).unwrap();
 
-        let expected_nwk_frame = NwkFrame {
-            encrypted: true,
+        let expected_nwk_frame = EncryptedNwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -639,7 +677,7 @@ mod test {
                 extended_source: Some(Eui64::from_hex("00:17:88:01:0c:71:3c:02")),
                 key_sequence_number: 0,
             }),
-            payload: hex!("0b73db5468c7cbc47caf8705").to_vec(),
+            ciphertext: hex!("0b73db5468c7cbc47caf8705").to_vec(),
         };
 
         assert_eq!(nwk_frame, expected_nwk_frame);
@@ -647,17 +685,16 @@ mod test {
         let key = Key::from_hex("31908c7c51c2f01552bc90cc16e5443d");
         let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
 
-        let expected_decrypted_nwk_frame = NwkFrame {
-            encrypted: false,
+        let expected_decrypted_nwk_frame = DecryptedNwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: hex!("020106000401405b").to_vec(),
+            plaintext: hex!("020106000401405b").to_vec(),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
 
         // Make sure encryption is round trip
-        let re_encrypted_nwk_frame = decrypted_nwk_frame.encrypt(&key).unwrap();
+        let re_encrypted_nwk_frame = decrypted_nwk_frame.encrypt(&key);
         assert_eq!(nwk_frame.to_bytes(), bytes);
         assert_eq!(re_encrypted_nwk_frame, nwk_frame);
         assert_eq!(re_encrypted_nwk_frame.to_bytes(), bytes);
