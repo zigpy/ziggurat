@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crc_all::CrcAlgo;
 use log;
 use num_enum::TryFromPrimitive;

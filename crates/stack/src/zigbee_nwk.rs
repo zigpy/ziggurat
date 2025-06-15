@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
