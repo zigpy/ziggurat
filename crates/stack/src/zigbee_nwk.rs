@@ -317,14 +317,14 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
 
     pub fn compute_mac(
         &self,
-        frame: &NwkFrame,
+        nwk_header: &NwkHeader,
         key: &Key,
         plaintext: &[u8],
         aux_header: &NwkAuxHeader,
         nonce: &[u8; 13],
     ) -> [u8; M] {
         let mut auth_data = Vec::new();
-        auth_data.extend(frame.nwk_header.to_bytes());
+        auth_data.extend(nwk_header.to_bytes());
         auth_data.extend(aux_header.to_bytes());
 
         let encoded_auth_data_len = auth_data.len().to_be_bytes();
@@ -494,7 +494,7 @@ impl EncryptedNwkFrame {
         let (ciphertext, encrypted_mac_tag) = crypto.split_mac_tag(&self.ciphertext);
         let (provided_mac_tag, plaintext) =
             crypto.encrypt_decrypt(key, &nonce, &encrypted_mac_tag, &ciphertext);
-        let mac_tag = crypto.compute_mac(&self, key, &plaintext, &aux_header, &nonce);
+        let mac_tag = crypto.compute_mac(&self.nwk_header, key, &plaintext, &aux_header, &nonce);
 
         if !constant_time_eq(&provided_mac_tag, &mac_tag) {
             return Err(NwkDecryptionError::InvalidMacTag);
@@ -551,9 +551,9 @@ impl NwkFrame {
 
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
-        let plaintext = &self.plaintext;
+        let plaintext = &self.payload;
 
-        let mac_tag = crypto.compute_mac(&self, key, &plaintext, &aux_header, &nonce);
+        let mac_tag = crypto.compute_mac(&self.nwk_header, key, &plaintext, &aux_header, &nonce);
         let (encrypted_mac_tag, ciphertext) =
             crypto.encrypt_decrypt(key, &nonce, &mac_tag, &plaintext);
 
