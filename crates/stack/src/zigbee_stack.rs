@@ -372,26 +372,6 @@ impl ApsAckData {
 }
 
 #[derive(Debug)]
-pub enum NwkFrameSequenceNumberOption {
-    Keep,
-    Increment,
-    FixedValue(u8),
-}
-
-#[derive(Debug)]
-pub struct NwkFrameSendOptions {
-    pub sequence_number: NwkFrameSequenceNumberOption,
-}
-
-impl NwkFrameSendOptions {
-    pub fn default() -> Self {
-        NwkFrameSendOptions {
-            sequence_number: NwkFrameSequenceNumberOption::Increment,
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct State {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,

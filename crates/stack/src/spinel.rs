@@ -10,9 +10,6 @@ use tokio::sync::{mpsc, oneshot};
 const CRC_KERMIT: CrcAlgo<u16> = CrcAlgo::<u16>::new(0x1021, 16, 0xFFFF, 0xFFFF, true);
 const U21_MAX: u32 = 1 << 21;
 
-#[derive(Error, Debug)]
-pub enum SpinelSendError {}
-
 #[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelCommandId {
