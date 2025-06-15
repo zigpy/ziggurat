@@ -462,7 +462,7 @@ impl ZigbeeStack {
                         continue;
                     }
 
-                    let aps_frame = match parse_aps_frame(&nwk_frame.plaintext) {
+                    let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
                         Ok(ApsFrame::Data(data)) => data,
                         Ok(ApsFrame::Ack(ack)) => {
                             let ack_data =
@@ -910,7 +910,7 @@ impl ZigbeeStack {
 
         // Handle NWK commands
         if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command {
-            match NwkCommandId::try_from(nwk_frame.plaintext[0]) {
+            match NwkCommandId::try_from(nwk_frame.payload[0]) {
                 Ok(NwkCommandId::LinkStatus) => {
                     // TODO: Error handling for decoding?
                     log::info!("Link status command frame received");
@@ -924,7 +924,7 @@ impl ZigbeeStack {
                 Ok(NwkCommandId::RouteRecord) => {
                     // TODO: Error handling for decoding?
                     let route_record_cmd =
-                        NwkRouteRecordCommand::deserialize(&nwk_frame.plaintext).unwrap();
+                        NwkRouteRecordCommand::deserialize(&nwk_frame.payload).unwrap();
                     log::info!(
                         "Route record command frame received: {:#?}",
                         route_record_cmd
@@ -940,10 +940,10 @@ impl ZigbeeStack {
                     self.handle_route_request(nwk_frame, sender_nwk);
                 }
                 Err(_) => {
-                    log::warn!("Unknown NWK command: {}", nwk_frame.plaintext[0]);
+                    log::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
                 }
                 _ => {
-                    log::warn!("Unhandled NWK command: {:?}", nwk_frame.plaintext[0]);
+                    log::warn!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
                 }
             }
         }
@@ -995,7 +995,7 @@ impl ZigbeeStack {
     }
 
     fn handle_link_status(&self, nwk_frame: &NwkFrame) {
-        let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.plaintext) {
+        let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing link status command: {e:?}");
@@ -1119,7 +1119,7 @@ impl ZigbeeStack {
     }
 
     fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
-        let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.plaintext) {
+        let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing route reply command: {e:?}");
@@ -1371,7 +1371,7 @@ impl ZigbeeStack {
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
-        let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.plaintext) {
+        let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
                 log::warn!("Error parsing route request command: {e:?}");

@@ -411,7 +411,7 @@ pub struct NwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
     #[derivative(Debug(format_with = "format_hex"))]
-    pub plaintext: Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 impl EncryptedNwkFrame {
@@ -503,7 +503,7 @@ impl EncryptedNwkFrame {
         Ok(NwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
-            plaintext: plaintext,
+            payload: plaintext,
         })
     }
 }
@@ -623,7 +623,7 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            plaintext: hex!("00010600040101a9015701").to_vec(),
+            payload: hex!("00010600040101a9015701").to_vec(),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
@@ -688,7 +688,7 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            plaintext: hex!("020106000401405b").to_vec(),
+            payload: hex!("020106000401405b").to_vec(),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
