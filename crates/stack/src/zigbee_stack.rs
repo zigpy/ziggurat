@@ -9,8 +9,8 @@ use crate::zigbee_aps::{
     ApsFrameType, parse_aps_frame,
 };
 use crate::zigbee_nwk::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, DecryptedNwkFrame,
-    EncryptedNwkFrame, NwkAuxHeader, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, EncryptedNwkFrame,
+    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
     NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 use ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -659,7 +659,7 @@ impl ZigbeeStack {
         frame: &Ieee802154Frame,
         lqi: u8,
         rssi: i8,
-    ) -> Option<DecryptedNwkFrame> {
+    ) -> Option<NwkFrame> {
         let state = self.state.lock().unwrap();
 
         // 802.15.4 encrypted frames can't be Zigbee NWK
@@ -827,7 +827,7 @@ impl ZigbeeStack {
     }
 
     /// Filter broadcast frames based on the NWK broadcast transaction table
-    pub fn filter_broadcast(&self, nwk_frame: &DecryptedNwkFrame) -> bool {
+    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
         let broadcast_delivery_time = state.nib.nwkc_broadcast_delivery_time;
@@ -866,13 +866,7 @@ impl ZigbeeStack {
         return false;
     }
 
-    pub fn handle_decrypted_frame(
-        &self,
-        nwk_frame: &DecryptedNwkFrame,
-        sender_nwk: Nwk,
-        lqi: u8,
-        rssi: i8,
-    ) {
+    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, lqi: u8, rssi: i8) {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header {
             match aux_header.extended_source {
@@ -955,13 +949,7 @@ impl ZigbeeStack {
         }
     }
 
-    fn maybe_recompute_lqa(
-        &self,
-        state: &mut State,
-        nwk_frame: &DecryptedNwkFrame,
-        lqi: u8,
-        _rssi: i8,
-    ) {
+    fn maybe_recompute_lqa(&self, state: &mut State, nwk_frame: &NwkFrame, lqi: u8, _rssi: i8) {
         // Find the source node via its EUI64 address (preferred) or its NWK address
         match if nwk_frame.nwk_header.source_ieee.is_some() {
             state
@@ -1006,7 +994,7 @@ impl ZigbeeStack {
         }
     }
 
-    fn handle_link_status(&self, nwk_frame: &DecryptedNwkFrame) {
+    fn handle_link_status(&self, nwk_frame: &NwkFrame) {
         let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.plaintext) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -1130,7 +1118,7 @@ impl ZigbeeStack {
         let _ = tx.send(());
     }
 
-    fn handle_route_reply(&self, nwk_frame: &DecryptedNwkFrame) {
+    fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
         let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.plaintext) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -1318,7 +1306,7 @@ impl ZigbeeStack {
             return;
         };
 
-        let relayed_route_reply_frame = DecryptedNwkFrame {
+        let relayed_route_reply_frame = NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
@@ -1382,7 +1370,7 @@ impl ZigbeeStack {
         });
     }
 
-    fn handle_route_request(&self, nwk_frame: &DecryptedNwkFrame, sender_nwk: Nwk) {
+    fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
         let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.plaintext) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -1561,7 +1549,7 @@ impl ZigbeeStack {
                 return;
             }
 
-            let relayed_route_request_cmd = DecryptedNwkFrame {
+            let relayed_route_request_cmd = NwkFrame {
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,
@@ -1597,7 +1585,7 @@ impl ZigbeeStack {
 
             self.background_send_nwk_frame(state, relayed_route_request_cmd);
         } else {
-            let route_reply_frame = DecryptedNwkFrame {
+            let route_reply_frame = NwkFrame {
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,
@@ -1636,11 +1624,11 @@ impl ZigbeeStack {
         }
     }
 
-    fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &DecryptedNwkFrame) {
+    fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
         log::debug!("Sending back an APS ACK");
 
         let state = self.state.lock().unwrap();
-        let aps_ack_frame = DecryptedNwkFrame {
+        let aps_ack_frame = NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -1759,10 +1747,7 @@ impl ZigbeeStack {
         });
     }
 
-    pub async fn send_nwk_frame(
-        &self,
-        nwk_frame: DecryptedNwkFrame,
-    ) -> Result<(), ZigbeeStackError> {
+    pub async fn send_nwk_frame(&self, nwk_frame: NwkFrame) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             self.send_broadcast_nwk_frame(nwk_frame).await
         } else {
@@ -1772,7 +1757,7 @@ impl ZigbeeStack {
 
     pub async fn send_unicast_nwk_frame(
         &self,
-        mut nwk_frame: DecryptedNwkFrame,
+        mut nwk_frame: NwkFrame,
     ) -> Result<(), ZigbeeStackError> {
         // Compute a next-hop address
         let next_hop_address = self
@@ -1910,7 +1895,7 @@ impl ZigbeeStack {
 
     pub async fn send_broadcast_nwk_frame(
         &self,
-        mut nwk_frame: DecryptedNwkFrame,
+        mut nwk_frame: NwkFrame,
     ) -> Result<(), ZigbeeStackError> {
         let mut state = self.state.lock().unwrap();
 
@@ -2205,7 +2190,7 @@ impl ZigbeeStack {
             }
         });
 
-        let route_request_frame = DecryptedNwkFrame {
+        let route_request_frame = NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
@@ -2312,7 +2297,7 @@ impl ZigbeeStack {
         log::debug!("Prepared APS frame: {:#?}", aps_frame);
 
         let mut state = self.state.lock().unwrap();
-        let nwk_frame = DecryptedNwkFrame {
+        let nwk_frame = NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -2439,7 +2424,7 @@ impl ZigbeeStack {
 
             state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
 
-            let link_status_frame = DecryptedNwkFrame {
+            let link_status_frame = NwkFrame {
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,

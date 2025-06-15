@@ -407,7 +407,7 @@ pub struct EncryptedNwkFrame {
 
 #[derive(Derivative)]
 #[derivative(Debug, Clone, PartialEq)]
-pub struct DecryptedNwkFrame {
+pub struct NwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
     #[derivative(Debug(format_with = "format_hex"))]
@@ -486,7 +486,7 @@ impl EncryptedNwkFrame {
         bytes
     }
 
-    pub fn decrypt(&self, key: &Key) -> Result<DecryptedNwkFrame, NwkDecryptionError> {
+    pub fn decrypt(&self, key: &Key) -> Result<NwkFrame, NwkDecryptionError> {
         let crypto = self.get_crypto();
 
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
@@ -500,7 +500,7 @@ impl EncryptedNwkFrame {
             return Err(NwkDecryptionError::InvalidMacTag);
         }
 
-        Ok(DecryptedNwkFrame {
+        Ok(NwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
             plaintext: plaintext,
@@ -508,7 +508,7 @@ impl EncryptedNwkFrame {
     }
 }
 
-impl DecryptedNwkFrame {
+impl NwkFrame {
     pub fn get_modified_aux_header(&self, nib_security_level: NwkSecurityLevel) -> NwkAuxHeader {
         if self.aux_header.is_none() {
             panic!("Auxiliary header is missing");
@@ -620,7 +620,7 @@ mod test {
         let key = Key::from_hex("e8785a1ed5996b3ef715cb3fbdd69187");
         let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
 
-        let expected_decrypted_nwk_frame = DecryptedNwkFrame {
+        let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
             plaintext: hex!("00010600040101a9015701").to_vec(),
@@ -685,7 +685,7 @@ mod test {
         let key = Key::from_hex("31908c7c51c2f01552bc90cc16e5443d");
         let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
 
-        let expected_decrypted_nwk_frame = DecryptedNwkFrame {
+        let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
             plaintext: hex!("020106000401405b").to_vec(),
