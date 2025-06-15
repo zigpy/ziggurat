@@ -315,25 +315,24 @@ impl SpinelClient {
             .await?;
 
         let response_payload = response.payload;
-        let (rsp_property_id, payload) =
+        let (rsp_property_id_int, payload) =
             packed_uint21_deserialize(&response_payload).map_err(SpinelError::U21ParsingError)?;
 
+        let rsp_property_id = SpinelPropertyId::try_from(rsp_property_id_int).map_err(|_| {
+            SpinelError::InvalidResponseError {
+                reason: "Invalid property ID in response".to_string(),
+            }
+        })?;
+
         log::info!(
-            "Setting property {:?}={:02X?}, result {}={:02X?}",
+            "Setting property {:?}={:02X?}, result {:?}={:02X?}",
             property_id,
             value,
             rsp_property_id,
             payload
         );
 
-        Ok((
-            SpinelPropertyId::try_from(rsp_property_id).map_err(|_| {
-                SpinelError::InvalidResponseError {
-                    reason: "Invalid property ID in response".to_string(),
-                }
-            })?,
-            payload.to_vec(),
-        ))
+        Ok((rsp_property_id, payload.to_vec()))
     }
 
     // Convenience method wrapping broad functionality are below
