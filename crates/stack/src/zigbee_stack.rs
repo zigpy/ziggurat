@@ -3,18 +3,20 @@ use crate::ieee_802154::{
     Ieee802154FrameType,
 };
 use crate::spinel::{SpinelFramePropValueIs, SpinelPropertyId, SpinelStatus};
-use crate::spinel_client::{SpinelClient, SpinelRxFrame, SpinelTxFrame};
+use crate::spinel_client::{SpinelClient, SpinelError, SpinelRxFrame, SpinelTxFrame};
 use crate::zigbee_aps::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrame, ApsFrameControl,
     ApsFrameType, parse_aps_frame,
 };
 use crate::zigbee_nwk::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, NwkAuxHeader, NwkFrame,
-    NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery, NwkSecurityHeaderControlField,
-    NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, EncryptedNwkFrame,
+    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
+    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 use ieee_802154::types::{Eui64, Key, Nwk, PanId};
 
+use thiserror::Error;
+use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use zigbee_parts::Command;
 use zigbee_parts::commands::{
@@ -33,6 +35,8 @@ use tokio::time::{Duration, Instant};
 mod neighbor;
 mod route;
 
+const APS_ACK_TIMEOUT: Duration = Duration::from_millis(5000);
+
 // The number of the most recent samples taken into consideration SHOULD be n = 3, which
 // eliminates single outliers maintains a fast response to real changes in link quality,
 // and keeps memory requirements to a minimum.
@@ -50,6 +54,24 @@ fn lqi_to_link_cost(lqi: u8) -> u8 {
         193..=255 => 1,
         // 0 corresponds to "unknown LQI"
     }
+}
+
+#[derive(Error, Debug)]
+pub enum ZigbeeStackError {
+    #[error("route discovery timed out")]
+    RouteDiscoveryTimeout(#[from] Elapsed),
+    #[error("route discovery unexpectedly failed: {0}")]
+    RouteDiscoveryFailure(String),
+    #[error("next hop {next_hop:?} did not ACK")]
+    NwkNoAck { next_hop: Nwk },
+    #[error("transmit rejected due to CCA failure")]
+    CcaFailure,
+    #[error("unexpected transmit failure: {0:?}")]
+    SpinelTransmitFailure(SpinelStatus),
+    #[error("aps ack timeout")]
+    ApsAckTimeout,
+    #[error("spinel error: {0}")]
+    SpinelError(#[from] SpinelError),
 }
 
 #[derive(Debug)]
@@ -350,26 +372,6 @@ impl ApsAckData {
 }
 
 #[derive(Debug)]
-pub enum NwkFrameSequenceNumberOption {
-    Keep,
-    Increment,
-    FixedValue(u8),
-}
-
-#[derive(Debug)]
-pub struct NwkFrameSendOptions {
-    pub sequence_number: NwkFrameSequenceNumberOption,
-}
-
-impl NwkFrameSendOptions {
-    pub fn default() -> Self {
-        NwkFrameSendOptions {
-            sequence_number: NwkFrameSequenceNumberOption::Increment,
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct State {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,
@@ -439,7 +441,7 @@ impl ZigbeeStack {
     pub fn new(spinel: SpinelClient) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
         let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
-        spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw as u32, raw_frame_tx);
+        spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw, raw_frame_tx);
 
         let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
             self_weak: weak_self.clone(),
@@ -557,7 +559,7 @@ impl ZigbeeStack {
         key: Key,
         key_seq_number: u8,
         outgoing_frame_counter: u32,
-    ) -> Result<(), String> {
+    ) -> Result<(), ZigbeeStackError> {
         let mut state = self.state.lock().unwrap();
         state.channel = nwk_channel;
         state.nib.nwk_update_id = nwk_update_id;
@@ -574,69 +576,63 @@ impl ZigbeeStack {
 
         // Update the hardware with new settings.
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyEnabled as u32, vec![true as u8])
+            .prop_value_set(SpinelPropertyId::PhyEnabled, vec![true as u8])
             .await
-            .expect("Failed to enable the PHY");
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyChan as u32, vec![nwk_channel])
+            .prop_value_set(SpinelPropertyId::PhyChan, vec![nwk_channel])
             .await
-            .map_err(|e| format!("Failed to set PHY channel: {:?}", e))?;
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyTxPower as u32, vec![8])
+            .prop_value_set(SpinelPropertyId::PhyTxPower, vec![8])
             .await
-            .map_err(|e| format!("Failed to set PHY TX power: {:?}", e))?;
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         /*
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::MacPromiscuousMode as u32,
+                SpinelPropertyId::MacPromiscuousMode,
                 vec![SpinelMacPromiscuousMode::Full as u8],
             )
             .await
-            .expect("Failed to set the MAC promiscuous mode");
+            .map_err(ZigbeeStackError::SpinelError)?;
         */
 
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::Mac154Laddr as u32,
+                SpinelPropertyId::Mac154Laddr,
                 state.nib.nwk_ieee_address.to_bytes().to_vec(),
             )
             .await
-            .map_err(|e| format!("Failed to set MAC IEEE address: {:?}", e))?;
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::Mac154Saddr as u32,
+                SpinelPropertyId::Mac154Saddr,
                 state.nib.nwk_network_address.to_bytes().to_vec(),
             )
             .await
-            .map_err(|e| format!("Failed to set MAC NWK address: {:?}", e))?;
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
             .prop_value_set(
-                SpinelPropertyId::Mac154Panid as u32,
+                SpinelPropertyId::Mac154Panid,
                 state.nib.nwk_pan_id.to_bytes().to_vec(),
             )
             .await
-            .map_err(|e| format!("Failed to set MAC PAN ID: {:?}", e))?;
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacRxOnWhenIdleMode as u32,
-                vec![true as u8],
-            )
+            .prop_value_set(SpinelPropertyId::MacRxOnWhenIdleMode, vec![true as u8])
             .await
-            .expect("Failed to set RX on when idle");
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacRawStreamEnabled as u32,
-                vec![true as u8],
-            )
+            .prop_value_set(SpinelPropertyId::MacRawStreamEnabled, vec![true as u8])
             .await
-            .expect("Failed to enable the RAW stream");
+            .map_err(ZigbeeStackError::SpinelError)?;
 
         // This is treated as the start time of the stack
         state.start_time = Some(Instant::now());
@@ -704,7 +700,7 @@ impl ZigbeeStack {
         }
 
         // Next, try to parse the NWK frame
-        let nwk_frame = match NwkFrame::from_bytes(&frame.payload) {
+        let nwk_frame = match EncryptedNwkFrame::from_bytes(&frame.payload) {
             Ok(nwk_frame) => nwk_frame,
             Err(_) => {
                 log::debug!("Ignoring frame, not a NWK frame");
@@ -722,7 +718,7 @@ impl ZigbeeStack {
         }
 
         // Ignore unencrypted frames
-        if !nwk_frame.encrypted {
+        if !nwk_frame.nwk_header.frame_control.security {
             log::debug!("Ignoring frame, it is not encrypted");
             return None;
         }
@@ -1313,7 +1309,6 @@ impl ZigbeeStack {
         };
 
         let relayed_route_reply_frame = NwkFrame {
-            encrypted: false,
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
@@ -1557,7 +1552,6 @@ impl ZigbeeStack {
             }
 
             let relayed_route_request_cmd = NwkFrame {
-                encrypted: false,
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,
@@ -1594,7 +1588,6 @@ impl ZigbeeStack {
             self.background_send_nwk_frame(state, relayed_route_request_cmd);
         } else {
             let route_reply_frame = NwkFrame {
-                encrypted: false,
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,
@@ -1638,7 +1631,6 @@ impl ZigbeeStack {
 
         let state = self.state.lock().unwrap();
         let aps_ack_frame = NwkFrame {
-            encrypted: false,
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -1683,7 +1675,7 @@ impl ZigbeeStack {
         self.background_send_nwk_frame(state, aps_ack_frame);
     }
 
-    async fn send_802154_frame(&self, mut frame: Ieee802154Frame) -> Result<(), String> {
+    async fn send_802154_frame(&self, mut frame: Ieee802154Frame) -> Result<(), ZigbeeStackError> {
         // Briefly grab the channel when sending, we don't want to hold the lock while
         // waiting for an ACK
         let mut state = self.state.lock().unwrap();
@@ -1726,14 +1718,20 @@ impl ZigbeeStack {
             .await
             .expect("Failed to transmit frame");
 
-        if status == SpinelStatus::Ok as u8 {
+        if status == SpinelStatus::Ok {
             return Ok(());
-        } else if status == SpinelStatus::NoAck as u8 {
-            return Err("No ACK".to_string());
-        } else if status == SpinelStatus::CcaFailure as u8 {
-            return Err("CCA failure".to_string());
+        } else if status == SpinelStatus::NoAck {
+            let next_hop = match frame.dest_address.unwrap() {
+                Ieee802154Address::Nwk(nwk) => Some(nwk),
+                _ => None,
+            }
+            .expect("Next 802.15.4. hop must have NWK addressing");
+
+            return Err(ZigbeeStackError::NwkNoAck { next_hop: next_hop });
+        } else if status == SpinelStatus::CcaFailure {
+            return Err(ZigbeeStackError::CcaFailure);
         } else {
-            return Err("Unknown failure: {status:#?}".to_string());
+            return Err(ZigbeeStackError::SpinelTransmitFailure(status));
         }
     }
 
@@ -1757,7 +1755,7 @@ impl ZigbeeStack {
         });
     }
 
-    pub async fn send_nwk_frame(&self, nwk_frame: NwkFrame) -> Result<(), String> {
+    pub async fn send_nwk_frame(&self, nwk_frame: NwkFrame) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             self.send_broadcast_nwk_frame(nwk_frame).await
         } else {
@@ -1765,7 +1763,10 @@ impl ZigbeeStack {
         }
     }
 
-    pub async fn send_unicast_nwk_frame(&self, mut nwk_frame: NwkFrame) -> Result<(), String> {
+    pub async fn send_unicast_nwk_frame(
+        &self,
+        mut nwk_frame: NwkFrame,
+    ) -> Result<(), ZigbeeStackError> {
         // Compute a next-hop address
         let next_hop_address = self
             .discover_route(nwk_frame.nwk_header.destination)
@@ -1810,7 +1811,7 @@ impl ZigbeeStack {
                 .outgoing_frame_counter;
 
             let encrypted_nwk_frame =
-                nwk_frame.encrypt(&state.nib.nwk_security_material_primary.key)?;
+                nwk_frame.encrypt(&state.nib.nwk_security_material_primary.key);
 
             let ieee802154_frame = Ieee802154Frame {
                 frame_control: Ieee802154FrameControl {
@@ -1900,7 +1901,10 @@ impl ZigbeeStack {
         Ok(())
     }
 
-    pub async fn send_broadcast_nwk_frame(&self, mut nwk_frame: NwkFrame) -> Result<(), String> {
+    pub async fn send_broadcast_nwk_frame(
+        &self,
+        mut nwk_frame: NwkFrame,
+    ) -> Result<(), ZigbeeStackError> {
         let mut state = self.state.lock().unwrap();
 
         state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
@@ -1941,7 +1945,7 @@ impl ZigbeeStack {
                 .outgoing_frame_counter;
 
             let encrypted_nwk_frame =
-                nwk_frame.encrypt(&state.nib.nwk_security_material_primary.key)?;
+                nwk_frame.encrypt(&state.nib.nwk_security_material_primary.key);
 
             let ieee802154_frame = Ieee802154Frame {
                 frame_control: Ieee802154FrameControl {
@@ -1998,7 +2002,7 @@ impl ZigbeeStack {
         Ok(())
     }
 
-    pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, String> {
+    pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, ZigbeeStackError> {
         let state = self.state.lock().unwrap();
 
         if state.hack_force_route_discovery || !state.nib.nwk_route_table.contains_key(&destination)
@@ -2072,7 +2076,9 @@ impl ZigbeeStack {
                     Some(entry) => entry,
                     None => {
                         log::warn!("No route discovery entry found for {destination:?}");
-                        return Err("No route discovery entry found".to_string());
+                        return Err(ZigbeeStackError::RouteDiscoveryFailure(
+                            "No discovery entry found".to_string(),
+                        ));
                     }
                 };
 
@@ -2084,22 +2090,15 @@ impl ZigbeeStack {
         );
 
         match timeout(discovery_timeout, rx.recv()).await {
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 log::debug!("Route discovery completed for NWK {destination:#?}");
             }
-            Ok(Err(_)) => {
+            Err(err) => {
                 log::debug!("Route discovery timed out");
                 let mut state = self.state.lock().unwrap();
                 let entry = state.nib.nwk_route_table.get_mut(&destination).unwrap();
                 entry.status = route::Status::DiscoveryFailed;
-                return Err("Route discovery timed out".to_string());
-            }
-            Err(_) => {
-                log::debug!("Route discovery timed out");
-                let mut state = self.state.lock().unwrap();
-                let entry = state.nib.nwk_route_table.get_mut(&destination).unwrap();
-                entry.status = route::Status::DiscoveryFailed;
-                return Err("Route discovery timed out".to_string());
+                return Err(ZigbeeStackError::RouteDiscoveryTimeout(err));
             }
         };
 
@@ -2195,7 +2194,6 @@ impl ZigbeeStack {
         });
 
         let route_request_frame = NwkFrame {
-            encrypted: false,
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
@@ -2244,7 +2242,7 @@ impl ZigbeeStack {
         radius: u8,
         aps_seq: u8,
         data: Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ZigbeeStackError> {
         let aps_frame = match delivery_mode {
             ApsDeliveryMode::Unicast => ApsDataFrame {
                 frame_control: ApsFrameControl {
@@ -2303,7 +2301,6 @@ impl ZigbeeStack {
 
         let mut state = self.state.lock().unwrap();
         let nwk_frame = NwkFrame {
-            encrypted: false,
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -2331,40 +2328,39 @@ impl ZigbeeStack {
 
         log::debug!("Prepared NWK frame: {:#?}", nwk_frame);
 
-        let mut maybe_ack_rx = None;
-
-        if aps_ack {
-            let ack_data = ApsAckData {
-                src: destination,
-                destination_endpoint: Some(src_ep), // These are swapped
-                cluster_id: Some(cluster_id),
-                profile_id: Some(profile_id),
-                source_endpoint: Some(dst_ep), // These are swapped
-                counter: aps_seq,
-            };
-
-            let (tx, rx) = oneshot::channel();
-            maybe_ack_rx = Some(rx);
-
-            log::debug!("APS ACK requested, waiting for {:?}", ack_data);
-            state.pending_aps_acks.insert(ack_data, tx);
+        if !aps_ack {
+            self.background_send_nwk_frame(state, nwk_frame);
+            return Ok(());
         }
+
+        let ack_data = ApsAckData {
+            src: destination,
+            destination_endpoint: Some(src_ep), // These are swapped
+            cluster_id: Some(cluster_id),
+            profile_id: Some(profile_id),
+            source_endpoint: Some(dst_ep), // These are swapped
+            counter: aps_seq,
+        };
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        log::debug!("APS ACK requested, waiting for {:?}", ack_data);
+        state.pending_aps_acks.insert(ack_data, ack_tx);
 
         self.background_send_nwk_frame(state, nwk_frame);
 
-        if let Some(ack_rx) = maybe_ack_rx {
-            // With a 5s timeout
-            let aps_ack_timeout = Duration::from_secs(5);
-            match tokio::time::timeout(aps_ack_timeout, ack_rx).await {
-                Ok(Ok(())) => {
-                    log::info!("APS ACK received");
-                }
-                Ok(Err(e)) => {
-                    log::warn!("APS ACK channel hung up: {:?}", e);
-                }
-                Err(_) => {
-                    log::warn!("APS ACK timed out");
-                }
+        // With a 5s timeout
+        match tokio::time::timeout(APS_ACK_TIMEOUT, ack_rx).await {
+            Ok(Ok(())) => {
+                log::info!("APS ACK received");
+            }
+            Ok(Err(e)) => {
+                log::warn!("APS ACK channel hung up: {:?}", e);
+                return Err(ZigbeeStackError::ApsAckTimeout);
+            }
+            Err(_) => {
+                log::warn!("APS ACK timed out");
+                return Err(ZigbeeStackError::ApsAckTimeout);
             }
         }
 
@@ -2431,7 +2427,6 @@ impl ZigbeeStack {
             state.nib.nwk_sequence_number = state.nib.nwk_sequence_number.wrapping_add(1);
 
             let link_status_frame = NwkFrame {
-                encrypted: false,
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,

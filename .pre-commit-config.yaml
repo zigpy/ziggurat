@@ -1,9 +1,15 @@
 repos:
   - repo: local
     hooks:
-      - id: rust-linting
-        name: Rust linting
+      - id: cargo-fmt
+        name: Cargo fmt
         entry: cargo fmt --all
+        language: system
+        pass_filenames: false
+
+      - id: cargo-check
+        name: Cargo check
+        entry: cargo check --workspace
         language: system
         pass_filenames: false
 

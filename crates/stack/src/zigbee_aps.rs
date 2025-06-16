@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use abstract_bits::{AbstractBits, abstract_bits};
 use num_enum::TryFromPrimitive;
 

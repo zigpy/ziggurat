@@ -210,10 +210,18 @@ impl ZigguratServer {
                     )
                     .await;
 
-                CommandResponse {
-                    tid: cmd.tid,
-                    cmd: cmd.cmd,
-                    data: json!({"status": if status.is_ok() { "success" } else { "error" } }),
+                if status.is_ok() {
+                    CommandResponse {
+                        tid: cmd.tid,
+                        cmd: cmd.cmd,
+                        data: json!({"status": "success"}),
+                    }
+                } else {
+                    CommandResponse {
+                        tid: cmd.tid,
+                        cmd: cmd.cmd,
+                        data: json!({"status": "error", "reason": status.err().map(|e| e.to_string())}),
+                    }
                 }
             }
             "send_aps_command" => {
