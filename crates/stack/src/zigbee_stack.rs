@@ -212,48 +212,6 @@ pub struct Nib {
     pub hub_connectivity: bool,
 }
 
-#[derive(Debug)]
-pub struct Constants {
-    pub concentrator_radius: u8,
-    pub concentrator_discovery_time: Duration,
-    pub stack_profile: u8,
-    pub transaction_persistence_time: Duration,
-    pub max_source_route: u8,
-    pub max_children: u8,
-
-    pub passive_ack_timeout: Duration,
-
-    /// The maximum number of retries allowed after a broadcast transmission failure.
-    pub max_broadcast_retries: u8,
-
-    /// The minimum time, in seconds, between two consecutive concentrator route
-    /// discoveries. If set to 0x00, there is no minimum separation. This only applies
-    /// when the device is operating as a Concentrator.
-    pub concentrator_discovery_separation_time: Duration,
-
-    /// The time between link status command frames.
-    pub link_status_period: Duration,
-
-    /// The number of missed link status command frames before resetting the link costs
-    /// to zero.
-    pub router_age_limit: u8,
-
-    pub protocol_version: u8,
-    pub route_discovery_time: Duration,
-    pub max_broadcast_jitter: Duration,
-    pub initial_rreq_retries: u8,
-    pub rreq_retries: u8,
-    pub rreq_retry_interval: Duration,
-    pub min_rreq_jitter: Duration,
-    pub max_rreq_jitter: Duration,
-    pub max_depth: u8,
-    pub unicast_retries: u8,
-    pub unicast_retry_delay: Duration,
-    pub min_router_bootstrap_jitter: Duration,
-    pub max_router_bootstrap_jitter: Duration,
-    pub broadcast_delivery_time: Duration,
-}
-
 impl Nib {
     pub fn new() -> Self {
         Nib {
@@ -311,6 +269,48 @@ impl Nib {
             hub_connectivity: true,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct Constants {
+    pub concentrator_radius: u8,
+    pub concentrator_discovery_time: Duration,
+    pub stack_profile: u8,
+    pub transaction_persistence_time: Duration,
+    pub max_source_route: u8,
+    pub max_children: u8,
+
+    pub passive_ack_timeout: Duration,
+
+    /// The maximum number of retries allowed after a broadcast transmission failure.
+    pub max_broadcast_retries: u8,
+
+    /// The minimum time, in seconds, between two consecutive concentrator route
+    /// discoveries. If set to 0x00, there is no minimum separation. This only applies
+    /// when the device is operating as a Concentrator.
+    pub concentrator_discovery_separation_time: Duration,
+
+    /// The time between link status command frames.
+    pub link_status_period: Duration,
+
+    /// The number of missed link status command frames before resetting the link costs
+    /// to zero.
+    pub router_age_limit: u8,
+
+    pub protocol_version: u8,
+    pub route_discovery_time: Duration,
+    pub max_broadcast_jitter: Duration,
+    pub initial_rreq_retries: u8,
+    pub rreq_retries: u8,
+    pub rreq_retry_interval: Duration,
+    pub min_rreq_jitter: Duration,
+    pub max_rreq_jitter: Duration,
+    pub max_depth: u8,
+    pub unicast_retries: u8,
+    pub unicast_retry_delay: Duration,
+    pub min_router_bootstrap_jitter: Duration,
+    pub max_router_bootstrap_jitter: Duration,
+    pub broadcast_delivery_time: Duration,
 }
 
 impl Constants {
