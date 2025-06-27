@@ -146,44 +146,22 @@ pub enum NwkDeviceType {
 #[derive(Debug)]
 pub struct Nib {
     pub nwk_sequence_number: u8,
-    pub nwk_passive_ack_timeout: Duration,
-    /// The maximum number of retries allowed after a broadcast transmission failure.
-    pub nwkc_max_broadcast_retries: u8,
-    pub nwk_max_children: u8,
-    pub nwk_max_depth: u8,
     pub nwk_neighbor_table: HashMap<Eui64, neighbor::TableEntry>,
     pub nwk_route_table: HashMap<Nwk, route::TableEntry>,
     pub nwk_route_discovery_table: HashMap<(Nwk, route::RequestId), route::DiscoveryEntry>,
     pub nwk_capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
-    pub nwk_max_source_route: u8,
     pub nwk_update_id: u8,
-    pub nwk_transaction_persistence_time: Duration,
     pub nwk_network_address: Nwk,
-    pub nwk_stack_profile: u8,
     pub nwk_broadcast_transaction_table: HashMap<(Nwk, u8), NwkBroadcastTransaction>,
     pub nwk_extended_pan_id: Eui64,
     pub nwk_route_record_table: HashMap<Nwk, Vec<Nwk>>,
     pub nwk_is_concentrator: bool,
-    pub nwk_concentrator_radius: u8,
-    pub nwk_concentrator_discovery_time: Duration,
     pub nwk_security_level: u8,
     pub nwk_security_material_primary: NwkSecurityDescriptor,
     pub nwk_security_material_alternate: NwkSecurityDescriptor,
     pub nwk_active_key_seq_number: u8,
     pub nwk_all_fresh: bool,
-
-    /// The minimum time, in seconds, between two consecutive concentrator route
-    /// discoveries. If set to 0x00, there is no minimum separation. This only applies
-    /// when the device is operating as a Concentrator.
-    pub nwk_concentrator_discovery_separation_time: Duration,
-
-    /// The time between link status command frames.
-    pub nwk_link_status_period: Duration,
-
-    /// The number of missed link status command frames before resetting the link costs
-    /// to zero.
-    pub nwk_router_age_limit: u8,
     pub nwk_address_map: HashMap<Eui64, Nwk>,
 
     /// A flag that determines if a timestamp indication is provided on incoming and
@@ -232,44 +210,54 @@ pub struct Nib {
     /// level application. The higher level application sets this value and the stack
     /// advertises it.
     pub nwk_hub_connectivity: bool,
+}
 
-    // nwkMacInterfaceTable
-    // nwkNetworkWideBeaconAppendixTLVs
-    // nwkDeviceLocalBeaconAppendixTLVs
-    // nwkDiscoveryTable
-    // nwkDiscoveryTableSize = 6
-    // nwkNextPanId = 0xFFFF
-    // nwkNextChannelChange = 0
-    // nwkPerformAdditionalMacDataPollRetries = 0
-    // nwkPreferredParent
-    // nwkGoodParentLQA = 75
-    // nwkPanIdConflictCount = 0
-    // nwkMaxInitialJoinParentAttempts = 1
-    // nwkMaxRejoinParentAttempts = 3
-    pub nwkc_protocol_version: u8,
-    pub nwkc_route_discovery_time: Duration,
-    pub nwkc_max_broadcast_jitter: Duration,
-    pub nwkc_initial_rreq_retries: u8,
-    pub nwkc_rreq_retries: u8,
-    pub nwkc_rreq_retry_interval: Duration,
-    pub nwkc_min_rreq_jitter: Duration,
-    pub nwkc_max_rreq_jitter: Duration,
-    pub nwkc_max_depth: u8,
-    pub nwkc_unicast_retries: u8,
-    pub nwkc_unicast_retry_delay: Duration,
-    pub nwkc_min_router_bootstrap_jitter: Duration,
-    pub nwkc_max_router_bootstrap_jitter: Duration,
-    pub nwkc_broadcast_delivery_time: Duration,
+#[derive(Debug)]
+pub struct Constants {
+    pub concentrator_radius: u8,
+    pub concentrator_discovery_time: Duration,
+    pub stack_profile: u8,
+    pub transaction_persistence_time: Duration,
+    pub max_source_route: u8,
+    pub max_children: u8,
+
+    pub passive_ack_timeout: Duration,
+
+    /// The maximum number of retries allowed after a broadcast transmission failure.
+    pub max_broadcast_retries: u8,
+
+    /// The minimum time, in seconds, between two consecutive concentrator route
+    /// discoveries. If set to 0x00, there is no minimum separation. This only applies
+    /// when the device is operating as a Concentrator.
+    pub concentrator_discovery_separation_time: Duration,
+
+    /// The time between link status command frames.
+    pub link_status_period: Duration,
+
+    /// The number of missed link status command frames before resetting the link costs
+    /// to zero.
+    pub router_age_limit: u8,
+
+    pub protocol_version: u8,
+    pub route_discovery_time: Duration,
+    pub max_broadcast_jitter: Duration,
+    pub initial_rreq_retries: u8,
+    pub rreq_retries: u8,
+    pub rreq_retry_interval: Duration,
+    pub min_rreq_jitter: Duration,
+    pub max_rreq_jitter: Duration,
+    pub max_depth: u8,
+    pub unicast_retries: u8,
+    pub unicast_retry_delay: Duration,
+    pub min_router_bootstrap_jitter: Duration,
+    pub max_router_bootstrap_jitter: Duration,
+    pub broadcast_delivery_time: Duration,
 }
 
 impl Nib {
-    pub fn new() -> Nib {
+    pub fn new() -> Self {
         Nib {
             nwk_sequence_number: 0,
-            nwk_passive_ack_timeout: Duration::from_millis(500),
-            nwkc_max_broadcast_retries: 2,
-            nwk_max_children: 32,
-            nwk_max_depth: 15,
             nwk_neighbor_table: HashMap::new(),
             nwk_route_table: HashMap::new(),
             nwk_route_discovery_table: HashMap::new(),
@@ -284,17 +272,12 @@ impl Nib {
                 allocate_address: true,
             },
             nwk_manager_addr: Nwk(0x0000),
-            nwk_max_source_route: 12,
             nwk_update_id: 0,
-            nwk_transaction_persistence_time: Duration::from_millis(7680),
             nwk_network_address: Nwk(0x0000),
-            nwk_stack_profile: 2,
             nwk_broadcast_transaction_table: HashMap::new(),
             nwk_extended_pan_id: Eui64::from_hex("0000000000000000"),
             nwk_route_record_table: HashMap::new(),
             nwk_is_concentrator: true,
-            nwk_concentrator_radius: 10,
-            nwk_concentrator_discovery_time: Duration::from_secs(0),
             nwk_security_level: 5,
             nwk_security_material_primary: NwkSecurityDescriptor {
                 key_seq_number: 0,
@@ -312,9 +295,6 @@ impl Nib {
             },
             nwk_active_key_seq_number: 0,
             nwk_all_fresh: false,
-            nwk_concentrator_discovery_separation_time: Duration::from_secs(0),
-            nwk_link_status_period: Duration::from_secs(15),
-            nwk_router_age_limit: 3,
             nwk_address_map: HashMap::new(),
             nwk_time_stamp: false,
             nwk_pan_id: PanId(0xFFFF),
@@ -329,21 +309,38 @@ impl Nib {
             // nwk_routing_sequence_number: 0x0000,
             nwk_routing_request_sequence_number: 0x00,
             nwk_hub_connectivity: true,
-            // Constants. Theoretically.
-            nwkc_protocol_version: 2,
-            nwkc_route_discovery_time: Duration::from_millis(10000),
-            nwkc_max_broadcast_jitter: Duration::from_millis(64),
-            nwkc_initial_rreq_retries: 3,
-            nwkc_rreq_retries: 2,
-            nwkc_rreq_retry_interval: Duration::from_millis(254),
-            nwkc_min_rreq_jitter: Duration::from_millis(2),
-            nwkc_max_rreq_jitter: Duration::from_millis(128),
-            nwkc_max_depth: 15,
-            nwkc_unicast_retries: 3,
-            nwkc_unicast_retry_delay: Duration::from_millis(50),
-            nwkc_min_router_bootstrap_jitter: Duration::from_millis(500),
-            nwkc_max_router_bootstrap_jitter: Duration::from_millis(1000),
-            nwkc_broadcast_delivery_time: Duration::from_millis(9000),
+        }
+    }
+}
+
+impl Constants {
+    pub fn new() -> Self {
+        Self {
+            passive_ack_timeout: Duration::from_millis(500),
+            max_broadcast_retries: 2,
+            max_children: 32,
+            max_depth: 15,
+            max_source_route: 12,
+            transaction_persistence_time: Duration::from_millis(7680),
+            stack_profile: 2,
+            concentrator_radius: 10,
+            concentrator_discovery_time: Duration::from_secs(0),
+            concentrator_discovery_separation_time: Duration::from_secs(0),
+            link_status_period: Duration::from_secs(15),
+            router_age_limit: 3,
+            protocol_version: 2,
+            route_discovery_time: Duration::from_millis(10000),
+            max_broadcast_jitter: Duration::from_millis(64),
+            initial_rreq_retries: 3,
+            rreq_retries: 2,
+            rreq_retry_interval: Duration::from_millis(254),
+            min_rreq_jitter: Duration::from_millis(2),
+            max_rreq_jitter: Duration::from_millis(128),
+            unicast_retries: 3,
+            unicast_retry_delay: Duration::from_millis(50),
+            min_router_bootstrap_jitter: Duration::from_millis(500),
+            max_router_bootstrap_jitter: Duration::from_millis(1000),
+            broadcast_delivery_time: Duration::from_millis(9000),
         }
     }
 }
@@ -376,6 +373,7 @@ pub struct State {
     pub channel: u8,
     pub ieee802154_sequence_number: u8,
     pub nib: Nib,
+    pub constants: Constants,
     pub pending_aps_acks: HashMap<ApsAckData, oneshot::Sender<()>>,
     pub pending_route_notifications: HashMap<Nwk, broadcast::Sender<()>>,
     pub start_time: Option<Instant>,
@@ -402,6 +400,7 @@ impl State {
             channel: 0,
             ieee802154_sequence_number: 0,
             nib: Nib::new(),
+            constants: Constants::new(),
             pending_aps_acks: HashMap::new(),
             pending_route_notifications: HashMap::new(),
             start_time: None,
@@ -832,7 +831,7 @@ impl ZigbeeStack {
     pub fn filter_broadcast(&self, nwk_frame: &NwkFrame) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
-        let broadcast_delivery_time = state.nib.nwkc_broadcast_delivery_time;
+        let broadcast_delivery_time = state.constants.broadcast_delivery_time;
 
         // We cannot handle broadcasts until the network has been running for at least
         // the time it takes to deliver one broadcast
@@ -982,7 +981,7 @@ impl ZigbeeStack {
         // TODO: this function should be replaced by real timers
         let now = Instant::now();
         let max_neighbor_age =
-            (state.nib.nwk_router_age_limit as u32) * state.nib.nwk_link_status_period;
+            (state.constants.router_age_limit as u32) * state.constants.link_status_period;
 
         for neighbor in state.nib.nwk_neighbor_table.values_mut() {
             if neighbor.outgoing_cost > 0
@@ -1312,7 +1311,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
-                    protocol_version: state.nib.nwkc_protocol_version,
+                    protocol_version: state.constants.protocol_version,
                     discover_route: NwkRouteDiscovery::Suppress,
                     multicast: false,
                     security: true,
@@ -1323,7 +1322,7 @@ impl ZigbeeStack {
                 },
                 destination: next_hop_nwk,
                 source: state.nib.nwk_network_address,
-                radius: 2 * state.nib.nwk_max_depth,
+                radius: 2 * state.constants.max_depth,
                 sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: nwk_frame.nwk_header.source_ieee,
                 source_ieee: Some(state.nib.nwk_ieee_address),
@@ -1492,7 +1491,7 @@ impl ZigbeeStack {
             route_request_cmd.route_request_identifier,
         );
 
-        let nwkc_route_discovery_time = state.nib.nwkc_route_discovery_time;
+        let route_discovery_time = state.constants.route_discovery_time;
 
         if !is_for_self_or_child {
             self.clean_route_discovery_table(&mut state.nib.nwk_route_discovery_table);
@@ -1507,7 +1506,7 @@ impl ZigbeeStack {
                     sender_address: sender_nwk,
                     forward_cost: updated_path_cost,
                     residual_cost: 0,
-                    expiration_time: Instant::now() + nwkc_route_discovery_time,
+                    expiration_time: Instant::now() + route_discovery_time,
                     destination_address: route_request_cmd.destination_address,
                 });
 
@@ -1555,7 +1554,7 @@ impl ZigbeeStack {
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,
-                        protocol_version: state.nib.nwkc_protocol_version,
+                        protocol_version: state.constants.protocol_version,
                         discover_route: NwkRouteDiscovery::Suppress,
                         multicast: false,
                         security: true,
@@ -1591,7 +1590,7 @@ impl ZigbeeStack {
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,
-                        protocol_version: state.nib.nwkc_protocol_version,
+                        protocol_version: state.constants.protocol_version,
                         discover_route: NwkRouteDiscovery::Suppress,
                         multicast: false,
                         security: true,
@@ -1602,7 +1601,7 @@ impl ZigbeeStack {
                     },
                     destination: nwk_frame.nwk_header.source,
                     source: state.nib.nwk_network_address,
-                    radius: 2 * state.nib.nwk_max_depth,
+                    radius: 2 * state.constants.max_depth,
                     sequence_number: state.nib.nwk_sequence_number,
                     destination_ieee: nwk_frame.nwk_header.source_ieee,
                     source_ieee: Some(state.nib.nwk_ieee_address),
@@ -1634,7 +1633,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
-                    protocol_version: state.nib.nwkc_protocol_version,
+                    protocol_version: state.constants.protocol_version,
                     discover_route: NwkRouteDiscovery::Enable,
                     multicast: false,
                     security: true,
@@ -1646,7 +1645,7 @@ impl ZigbeeStack {
                 // Send our ACK back to the sender
                 destination: nwk_frame.nwk_header.source,
                 source: state.nib.nwk_network_address,
-                radius: 2 * state.nib.nwk_max_depth,
+                radius: 2 * state.constants.max_depth,
                 sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: None,
                 source_ieee: None,
@@ -1787,12 +1786,12 @@ impl ZigbeeStack {
             key_sequence_number: state.nib.nwk_active_key_seq_number,
         });
 
-        let nwkc_unicast_retries = state.nib.nwkc_unicast_retries;
-        let nwkc_unicast_retry_delay = state.nib.nwkc_unicast_retry_delay;
+        let unicast_retries = state.constants.unicast_retries;
+        let unicast_retry_delay = state.constants.unicast_retry_delay;
 
         drop(state);
 
-        for attempt in 0..=nwkc_unicast_retries {
+        for attempt in 0..=unicast_retries {
             state = self.state.lock().unwrap();
 
             // The encryption frame counter always increments
@@ -1883,17 +1882,17 @@ impl ZigbeeStack {
                 Err(e) => {
                     log::warn!("Failed to send unicast frame: {e}");
 
-                    if attempt + 1 > nwkc_unicast_retries {
+                    if attempt + 1 > unicast_retries {
                         log::error!("Failed to send unicast frame after {} attempts", attempt);
                         return Err(e);
                     }
                     log::debug!(
                         "Retrying unicast frame send, attempt {} of {}",
                         attempt,
-                        nwkc_unicast_retries
+                        unicast_retries
                     );
 
-                    tokio::time::sleep(nwkc_unicast_retry_delay).await;
+                    tokio::time::sleep(unicast_retry_delay).await;
                 }
             }
         }
@@ -1921,12 +1920,12 @@ impl ZigbeeStack {
             key_sequence_number: state.nib.nwk_active_key_seq_number,
         });
 
-        let nwkc_broadcast_retries = state.nib.nwkc_max_broadcast_retries;
-        let nwkc_max_broadcast_jitter = state.nib.nwkc_max_broadcast_jitter;
+        let broadcast_retries = state.constants.max_broadcast_retries;
+        let max_broadcast_jitter = state.constants.max_broadcast_jitter;
 
         drop(state);
 
-        for attempt in 0..=nwkc_broadcast_retries {
+        for attempt in 0..=broadcast_retries {
             state = self.state.lock().unwrap();
 
             // The encryption frame counter always increments
@@ -1988,11 +1987,11 @@ impl ZigbeeStack {
             // "heard" relaying it. For now, we just retry a few times.
             let _ = self.send_802154_frame(ieee802154_frame).await;
 
-            let sleep_time = nwkc_max_broadcast_jitter.mul_f32(rand::random::<f32>());
+            let sleep_time = max_broadcast_jitter.mul_f32(rand::random::<f32>());
             log::debug!(
                 "Retrying broadcast frame send, attempt {} of {} in {:?}",
                 attempt,
-                nwkc_broadcast_retries,
+                broadcast_retries,
                 sleep_time,
             );
 
@@ -2157,7 +2156,7 @@ impl ZigbeeStack {
 
         // We initiated discovery so insert an entry keyed by our NWK and request ID
         let nwk_network_address = state.nib.nwk_network_address;
-        let nwkc_route_discovery_time = state.nib.nwkc_route_discovery_time;
+        let route_discovery_time = state.constants.route_discovery_time;
 
         {
             self.clean_route_discovery_table(&mut state.nib.nwk_route_discovery_table);
@@ -2172,7 +2171,7 @@ impl ZigbeeStack {
                     sender_address: Nwk(0xFFFF),
                     forward_cost: 0,
                     residual_cost: 0,
-                    expiration_time: Instant::now() + nwkc_route_discovery_time,
+                    expiration_time: Instant::now() + route_discovery_time,
                     destination_address: destination,
                 });
 
@@ -2197,7 +2196,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
-                    protocol_version: state.nib.nwkc_protocol_version,
+                    protocol_version: state.constants.protocol_version,
                     discover_route: NwkRouteDiscovery::Suppress,
                     multicast: false,
                     security: true,
@@ -2208,7 +2207,7 @@ impl ZigbeeStack {
                 },
                 destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
                 source: state.nib.nwk_network_address,
-                radius: 2 * state.nib.nwk_max_depth,
+                radius: 2 * state.constants.max_depth,
                 sequence_number: state.nib.nwk_sequence_number,
                 destination_ieee: None,
                 source_ieee: Some(state.nib.nwk_ieee_address),
@@ -2304,7 +2303,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
-                    protocol_version: state.nib.nwkc_protocol_version,
+                    protocol_version: state.constants.protocol_version,
                     discover_route: NwkRouteDiscovery::Enable,
                     multicast: false,
                     security: true,
@@ -2430,7 +2429,7 @@ impl ZigbeeStack {
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
                         frame_type: NwkFrameType::Command,
-                        protocol_version: state.nib.nwkc_protocol_version,
+                        protocol_version: state.constants.protocol_version,
                         discover_route: NwkRouteDiscovery::Suppress,
                         multicast: false,
                         security: true,
@@ -2475,8 +2474,8 @@ impl ZigbeeStack {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            let nwk_link_status_period = self.state.lock().unwrap().nib.nwk_link_status_period;
-            tokio::time::sleep(nwk_link_status_period).await;
+            let link_status_period = self.state.lock().unwrap().constants.link_status_period;
+            tokio::time::sleep(link_status_period).await;
 
             self.send_link_status_broadcast(false).await;
         }
