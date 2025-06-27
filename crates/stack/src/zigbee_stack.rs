@@ -238,12 +238,12 @@ impl ApsAckData {
 
 #[derive(Debug)]
 pub struct State {
-    pub channel: u8,
+    pub channel: Mutex<u8>,
     pub ieee802154_sequence_number: Mutex<u8>,
 
     pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
     pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
-    pub start_time: Option<Instant>,
+    pub start_time: Instant,
 
     // We intentionally violate the spec with these options
     //
@@ -267,7 +267,7 @@ pub struct State {
     pub route_discovery_table: Mutex<HashMap<(Nwk, route::RequestId), route::DiscoveryEntry>>,
     pub capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
-    pub update_id: u8,
+    pub update_id: Mutex<u8>,
     pub network_address: Nwk,
     pub broadcast_transaction_table: Mutex<HashMap<(Nwk, u8), NwkBroadcastTransaction>>,
     pub extended_pan_id: Eui64,
@@ -287,7 +287,7 @@ pub struct State {
     /// outgoing packets.
     pub time_stamp: bool,
 
-    pub pan_id: PanId,
+    pub pan_id: Mutex<PanId>,
 
     /// A count of Unicast transmissions made by the NNK layer on this device.
     /// Each time the NWK layer transmits a Unicast frame, by invoking the
@@ -328,13 +328,23 @@ pub struct State {
 }
 
 impl State {
-    pub fn new() -> Self {
+    pub fn new(
+        channel: u8,
+        update_id: u8,
+        pan_id: PanId,
+        extended_pan_id: Eui64,
+        network_address: Nwk,
+        ieee_address: Eui64,
+        key: Key,
+        key_seq_number: u8,
+        outgoing_frame_counter: u32,
+    ) -> Self {
         State {
-            channel: 0,
+            channel: Mutex::new(channel),
             ieee802154_sequence_number: Mutex::new(0),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
-            start_time: None,
+            start_time: Instant::now(),
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
@@ -355,18 +365,18 @@ impl State {
                 allocate_address: true,
             },
             nwk_manager_addr: Nwk(0x0000),
-            update_id: 0,
-            network_address: Nwk(0x0000),
+            update_id: Mutex::new(update_id),
+            network_address: network_address,
             broadcast_transaction_table: Mutex::new(HashMap::new()),
-            extended_pan_id: Eui64::from_hex("0000000000000000"),
+            extended_pan_id: extended_pan_id,
             route_record_table: Mutex::new(HashMap::new()),
             is_concentrator: true,
             security_level: 5,
             security_material_primary: Mutex::new(NwkSecurityDescriptor {
-                key_seq_number: 0,
-                outgoing_frame_counter: 0,
+                key_seq_number: key_seq_number,
+                outgoing_frame_counter: outgoing_frame_counter,
                 incoming_frame_counter_set: HashMap::new(),
-                key: Key::from_hex("00000000000000000000000000000000"),
+                key: key,
                 network_key_type: NetworkKeyType::Standard,
             }),
             security_material_alternate: Mutex::new(NwkSecurityDescriptor {
@@ -380,12 +390,12 @@ impl State {
             all_fresh: false,
             address_map: Mutex::new(HashMap::new()),
             time_stamp: false,
-            pan_id: PanId(0xFFFF),
+            pan_id: Mutex::new(pan_id),
             tx_total: Mutex::new(0),
             leave_request_allowed: false,
             parent_information: 0,
             leave_request_without_rejoin_allowed: false,
-            ieee_address: Eui64::from_hex("0000000000000000"),
+            ieee_address: ieee_address,
             // TODO: The 16-bit routing sequence number is expected to be
             // strictly-increasing, it should be persisted to disk
             // nwk_routing_sequence_number: 0x0000,
@@ -421,14 +431,35 @@ pub struct ZigbeeStack {
 }
 
 impl ZigbeeStack {
-    pub fn new(spinel: SpinelClient) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
+    pub fn new(
+        spinel: SpinelClient,
+        channel: u8,
+        update_id: u8,
+        pan_id: PanId,
+        extended_pan_id: Eui64,
+        network_address: Nwk,
+        ieee_address: Eui64,
+        key: Key,
+        key_seq_number: u8,
+        outgoing_frame_counter: u32,
+    ) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
         let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
         spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw, raw_frame_tx);
 
         let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
             self_weak: weak_self.clone(),
-            state: State::new(),
+            state: State::new(
+                channel,
+                update_id,
+                pan_id,
+                extended_pan_id,
+                network_address,
+                ieee_address,
+                key,
+                key_seq_number,
+                outgoing_frame_counter,
+            ),
             constants: Constants::new(),
             spinel,
             notification_tx,
@@ -532,33 +563,7 @@ impl ZigbeeStack {
         }
     }
 
-    pub async fn set_network_settings(
-        &mut self,
-        channel: u8,
-        update_id: u8,
-        pan_id: PanId,
-        extended_pan_id: Eui64,
-        network_address: Nwk,
-        ieee_address: Eui64,
-        key: Key,
-        key_seq_number: u8,
-        outgoing_frame_counter: u32,
-    ) -> Result<(), ZigbeeStackError> {
-        self.state.channel = channel;
-        self.state.update_id = update_id;
-        self.state.pan_id = pan_id;
-        self.state.extended_pan_id = extended_pan_id;
-        self.state.network_address = network_address;
-        self.state.ieee_address = ieee_address;
-
-        {
-            let mut security_material_primary =
-                self.state.security_material_primary.lock().unwrap();
-            security_material_primary.key = key;
-            security_material_primary.key_seq_number = key_seq_number;
-            security_material_primary.outgoing_frame_counter = outgoing_frame_counter;
-        }
-
+    pub async fn start_network(&self) -> Result<(), ZigbeeStackError> {
         // Update the hardware with new settings.
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyEnabled, vec![true as u8])
@@ -566,7 +571,10 @@ impl ZigbeeStack {
             .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
+            .prop_value_set(
+                SpinelPropertyId::PhyChan,
+                vec![*self.state.channel.lock().unwrap()],
+            )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
@@ -604,7 +612,7 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Panid,
-                self.state.pan_id.to_bytes().to_vec(),
+                self.state.pan_id.lock().unwrap().to_bytes().to_vec(),
             )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
@@ -618,9 +626,6 @@ impl ZigbeeStack {
             .prop_value_set(SpinelPropertyId::MacRawStreamEnabled, vec![true as u8])
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
-
-        // This is treated as the start time of the stack
-        self.state.start_time = Some(Instant::now());
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will
         // "respond" to empty link status broadcasts proactively, independent of the
@@ -665,20 +670,24 @@ impl ZigbeeStack {
         }
 
         // Only process packets destined for our PAN ID
-        match frame.dest_pan_id {
-            None => {
-                log::debug!("Ignoring frame, destination PAN ID is not present");
-                return None;
+        {
+            let pan_id = *self.state.pan_id.lock().unwrap();
+
+            match frame.dest_pan_id {
+                None => {
+                    log::debug!("Ignoring frame, destination PAN ID is not present");
+                    return None;
+                }
+                Some(dest_pan_id) if dest_pan_id != pan_id => {
+                    log::debug!(
+                        "Ignoring frame, PAN ID does not match {:?} != {:?}",
+                        dest_pan_id,
+                        pan_id
+                    );
+                    return None;
+                }
+                Some(_) => (),
             }
-            Some(dest_pan_id) if dest_pan_id != self.state.pan_id => {
-                log::debug!(
-                    "Ignoring frame, PAN ID does not match {:?} != {:?}",
-                    dest_pan_id,
-                    self.state.pan_id
-                );
-                return None;
-            }
-            Some(_) => (),
         }
 
         // Next, try to parse the NWK frame
@@ -814,8 +823,7 @@ impl ZigbeeStack {
         // We cannot handle broadcasts until the network has been running for at least
         // the time it takes to deliver one broadcast
         if !self.state.hack_ignore_broadcast_startup_wait_period
-            && (self.state.start_time.is_none()
-                || self.state.start_time.unwrap() + self.constants.broadcast_delivery_time > now)
+            && (self.state.start_time + self.constants.broadcast_delivery_time > now)
         {
             log::debug!("Filtering broadcast, network started too recently.");
             return true;
@@ -1616,7 +1624,7 @@ impl ZigbeeStack {
             .spinel
             .transmit_frame(&SpinelTxFrame {
                 psdu: frame.to_bytes(),
-                channel: Some(self.state.channel),
+                channel: Some(*self.state.channel.lock().unwrap()),
                 max_csma_backoffs: Some(1),
                 max_frame_retries: Some(5),
                 enable_csma_ca: Some(true),
@@ -1730,7 +1738,7 @@ impl ZigbeeStack {
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
                 sequence_number: Some(*self.state.ieee802154_sequence_number.lock().unwrap()),
-                dest_pan_id: Some(self.state.pan_id),
+                dest_pan_id: Some(*self.state.pan_id.lock().unwrap()),
                 dest_address: Some(Ieee802154Address::Nwk(next_hop_address)),
                 src_pan_id: None,
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
@@ -1857,7 +1865,7 @@ impl ZigbeeStack {
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
                 sequence_number: Some(*self.state.ieee802154_sequence_number.lock().unwrap()),
-                dest_pan_id: Some(self.state.pan_id),
+                dest_pan_id: Some(*self.state.pan_id.lock().unwrap()),
                 // All broadcasts are sent to the 802.15.4 broadcast address, since the
                 // distinction between Zigbee groups and broadcasts is at a higher layer
                 dest_address: Some(Ieee802154Address::Nwk(Nwk(0xFFFF))),
