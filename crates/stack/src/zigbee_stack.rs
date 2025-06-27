@@ -26,8 +26,7 @@ use zigbee_parts::commands::{
 
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::mem::drop;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
@@ -240,10 +239,10 @@ impl ApsAckData {
 #[derive(Debug)]
 pub struct State {
     pub channel: u8,
-    pub ieee802154_sequence_number: u8,
+    pub ieee802154_sequence_number: Mutex<u8>,
 
-    pub pending_aps_acks: HashMap<ApsAckData, oneshot::Sender<()>>,
-    pub pending_route_notifications: HashMap<Nwk, broadcast::Sender<()>>,
+    pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
+    pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
     pub start_time: Option<Instant>,
 
     // We intentionally violate the spec with these options
@@ -262,27 +261,27 @@ pub struct State {
     pub hack_force_route_discovery: bool,
 
     // NIB
-    pub sequence_number: u8,
-    pub neighbor_table: HashMap<Eui64, neighbor::TableEntry>,
-    pub route_table: HashMap<Nwk, route::TableEntry>,
-    pub route_discovery_table: HashMap<(Nwk, route::RequestId), route::DiscoveryEntry>,
+    pub sequence_number: Mutex<u8>,
+    pub neighbor_table: Mutex<HashMap<Eui64, neighbor::TableEntry>>,
+    pub route_table: Mutex<HashMap<Nwk, route::TableEntry>>,
+    pub route_discovery_table: Mutex<HashMap<(Nwk, route::RequestId), route::DiscoveryEntry>>,
     pub capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
     pub update_id: u8,
     pub network_address: Nwk,
-    pub broadcast_transaction_table: HashMap<(Nwk, u8), NwkBroadcastTransaction>,
+    pub broadcast_transaction_table: Mutex<HashMap<(Nwk, u8), NwkBroadcastTransaction>>,
     pub extended_pan_id: Eui64,
-    pub route_record_table: HashMap<Nwk, Vec<Nwk>>,
+    pub route_record_table: Mutex<HashMap<Nwk, Vec<Nwk>>>,
     pub is_concentrator: bool,
     pub security_level: u8,
-    pub security_material_primary: NwkSecurityDescriptor,
-    pub security_material_alternate: NwkSecurityDescriptor,
+    pub security_material_primary: Mutex<NwkSecurityDescriptor>,
+    pub security_material_alternate: Mutex<NwkSecurityDescriptor>,
     pub active_key_seq_number: u8,
 
     /// Indicates whether incoming NWK frames SHALL be all checked for freshness when
     /// the memory for incoming frame counts is exceeded.
     pub all_fresh: bool,
-    pub address_map: HashMap<Eui64, Nwk>,
+    pub address_map: Mutex<HashMap<Eui64, Nwk>>,
 
     /// A flag that determines if a timestamp indication is provided on incoming and
     /// outgoing packets.
@@ -297,7 +296,7 @@ pub struct State {
     /// attribute or if the value of `tx_total` rolls over past 0xffff the
     /// NWK layer SHALL reset to 0x00 each Transmit Failure field contained in
     /// the neighbor table.
-    pub tx_total: u16,
+    pub tx_total: Mutex<u16>,
 
     /// This policy determines whether or not a remote NWK leave request command frame
     /// received by the local device is accepted.
@@ -320,7 +319,7 @@ pub struct State {
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
     /// originating in a particular router; the latter is used to identify stale routing
     /// information."
-    pub routing_request_sequence_number: u8,
+    pub routing_request_sequence_number: Mutex<u8>,
 
     /// This indicates whether the router has Hub Connectivity as defined by a higher
     /// level application. The higher level application sets this value and the stack
@@ -332,19 +331,19 @@ impl State {
     pub fn new() -> Self {
         State {
             channel: 0,
-            ieee802154_sequence_number: 0,
-            pending_aps_acks: HashMap::new(),
-            pending_route_notifications: HashMap::new(),
+            ieee802154_sequence_number: Mutex::new(0),
+            pending_aps_acks: Mutex::new(HashMap::new()),
+            pending_route_notifications: Mutex::new(HashMap::new()),
             start_time: None,
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
             hack_force_route_discovery: false,
 
-            sequence_number: 0,
-            neighbor_table: HashMap::new(),
-            route_table: HashMap::new(),
-            route_discovery_table: HashMap::new(),
+            sequence_number: Mutex::new(0),
+            neighbor_table: Mutex::new(HashMap::new()),
+            route_table: Mutex::new(HashMap::new()),
+            route_discovery_table: Mutex::new(HashMap::new()),
             capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
                 device_type: NwkCapabilityInformationDeviceType::EndDevice,
@@ -358,31 +357,31 @@ impl State {
             nwk_manager_addr: Nwk(0x0000),
             update_id: 0,
             network_address: Nwk(0x0000),
-            broadcast_transaction_table: HashMap::new(),
+            broadcast_transaction_table: Mutex::new(HashMap::new()),
             extended_pan_id: Eui64::from_hex("0000000000000000"),
-            route_record_table: HashMap::new(),
+            route_record_table: Mutex::new(HashMap::new()),
             is_concentrator: true,
             security_level: 5,
-            security_material_primary: NwkSecurityDescriptor {
+            security_material_primary: Mutex::new(NwkSecurityDescriptor {
                 key_seq_number: 0,
                 outgoing_frame_counter: 0,
                 incoming_frame_counter_set: HashMap::new(),
                 key: Key::from_hex("00000000000000000000000000000000"),
                 network_key_type: NetworkKeyType::Standard,
-            },
-            security_material_alternate: NwkSecurityDescriptor {
+            }),
+            security_material_alternate: Mutex::new(NwkSecurityDescriptor {
                 key_seq_number: 0,
                 outgoing_frame_counter: 0,
                 incoming_frame_counter_set: HashMap::new(),
                 key: Key::from_hex("00000000000000000000000000000000"),
                 network_key_type: NetworkKeyType::Standard,
-            },
+            }),
             active_key_seq_number: 0,
             all_fresh: false,
-            address_map: HashMap::new(),
+            address_map: Mutex::new(HashMap::new()),
             time_stamp: false,
             pan_id: PanId(0xFFFF),
-            tx_total: 0,
+            tx_total: Mutex::new(0),
             leave_request_allowed: false,
             parent_information: 0,
             leave_request_without_rejoin_allowed: false,
@@ -390,7 +389,7 @@ impl State {
             // TODO: The 16-bit routing sequence number is expected to be
             // strictly-increasing, it should be persisted to disk
             // nwk_routing_sequence_number: 0x0000,
-            routing_request_sequence_number: 0x00,
+            routing_request_sequence_number: Mutex::new(0x00),
             hub_connectivity: true,
         }
     }
@@ -414,7 +413,7 @@ pub enum ZigbeeNotification {
 pub struct ZigbeeStack {
     self_weak: Weak<ZigbeeStack>,
 
-    pub state: Mutex<State>,
+    pub state: State,
     pub constants: Constants,
     pub spinel: SpinelClient,
     pub notification_tx: broadcast::Sender<ZigbeeNotification>,
@@ -429,7 +428,7 @@ impl ZigbeeStack {
 
         let arc_stack = Arc::new_cyclic(|weak_self| ZigbeeStack {
             self_weak: weak_self.clone(),
-            state: Mutex::new(State::new()),
+            state: State::new(),
             constants: Constants::new(),
             spinel,
             notification_tx,
@@ -457,9 +456,9 @@ impl ZigbeeStack {
                             log::debug!("Received APS ack: {:?}", ack_data);
 
                             self.state
+                                .pending_aps_acks
                                 .lock()
                                 .unwrap()
-                                .pending_aps_acks
                                 .remove(&ack_data)
                                 .map(|tx| {
                                     let _ = tx.send(());
@@ -534,7 +533,7 @@ impl ZigbeeStack {
     }
 
     pub async fn set_network_settings(
-        &self,
+        &mut self,
         channel: u8,
         update_id: u8,
         pan_id: PanId,
@@ -545,16 +544,20 @@ impl ZigbeeStack {
         key_seq_number: u8,
         outgoing_frame_counter: u32,
     ) -> Result<(), ZigbeeStackError> {
-        let mut state = self.state.lock().unwrap();
-        state.channel = channel;
-        state.update_id = update_id;
-        state.pan_id = pan_id;
-        state.extended_pan_id = extended_pan_id;
-        state.network_address = network_address;
-        state.ieee_address = ieee_address;
-        state.security_material_primary.key = key;
-        state.security_material_primary.key_seq_number = key_seq_number;
-        state.security_material_primary.outgoing_frame_counter = outgoing_frame_counter;
+        self.state.channel = channel;
+        self.state.update_id = update_id;
+        self.state.pan_id = pan_id;
+        self.state.extended_pan_id = extended_pan_id;
+        self.state.network_address = network_address;
+        self.state.ieee_address = ieee_address;
+
+        {
+            let mut security_material_primary =
+                self.state.security_material_primary.lock().unwrap();
+            security_material_primary.key = key;
+            security_material_primary.key_seq_number = key_seq_number;
+            security_material_primary.outgoing_frame_counter = outgoing_frame_counter;
+        }
 
         // Update the hardware with new settings.
         self.spinel
@@ -585,7 +588,7 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Laddr,
-                state.ieee_address.to_bytes().to_vec(),
+                self.state.ieee_address.to_bytes().to_vec(),
             )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
@@ -593,7 +596,7 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Saddr,
-                state.network_address.to_bytes().to_vec(),
+                self.state.network_address.to_bytes().to_vec(),
             )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
@@ -601,7 +604,7 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Panid,
-                state.pan_id.to_bytes().to_vec(),
+                self.state.pan_id.to_bytes().to_vec(),
             )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
@@ -617,8 +620,7 @@ impl ZigbeeStack {
             .map_err(ZigbeeStackError::SpinelError)?;
 
         // This is treated as the start time of the stack
-        state.start_time = Some(Instant::now());
-        drop(state);
+        self.state.start_time = Some(Instant::now());
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will
         // "respond" to empty link status broadcasts proactively, independent of the
@@ -644,8 +646,6 @@ impl ZigbeeStack {
         lqi: u8,
         rssi: i8,
     ) -> Option<NwkFrame> {
-        let state = self.state.lock().unwrap();
-
         // 802.15.4 encrypted frames can't be Zigbee NWK
         if frame.frame_control.security_enabled {
             log::debug!("Ignoring frame, 802.15.4 security bit is enabled");
@@ -670,11 +670,11 @@ impl ZigbeeStack {
                 log::debug!("Ignoring frame, destination PAN ID is not present");
                 return None;
             }
-            Some(dest_pan_id) if dest_pan_id != state.pan_id => {
+            Some(dest_pan_id) if dest_pan_id != self.state.pan_id => {
                 log::debug!(
                     "Ignoring frame, PAN ID does not match {:?} != {:?}",
                     dest_pan_id,
-                    state.pan_id
+                    self.state.pan_id
                 );
                 return None;
             }
@@ -691,7 +691,7 @@ impl ZigbeeStack {
         };
 
         // Ignore frames that aren't destined for us
-        if nwk_frame.nwk_header.destination != state.network_address
+        if nwk_frame.nwk_header.destination != self.state.network_address
             && nwk_frame.nwk_header.destination.as_u16()
                 < BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
         {
@@ -726,7 +726,7 @@ impl ZigbeeStack {
         }
 
         // Validate the network key sequence number
-        if aux_header.key_sequence_number != state.active_key_seq_number {
+        if aux_header.key_sequence_number != self.state.active_key_seq_number {
             log::debug!("Ignoring frame, key sequence number is unknown");
             return None;
         }
@@ -744,8 +744,11 @@ impl ZigbeeStack {
             }
         }
 
-        match state
+        match self
+            .state
             .security_material_primary
+            .lock()
+            .unwrap()
             .incoming_frame_counter_set
             .get(&src_eui64)
         {
@@ -766,20 +769,18 @@ impl ZigbeeStack {
         log::debug!(
             "Attempting to decrypt {:?} with {:?}",
             nwk_frame,
-            state.security_material_primary
+            self.state.security_material_primary
         );
 
         // Finally, attempt decryption
-        let decrypted_nwk_frame = match nwk_frame.decrypt(&state.security_material_primary.key) {
-            Ok(decrypted_frame) => decrypted_frame,
-            Err(err) => {
-                log::warn!("Ignoring frame, decryption failed: {err:?}");
-                return None;
-            }
-        };
-
-        // At this point we no longer need to lock `state`
-        drop(state);
+        let decrypted_nwk_frame =
+            match nwk_frame.decrypt(&self.state.security_material_primary.lock().unwrap().key) {
+                Ok(decrypted_frame) => decrypted_frame,
+                Err(err) => {
+                    log::warn!("Ignoring frame, decryption failed: {err:?}");
+                    return None;
+                }
+            };
 
         log::info!("Decrypted frame: {decrypted_nwk_frame:#?}");
 
@@ -796,9 +797,7 @@ impl ZigbeeStack {
     }
 
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let mut state = self.state.lock().unwrap();
-
-        match state.address_map.insert(eui64, nwk) {
+        match self.state.address_map.lock().unwrap().insert(eui64, nwk) {
             None => {
                 log::debug!("Added new address mapping: {eui64:?} -> {nwk:?}")
             }
@@ -811,13 +810,12 @@ impl ZigbeeStack {
     /// Filter broadcast frames based on the NWK broadcast transaction table
     pub fn filter_broadcast(&self, nwk_frame: &NwkFrame) -> bool {
         let now = Instant::now();
-        let mut state = self.state.lock().unwrap();
 
         // We cannot handle broadcasts until the network has been running for at least
         // the time it takes to deliver one broadcast
-        if !state.hack_ignore_broadcast_startup_wait_period
-            && (state.start_time.is_none()
-                || state.start_time.unwrap() + self.constants.broadcast_delivery_time > now)
+        if !self.state.hack_ignore_broadcast_startup_wait_period
+            && (self.state.start_time.is_none()
+                || self.state.start_time.unwrap() + self.constants.broadcast_delivery_time > now)
         {
             log::debug!("Filtering broadcast, network started too recently.");
             return true;
@@ -829,13 +827,16 @@ impl ZigbeeStack {
         );
 
         // Clean a stale entry first, if one exists.
-        if let Some(entry) = state.broadcast_transaction_table.get(&key) {
+        let mut broadcast_transaction_table =
+            self.state.broadcast_transaction_table.lock().unwrap();
+
+        if let Some(entry) = broadcast_transaction_table.get(&key) {
             if entry.expiration_time > now {
                 return true;
             }
         }
 
-        state.broadcast_transaction_table.insert(
+        broadcast_transaction_table.insert(
             key,
             NwkBroadcastTransaction {
                 source_nwk: nwk_frame.nwk_header.source,
@@ -852,9 +853,10 @@ impl ZigbeeStack {
         if let Some(aux_header) = &nwk_frame.aux_header {
             match aux_header.extended_source {
                 Some(relaying_eui64) => {
-                    let mut state = self.state.lock().unwrap();
-                    state
+                    self.state
                         .security_material_primary
+                        .lock()
+                        .unwrap()
                         .incoming_frame_counter_set
                         .insert(relaying_eui64, aux_header.frame_counter);
 
@@ -874,9 +876,8 @@ impl ZigbeeStack {
 
         // Handle LQA calculation
         {
-            let mut state = self.state.lock().unwrap();
-            self.maybe_age_neighbors(&mut state);
-            self.maybe_recompute_lqa(&mut state, nwk_frame, lqi, rssi);
+            self.maybe_age_neighbors();
+            self.maybe_recompute_lqa(nwk_frame, lqi, rssi);
         }
 
         // Ignore frames that aren't destined for us
@@ -909,9 +910,10 @@ impl ZigbeeStack {
                         "Route record command frame received: {:#?}",
                         route_record_cmd
                     );
-                    let mut state = self.state.lock().unwrap();
-                    state
+                    self.state
                         .route_record_table
+                        .lock()
+                        .unwrap()
                         .insert(nwk_frame.nwk_header.source, route_record_cmd.relays);
                 }
                 Ok(NwkCommandId::RouteRequest) => {
@@ -928,15 +930,14 @@ impl ZigbeeStack {
         }
     }
 
-    fn maybe_recompute_lqa(&self, state: &mut State, nwk_frame: &NwkFrame, lqi: u8, _rssi: i8) {
+    fn maybe_recompute_lqa(&self, nwk_frame: &NwkFrame, lqi: u8, _rssi: i8) {
         // Find the source node via its EUI64 address (preferred) or its NWK address
+        let mut neighbor_table = self.state.neighbor_table.lock().unwrap();
+
         match if nwk_frame.nwk_header.source_ieee.is_some() {
-            state
-                .neighbor_table
-                .get_mut(&nwk_frame.nwk_header.source_ieee.unwrap())
+            neighbor_table.get_mut(&nwk_frame.nwk_header.source_ieee.unwrap())
         } else {
-            state
-                .neighbor_table
+            neighbor_table
                 .values_mut()
                 .find(|e| e.network_address == nwk_frame.nwk_header.source)
         } {
@@ -953,13 +954,13 @@ impl ZigbeeStack {
         }
     }
 
-    fn maybe_age_neighbors(&self, state: &mut State) {
+    fn maybe_age_neighbors(&self) {
         // TODO: this function should be replaced by real timers
         let now = Instant::now();
         let max_neighbor_age =
             (self.constants.router_age_limit as u32) * self.constants.link_status_period;
 
-        for neighbor in state.neighbor_table.values_mut() {
+        for neighbor in self.state.neighbor_table.lock().unwrap().values_mut() {
             if neighbor.outgoing_cost > 0
                 && neighbor.last_link_status_timestamp >= now + max_neighbor_age
             {
@@ -989,29 +990,27 @@ impl ZigbeeStack {
 
         // We collect a list of neighbors with non-zero outgoing cost up here, before
         // mutating the state
-        let neighbors_with_nonzero_outgoing_cost = {
-            let mut state = self.state.lock().unwrap();
-            self.maybe_age_neighbors(&mut state);
+        self.maybe_age_neighbors();
 
-            state
-                .neighbor_table
-                .iter()
-                .filter_map(|(_, neighbor_entry)| {
-                    if neighbor_entry.outgoing_cost > 0 {
-                        Some(neighbor_entry.network_address)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<HashSet<Nwk>>()
-        };
-
-        let network_address = self.state.lock().unwrap().network_address;
+        let neighbors_with_nonzero_outgoing_cost = self
+            .state
+            .neighbor_table
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(_, neighbor_entry)| {
+                if neighbor_entry.outgoing_cost > 0 {
+                    Some(neighbor_entry.network_address)
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<Nwk>>();
 
         let source_ieee = nwk_frame.nwk_header.source_ieee.unwrap();
+        let mut neighbor_table = self.state.neighbor_table.lock().unwrap();
 
-        let mut state = self.state.lock().unwrap();
-        let neighbor_entry = match state.neighbor_table.get_mut(&source_ieee) {
+        let neighbor_entry = match neighbor_table.get_mut(&source_ieee) {
             Some(entry) => entry,
             None => {
                 // Create one
@@ -1043,8 +1042,8 @@ impl ZigbeeStack {
                     security_timer: 0,
                 };
 
-                state.neighbor_table.insert(source_ieee, entry);
-                state.neighbor_table.get_mut(&source_ieee).unwrap()
+                neighbor_table.insert(source_ieee, entry);
+                neighbor_table.get_mut(&source_ieee).unwrap()
             }
         };
 
@@ -1072,7 +1071,7 @@ impl ZigbeeStack {
                 }
             }
 
-            if link_status.address == network_address {
+            if link_status.address == self.state.network_address {
                 neighbor_entry.outgoing_cost = link_status.incoming_cost;
             }
         }
@@ -1085,12 +1084,14 @@ impl ZigbeeStack {
         log::debug!("Updated neighbor table entry: {neighbor_entry:#?}");
     }
 
-    fn notify_routing_change(&self, state: &State, nwk: &Nwk) {
-        if !state.pending_route_notifications.contains_key(nwk) {
+    fn notify_routing_change(&self, nwk: &Nwk) {
+        let pending_route_notifications = self.state.pending_route_notifications.lock().unwrap();
+
+        if !pending_route_notifications.contains_key(nwk) {
             return;
         }
 
-        let tx = state.pending_route_notifications.get(nwk).unwrap();
+        let tx = pending_route_notifications.get(nwk).unwrap();
         let _ = tx.send(());
     }
 
@@ -1108,18 +1109,19 @@ impl ZigbeeStack {
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
 
-        let mut state = self.state.lock().unwrap();
-        let our_nwk_address = state.network_address;
+        let our_nwk_address = self.state.network_address;
 
-        let neighbor = match state
-            .neighbor_table
-            .values()
-            .find(|&entry| entry.network_address == nwk_frame.nwk_header.source)
-        {
-            Some(neighbor) => neighbor,
-            None => {
-                log::debug!("Ignoring route reply from unknown neighbor");
-                return;
+        let neighbor_table = self.state.neighbor_table.lock().unwrap();
+        let neighbor = {
+            match neighbor_table
+                .values()
+                .find(|&entry| entry.network_address == nwk_frame.nwk_header.source)
+            {
+                Some(neighbor) => neighbor,
+                None => {
+                    log::debug!("Ignoring route reply from unknown neighbor");
+                    return;
+                }
             }
         };
 
@@ -1138,13 +1140,15 @@ impl ZigbeeStack {
 
         // TODO: clean this up, the mutability problems caused by the shared state mutex
         // make having two mutable borrows at once very difficult
-        let Some(discovery_entry) = state.route_discovery_table.get(&route_discovery_table_key)
+        let mut route_discovery_table = self.state.route_discovery_table.lock().unwrap();
+        let Some(discovery_entry) = route_discovery_table.get_mut(&route_discovery_table_key)
         else {
             log::debug!("Route reply for unknown route discovery, ignoring");
             return;
         };
 
-        let Some(routing_entry) = state.route_table.get(&route_reply_cmd.responder_nwk) else {
+        let mut route_table = self.state.route_table.lock().unwrap();
+        let Some(routing_entry) = route_table.get_mut(&route_reply_cmd.responder_nwk) else {
             log::debug!("Route reply with unknown responder, ignoring");
             return;
         };
@@ -1161,23 +1165,13 @@ impl ZigbeeStack {
                         updated_path_cost);
 
                     // Mutate the routing entry
-                    {
-                        let routing_entry = state
-                            .route_table
-                            .get_mut(&route_reply_cmd.responder_nwk).unwrap();
-                        routing_entry.status = route::Status::Active;
-                        routing_entry.next_hop_address = nwk_frame.nwk_header.source;
-                    }
+                    routing_entry.status = route::Status::Active;
+                    routing_entry.next_hop_address = nwk_frame.nwk_header.source;
 
                     // Mutate the discovery entry
-                    {
-                        let discovery_entry = state
-                            .route_discovery_table
-                            .get_mut(&route_discovery_table_key).unwrap();
-                        discovery_entry.residual_cost = updated_path_cost;
-                    }
+                    discovery_entry.residual_cost = updated_path_cost;
 
-                    self.notify_routing_change(&state, &route_reply_cmd.responder_nwk);
+                    self.notify_routing_change(&route_reply_cmd.responder_nwk);
                 },
                 route::Status::Active => {
                     if updated_path_cost >= discovery_entry.residual_cost {
@@ -1194,22 +1188,12 @@ impl ZigbeeStack {
                         updated_path_cost);
 
                     // Mutate the routing entry
-                    {
-                        let routing_entry = state
-                            .route_table
-                            .get_mut(&route_reply_cmd.responder_nwk).unwrap();
-                        routing_entry.next_hop_address = nwk_frame.nwk_header.source;
-                    }
+                    routing_entry.next_hop_address = nwk_frame.nwk_header.source;
 
                     // Mutate the discovery entry
-                    {
-                        let discovery_entry = state
-                            .route_discovery_table
-                            .get_mut(&route_discovery_table_key).unwrap();
-                        discovery_entry.residual_cost = updated_path_cost;
-                    }
+                    discovery_entry.residual_cost = updated_path_cost;
 
-                    self.notify_routing_change(&state, &route_reply_cmd.responder_nwk);
+                    self.notify_routing_change(&route_reply_cmd.responder_nwk);
                 },
             }
 
@@ -1228,37 +1212,18 @@ impl ZigbeeStack {
         }
 
         // Mutate the routing entry
-        {
-            let routing_entry = state
-                .route_table
-                .get_mut(&route_reply_cmd.responder_nwk)
-                .unwrap();
-            routing_entry.next_hop_address = nwk_frame.nwk_header.source;
-        }
+        routing_entry.next_hop_address = nwk_frame.nwk_header.source;
 
         // Mutate the discovery entry
-        {
-            let discovery_entry = state
-                .route_discovery_table
-                .get_mut(&route_discovery_table_key)
-                .unwrap();
-            discovery_entry.residual_cost = updated_path_cost;
-        }
+        discovery_entry.residual_cost = updated_path_cost;
 
-        self.notify_routing_change(&state, &route_reply_cmd.responder_nwk);
+        self.notify_routing_change(&route_reply_cmd.responder_nwk);
 
         // Find the next hop to the destination
-        let next_hop_nwk = {
-            let discovery_entry = state
-                .route_discovery_table
-                .get_mut(&route_discovery_table_key)
-                .unwrap();
+        let next_hop_nwk = discovery_entry.sender_address;
 
-            discovery_entry.sender_address
-        };
-
-        let Some(next_hop_neighbor) = state
-            .neighbor_table
+        let neighbor_table = self.state.neighbor_table.lock().unwrap();
+        let Some(next_hop_neighbor) = neighbor_table
             .values()
             .find(|&entry| entry.network_address == next_hop_nwk)
         else {
@@ -1280,11 +1245,11 @@ impl ZigbeeStack {
                     end_device_initiator: false,
                 },
                 destination: next_hop_nwk,
-                source: state.network_address,
+                source: self.state.network_address,
                 radius: 2 * self.constants.max_depth,
-                sequence_number: state.sequence_number,
+                sequence_number: *self.state.sequence_number.lock().unwrap(),
                 destination_ieee: nwk_frame.nwk_header.source_ieee,
-                source_ieee: Some(state.ieee_address),
+                source_ieee: Some(self.state.ieee_address),
                 multicast_control: None,
                 source_route: None,
             },
@@ -1302,7 +1267,7 @@ impl ZigbeeStack {
             .unwrap(),
         };
 
-        self.background_send_nwk_frame(state, relayed_route_reply_frame);
+        self.background_send_nwk_frame(relayed_route_reply_frame);
     }
 
     /// Clean expired entries from the route discovery table. Their lifetime is ~10s.
@@ -1314,20 +1279,21 @@ impl ZigbeeStack {
     ///
     /// TODO: Alternatively, we can look into a way to tie timers to these entries and
     /// expire them directly from the event loop.
-    fn clean_route_discovery_table(
-        &self,
-        route_discovery_table: &mut HashMap<(Nwk, u8), route::DiscoveryEntry>,
-    ) {
+    fn clean_route_discovery_table(&self) {
         let now = Instant::now();
 
-        route_discovery_table.retain(|_, entry| {
-            if entry.expiration_time <= now {
-                log::debug!("Removing expired route discovery entry: {entry:#?}");
-                false
-            } else {
-                true
-            }
-        });
+        self.state
+            .route_discovery_table
+            .lock()
+            .unwrap()
+            .retain(|_, entry| {
+                if entry.expiration_time <= now {
+                    log::debug!("Removing expired route discovery entry: {entry:#?}");
+                    false
+                } else {
+                    true
+                }
+            });
     }
 
     fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
@@ -1344,12 +1310,10 @@ impl ZigbeeStack {
             route_request_cmd
         );
 
-        let mut state = self.state.lock().unwrap();
-
-        let network_address = state.network_address;
+        let network_address = self.state.network_address;
+        let neighbor_table = self.state.neighbor_table.lock().unwrap();
         // We need to know who sent the frame
-        let Some(sender_neighbor) = state
-            .neighbor_table
+        let Some(sender_neighbor) = neighbor_table
             .values()
             .find(|&entry| entry.network_address == sender_nwk)
         else {
@@ -1377,8 +1341,9 @@ impl ZigbeeStack {
         // table entry via the relaying device. This is free routing information and
         // should be used.
         {
-            let route_table_entry = state
-                .route_table
+            let mut route_table = self.state.route_table.lock().unwrap();
+
+            let route_table_entry = route_table
                 .entry(route_request_cmd.destination_address)
                 .or_insert_with(|| {
                     route::TableEntry {
@@ -1401,14 +1366,15 @@ impl ZigbeeStack {
                 route_table_entry.next_hop_address = sender_nwk;
             }
 
-            self.notify_routing_change(&state, &route_request_cmd.destination_address);
+            self.notify_routing_change(&route_request_cmd.destination_address);
         }
 
         // Create a routing table entry that assigns the node that last-relayed the
         // route request command to be the next-hop for the original sender
         {
-            let route_table_entry = state
-                .route_table
+            let mut route_table = self.state.route_table.lock().unwrap();
+
+            let route_table_entry = route_table
                 .entry(nwk_frame.nwk_header.source)
                 .or_insert_with(|| route::TableEntry {
                     destination: nwk_frame.nwk_header.source,
@@ -1429,7 +1395,7 @@ impl ZigbeeStack {
                 route_table_entry.next_hop_address = sender_nwk;
             }
 
-            self.notify_routing_change(&state, &nwk_frame.nwk_header.source);
+            self.notify_routing_change(&nwk_frame.nwk_header.source);
         }
 
         // TODO: what do we do if one of these values doesn't match? This would be
@@ -1448,10 +1414,11 @@ impl ZigbeeStack {
         );
 
         if !is_for_self_or_child {
-            self.clean_route_discovery_table(&mut state.route_discovery_table);
+            self.clean_route_discovery_table();
 
-            let route_discovery_entry = state
-                .route_discovery_table
+            let mut route_discovery_table = self.state.route_discovery_table.lock().unwrap();
+
+            let route_discovery_entry = route_discovery_table
                 .entry(route_discovery_table_key)
                 .or_insert_with(|| route::DiscoveryEntry {
                     route_request_id: route_request_cmd.route_request_identifier,
@@ -1477,8 +1444,10 @@ impl ZigbeeStack {
             }
 
             // Create an entry in the routing table as well
-            state
+            self.state
                 .route_table
+                .lock()
+                .unwrap()
                 .entry(route_request_cmd.destination_address)
                 .or_insert_with(|| route::TableEntry {
                     destination: route_request_cmd.destination_address,
@@ -1518,7 +1487,7 @@ impl ZigbeeStack {
                     destination: nwk_frame.nwk_header.destination,
                     source: nwk_frame.nwk_header.source,
                     radius: rebroadcast_radius,
-                    sequence_number: state.sequence_number, // TODO: do we change this?
+                    sequence_number: *self.state.sequence_number.lock().unwrap(), // TODO: do we change this?
                     destination_ieee: nwk_frame.nwk_header.source_ieee,
                     source_ieee: nwk_frame.nwk_header.source_ieee,
                     multicast_control: None,
@@ -1536,7 +1505,7 @@ impl ZigbeeStack {
                 .unwrap(),
             };
 
-            self.background_send_nwk_frame(state, relayed_route_request_cmd);
+            self.background_send_nwk_frame(relayed_route_request_cmd);
         } else {
             let route_reply_frame = NwkFrame {
                 nwk_header: NwkHeader {
@@ -1552,11 +1521,11 @@ impl ZigbeeStack {
                         end_device_initiator: false,
                     },
                     destination: nwk_frame.nwk_header.source,
-                    source: state.network_address,
+                    source: self.state.network_address,
                     radius: 2 * self.constants.max_depth,
-                    sequence_number: state.sequence_number,
+                    sequence_number: *self.state.sequence_number.lock().unwrap(),
                     destination_ieee: nwk_frame.nwk_header.source_ieee,
-                    source_ieee: Some(state.ieee_address),
+                    source_ieee: Some(self.state.ieee_address),
                     multicast_control: None,
                     source_route: None,
                 },
@@ -1564,23 +1533,22 @@ impl ZigbeeStack {
                 payload: NwkRouteReplyCommand {
                     route_request_identifier: route_request_cmd.route_request_identifier,
                     originator_nwk: nwk_frame.nwk_header.source,
-                    responder_nwk: state.network_address,
+                    responder_nwk: self.state.network_address,
                     path_cost: updated_path_cost,
                     originator_eui64: nwk_frame.nwk_header.source_ieee,
-                    responder_eui64: Some(state.ieee_address),
+                    responder_eui64: Some(self.state.ieee_address),
                 }
                 .serialize()
                 .unwrap(),
             };
 
-            self.background_send_nwk_frame(state, route_reply_frame);
+            self.background_send_nwk_frame(route_reply_frame);
         }
     }
 
     fn handle_aps_ack_request(&self, aps_frame: &ApsDataFrame, nwk_frame: &NwkFrame) {
         log::debug!("Sending back an APS ACK");
 
-        let state = self.state.lock().unwrap();
         let aps_ack_frame = NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -1596,9 +1564,9 @@ impl ZigbeeStack {
                 },
                 // Send our ACK back to the sender
                 destination: nwk_frame.nwk_header.source,
-                source: state.network_address,
+                source: self.state.network_address,
                 radius: 2 * self.constants.max_depth,
-                sequence_number: state.sequence_number,
+                sequence_number: *self.state.sequence_number.lock().unwrap(),
                 destination_ieee: None,
                 source_ieee: None,
                 multicast_control: None,
@@ -1623,37 +1591,32 @@ impl ZigbeeStack {
             .to_bytes(),
         };
 
-        self.background_send_nwk_frame(state, aps_ack_frame);
+        self.background_send_nwk_frame(aps_ack_frame);
     }
 
     async fn send_802154_frame(&self, mut frame: Ieee802154Frame) -> Result<(), ZigbeeStackError> {
-        // Briefly grab the channel when sending, we don't want to hold the lock while
-        // waiting for an ACK
-        let mut state = self.state.lock().unwrap();
-        let channel = state.channel;
-
         // Increment the 802.15.4 sequence number
         if !frame.frame_control.sequence_number_suppression {
-            state.ieee802154_sequence_number = state.ieee802154_sequence_number.wrapping_add(1);
-            frame.sequence_number = Some(state.ieee802154_sequence_number);
+            let mut ieee802154_sequence_number =
+                self.state.ieee802154_sequence_number.lock().unwrap();
+            *ieee802154_sequence_number = ieee802154_sequence_number.wrapping_add(1);
+
+            frame.sequence_number = Some(*ieee802154_sequence_number);
         }
 
         log::info!("Sending 802.15.4 frame: {:#?}", frame);
         log::info!("Sending 802.15.4 frame bytes: {:02X?}", frame.to_bytes());
 
-        if state.hack_disable_tx {
-            drop(state);
+        if self.state.hack_disable_tx {
             log::debug!("Not transmitting the frame, TX is disabled");
             return Ok(());
         }
-
-        drop(state);
 
         let status = self
             .spinel
             .transmit_frame(&SpinelTxFrame {
                 psdu: frame.to_bytes(),
-                channel: Some(channel),
+                channel: Some(self.state.channel),
                 max_csma_backoffs: Some(1),
                 max_frame_retries: Some(5),
                 enable_csma_ca: Some(true),
@@ -1686,11 +1649,7 @@ impl ZigbeeStack {
         }
     }
 
-    pub fn background_send_nwk_frame(&self, state: MutexGuard<State>, nwk_frame: NwkFrame) {
-        // This function takes ownership of `state` to force it to be dropped before we
-        // transmit.
-        drop(state);
-
+    pub fn background_send_nwk_frame(&self, nwk_frame: NwkFrame) {
         let arc_self = self
             .self_weak
             .upgrade()
@@ -1722,10 +1681,13 @@ impl ZigbeeStack {
         let next_hop_address = self
             .discover_route(nwk_frame.nwk_header.destination)
             .await?;
-        let mut state = self.state.lock().unwrap();
 
-        state.sequence_number = state.sequence_number.wrapping_add(1);
-        nwk_frame.nwk_header.sequence_number = state.sequence_number;
+        nwk_frame.nwk_header.sequence_number = {
+            let mut sequence_number = self.state.sequence_number.lock().unwrap();
+            *sequence_number = sequence_number.wrapping_add(1);
+            *sequence_number
+        };
+
         nwk_frame.aux_header = Some(NwkAuxHeader {
             security_control: NwkSecurityHeaderControlField {
                 security_level: NwkSecurityLevel::NoSecurity,
@@ -1734,25 +1696,24 @@ impl ZigbeeStack {
                 require_verified_frame_counter: false,
             },
             frame_counter: 0, // This field is rewritten and is always up-to-date
-            extended_source: Some(state.ieee_address),
-            key_sequence_number: state.active_key_seq_number,
+            extended_source: Some(self.state.ieee_address),
+            key_sequence_number: self.state.active_key_seq_number,
         });
 
-        drop(state);
-
         for attempt in 0..=self.constants.unicast_retries {
-            state = self.state.lock().unwrap();
-
             // The encryption frame counter always increments
-            state.security_material_primary.outgoing_frame_counter = state
-                .security_material_primary
-                .outgoing_frame_counter
-                .wrapping_add(1);
+            nwk_frame.aux_header.as_mut().unwrap().frame_counter = {
+                let mut security_material_primary =
+                    self.state.security_material_primary.lock().unwrap();
+                security_material_primary.outgoing_frame_counter = security_material_primary
+                    .outgoing_frame_counter
+                    .wrapping_add(1);
 
-            nwk_frame.aux_header.as_mut().unwrap().frame_counter =
-                state.security_material_primary.outgoing_frame_counter;
+                security_material_primary.outgoing_frame_counter
+            };
 
-            let encrypted_nwk_frame = nwk_frame.encrypt(&state.security_material_primary.key);
+            let encrypted_nwk_frame =
+                nwk_frame.encrypt(&self.state.security_material_primary.lock().unwrap().key);
 
             let ieee802154_frame = Ieee802154Frame {
                 frame_control: Ieee802154FrameControl {
@@ -1768,11 +1729,11 @@ impl ZigbeeStack {
                     frame_version: 0,
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
-                sequence_number: Some(state.ieee802154_sequence_number),
-                dest_pan_id: Some(state.pan_id),
+                sequence_number: Some(*self.state.ieee802154_sequence_number.lock().unwrap()),
+                dest_pan_id: Some(self.state.pan_id),
                 dest_address: Some(Ieee802154Address::Nwk(next_hop_address)),
                 src_pan_id: None,
-                src_address: Some(Ieee802154Address::Nwk(state.network_address)),
+                src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
                 payload: encrypted_nwk_frame.to_bytes(),
                 fcs: 0x0000, // It'll be replaced
             };
@@ -1780,37 +1741,44 @@ impl ZigbeeStack {
             // When forwarding packets to another node, update the counters for the neighbor
             // TODO: maybe wrap the send state into some sort of struct to avoid
             // needing to do this?
-            if let Some(relaying_ieee) = state.address_map.iter().find_map(|(&eui64, &nwk)| {
+            let address_map = self.state.address_map.lock().unwrap();
+            let mut neighbor_table = self.state.neighbor_table.lock().unwrap();
+
+            if let Some(relaying_ieee) = address_map.iter().find_map(|(&eui64, &nwk)| {
                 if nwk == next_hop_address {
                     Some(eui64)
                 } else {
                     None
                 }
             }) {
-                if let Some(neighbor_entry) = state.neighbor_table.get_mut(&relaying_ieee) {
+                if let Some(neighbor_entry) = neighbor_table.get_mut(&relaying_ieee) {
                     // Update the neighbor table counters
                     neighbor_entry.router_outbound_activity =
                         neighbor_entry.router_outbound_activity.saturating_add(1);
                 }
             }
 
+            let mut route_table = self.state.route_table.lock().unwrap();
+
             // And the routing table counters
-            if let Some(route_entry) = state.route_table.get_mut(&nwk_frame.nwk_header.destination)
-            {
+            if let Some(route_entry) = route_table.get_mut(&nwk_frame.nwk_header.destination) {
                 route_entry.recent_activity = route_entry.recent_activity.saturating_add(1);
                 route_entry.total_usage_count = route_entry.total_usage_count.saturating_add(1);
             }
 
             // Increment counters before sending
-            state.tx_total = state.tx_total.wrapping_add(1);
+            let tx_total = {
+                let mut tx_total = self.state.tx_total.lock().unwrap();
+                *tx_total = tx_total.wrapping_add(1);
+                *tx_total
+            };
 
             // Handle `tx_total` wrapping
-            if state.tx_total == 0x0000 {
-                for (_, neighbor) in state.neighbor_table.iter_mut() {
+            if tx_total == 0x0000 {
+                for (_, neighbor) in neighbor_table.iter_mut() {
                     neighbor.transmit_failure = 0;
                 }
             }
-            drop(state);
 
             match self.send_802154_frame(ieee802154_frame).await {
                 Ok(_) => {
@@ -1841,10 +1809,12 @@ impl ZigbeeStack {
         &self,
         mut nwk_frame: NwkFrame,
     ) -> Result<(), ZigbeeStackError> {
-        let mut state = self.state.lock().unwrap();
+        nwk_frame.nwk_header.sequence_number = {
+            let mut sequence_number = self.state.sequence_number.lock().unwrap();
+            *sequence_number = sequence_number.wrapping_add(1);
+            *sequence_number
+        };
 
-        state.sequence_number = state.sequence_number.wrapping_add(1);
-        nwk_frame.nwk_header.sequence_number = state.sequence_number;
         nwk_frame.aux_header = Some(NwkAuxHeader {
             security_control: NwkSecurityHeaderControlField {
                 security_level: NwkSecurityLevel::NoSecurity,
@@ -1853,25 +1823,24 @@ impl ZigbeeStack {
                 require_verified_frame_counter: false,
             },
             frame_counter: 0, // This field is rewritten and is always up-to-date
-            extended_source: Some(state.ieee_address),
-            key_sequence_number: state.active_key_seq_number,
+            extended_source: Some(self.state.ieee_address),
+            key_sequence_number: self.state.active_key_seq_number,
         });
 
-        drop(state);
-
         for attempt in 0..=self.constants.max_broadcast_retries {
-            state = self.state.lock().unwrap();
-
             // The encryption frame counter always increments
-            state.security_material_primary.outgoing_frame_counter = state
-                .security_material_primary
-                .outgoing_frame_counter
-                .wrapping_add(1);
+            nwk_frame.aux_header.as_mut().unwrap().frame_counter = {
+                let mut security_material_primary =
+                    self.state.security_material_primary.lock().unwrap();
+                security_material_primary.outgoing_frame_counter = security_material_primary
+                    .outgoing_frame_counter
+                    .wrapping_add(1);
 
-            nwk_frame.aux_header.as_mut().unwrap().frame_counter =
-                state.security_material_primary.outgoing_frame_counter;
+                security_material_primary.outgoing_frame_counter
+            };
 
-            let encrypted_nwk_frame = nwk_frame.encrypt(&state.security_material_primary.key);
+            let encrypted_nwk_frame =
+                nwk_frame.encrypt(&self.state.security_material_primary.lock().unwrap().key);
 
             let ieee802154_frame = Ieee802154Frame {
                 frame_control: Ieee802154FrameControl {
@@ -1887,27 +1856,32 @@ impl ZigbeeStack {
                     frame_version: 0,
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
-                sequence_number: Some(state.ieee802154_sequence_number),
-                dest_pan_id: Some(state.pan_id),
+                sequence_number: Some(*self.state.ieee802154_sequence_number.lock().unwrap()),
+                dest_pan_id: Some(self.state.pan_id),
                 // All broadcasts are sent to the 802.15.4 broadcast address, since the
                 // distinction between Zigbee groups and broadcasts is at a higher layer
                 dest_address: Some(Ieee802154Address::Nwk(Nwk(0xFFFF))),
                 src_pan_id: None,
-                src_address: Some(Ieee802154Address::Nwk(state.network_address)),
+                src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
                 payload: encrypted_nwk_frame.to_bytes(),
                 fcs: 0x0000, // It'll be replaced
             };
 
             // Increment counters before sending
-            state.tx_total = state.tx_total.wrapping_add(1);
+            let tx_total = {
+                let mut tx_total = self.state.tx_total.lock().unwrap();
+                *tx_total = tx_total.wrapping_add(1);
+                *tx_total
+            };
 
             // Handle `tx_total` wrapping
-            if state.tx_total == 0x0000 {
-                for (_, neighbor) in state.neighbor_table.iter_mut() {
+            let mut neighbor_table = self.state.neighbor_table.lock().unwrap();
+
+            if tx_total == 0x0000 {
+                for (_, neighbor) in neighbor_table.iter_mut() {
                     neighbor.transmit_failure = 0;
                 }
             }
-            drop(state);
 
             // TODO: implement logic to detect when broadcasts have been successfully
             // sent. This is done by keeping track of which neighbor routers have been
@@ -1932,19 +1906,21 @@ impl ZigbeeStack {
     }
 
     pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, ZigbeeStackError> {
-        let state = self.state.lock().unwrap();
-
-        if state.hack_force_route_discovery || !state.route_table.contains_key(&destination) {
-            drop(state);
+        if self.state.hack_force_route_discovery
+            || !self
+                .state
+                .route_table
+                .lock()
+                .unwrap()
+                .contains_key(&destination)
+        {
             log::debug!("Starting route discovery for NWK {destination:?}");
             self.send_route_discovery(destination).await;
-        } else {
-            drop(state);
         }
 
         let (route_entry_status, route_entry_next_hop_address) = {
-            let state = self.state.lock().unwrap();
-            let entry = state.route_table.get(&destination).unwrap();
+            let route_table = self.state.route_table.lock().unwrap();
+            let entry = route_table.get(&destination).unwrap();
 
             (entry.status, entry.next_hop_address)
         };
@@ -1970,9 +1946,9 @@ impl ZigbeeStack {
 
         // Create a pending route notification
         let mut rx = {
-            let mut state = self.state.lock().unwrap();
-            let tx = state
-                .pending_route_notifications
+            let mut pending_route_notifications =
+                self.state.pending_route_notifications.lock().unwrap();
+            let tx = pending_route_notifications
                 .entry(destination)
                 .or_insert_with(|| {
                     let (tx, _) = broadcast::channel(1);
@@ -1985,21 +1961,17 @@ impl ZigbeeStack {
         // Pull the current route discovery entry for the device to determine the timeout
         let discovery_timeout = {
             let now = Instant::now();
+            let route_discovery_table = self.state.route_discovery_table.lock().unwrap();
 
             // One should exist
-            let state = self.state.lock().unwrap();
             let route_discovery_entry =
-                match state
-                    .route_discovery_table
-                    .iter()
-                    .find_map(|(&(_, _), entry)| {
-                        if entry.expiration_time >= now && entry.destination_address == destination
-                        {
-                            Some(entry)
-                        } else {
-                            None
-                        }
-                    }) {
+                match route_discovery_table.iter().find_map(|(&(_, _), entry)| {
+                    if entry.expiration_time >= now && entry.destination_address == destination {
+                        Some(entry)
+                    } else {
+                        None
+                    }
+                }) {
                     Some(entry) => entry,
                     None => {
                         log::warn!("No route discovery entry found for {destination:?}");
@@ -2022,17 +1994,18 @@ impl ZigbeeStack {
             }
             Err(err) => {
                 log::debug!("Route discovery timed out");
-                let mut state = self.state.lock().unwrap();
-                let entry = state.route_table.get_mut(&destination).unwrap();
+                let mut route_table = self.state.route_table.lock().unwrap();
+                let entry = route_table.get_mut(&destination).unwrap();
                 entry.status = route::Status::DiscoveryFailed;
                 return Err(ZigbeeStackError::RouteDiscoveryTimeout(err));
             }
         };
 
         let next_hop_address = {
-            let state = self.state.lock().unwrap();
-            state
+            self.state
                 .route_table
+                .lock()
+                .unwrap()
                 .get(&destination)
                 .unwrap()
                 .next_hop_address
@@ -2043,13 +2016,12 @@ impl ZigbeeStack {
 
     pub async fn send_route_discovery(&self, destination: Nwk) {
         // Discover next hop route
-        let mut state = self.state.lock().unwrap();
-
         log::debug!("Sending route discovery for NWK {destination:?}");
 
         // Get or create a routing table entry without keeping a mutable reference
         {
-            let route_table_entry = state.route_table.entry(destination).or_insert_with(|| {
+            let mut route_table = self.state.route_table.lock().unwrap();
+            let route_table_entry = route_table.entry(destination).or_insert_with(|| {
                 route::TableEntry {
                     destination: destination,
                     status: route::Status::Inactive,
@@ -2068,20 +2040,23 @@ impl ZigbeeStack {
             route_table_entry.status = route::Status::DiscoveryUnderway;
         }
 
-        state.routing_request_sequence_number =
-            state.routing_request_sequence_number.wrapping_add(1);
+        let route_request_identifier = {
+            let mut routing_request_sequence_number =
+                self.state.routing_request_sequence_number.lock().unwrap();
+            *routing_request_sequence_number = routing_request_sequence_number.wrapping_add(1);
+            *routing_request_sequence_number
+        };
 
-        let route_request_identifier = state.routing_request_sequence_number;
-        let route_discovery_table_key = (state.network_address, route_request_identifier);
+        let route_discovery_table_key = (self.state.network_address, route_request_identifier);
 
         // We initiated discovery so insert an entry keyed by our NWK and request ID
-        let network_address = state.network_address;
+        let network_address = self.state.network_address;
+
+        self.clean_route_discovery_table();
 
         {
-            self.clean_route_discovery_table(&mut state.route_discovery_table);
-
-            let route_discovery_entry = state
-                .route_discovery_table
+            let mut route_discovery_table = self.state.route_discovery_table.lock().unwrap();
+            let route_discovery_entry = route_discovery_table
                 .entry(route_discovery_table_key)
                 .or_insert_with(|| route::DiscoveryEntry {
                     route_request_id: route_request_identifier,
@@ -2098,18 +2073,22 @@ impl ZigbeeStack {
             );
         }
 
-        // Construct a frame
-        state.sequence_number = state.sequence_number.wrapping_add(1);
-
         // If we know the EUI64 corresponding to the NWK, use it
-        let destination_eui64 = state.address_map.iter().find_map(|(&eui64, &nwk)| {
-            if nwk == destination {
-                Some(eui64)
-            } else {
-                None
-            }
-        });
+        let destination_eui64 =
+            self.state
+                .address_map
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|(&eui64, &nwk)| {
+                    if nwk == destination {
+                        Some(eui64)
+                    } else {
+                        None
+                    }
+                });
 
+        // Construct a frame
         let route_request_frame = NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -2124,11 +2103,11 @@ impl ZigbeeStack {
                     end_device_initiator: false,
                 },
                 destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                source: state.network_address,
+                source: self.state.network_address,
                 radius: 2 * self.constants.max_depth,
-                sequence_number: state.sequence_number,
+                sequence_number: *self.state.sequence_number.lock().unwrap(),
                 destination_ieee: None,
-                source_ieee: Some(state.ieee_address),
+                source_ieee: Some(self.state.ieee_address),
                 multicast_control: None,
                 source_route: None,
             },
@@ -2144,7 +2123,7 @@ impl ZigbeeStack {
             .unwrap(),
         };
 
-        self.background_send_nwk_frame(state, route_request_frame);
+        self.background_send_nwk_frame(route_request_frame);
     }
 
     pub async fn send_aps_command(
@@ -2216,7 +2195,6 @@ impl ZigbeeStack {
 
         log::debug!("Prepared APS frame: {:#?}", aps_frame);
 
-        let mut state = self.state.lock().unwrap();
         let nwk_frame = NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -2231,9 +2209,9 @@ impl ZigbeeStack {
                     end_device_initiator: false,
                 },
                 destination: destination,
-                source: state.network_address,
+                source: self.state.network_address,
                 radius: cmp::max(radius, 1),
-                sequence_number: state.sequence_number,
+                sequence_number: *self.state.sequence_number.lock().unwrap(),
                 destination_ieee: None,
                 source_ieee: None,
                 multicast_control: None,
@@ -2246,7 +2224,7 @@ impl ZigbeeStack {
         log::debug!("Prepared NWK frame: {:#?}", nwk_frame);
 
         if !aps_ack {
-            self.background_send_nwk_frame(state, nwk_frame);
+            self.background_send_nwk_frame(nwk_frame);
             return Ok(());
         }
 
@@ -2262,9 +2240,13 @@ impl ZigbeeStack {
         let (ack_tx, ack_rx) = oneshot::channel();
 
         log::debug!("APS ACK requested, waiting for {:?}", ack_data);
-        state.pending_aps_acks.insert(ack_data, ack_tx);
+        self.state
+            .pending_aps_acks
+            .lock()
+            .unwrap()
+            .insert(ack_data, ack_tx);
 
-        self.background_send_nwk_frame(state, nwk_frame);
+        self.background_send_nwk_frame(nwk_frame);
 
         // With a 5s timeout
         match tokio::time::timeout(APS_ACK_TIMEOUT, ack_rx).await {
@@ -2285,16 +2267,15 @@ impl ZigbeeStack {
     }
 
     pub async fn send_link_status_broadcast(&self, empty: bool) {
-        let mut state = self.state.lock().unwrap();
         log::debug!("Sending periodic link status broadcast");
 
-        if state.network_address == Nwk(0xFFFF) {
+        if self.state.network_address == Nwk(0xFFFF) {
             log::debug!("Skipping, stack has not been initialized yet");
             return;
         }
 
         // Decrement the `recent_activity` field of every active routing table entry
-        for (_, route_table_entry) in state.route_table.iter_mut() {
+        for (_, route_table_entry) in self.state.route_table.lock().unwrap().iter_mut() {
             if route_table_entry.status == route::Status::Active {
                 route_table_entry.recent_activity =
                     route_table_entry.recent_activity.saturating_sub(1);
@@ -2302,9 +2283,9 @@ impl ZigbeeStack {
         }
 
         // Decrement the inbound and outbound activity fields for neighbors
-        self.maybe_age_neighbors(&mut state);
+        self.maybe_age_neighbors();
 
-        for (_, neighbor_entry) in state.neighbor_table.iter_mut() {
+        for (_, neighbor_entry) in self.state.neighbor_table.lock().unwrap().iter_mut() {
             neighbor_entry.router_outbound_activity =
                 neighbor_entry.router_outbound_activity.saturating_sub(1);
             neighbor_entry.router_inbound_activity =
@@ -2312,8 +2293,10 @@ impl ZigbeeStack {
         }
 
         let mut link_statuses = if !empty {
-            state
+            self.state
                 .neighbor_table
+                .lock()
+                .unwrap()
                 .iter()
                 .filter_map(|(_, neighbor)| {
                     // We only calculate link statuses for neighbors for which we have
@@ -2329,8 +2312,6 @@ impl ZigbeeStack {
             Vec::new()
         };
 
-        drop(state);
-
         // Link statuses are sorted in ascending order
         link_statuses.sort_by(|a, b| a.address.as_u16().cmp(&b.address.as_u16()));
 
@@ -2338,10 +2319,6 @@ impl ZigbeeStack {
         let mut remaining_link_statuses = link_statuses.clone();
 
         loop {
-            let mut state = self.state.lock().unwrap();
-
-            state.sequence_number = state.sequence_number.wrapping_add(1);
-
             let link_status_frame = NwkFrame {
                 nwk_header: NwkHeader {
                     frame_control: NwkFrameControl {
@@ -2356,11 +2333,11 @@ impl ZigbeeStack {
                         end_device_initiator: false,
                     },
                     destination: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                    source: state.network_address,
+                    source: self.state.network_address,
                     radius: 1,
-                    sequence_number: state.sequence_number,
+                    sequence_number: *self.state.sequence_number.lock().unwrap(),
                     destination_ieee: None,
-                    source_ieee: Some(state.ieee_address),
+                    source_ieee: Some(self.state.ieee_address),
                     multicast_control: None,
                     source_route: None,
                 },
@@ -2381,7 +2358,7 @@ impl ZigbeeStack {
                 .unwrap(),
             };
 
-            self.background_send_nwk_frame(state, link_status_frame);
+            self.background_send_nwk_frame(link_status_frame);
 
             if remaining_link_statuses.is_empty() {
                 break;
