@@ -4,13 +4,13 @@ use serde_json::json;
 use serial2::Settings;
 use serial2_tokio::SerialPort;
 use std::env;
-use std::future;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::LocalRuntime;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast}; // Use tokio's async-aware Mutex
 use tokio::task::spawn_local;
 
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -41,6 +41,7 @@ struct ServerState {
 
 pub struct ZigguratServer {
     serial_path: String,
+    // Use tokio::sync::Mutex for async-aware locking
     server_state: Mutex<Option<ServerState>>,
     is_client_connected: Mutex<bool>,
 }
@@ -64,20 +65,21 @@ impl ZigguratServer {
         loop {
             let (socket, addr) = listener.accept().await?;
 
-            // Enforce the single-client rule.
-            if *self.is_client_connected.lock().unwrap() {
+            // Enforce the single-client rule using the async mutex
+            let mut is_connected_guard = self.is_client_connected.lock().await;
+            if *is_connected_guard {
                 log::warn!(
                     "Rejecting connection from {}: another client is already connected.",
                     addr
                 );
                 drop(socket);
-                continue;
+                continue; // The lock guard is dropped here
             }
 
             log::info!("Accepted new TCP client from {}", addr);
-            *self.is_client_connected.lock().unwrap() = true;
+            *is_connected_guard = true;
+            drop(is_connected_guard); // Release the lock before spawning the task
 
-            // Clone the Arc to move it into the client handling task.
             let server_clone = self.clone();
             spawn_local(async move {
                 server_clone.handle_client(socket, addr).await;
@@ -86,22 +88,19 @@ impl ZigguratServer {
     }
 
     /// Manages the entire lifecycle of a single client connection.
-    /// This is a wrapper function that ensures the connection flag is reset
-    /// regardless of how the client handler exits.
     async fn handle_client(self: Arc<Self>, stream: TcpStream, addr: SocketAddr) {
         if let Err(e) = self.handle_client_loop(stream, addr).await {
             log::warn!("Error handling client {}: {:?}", addr, e);
         }
 
         log::info!("Client {} disconnected.", addr);
-        *self.is_client_connected.lock().unwrap() = false;
-        // When a client disconnects, we also tear down the Zigbee stack.
-        // A new client will have to re-initialize it.
-        *self.server_state.lock().unwrap() = None;
+        *self.is_client_connected.lock().await = false;
+        *self.server_state.lock().await = None;
         log::info!("Zigbee stack has been reset.");
     }
 
-    /// The core logic loop for handling client messages and Zigbee notifications.
+    /// The core logic loop for handling client messages. This function now correctly
+    /// separates the uninitialized and initialized states.
     async fn handle_client_loop(
         &self,
         stream: TcpStream,
@@ -111,28 +110,69 @@ impl ZigguratServer {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
 
-        // The notification receiver might not exist yet. We will acquire it
-        // after the stack is initialized by the client.
-        let mut maybe_notification_rx: Option<broadcast::Receiver<ZigbeeNotification>> = None;
+        log::info!(
+            "Client {} connected. Waiting for 'set_network_settings'...",
+            addr
+        );
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => return Ok(()), // Client disconnected
+                Ok(_) => {
+                    let cmd = match serde_json::from_str::<CommandRequest>(line.trim()) {
+                        Ok(cmd) => cmd,
+                        Err(e) => {
+                            log::warn!("JSON parse error from {}: {}", addr, e);
+                            let resp = json!({"tid": 0, "cmd": "error", "data": {"reason": "invalid_json", "details": e.to_string()}});
+                            writer.write_all(resp.to_string().as_bytes()).await?;
+                            writer.write_all(b"\n").await?;
+                            continue;
+                        }
+                    };
+
+                    log::debug!("Received command from {}: {:?}", addr, cmd);
+                    let resp = self.process_command(cmd).await;
+                    let resp_str = serde_json::to_string(&resp)?;
+                    writer.write_all(resp_str.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+
+                    if resp.cmd == "set_network_settings"
+                        && resp.data.get("status").and_then(|v| v.as_str()) == Some("success")
+                    {
+                        break;
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        let state_guard = self.server_state.lock().await;
+        let notification_rx = state_guard.as_ref().unwrap().notification_rx.resubscribe();
+        drop(state_guard);
+
+        log::info!("Stack initialized. Now listening for commands and notifications.");
+
+        self.run_initialized_loop(reader, writer, notification_rx, addr)
+            .await
+    }
+
+    /// Runs the main operational loop after the Zigbee stack has been initialized.
+    async fn run_initialized_loop(
+        &self,
+        reader: BufReader<OwnedReadHalf>,
+        mut writer: OwnedWriteHalf,
+        mut notification_rx: broadcast::Receiver<ZigbeeNotification>,
+        addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut reader = reader;
+        let mut line = String::new();
 
         loop {
-            // If the stack was initialized in a previous loop iteration,
-            // we subscribe to the notification channel here.
-            if maybe_notification_rx.is_none() {
-                if let Some(state) = self.server_state.lock().unwrap().as_ref() {
-                    maybe_notification_rx = Some(state.notification_rx.resubscribe());
-                }
-            }
-
             line.clear();
-
             tokio::select! {
-                // Handle incoming TCP commands from the client.
                 read_result = reader.read_line(&mut line) => {
                     let n = read_result?;
-                    if n == 0 {
-                        break; // EOF reached, client disconnected.
-                    }
+                    if n == 0 { break; }
 
                     match serde_json::from_str::<CommandRequest>(line.trim()) {
                         Ok(cmd) => {
@@ -151,18 +191,7 @@ impl ZigguratServer {
                         }
                     }
                 },
-
-                // Handle notifications from the Zigbee stack.
-                // This branch effectively does nothing until `maybe_notification_rx` is `Some`.
-                // `future::pending()` creates a future that never resolves, which is perfect
-                // for disabling a select branch until it's ready.
-                notify_event = async {
-                    if let Some(ref mut rx) = maybe_notification_rx {
-                        rx.recv().await
-                    } else {
-                        future::pending().await
-                    }
-                } => {
+                notify_event = notification_rx.recv() => {
                      match notify_event {
                         Ok(ZigbeeNotification::ReceivedApsCommand {
                             source, profile_id, cluster_id, src_ep, dst_ep, lqi, rssi, data,
@@ -181,7 +210,6 @@ impl ZigguratServer {
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                             log::warn!("Client {} lagged {} messages, skipping...", addr, count);
-                            continue;
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             log::warn!("Broadcast channel closed, ending client connection for {}", addr);
@@ -198,8 +226,8 @@ impl ZigguratServer {
     async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
         match cmd.cmd.as_str() {
             "set_network_settings" => {
-                // This command is special: it creates the ZigbeeStack.
-                if self.server_state.lock().unwrap().is_some() {
+                let mut state_guard = self.server_state.lock().await;
+                if state_guard.is_some() {
                     return CommandResponse {
                         tid: cmd.tid,
                         cmd: cmd.cmd,
@@ -207,8 +235,6 @@ impl ZigguratServer {
                     };
                 }
 
-                // NOTE: The extensive use of `unwrap()` here matches the original code's style.
-                // A production implementation should handle parsing errors gracefully.
                 let channel = cmd.data.get("channel").unwrap().as_u64().unwrap() as u8;
                 let nwk_update_id = cmd.data.get("nwk_update_id").unwrap().as_u64().unwrap() as u8;
                 let pan_id = PanId::from_hex(cmd.data.get("pan_id").unwrap().as_str().unwrap());
@@ -229,7 +255,6 @@ impl ZigguratServer {
                     .as_u64()
                     .unwrap() as u32;
 
-                // --- Begin Initialization ---
                 log::info!("Initializing Zigbee stack with new settings...");
                 let port = match SerialPort::open(&self.serial_path, |mut settings: Settings| {
                     settings.set_raw();
@@ -262,14 +287,12 @@ impl ZigguratServer {
                     network_key_tx_counter,
                 );
 
-                // Spawn the main stack runner task.
                 let stack_clone = zigbee_stack.clone();
                 spawn_local(async move {
                     stack_clone.run().await;
                 });
 
-                // Store the initialized stack and notifier in our state.
-                *self.server_state.lock().unwrap() = Some(ServerState {
+                *state_guard = Some(ServerState {
                     zigbee_stack,
                     notification_rx,
                 });
@@ -281,11 +304,10 @@ impl ZigguratServer {
                     data: json!({"status": "success"}),
                 }
             }
-
             "send_aps_command" => {
-                // This command depends on the stack being initialized first.
-                let state = self.server_state.lock().unwrap();
-                if let Some(server_state) = &*state {
+                let state_guard = self.server_state.lock().await;
+                if let Some(server_state) = &*state_guard {
+                    // ... (parsing logic remains the same)
                     let delivery_mode = match cmd
                         .data
                         .get("delivery_mode")
@@ -316,6 +338,7 @@ impl ZigguratServer {
                     let data =
                         hex::decode(cmd.data.get("data").unwrap().as_str().unwrap()).unwrap();
 
+                    // The lock is held across this await, which is now safe.
                     let status = server_state
                         .zigbee_stack
                         .send_aps_command(
@@ -338,7 +361,6 @@ impl ZigguratServer {
                         data: json!({"status": if status.is_ok() { "success" } else { "error" }, "reason": status.err().map(|e| e.to_string())}),
                     }
                 } else {
-                    // Return error if stack is not yet initialized.
                     CommandResponse {
                         tid: cmd.tid,
                         cmd: cmd.cmd,
@@ -346,7 +368,6 @@ impl ZigguratServer {
                     }
                 }
             }
-
             _ => CommandResponse {
                 tid: cmd.tid,
                 cmd: cmd.cmd,
