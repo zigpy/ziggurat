@@ -14,19 +14,19 @@ pub struct TableEntry {
     pub end_device_configuration: u16,
 
     /// The current time remaining, in seconds, for the end device
-    pub timeout_at: Instant,
     /// max: 15728640 seconds, ~182 days
+    pub timeout_at: Instant,
 
     /// This field indicates the timeout, in seconds, for the end device child
-    pub device_timeout_at: Instant,
     /// max: 129600 seconds, 36 hours
+    pub device_timeout_at: Instant,
     pub relationship: Relationship,
 
     /// A value indicating if previous transmissions to the device were successful or
     /// not. Higher values indicate more failures.
     pub transmit_failure: u8,
-    pub lqas: VecDeque<u8>,
     /// TODO: replace with a fixed-size ring buffer
+    pub lqas: VecDeque<u8>,
 
     /// The outgoing cost field contains the cost of the link as measured by the
     /// neighbor. The value is obtained from the most recent link status command frame
