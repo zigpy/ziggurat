@@ -920,7 +920,7 @@ impl ZigbeeStack {
                 Ok(NwkCommandId::LinkStatus) => {
                     // TODO: Error handling for decoding?
                     log::info!("Link status command frame received");
-                    self.handle_link_status(nwk_frame);
+                    self.handle_link_status(nwk_frame, lqi);
                 }
                 Ok(NwkCommandId::RouteReply) => {
                     // TODO: Error handling for decoding?
@@ -1002,7 +1002,7 @@ impl ZigbeeStack {
         }
     }
 
-    fn handle_link_status(&self, nwk_frame: &NwkFrame) {
+    fn handle_link_status(&self, nwk_frame: &NwkFrame, lqi: u8) {
         let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -1049,7 +1049,7 @@ impl ZigbeeStack {
                 // Create one
                 log::info!("Creating new neighbor entry for {source_ieee:?}");
 
-                let entry = neighbor::TableEntry {
+                let mut entry = neighbor::TableEntry {
                     extended_address: source_ieee,
                     network_address: nwk_frame.nwk_header.source,
                     device_type: NwkDeviceType::Router,
@@ -1074,6 +1074,10 @@ impl ZigbeeStack {
                     router_inbound_activity: 0,
                     security_timer: 0,
                 };
+
+                // Update the neighbor's LQI deque here, since we did not do so earlier
+                // when receiving the packet (since the entry was missing)
+                entry.lqas.push_back(lqi);
 
                 neighbor_table.insert(source_ieee, entry);
                 neighbor_table.get_mut(&source_ieee).unwrap()
