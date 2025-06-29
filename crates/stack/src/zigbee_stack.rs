@@ -267,21 +267,27 @@ pub struct State {
 
     // NIB
     pub sequence_number: Mutex<u8>,
+
     pub neighbor_table: Mutex<HashMap<Eui64, neighbor::TableEntry>>,
     pub route_table: Mutex<HashMap<Nwk, route::TableEntry>>,
     pub route_discovery_table: Mutex<HashMap<(Nwk, route::RequestId), route::DiscoveryEntry>>,
+    pub broadcast_transaction_table: Mutex<HashMap<(Nwk, u8), NwkBroadcastTransaction>>,
+    pub route_record_table: Mutex<HashMap<Nwk, Vec<Nwk>>>,
+
     pub capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
+
+    pub ieee_address: Eui64,
     pub update_id: Mutex<u8>,
+    pub pan_id: Mutex<PanId>,
     pub network_address: Nwk,
-    pub broadcast_transaction_table: Mutex<HashMap<(Nwk, u8), NwkBroadcastTransaction>>,
     pub extended_pan_id: Eui64,
-    pub route_record_table: Mutex<HashMap<Nwk, Vec<Nwk>>>,
-    pub is_concentrator: bool,
-    pub security_level: u8,
     pub security_material_primary: Mutex<NwkSecurityDescriptor>,
     pub security_material_alternate: Mutex<NwkSecurityDescriptor>,
     pub active_key_seq_number: u8,
+
+    pub is_concentrator: bool,
+    pub security_level: u8,
 
     /// Indicates whether incoming NWK frames SHALL be all checked for freshness when
     /// the memory for incoming frame counts is exceeded.
@@ -291,8 +297,6 @@ pub struct State {
     /// A flag that determines if a timestamp indication is provided on incoming and
     /// outgoing packets.
     pub time_stamp: bool,
-
-    pub pan_id: Mutex<PanId>,
 
     /// A count of Unicast transmissions made by the NNK layer on this device.
     /// Each time the NWK layer transmits a Unicast frame, by invoking the
@@ -312,8 +316,6 @@ pub struct State {
     /// This policy determines whether a NWK leave request is accepted when the Rejoin
     /// bit in the message is set to FALSE
     pub leave_request_without_rejoin_allowed: bool,
-
-    pub ieee_address: Eui64,
 
     // A strictly increasing sequence number included in all route request and route
     // reply command frames to allow other routers to determine the chronological order
