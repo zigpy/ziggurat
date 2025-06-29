@@ -1013,14 +1013,14 @@ impl ZigbeeStack {
 
         log::info!("Link status command frame: {link_status_cmd:#?}");
 
-        if nwk_frame.nwk_header.source_ieee.is_none() {
-            log::warn!("Link status command source EUI64 is missing");
-            return;
-        }
-
         // We collect a list of neighbors with non-zero outgoing cost up here, before
         // mutating the state
         self.maybe_age_neighbors();
+
+        let Some(source_ieee) = nwk_frame.nwk_header.source_ieee else {
+            log::warn!("Link status command source EUI64 is missing");
+            return;
+        };
 
         let neighbors_with_nonzero_outgoing_cost = self
             .state
@@ -1037,7 +1037,6 @@ impl ZigbeeStack {
             })
             .collect::<HashSet<Nwk>>();
 
-        let source_ieee = nwk_frame.nwk_header.source_ieee.unwrap();
         let mut neighbor_table = self
             .state
             .neighbor_table
