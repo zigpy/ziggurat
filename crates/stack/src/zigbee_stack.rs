@@ -36,7 +36,8 @@ use tokio::time::{Duration, Instant};
 mod neighbor;
 mod route;
 
-const MAX_LOCK_DURATION: Duration = Duration::from_millis(100);
+// TODO: remove this once all long locks have been found
+const MAX_LOCK_DURATION: Duration = Duration::from_millis(10);
 
 const APS_ACK_TIMEOUT: Duration = Duration::from_millis(5000);
 
