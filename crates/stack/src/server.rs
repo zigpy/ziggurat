@@ -5,12 +5,12 @@ use serial2::Settings;
 use serial2_tokio::SerialPort;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::LocalRuntime;
-use tokio::sync::{Mutex, broadcast}; // Use tokio's async-aware Mutex
+use tokio::sync::broadcast;
 use tokio::task::spawn_local;
 
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -66,7 +66,7 @@ impl ZigguratServer {
             let (socket, addr) = listener.accept().await?;
 
             // Enforce the single-client rule using the async mutex
-            let mut is_connected_guard = self.is_client_connected.lock().await;
+            let mut is_connected_guard = self.is_client_connected.lock().unwrap();
             if *is_connected_guard {
                 log::warn!(
                     "Rejecting connection from {}: another client is already connected.",
@@ -94,8 +94,8 @@ impl ZigguratServer {
         }
 
         log::info!("Client {} disconnected.", addr);
-        *self.is_client_connected.lock().await = false;
-        *self.server_state.lock().await = None;
+        *self.is_client_connected.lock().unwrap() = false;
+        *self.server_state.lock().unwrap() = None;
         log::info!("Zigbee stack has been reset.");
     }
 
@@ -146,7 +146,7 @@ impl ZigguratServer {
             }
         }
 
-        let state_guard = self.server_state.lock().await;
+        let state_guard = self.server_state.lock().unwrap();
         let notification_rx = state_guard.as_ref().unwrap().notification_rx.resubscribe();
         drop(state_guard);
 
@@ -226,7 +226,7 @@ impl ZigguratServer {
     async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
         match cmd.cmd.as_str() {
             "set_network_settings" => {
-                let mut state_guard = self.server_state.lock().await;
+                let mut state_guard = self.server_state.lock().unwrap();
                 if state_guard.is_some() {
                     return CommandResponse {
                         tid: cmd.tid,
@@ -305,7 +305,7 @@ impl ZigguratServer {
                 }
             }
             "send_aps_command" => {
-                let state_guard = self.server_state.lock().await;
+                let state_guard = self.server_state.lock().unwrap();
                 if let Some(server_state) = &*state_guard {
                     // ... (parsing logic remains the same)
                     let delivery_mode = match cmd
