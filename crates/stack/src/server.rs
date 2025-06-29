@@ -41,7 +41,6 @@ struct ServerState {
 
 pub struct ZigguratServer {
     serial_path: String,
-    // Use tokio::sync::Mutex for async-aware locking
     server_state: Mutex<Option<ServerState>>,
     is_client_connected: Mutex<bool>,
 }
@@ -99,8 +98,7 @@ impl ZigguratServer {
         log::info!("Zigbee stack has been reset.");
     }
 
-    /// The core logic loop for handling client messages. This function now correctly
-    /// separates the uninitialized and initialized states.
+    /// The core logic loop for handling client messages.
     async fn handle_client_loop(
         &self,
         stream: TcpStream,
