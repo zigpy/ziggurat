@@ -13,6 +13,12 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: cargo-build
+        name: Cargo build
+        entry: cargo build
+        language: system
+        pass_filenames: false
+
 #      - id: rust-clippy
 #        name: Rust clippy
 #        entry: bash -c "cd ziggurat && cargo clippy --all-targets --all-features -- -Dclippy::all"
