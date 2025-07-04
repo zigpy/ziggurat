@@ -198,12 +198,12 @@ pub enum ApsFrame {
 }
 
 pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, &'static str> {
-    if bytes.len() < 1 {
+    if bytes.is_empty() {
         return Err("Not enough data to parse ApsFrame");
     }
 
     let frame_type =
-        ApsFrameType::try_from((bytes[0] >> 0) & 0b11).map_err(|_| "Invalid frame type")?;
+        ApsFrameType::try_from(bytes[0] & 0b11).map_err(|_| "Invalid frame type")?;
 
     match frame_type {
         ApsFrameType::Data => Ok(ApsFrame::Data(ApsDataFrame::from_bytes(bytes)?)),

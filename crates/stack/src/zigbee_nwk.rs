@@ -142,15 +142,15 @@ impl NwkHeader {
 
         Ok((
             Self {
-                frame_control: frame_control,
-                destination: destination,
-                source: source,
-                radius: radius,
-                sequence_number: sequence_number,
-                destination_ieee: destination_ieee,
-                source_ieee: source_ieee,
-                multicast_control: multicast_control,
-                source_route: source_route,
+                frame_control,
+                destination,
+                source,
+                radius,
+                sequence_number,
+                destination_ieee,
+                source_ieee,
+                multicast_control,
+                source_route,
             },
             remaining,
         ))
@@ -281,7 +281,7 @@ impl NwkAuxHeader {
 
 fn right_pad_to_multiple_of_16(data: &[u8]) -> Vec<Block> {
     // Pre-allocate enough blocks
-    let mut blocks = Vec::<Block>::with_capacity((data.len() + 15) / 16);
+    let mut blocks = Vec::<Block>::with_capacity(data.len().div_ceil(16));
 
     // Push all full 16-byte chunks
     for chunk in data.chunks_exact(16) {
@@ -338,7 +338,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
 
         let mut authed_plaintext = Vec::<Block>::new();
         authed_plaintext.extend(right_pad_to_multiple_of_16(&added_auth_data));
-        authed_plaintext.extend(right_pad_to_multiple_of_16(&plaintext));
+        authed_plaintext.extend(right_pad_to_multiple_of_16(plaintext));
 
         let mut ciphertext_buffer = Vec::<Block>::new();
         ciphertext_buffer.push(b0);
@@ -387,7 +387,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
         encrypted_mac_tag.copy_from_slice(&tagged_ciphertext_blocks[0][0..M]);
 
         // The actual ciphertext portion starts at the second block
-        let ciphertext_vec = Vec::<u8>::from(tagged_ciphertext_blocks[1..].concat());
+        let ciphertext_vec = tagged_ciphertext_blocks[1..].concat();
         let ciphertext = ciphertext_vec[..plaintext.len()].to_vec();
 
         (encrypted_mac_tag, ciphertext)
@@ -427,9 +427,9 @@ impl EncryptedNwkFrame {
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
         let source;
 
-        if !aux_header.extended_source.is_none() {
+        if aux_header.extended_source.is_some() {
             source = aux_header.extended_source.unwrap();
-        } else if !self.nwk_header.source_ieee.is_none() {
+        } else if self.nwk_header.source_ieee.is_some() {
             source = self.nwk_header.source_ieee.unwrap();
         } else {
             // XXX: this can't happen
@@ -464,8 +464,8 @@ impl EncryptedNwkFrame {
         }
 
         Ok(Self {
-            nwk_header: nwk_header,
-            aux_header: aux_header,
+            nwk_header,
+            aux_header,
             ciphertext: remaining.to_vec(),
         })
     }
@@ -521,9 +521,9 @@ impl NwkFrame {
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
         let source;
 
-        if !aux_header.extended_source.is_none() {
+        if aux_header.extended_source.is_some() {
             source = aux_header.extended_source.unwrap();
-        } else if !self.nwk_header.source_ieee.is_none() {
+        } else if self.nwk_header.source_ieee.is_some() {
             source = self.nwk_header.source_ieee.unwrap();
         } else {
             // XXX: this can't happen
@@ -551,9 +551,9 @@ impl NwkFrame {
         let nonce = self.get_nonce(&aux_header);
         let plaintext = &self.payload;
 
-        let mac_tag = crypto.compute_mac(&self.nwk_header, key, &plaintext, &aux_header, &nonce);
+        let mac_tag = crypto.compute_mac(&self.nwk_header, key, plaintext, &aux_header, &nonce);
         let (encrypted_mac_tag, ciphertext) =
-            crypto.encrypt_decrypt(key, &nonce, &mac_tag, &plaintext);
+            crypto.encrypt_decrypt(key, &nonce, &mac_tag, plaintext);
 
         let mut ciphertext_with_tag = ciphertext;
         ciphertext_with_tag.extend(encrypted_mac_tag);

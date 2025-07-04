@@ -262,7 +262,7 @@ pub fn packed_uint21_deserialize(bytes: &[u8]) -> Result<(u32, &[u8]), SpinelFra
         }
     }
 
-    return Err(SpinelFrameParsingError::PackedU21DidNotTerminate);
+    Err(SpinelFrameParsingError::PackedU21DidNotTerminate)
 }
 
 pub fn packed_uint21_to_bytes(value: u32) -> Vec<u8> {
@@ -371,7 +371,7 @@ impl HdlcLiteFrame {
 
         if crc != expected_crc {
             return Err(HdlcLiteFrameParsingError::InvalidCrc {
-                expected_crc: expected_crc,
+                expected_crc,
                 got_crc: crc,
             });
         }
@@ -429,7 +429,7 @@ pub struct SpinelHeader {
 
 impl SpinelHeader {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
-        if bytes.len() < 1 {
+        if bytes.is_empty() {
             return Err(SpinelFrameParsingError::PayloadTooShort {
                 expected: 1,
                 got: bytes.len(),
@@ -442,12 +442,12 @@ impl SpinelHeader {
         Ok(Self {
             flag: (byte & 0b11000000) >> 6,
             network_link_id: (byte & 0b00110000) >> 4,
-            transaction_id: (byte & 0b00001111) >> 0,
+            transaction_id: (byte & 0b00001111),
         })
     }
 
     pub fn to_bytes(&self) -> [u8; 1] {
-        [(self.flag << 6) | (self.network_link_id << 4) | (self.transaction_id << 0)]
+        [(self.flag << 6) | (self.network_link_id << 4) | self.transaction_id]
     }
 }
 
@@ -531,6 +531,12 @@ pub struct SpinelProtocol {
     pub property_update_receivers: HashMap<SpinelPropertyId, mpsc::Sender<SpinelFramePropValueIs>>,
 }
 
+impl Default for SpinelProtocol {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpinelProtocol {
     pub fn new() -> Self {
         Self {
@@ -588,7 +594,7 @@ impl SpinelProtocol {
                     | Err(HdlcLiteFrameParsingError::PayloadTooShort { .. }) => {}
                     Ok(frame) => match SpinelFrame::from_bytes(&frame.data) {
                         Err(SpinelFrameParsingError::PayloadTooShort { .. })
-                        | Err(SpinelFrameParsingError::PackedU21DidNotTerminate { .. })
+                        | Err(SpinelFrameParsingError::PackedU21DidNotTerminate)
                         | Err(SpinelFrameParsingError::NotSpinelFrame { .. }) => {}
                         Err(SpinelFrameParsingError::InvalidPropertyId { .. }) => { /* This cannot happen */
                         }
@@ -605,7 +611,7 @@ impl SpinelProtocol {
             self.buffer.drain(0..index.unwrap() + 1);
         }
 
-        return num_parsed_frames;
+        num_parsed_frames
     }
 
     pub fn parse_frames_from_bytes(&mut self, bytes: &[u8]) -> Vec<SpinelFrame> {
@@ -639,21 +645,21 @@ impl SpinelProtocol {
                                 let _ = sender.try_send(prop_value_is);
                             }
                             None => {
-                                eprintln!("No receiver for property update: {:?}", prop_value_is);
+                                eprintln!("No receiver for property update: {prop_value_is:?}");
                             }
                         }
                     }
                     Err(_) => {
-                        eprintln!("Failed to parse PropValueIs frame: {:?}", frame);
+                        eprintln!("Failed to parse PropValueIs frame: {frame:?}");
                     }
                 }
             } else {
-                eprintln!("Unhandled unsolicited frame: {:?}", frame);
+                eprintln!("Unhandled unsolicited frame: {frame:?}");
             }
         } else if let Some(sender) = self.pending_frames.remove(&tid) {
             let _ = sender.send(frame);
         } else {
-            eprintln!("Unsolicited or unmatched frame: {:?}", frame);
+            eprintln!("Unsolicited or unmatched frame: {frame:?}");
         }
     }
 

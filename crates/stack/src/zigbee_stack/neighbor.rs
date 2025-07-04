@@ -82,12 +82,12 @@ impl TableEntry {
             // Average of the two middle elements for even number of samples
             let mid1 = sorted_lqas[num_samples / 2 - 1];
             let mid2 = sorted_lqas[num_samples / 2];
-            return Some(((mid1 as u16 + mid2 as u16) / 2) as u8);
-        };
+            Some(((mid1 as u16 + mid2 as u16) / 2) as u8)
+        }
     }
 
     pub fn incoming_link_cost(&self) -> u8 {
-        self.lqa().map_or(0, |lqa| lqi_to_link_cost(lqa))
+        self.lqa().map_or(0, lqi_to_link_cost)
     }
 }
 
