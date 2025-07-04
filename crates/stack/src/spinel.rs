@@ -364,7 +364,7 @@ impl HdlcLiteFrame {
         let mut crc = 0x0000u16;
         CRC_KERMIT.init_crc(&mut crc);
         CRC_KERMIT.update_crc(&mut crc, &data[..data.len() - 2]);
-        CRC_KERMIT.finish_crc(&mut crc);
+        CRC_KERMIT.finish_crc(&crc);
         crc ^= 0xFFFF;
 
         let expected_crc = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
@@ -385,7 +385,7 @@ impl HdlcLiteFrame {
         let mut crc = 0x0000u16;
         CRC_KERMIT.init_crc(&mut crc);
         CRC_KERMIT.update_crc(&mut crc, &self.data);
-        CRC_KERMIT.finish_crc(&mut crc);
+        CRC_KERMIT.finish_crc(&crc);
         crc ^= 0xFFFF;
 
         let mut result = Vec::new();

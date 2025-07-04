@@ -315,6 +315,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
         (ciphertext, mac_tag)
     }
 
+    #[allow(clippy::unusual_byte_groupings)]
     pub fn compute_mac(
         &self,
         nwk_header: &NwkHeader,
@@ -356,6 +357,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
         mac_tag
     }
 
+    #[allow(clippy::unusual_byte_groupings)]
     pub fn encrypt_decrypt(
         &self,
         key: &Key,
@@ -380,7 +382,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
             counter_block[14..16]
                 .copy_from_slice(&encoded_block_num[encoded_block_num.len() - L..]);
 
-            cipher.encrypt_block_b2b(&mut counter_block, &mut buffer_block);
+            cipher.encrypt_block_b2b(&counter_block, &mut buffer_block);
             tagged_ciphertext_blocks.push(Block::from_fn(|i| buffer_block[i] ^ plaintext_block[i]));
         }
 

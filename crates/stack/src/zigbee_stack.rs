@@ -339,6 +339,7 @@ pub struct State {
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         channel: u8,
         update_id: u8,
@@ -442,6 +443,7 @@ pub struct ZigbeeStack {
 }
 
 impl ZigbeeStack {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         spinel: SpinelClient,
         channel: u8,
@@ -757,17 +759,13 @@ impl ZigbeeStack {
         }
 
         // Validate the security header frame counter for the relaying EUI64
-        let src_eui64;
-
-        match aux_header.extended_source {
+        let src_eui64 = match aux_header.extended_source {
             None => {
                 log::debug!("Ignoring frame, extended source is missing");
                 return None;
             }
-            Some(eui64) => {
-                src_eui64 = eui64;
-            }
-        }
+            Some(eui64) => eui64,
+        };
 
         match self
             .state
@@ -2314,6 +2312,7 @@ impl ZigbeeStack {
         self.background_send_nwk_frame(route_request_frame);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_aps_command(
         &self,
         delivery_mode: ApsDeliveryMode,
