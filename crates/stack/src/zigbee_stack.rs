@@ -1813,16 +1813,14 @@ impl ZigbeeStack {
             // The encryption frame counter always increments
             nwk_frame.aux_header.as_mut().unwrap().frame_counter = self.next_nwk_frame_counter();
 
-            let encrypted_nwk_frame = {
-                nwk_frame.encrypt(
-                    &self
-                        .state
-                        .security_material_primary
-                        .try_lock_for(MAX_LOCK_DURATION)
-                        .unwrap()
-                        .key,
-                )
-            };
+            let encrypted_nwk_frame = nwk_frame.encrypt(
+                &self
+                    .state
+                    .security_material_primary
+                    .try_lock_for(MAX_LOCK_DURATION)
+                    .unwrap()
+                    .key,
+            );
 
             let ieee802154_frame = Ieee802154Frame {
                 frame_control: Ieee802154FrameControl {
@@ -1968,16 +1966,14 @@ impl ZigbeeStack {
             // The encryption frame counter always increments
             nwk_frame.aux_header.as_mut().unwrap().frame_counter = self.next_nwk_frame_counter();
 
-            let encrypted_nwk_frame = {
-                nwk_frame.encrypt(
-                    &self
-                        .state
-                        .security_material_primary
-                        .try_lock_for(MAX_LOCK_DURATION)
-                        .unwrap()
-                        .key,
-                )
-            };
+            let encrypted_nwk_frame = nwk_frame.encrypt(
+                &self
+                    .state
+                    .security_material_primary
+                    .try_lock_for(MAX_LOCK_DURATION)
+                    .unwrap()
+                    .key,
+            );
 
             let ieee802154_frame = Ieee802154Frame {
                 frame_control: Ieee802154FrameControl {
