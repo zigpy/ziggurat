@@ -1765,6 +1765,19 @@ impl ZigbeeStack {
         }
     }
 
+    pub fn next_nwk_frame_counter(&self) -> u32 {
+        let mut security_material_primary = self
+            .state
+            .security_material_primary
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap();
+        security_material_primary.outgoing_frame_counter = security_material_primary
+            .outgoing_frame_counter
+            .wrapping_add(1);
+
+        security_material_primary.outgoing_frame_counter
+    }
+
     pub async fn send_unicast_nwk_frame(
         &self,
         mut nwk_frame: NwkFrame,
@@ -1798,16 +1811,7 @@ impl ZigbeeStack {
 
         for attempt in 0..=self.constants.unicast_retries {
             // The encryption frame counter always increments
-            nwk_frame.aux_header.as_mut().unwrap().frame_counter = {
-                let mut outgoing_frame_counter = self
-                    .state
-                    .security_material_primary
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .outgoing_frame_counter;
-                outgoing_frame_counter = outgoing_frame_counter.wrapping_add(1);
-                outgoing_frame_counter
-            };
+            nwk_frame.aux_header.as_mut().unwrap().frame_counter = self.next_nwk_frame_counter();
 
             let encrypted_nwk_frame = {
                 nwk_frame.encrypt(
@@ -1962,16 +1966,7 @@ impl ZigbeeStack {
 
         for attempt in 0..=self.constants.max_broadcast_retries {
             // The encryption frame counter always increments
-            nwk_frame.aux_header.as_mut().unwrap().frame_counter = {
-                let mut outgoing_frame_counter = self
-                    .state
-                    .security_material_primary
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .outgoing_frame_counter;
-                outgoing_frame_counter = outgoing_frame_counter.wrapping_add(1);
-                outgoing_frame_counter
-            };
+            nwk_frame.aux_header.as_mut().unwrap().frame_counter = self.next_nwk_frame_counter();
 
             let encrypted_nwk_frame = {
                 nwk_frame.encrypt(
