@@ -77,7 +77,7 @@ impl TableEntry {
 
         // Calculate median
         if num_samples % 2 == 1 {
-            return Some(sorted_lqas[num_samples / 2]);
+            Some(sorted_lqas[num_samples / 2])
         } else {
             // Average of the two middle elements for even number of samples
             let mid1 = sorted_lqas[num_samples / 2 - 1];

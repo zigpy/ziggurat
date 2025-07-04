@@ -486,52 +486,54 @@ impl ZigbeeStack {
         loop {
             let (packet, ieee802154_frame) = self.recv_frame().await;
 
-            match self.process_802154_frame(&ieee802154_frame, packet.lqi, packet.rssi) {
-                Some(nwk_frame) => {
-                    if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
+            if let Some(nwk_frame) =
+                self.process_802154_frame(&ieee802154_frame, packet.lqi, packet.rssi)
+            {
+                if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
+                    continue;
+                }
+
+                let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
+                    Ok(ApsFrame::Data(data)) => data,
+                    Ok(ApsFrame::Ack(ack)) => {
+                        let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, &ack);
+                        log::debug!("Received APS ack: {ack_data:?}");
+
+                        if let Some(tx) = self
+                            .state
+                            .pending_aps_acks
+                            .try_lock_for(MAX_LOCK_DURATION)
+                            .unwrap()
+                            .remove(&ack_data)
+                        {
+                            let _ = tx.send(());
+                        }
+
                         continue;
                     }
-
-                    let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
-                        Ok(ApsFrame::Data(data)) => data,
-                        Ok(ApsFrame::Ack(ack)) => {
-                            let ack_data =
-                                ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, &ack);
-                            log::debug!("Received APS ack: {ack_data:?}");
-
-                            if let Some(tx) = self.state
-                                .pending_aps_acks
-                                .try_lock_for(MAX_LOCK_DURATION)
-                                .unwrap()
-                                .remove(&ack_data) { let _ = tx.send(()); }
-
-                            continue;
-                        }
-                        Err(e) => {
-                            log::warn!("Error parsing APS frame: {e:?}");
-                            continue;
-                        }
-                    };
-
-                    log::debug!("Received APS data frame: {aps_frame:#?}");
-
-                    if aps_frame.frame_control.ack_request {
-                        self.handle_aps_ack_request(&aps_frame, &nwk_frame);
+                    Err(e) => {
+                        log::warn!("Error parsing APS frame: {e:?}");
+                        continue;
                     }
+                };
 
-                    let notification = ZigbeeNotification::ReceivedApsCommand {
-                        source: nwk_frame.nwk_header.source,
-                        profile_id: aps_frame.profile_id,
-                        cluster_id: aps_frame.cluster_id,
-                        src_ep: aps_frame.source_endpoint,
-                        dst_ep: aps_frame.destination_endpoint.unwrap_or(0),
-                        lqi: packet.lqi,
-                        rssi: packet.rssi,
-                        data: aps_frame.asdu,
-                    };
-                    let _ = self.notification_tx.send(notification);
+                log::debug!("Received APS data frame: {aps_frame:#?}");
+
+                if aps_frame.frame_control.ack_request {
+                    self.handle_aps_ack_request(&aps_frame, &nwk_frame);
                 }
-                None => {}
+
+                let notification = ZigbeeNotification::ReceivedApsCommand {
+                    source: nwk_frame.nwk_header.source,
+                    profile_id: aps_frame.profile_id,
+                    cluster_id: aps_frame.cluster_id,
+                    src_ep: aps_frame.source_endpoint,
+                    dst_ep: aps_frame.destination_endpoint.unwrap_or(0),
+                    lqi: packet.lqi,
+                    rssi: packet.rssi,
+                    data: aps_frame.asdu,
+                };
+                let _ = self.notification_tx.send(notification);
             }
         }
     }
@@ -698,9 +700,7 @@ impl ZigbeeStack {
                 return None;
             }
             Some(dest_pan_id) if dest_pan_id != pan_id => {
-                log::debug!(
-                    "Ignoring frame, PAN ID does not match {dest_pan_id:?} != {pan_id:?}"
-                );
+                log::debug!("Ignoring frame, PAN ID does not match {dest_pan_id:?} != {pan_id:?}");
                 return None;
             }
             Some(_) => (),
@@ -870,9 +870,10 @@ impl ZigbeeStack {
             .unwrap();
 
         if let Some(entry) = broadcast_transaction_table.get(&key)
-            && entry.expiration_time > now {
-                return true;
-            }
+            && entry.expiration_time > now
+        {
+            return true;
+        }
 
         broadcast_transaction_table.insert(
             key,
@@ -888,20 +889,20 @@ impl ZigbeeStack {
 
     pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, lqi: u8, rssi: i8) {
         // Update the frame counter for the relaying device
-        if let Some(aux_header) = &nwk_frame.aux_header {
-            if let Some(relaying_eui64) = aux_header.extended_source {
-                self.state
-                    .security_material_primary
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .incoming_frame_counter_set
-                    .insert(relaying_eui64, aux_header.frame_counter);
+        if let Some(aux_header) = &nwk_frame.aux_header
+            && let Some(relaying_eui64) = aux_header.extended_source
+        {
+            self.state
+                .security_material_primary
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .incoming_frame_counter_set
+                .insert(relaying_eui64, aux_header.frame_counter);
 
-                log::debug!(
-                    "Incremented frame counter for {relaying_eui64:?} to {}",
-                    aux_header.frame_counter
-                );
-            }
+            log::debug!(
+                "Incremented frame counter for {relaying_eui64:?} to {}",
+                aux_header.frame_counter
+            );
         }
 
         // Update the address cache
@@ -939,9 +940,7 @@ impl ZigbeeStack {
                     // TODO: Error handling for decoding?
                     let route_record_cmd =
                         NwkRouteRecordCommand::deserialize(&nwk_frame.payload).unwrap();
-                    log::info!(
-                        "Route record command frame received: {route_record_cmd:#?}"
-                    );
+                    log::info!("Route record command frame received: {route_record_cmd:#?}");
                     self.state
                         .route_record_table
                         .try_lock_for(MAX_LOCK_DURATION)
@@ -977,8 +976,7 @@ impl ZigbeeStack {
                 .values_mut()
                 .find(|e| e.network_address == nwk_frame.nwk_header.source)
         } {
-            None => {
-            }
+            None => {}
             Some(entry) => {
                 entry.lqas.push_back(lqi);
 
@@ -1374,9 +1372,7 @@ impl ZigbeeStack {
             }
         };
 
-        log::info!(
-            "Route request command frame (sender {sender_nwk:#?}): {route_request_cmd:#?}"
-        );
+        log::info!("Route request command frame (sender {sender_nwk:#?}): {route_request_cmd:#?}");
 
         let network_address = self.state.network_address;
         let neighbor_table = self
@@ -1881,11 +1877,11 @@ impl ZigbeeStack {
                     .try_lock_for(MAX_LOCK_DURATION)
                     .unwrap()
                     .get_mut(&relaying_ieee)
-                {
-                    // Update the neighbor table counters
-                    neighbor_entry.router_outbound_activity =
-                        neighbor_entry.router_outbound_activity.saturating_add(1);
-                }
+            {
+                // Update the neighbor table counters
+                neighbor_entry.router_outbound_activity =
+                    neighbor_entry.router_outbound_activity.saturating_add(1);
+            }
 
             // And the routing table counters
             if let Some(route_entry) = self

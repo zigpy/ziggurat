@@ -202,8 +202,7 @@ pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, &'static str> {
         return Err("Not enough data to parse ApsFrame");
     }
 
-    let frame_type =
-        ApsFrameType::try_from(bytes[0] & 0b11).map_err(|_| "Invalid frame type")?;
+    let frame_type = ApsFrameType::try_from(bytes[0] & 0b11).map_err(|_| "Invalid frame type")?;
 
     match frame_type {
         ApsFrameType::Data => Ok(ApsFrame::Data(ApsDataFrame::from_bytes(bytes)?)),
