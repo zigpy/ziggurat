@@ -20,7 +20,7 @@ repos:
         pass_filenames: false
 
       - id: rust-clippy
-        name: Rust clippy
+        name: Cargo clippy
         entry: cargo clippy --all-targets --all-features -- -Dclippy::all -Dclippy::nursery
         language: system
         pass_filenames: false
