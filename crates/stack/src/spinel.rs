@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 const CRC_KERMIT: CrcAlgo<u16> = CrcAlgo::<u16>::new(0x1021, 16, 0xFFFF, 0xFFFF, true);
 const U21_MAX: u32 = 1 << 21;
 
-#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelCommandId {
     Noop = 0,
@@ -37,7 +37,7 @@ pub enum SpinelCommandId {
     HboDropped = 17,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive, Hash, Eq)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive, Hash)]
 #[repr(u32)]
 pub enum SpinelPropertyId {
     // Core Properties
@@ -175,7 +175,7 @@ pub enum SpinelPropertyId {
     NestStreamMfg = 0x3BC0,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelResetReason {
     Platform = 1,
@@ -183,7 +183,7 @@ pub enum SpinelResetReason {
     Bootloader = 3,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelStatus {
     Ok = 0,
@@ -222,7 +222,7 @@ pub enum SpinelStatus {
     ResetWatchdog = 120,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelMacPromiscuousMode {
     //  Normal MAC filtering is in place.
@@ -290,7 +290,7 @@ pub fn packed_uint21_to_bytes(value: u32) -> Vec<u8> {
     chunks
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum HdlcSpecial {
     Flag = 0x7E,
@@ -312,7 +312,7 @@ pub enum HdlcLiteFrameParsingError {
     PayloadTooShort { expected: usize, got: usize },
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct HdlcLiteFrame {
     pub data: Vec<u8>,
 }
@@ -420,7 +420,7 @@ impl HdlcLiteFrame {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SpinelHeader {
     pub flag: u8,
     pub network_link_id: u8,
@@ -446,12 +446,12 @@ impl SpinelHeader {
         })
     }
 
-    pub fn to_bytes(&self) -> [u8; 1] {
+    pub const fn to_bytes(&self) -> [u8; 1] {
         [(self.flag << 6) | (self.network_link_id << 4) | self.transaction_id]
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SpinelFrame {
     pub header: SpinelHeader,
     pub command_id: SpinelCommandId,

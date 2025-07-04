@@ -15,7 +15,7 @@ pub enum Ieee802154FrameType {
     Ack = 0b010,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[abstract_bits(bits = 8)]
 #[repr(u8)]
 pub enum Ieee802154AssociationStatus {
@@ -36,7 +36,7 @@ pub enum Ieee802154AddressingMode {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ieee802154FrameControl {
     pub frame_type: Ieee802154FrameType,
     pub security_enabled: bool,
@@ -51,7 +51,7 @@ pub struct Ieee802154FrameControl {
     pub src_addr_mode: Ieee802154AddressingMode,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[abstract_bits(bits = 8)]
 #[repr(u8)]
 pub enum Ieee802154CommandId {
@@ -67,7 +67,7 @@ pub enum Ieee802154CommandId {
     GtsRequest = 0x09,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum Ieee802154Address {
     Nwk(Nwk),
     Eui64(Eui64),
