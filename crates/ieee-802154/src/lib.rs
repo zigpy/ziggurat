@@ -15,7 +15,7 @@ pub enum Ieee802154FrameType {
     Ack = 0b010,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[abstract_bits(bits = 8)]
 #[repr(u8)]
 pub enum Ieee802154AssociationStatus {
@@ -36,7 +36,7 @@ pub enum Ieee802154AddressingMode {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ieee802154FrameControl {
     pub frame_type: Ieee802154FrameType,
     pub security_enabled: bool,
@@ -51,7 +51,7 @@ pub struct Ieee802154FrameControl {
     pub src_addr_mode: Ieee802154AddressingMode,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[abstract_bits(bits = 8)]
 #[repr(u8)]
 pub enum Ieee802154CommandId {
@@ -67,7 +67,7 @@ pub enum Ieee802154CommandId {
     GtsRequest = 0x09,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum Ieee802154Address {
     Nwk(Nwk),
     Eui64(Eui64),
@@ -233,6 +233,7 @@ impl Ieee802154Frame {
         data
     }
 
+    #[allow(clippy::identity_op)]
     pub fn compute_fcs(data: &[u8]) -> u16 {
         let mut crc: u16 = 0x0000;
 
@@ -260,12 +261,12 @@ mod test {
         let remaining = &bytes[2..];
 
         assert_eq!(frame_control.frame_type, Ieee802154FrameType::Data);
-        assert_eq!(frame_control.security_enabled, false);
-        assert_eq!(frame_control.frame_pending, false);
-        assert_eq!(frame_control.ack_request, true);
-        assert_eq!(frame_control.pan_id_compression, true);
-        assert_eq!(frame_control.sequence_number_suppression, false);
-        assert_eq!(frame_control.information_elements_present, false);
+        assert!(!frame_control.security_enabled);
+        assert!(!frame_control.frame_pending);
+        assert!(frame_control.ack_request);
+        assert!(frame_control.pan_id_compression);
+        assert!(!frame_control.sequence_number_suppression);
+        assert!(!frame_control.information_elements_present);
         assert_eq!(
             frame_control.dest_addr_mode,
             Ieee802154AddressingMode::Short
@@ -290,12 +291,12 @@ mod test {
         let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
 
         assert_eq!(frame.frame_control.frame_type, Ieee802154FrameType::Data);
-        assert_eq!(frame.frame_control.security_enabled, false);
-        assert_eq!(frame.frame_control.frame_pending, false);
-        assert_eq!(frame.frame_control.ack_request, true);
-        assert_eq!(frame.frame_control.pan_id_compression, true);
-        assert_eq!(frame.frame_control.sequence_number_suppression, false);
-        assert_eq!(frame.frame_control.information_elements_present, false);
+        assert!(!frame.frame_control.security_enabled);
+        assert!(!frame.frame_control.frame_pending);
+        assert!(frame.frame_control.ack_request);
+        assert!(frame.frame_control.pan_id_compression);
+        assert!(!frame.frame_control.sequence_number_suppression);
+        assert!(!frame.frame_control.information_elements_present);
         assert_eq!(
             frame.frame_control.dest_addr_mode,
             Ieee802154AddressingMode::Short
@@ -344,12 +345,12 @@ mod test {
         let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
 
         assert_eq!(frame.frame_control.frame_type, Ieee802154FrameType::Ack);
-        assert_eq!(frame.frame_control.security_enabled, false);
-        assert_eq!(frame.frame_control.frame_pending, false);
-        assert_eq!(frame.frame_control.ack_request, false);
-        assert_eq!(frame.frame_control.pan_id_compression, false);
-        assert_eq!(frame.frame_control.sequence_number_suppression, false);
-        assert_eq!(frame.frame_control.information_elements_present, false);
+        assert!(!frame.frame_control.security_enabled);
+        assert!(!frame.frame_control.frame_pending);
+        assert!(!frame.frame_control.ack_request);
+        assert!(!frame.frame_control.pan_id_compression);
+        assert!(!frame.frame_control.sequence_number_suppression);
+        assert!(!frame.frame_control.information_elements_present);
         assert_eq!(
             frame.frame_control.dest_addr_mode,
             Ieee802154AddressingMode::None

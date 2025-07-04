@@ -15,7 +15,7 @@ use tokio::time::{Duration, timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelTxFrame {
     pub psdu: Vec<u8>,
     pub channel: Option<u8>,
@@ -87,7 +87,7 @@ impl SpinelTxFrame {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelRxFrame {
     pub psdu: Vec<u8>,
     pub rssi: i8,
@@ -228,7 +228,7 @@ impl SpinelClient {
                         break;
                     }
                     Err(e) => {
-                        eprintln!("Error reading port: {:?}", e);
+                        eprintln!("Error reading port: {e:?}");
                         break;
                     }
                 }
@@ -248,7 +248,7 @@ impl SpinelClient {
                 .prepare_request(command_id, payload)
         };
 
-        log::debug!("Sending frame {:?}", frame);
+        log::debug!("Sending frame {frame:?}");
 
         let hdlc_frame = HdlcLiteFrame {
             data: frame.to_bytes(),
@@ -256,7 +256,7 @@ impl SpinelClient {
 
         let data = hdlc_frame.to_bytes_with_flags();
 
-        log::debug!("Writing {:02X?}", data);
+        log::debug!("Writing {data:02X?}");
         self.port.write(&data).await.map_err(SpinelError::IoError)?;
 
         match timeout(TIMEOUT, rx).await {
@@ -325,11 +325,7 @@ impl SpinelClient {
         })?;
 
         log::info!(
-            "Setting property {:?}={:02X?}, result {:?}={:02X?}",
-            property_id,
-            value,
-            rsp_property_id,
-            payload
+            "Setting property {property_id:?}={value:02X?}, result {rsp_property_id:?}={payload:02X?}"
         );
 
         Ok((rsp_property_id, payload.to_vec()))
@@ -367,7 +363,7 @@ impl SpinelClient {
             });
         }
 
-        if rsp.len() < 1 {
+        if rsp.is_empty() {
             return Err(SpinelError::InvalidResponseError {
                 reason: "Unexpected response length".to_string(),
             });

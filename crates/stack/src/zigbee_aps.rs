@@ -20,7 +20,7 @@ pub enum ApsDeliveryMode {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApsFrameControl {
     pub frame_type: ApsFrameType,
     pub delivery_mode: ApsDeliveryMode,
@@ -31,7 +31,7 @@ pub struct ApsFrameControl {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApsAckFrameControl {
     pub frame_type: ApsFrameType,
     pub delivery_mode: ApsDeliveryMode,
@@ -41,7 +41,7 @@ pub struct ApsAckFrameControl {
     pub extended_header: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApsAckFrame {
     pub frame_control: ApsAckFrameControl,
     pub destination_endpoint: Option<u8>,
@@ -52,6 +52,7 @@ pub struct ApsAckFrame {
 }
 
 impl ApsAckFrame {
+    #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 8 {
             return Err("Not enough data to parse ApsAckFrame");
@@ -118,7 +119,7 @@ impl ApsAckFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApsDataFrame {
     pub frame_control: ApsFrameControl,
     pub group_id: Option<u16>,
@@ -131,6 +132,7 @@ pub struct ApsDataFrame {
 }
 
 impl ApsDataFrame {
+    #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() < 8 {
             return Err("Not enough data to parse ApsDataFrame");
@@ -198,12 +200,11 @@ pub enum ApsFrame {
 }
 
 pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, &'static str> {
-    if bytes.len() < 1 {
+    if bytes.is_empty() {
         return Err("Not enough data to parse ApsFrame");
     }
 
-    let frame_type =
-        ApsFrameType::try_from((bytes[0] >> 0) & 0b11).map_err(|_| "Invalid frame type")?;
+    let frame_type = ApsFrameType::try_from(bytes[0] & 0b11).map_err(|_| "Invalid frame type")?;
 
     match frame_type {
         ApsFrameType::Data => Ok(ApsFrame::Data(ApsDataFrame::from_bytes(bytes)?)),

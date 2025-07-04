@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion)]
+
 use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
@@ -45,7 +47,7 @@ pub enum NwkRouteDiscovery {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkFrameControl {
     pub frame_type: NwkFrameType,
     pub protocol_version: u4,
@@ -60,7 +62,7 @@ pub struct NwkFrameControl {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkSourceRoute {
     #[abstract_bits(length_of = relays)]
     relay_count: u8,
@@ -68,7 +70,7 @@ pub struct NwkSourceRoute {
     pub relays: Vec<Nwk>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkHeader {
     pub frame_control: NwkFrameControl,
     pub destination: Nwk,
@@ -142,15 +144,15 @@ impl NwkHeader {
 
         Ok((
             Self {
-                frame_control: frame_control,
-                destination: destination,
-                source: source,
-                radius: radius,
-                sequence_number: sequence_number,
-                destination_ieee: destination_ieee,
-                source_ieee: source_ieee,
-                multicast_control: multicast_control,
-                source_route: source_route,
+                frame_control,
+                destination,
+                source,
+                radius,
+                sequence_number,
+                destination_ieee,
+                source_ieee,
+                multicast_control,
+                source_route,
             },
             remaining,
         ))
@@ -210,7 +212,7 @@ pub enum NwkSecurityLevel {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkSecurityHeaderControlField {
     pub security_level: NwkSecurityLevel,
     pub key_id: NwkSecurityHeaderKeyId,
@@ -219,7 +221,7 @@ pub struct NwkSecurityHeaderControlField {
     reserved: u1,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkAuxHeader {
     pub security_control: NwkSecurityHeaderControlField,
     pub frame_counter: u32,
@@ -228,6 +230,7 @@ pub struct NwkAuxHeader {
 }
 
 impl NwkAuxHeader {
+    #[allow(clippy::useless_let_if_seq)]
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
         if bytes.len() < 6 {
             return Err("Not enough data to parse NwkAuxHeader");
@@ -281,7 +284,7 @@ impl NwkAuxHeader {
 
 fn right_pad_to_multiple_of_16(data: &[u8]) -> Vec<Block> {
     // Pre-allocate enough blocks
-    let mut blocks = Vec::<Block>::with_capacity((data.len() + 15) / 16);
+    let mut blocks = Vec::<Block>::with_capacity(data.len().div_ceil(16));
 
     // Push all full 16-byte chunks
     for chunk in data.chunks_exact(16) {
@@ -313,6 +316,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
         (ciphertext, mac_tag)
     }
 
+    #[allow(clippy::unusual_byte_groupings)]
     pub fn compute_mac(
         &self,
         nwk_header: &NwkHeader,
@@ -338,7 +342,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
 
         let mut authed_plaintext = Vec::<Block>::new();
         authed_plaintext.extend(right_pad_to_multiple_of_16(&added_auth_data));
-        authed_plaintext.extend(right_pad_to_multiple_of_16(&plaintext));
+        authed_plaintext.extend(right_pad_to_multiple_of_16(plaintext));
 
         let mut ciphertext_buffer = Vec::<Block>::new();
         ciphertext_buffer.push(b0);
@@ -354,6 +358,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
         mac_tag
     }
 
+    #[allow(clippy::unusual_byte_groupings)]
     pub fn encrypt_decrypt(
         &self,
         key: &Key,
@@ -378,7 +383,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
             counter_block[14..16]
                 .copy_from_slice(&encoded_block_num[encoded_block_num.len() - L..]);
 
-            cipher.encrypt_block_b2b(&mut counter_block, &mut buffer_block);
+            cipher.encrypt_block_b2b(&counter_block, &mut buffer_block);
             tagged_ciphertext_blocks.push(Block::from_fn(|i| buffer_block[i] ^ plaintext_block[i]));
         }
 
@@ -387,7 +392,7 @@ impl<const L: usize, const M: usize> NwkCrypto<L, M> {
         encrypted_mac_tag.copy_from_slice(&tagged_ciphertext_blocks[0][0..M]);
 
         // The actual ciphertext portion starts at the second block
-        let ciphertext_vec = Vec::<u8>::from(tagged_ciphertext_blocks[1..].concat());
+        let ciphertext_vec = tagged_ciphertext_blocks[1..].concat();
         let ciphertext = ciphertext_vec[..plaintext.len()].to_vec();
 
         (encrypted_mac_tag, ciphertext)
@@ -427,9 +432,9 @@ impl EncryptedNwkFrame {
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
         let source;
 
-        if !aux_header.extended_source.is_none() {
+        if aux_header.extended_source.is_some() {
             source = aux_header.extended_source.unwrap();
-        } else if !self.nwk_header.source_ieee.is_none() {
+        } else if self.nwk_header.source_ieee.is_some() {
             source = self.nwk_header.source_ieee.unwrap();
         } else {
             // XXX: this can't happen
@@ -444,12 +449,13 @@ impl EncryptedNwkFrame {
         nonce
     }
 
-    pub fn get_crypto(&self) -> NwkCrypto<2, 4> {
+    pub const fn get_crypto(&self) -> NwkCrypto<2, 4> {
         // Only a single configuration is supported but to keep the cryptography code
         // readable, it's useful to be generic here
         NwkCrypto::<2, 4>
     }
 
+    #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         let mut remaining;
         let nwk_header;
@@ -464,8 +470,8 @@ impl EncryptedNwkFrame {
         }
 
         Ok(Self {
-            nwk_header: nwk_header,
-            aux_header: aux_header,
+            nwk_header,
+            aux_header,
             ciphertext: remaining.to_vec(),
         })
     }
@@ -521,9 +527,9 @@ impl NwkFrame {
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
         let source;
 
-        if !aux_header.extended_source.is_none() {
+        if aux_header.extended_source.is_some() {
             source = aux_header.extended_source.unwrap();
-        } else if !self.nwk_header.source_ieee.is_none() {
+        } else if self.nwk_header.source_ieee.is_some() {
             source = self.nwk_header.source_ieee.unwrap();
         } else {
             // XXX: this can't happen
@@ -538,7 +544,7 @@ impl NwkFrame {
         nonce
     }
 
-    pub fn get_crypto(&self) -> NwkCrypto<2, 4> {
+    pub const fn get_crypto(&self) -> NwkCrypto<2, 4> {
         // Only a single configuration is supported but to keep the cryptography code
         // readable, it's useful to be generic here
         NwkCrypto::<2, 4>
@@ -551,9 +557,9 @@ impl NwkFrame {
         let nonce = self.get_nonce(&aux_header);
         let plaintext = &self.payload;
 
-        let mac_tag = crypto.compute_mac(&self.nwk_header, key, &plaintext, &aux_header, &nonce);
+        let mac_tag = crypto.compute_mac(&self.nwk_header, key, plaintext, &aux_header, &nonce);
         let (encrypted_mac_tag, ciphertext) =
-            crypto.encrypt_decrypt(key, &nonce, &mac_tag, &plaintext);
+            crypto.encrypt_decrypt(key, &nonce, &mac_tag, plaintext);
 
         let mut ciphertext_with_tag = ciphertext;
         ciphertext_with_tag.extend(encrypted_mac_tag);

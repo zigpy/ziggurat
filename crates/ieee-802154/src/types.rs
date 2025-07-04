@@ -28,11 +28,11 @@ impl Nwk {
         Ok((Self(u16::from_le_bytes([bytes[0], bytes[1]])), &bytes[2..]))
     }
 
-    pub fn to_bytes(&self) -> [u8; 2] {
+    pub const fn to_bytes(&self) -> [u8; 2] {
         self.0.to_le_bytes()
     }
 
-    pub fn as_u16(&self) -> u16 {
+    pub const fn as_u16(&self) -> u16 {
         self.0
     }
 }
@@ -77,7 +77,7 @@ impl Eui64 {
         Ok((Self(eui), &bytes[8..]))
     }
 
-    pub fn to_bytes(&self) -> [u8; 8] {
+    pub const fn to_bytes(&self) -> [u8; 8] {
         self.0
     }
 }
@@ -100,7 +100,7 @@ impl fmt::Debug for Eui64 {
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum Address {
     Nwk(Nwk),
     Eui64(Eui64),
@@ -133,7 +133,7 @@ impl PanId {
         Ok((Self(u16::from_le_bytes([bytes[0], bytes[1]])), &bytes[2..]))
     }
 
-    pub fn to_bytes(&self) -> [u8; 2] {
+    pub const fn to_bytes(&self) -> [u8; 2] {
         self.0.to_le_bytes()
     }
 }
@@ -146,7 +146,7 @@ impl fmt::Debug for PanId {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Key(pub [u8; 16]);
 
 impl Key {
@@ -170,12 +170,12 @@ impl Key {
         }
 
         let mut key = [0; 16];
-        key.copy_from_slice(&bytes);
+        key.copy_from_slice(bytes);
 
         Ok(Self(key))
     }
 
-    pub fn to_bytes(&self) -> [u8; 16] {
+    pub const fn to_bytes(&self) -> [u8; 16] {
         self.0
     }
 }
@@ -195,9 +195,9 @@ impl fmt::Debug for Key {
 pub fn format_hex<T: AsRef<[u8]>>(data: T, f: &mut fmt::Formatter) -> fmt::Result {
     for (index, b) in data.as_ref().iter().enumerate() {
         if index == 0 {
-            write!(f, "{:02X}", b)?;
+            write!(f, "{b:02X}")?;
         } else {
-            write!(f, ":{:02X}", b)?;
+            write!(f, ":{b:02X}")?;
         }
     }
     Ok(())

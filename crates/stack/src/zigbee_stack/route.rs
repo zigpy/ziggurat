@@ -4,7 +4,7 @@ use ieee_802154::types::Nwk;
 
 pub type RequestId = u8;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Active = 0,
     DiscoveryUnderway = 1,

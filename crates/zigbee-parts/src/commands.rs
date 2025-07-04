@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion)]
+
 use crate::{Command, Request, Response};
 use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Nwk, PanId};
@@ -38,7 +40,7 @@ pub enum NwkRouteRequestManyToOne {
 
 /// Zigbee spec: 3.4.1 Route Request Command
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRouteRequestCommand {
     reserved: u3,
     pub many_to_one: NwkRouteRequestManyToOne,
@@ -61,7 +63,7 @@ impl Command for NwkRouteRequestCommand {
 
 /// Zigbee spec 3.4.2 Route Reply Command
 #[abstract_bits::abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRouteReplyCommand {
     reserved: u4,
     #[abstract_bits(presence_of = originator_eui64)]
@@ -153,7 +155,7 @@ pub enum NwkNetworkStatus {
 }
 
 #[abstract_bits::abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkNetworkStatusCommand {
     pub status_code: NwkNetworkStatus,
     pub network_address: Nwk,
@@ -165,7 +167,7 @@ impl Command for NwkNetworkStatusCommand {
 
 /// Zigbee spec 3.4.5: Route Record Command
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRouteRecordCommand {
     #[abstract_bits(length_of = relays)]
     reserved: u8,
@@ -194,7 +196,7 @@ pub enum NwkRejoinCapabilityInformationPowerSource {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRejoinCapabilityInformation {
     /// This field will always have a value of 0 in implementations of this
     /// specification.
@@ -224,7 +226,7 @@ pub struct NwkRejoinCapabilityInformation {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRejoinRequestCommand {
     pub capability_information: NwkRejoinCapabilityInformation,
 }
@@ -238,7 +240,7 @@ impl Command for NwkRejoinRequestCommand {
 }
 
 /// Zigbee spec: 3.4.7 Rejoin Response Command
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[abstract_bits(bits = 8)]
 #[repr(u8)]
 pub enum Nwk802154AssociationStatus {
@@ -252,7 +254,7 @@ pub enum Nwk802154AssociationStatus {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRejoinResponseCommand {
     pub network_address: Nwk,
     pub rejoin_status: Nwk802154AssociationStatus,
@@ -268,7 +270,7 @@ impl Command for NwkRejoinResponseCommand {
 
 /// Zigbee spec compressed: 3.4.8.3
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkLinkStatusCommand {
     #[abstract_bits(length_of = link_statuses)]
     reserved: u5,
@@ -284,7 +286,7 @@ impl Command for NwkLinkStatusCommand {
 
 /// Zigbee spec 3.4.8
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkLinkStatus {
     pub address: Nwk,
     pub incoming_cost: u3,
@@ -295,7 +297,7 @@ pub struct NwkLinkStatus {
 
 /// Zigbee spec: 3.4.4 Leave Command
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkLeaveCommand {
     reserved: u5,
     pub rejoin: bool,
@@ -338,7 +340,7 @@ pub enum NwkReportCommandIdentifier {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkNetworkReportCommand {
     #[abstract_bits(length_of = pan_ids)]
     report_information_count: u5,
@@ -363,7 +365,7 @@ pub enum NwkUpdateCommandIdentifier {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkNetworkUpdateCommand {
     /// For a PAN Identifier Update, this value SHALL be 1.
     update_information_count: u5,
@@ -382,7 +384,7 @@ impl Command for NwkNetworkUpdateCommand {
 
 /// Zigbee spec 3.4.11 End Device Timeout Request Command
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkEndDeviceTimeoutRequestCommand {
     pub request_timeout_enum: EndDeviceTimeout,
     reserved: u8, // reserved for future use
@@ -406,7 +408,7 @@ pub enum NwkEndDeviceTimeoutResponseStatus {
 
 /// Zigbee spec: 3.4.12 End Device Timeout Response Command
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkEndDeviceTimeoutResponseCommand {
     pub status: NwkEndDeviceTimeoutResponseStatus,
     pub mac_data_poll_keepalive_supported: bool,
@@ -434,7 +436,7 @@ pub enum NwkLinkPowerDeltaType {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkPowerListEntry {
     pub device_address: Nwk,
     /// Delta power calculated as the difference between the optimal power level and the
@@ -444,7 +446,7 @@ pub struct NwkPowerListEntry {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkLinkPowerDeltaCommand {
     pub command_type: NwkLinkPowerDeltaType,
     reserved: u6,
@@ -467,7 +469,7 @@ pub enum NwkCommissioningType {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkNetworkCommissioningRequestCommand {
     pub commissioning_type: NwkCommissioningType,
     pub capability_information: NwkRejoinCapabilityInformation,
@@ -483,7 +485,7 @@ impl Command for NwkNetworkCommissioningRequestCommand {
 
 /// Zigbee spec 3.4.15: Network Commissioning Response Command
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkNetworkCommissioningResponseCommand {
     /// The network address assigned to the joining device.
     pub network_address: Nwk,
