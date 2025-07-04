@@ -291,12 +291,12 @@ mod test {
         let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
 
         assert_eq!(frame.frame_control.frame_type, Ieee802154FrameType::Data);
-        assert_eq!(frame.frame_control.security_enabled, false);
-        assert_eq!(frame.frame_control.frame_pending, false);
-        assert_eq!(frame.frame_control.ack_request, true);
-        assert_eq!(frame.frame_control.pan_id_compression, true);
-        assert_eq!(frame.frame_control.sequence_number_suppression, false);
-        assert_eq!(frame.frame_control.information_elements_present, false);
+        assert!(!frame.frame_control.security_enabled);
+        assert!(!frame.frame_control.frame_pending);
+        assert!(frame.frame_control.ack_request);
+        assert!(frame.frame_control.pan_id_compression);
+        assert!(!frame.frame_control.sequence_number_suppression);
+        assert!(!frame.frame_control.information_elements_present);
         assert_eq!(
             frame.frame_control.dest_addr_mode,
             Ieee802154AddressingMode::Short
@@ -345,12 +345,12 @@ mod test {
         let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
 
         assert_eq!(frame.frame_control.frame_type, Ieee802154FrameType::Ack);
-        assert_eq!(frame.frame_control.security_enabled, false);
-        assert_eq!(frame.frame_control.frame_pending, false);
-        assert_eq!(frame.frame_control.ack_request, false);
-        assert_eq!(frame.frame_control.pan_id_compression, false);
-        assert_eq!(frame.frame_control.sequence_number_suppression, false);
-        assert_eq!(frame.frame_control.information_elements_present, false);
+        assert!(!frame.frame_control.security_enabled);
+        assert!(!frame.frame_control.frame_pending);
+        assert!(!frame.frame_control.ack_request);
+        assert!(!frame.frame_control.pan_id_compression);
+        assert!(!frame.frame_control.sequence_number_suppression);
+        assert!(!frame.frame_control.information_elements_present);
         assert_eq!(
             frame.frame_control.dest_addr_mode,
             Ieee802154AddressingMode::None
