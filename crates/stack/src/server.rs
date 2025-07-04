@@ -140,9 +140,10 @@ impl ZigguratServer {
             }
         }
 
-        let state_guard = self.server_state.lock().unwrap();
-        let notification_rx = state_guard.as_ref().unwrap().notification_rx.resubscribe();
-        drop(state_guard);
+        let notification_rx = {
+            let state_guard = self.server_state.lock().unwrap();
+            state_guard.as_ref().unwrap().notification_rx.resubscribe()
+        };
 
         log::info!("Stack initialized. Now listening for commands and notifications.");
 
@@ -299,8 +300,20 @@ impl ZigguratServer {
                 }
             }
             "send_aps_command" => {
-                let state_guard = self.server_state.lock().unwrap();
-                if let Some(server_state) = &*state_guard {
+                let zigbee_stack = {
+                    let state_guard = self.server_state.lock().unwrap();
+                    if let Some(server_state) = &*state_guard {
+                        server_state.zigbee_stack.clone()
+                    } else {
+                        return CommandResponse {
+                            tid: cmd.tid,
+                            cmd: cmd.cmd,
+                            data: json!({"status": "error", "reason": "not_initialized"}),
+                        };
+                    }
+                };
+
+                {
                     // ... (parsing logic remains the same)
                     let delivery_mode = match cmd
                         .data
@@ -332,9 +345,7 @@ impl ZigguratServer {
                     let data =
                         hex::decode(cmd.data.get("data").unwrap().as_str().unwrap()).unwrap();
 
-                    // The lock is held across this await, which is now safe.
-                    let status = server_state
-                        .zigbee_stack
+                    let status = zigbee_stack
                         .send_aps_command(
                             delivery_mode,
                             destination,
@@ -353,12 +364,6 @@ impl ZigguratServer {
                         tid: cmd.tid,
                         cmd: cmd.cmd,
                         data: json!({"status": if status.is_ok() { "success" } else { "error" }, "reason": status.err().map(|e| e.to_string())}),
-                    }
-                } else {
-                    CommandResponse {
-                        tid: cmd.tid,
-                        cmd: cmd.cmd,
-                        data: json!({"status": "error", "reason": "stack_not_initialized"}),
                     }
                 }
             }

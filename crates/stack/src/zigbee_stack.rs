@@ -540,15 +540,17 @@ impl ZigbeeStack {
         }
     }
 
+    // We intentionally hold the receiver lock for the entire duration of this function
+    // to ensure exclusive access to the raw frame receiver.
+    #[allow(clippy::await_holding_lock)]
     async fn recv_frame(&self) -> (SpinelRxFrame, Ieee802154Frame) {
+        let mut receiver = self
+            .raw_frame_rx
+            .try_lock_for(MAX_LOCK_DURATION)
+            .expect("No thread should panic");
+
         loop {
-            let Some(spinel_frame) = self
-                .raw_frame_rx
-                .try_lock_for(MAX_LOCK_DURATION)
-                .expect("No thread should panic")
-                .recv()
-                .await
-            else {
+            let Some(spinel_frame) = receiver.recv().await else {
                 log::warn!("Frame sender hung up");
                 continue;
             };
@@ -588,11 +590,9 @@ impl ZigbeeStack {
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
+        let channel = *self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap();
         self.spinel
-            .prop_value_set(
-                SpinelPropertyId::PhyChan,
-                vec![*self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap()],
-            )
+            .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
@@ -627,16 +627,9 @@ impl ZigbeeStack {
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
+        let pan_id = *self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap();
         self.spinel
-            .prop_value_set(
-                SpinelPropertyId::Mac154Panid,
-                self.state
-                    .pan_id
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .to_bytes()
-                    .to_vec(),
-            )
+            .prop_value_set(SpinelPropertyId::Mac154Panid, pan_id.to_bytes().to_vec())
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
@@ -1476,7 +1469,7 @@ impl ZigbeeStack {
         // an error, some device on the network is storing invalid information about
         // either us or a child.
         let is_for_self_or_child = route_request_cmd.destination_address == network_address
-            || route_request_cmd.destination_eui64 == route_request_cmd.destination_eui64
+            || route_request_cmd.destination_eui64 == Some(self.state.ieee_address)
             /* || destination_is_child */;
 
         // Check for a route discovery table entry. If one already exists and the
