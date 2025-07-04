@@ -59,7 +59,7 @@ impl ZigguratServer {
     /// Listens for and handles incoming TCP connections.
     pub async fn run_tcp_server(self: Arc<Self>, listen_addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(listen_addr).await?;
-        log::info!("Listening for a single TCP client on {}", listen_addr);
+        log::info!("Listening for a single TCP client on {listen_addr}");
 
         loop {
             let (socket, addr) = listener.accept().await?;
@@ -68,14 +68,13 @@ impl ZigguratServer {
             let mut is_connected_guard = self.is_client_connected.lock().unwrap();
             if *is_connected_guard {
                 log::warn!(
-                    "Rejecting connection from {}: another client is already connected.",
-                    addr
+                    "Rejecting connection from {addr}: another client is already connected."
                 );
                 drop(socket);
                 continue; // The lock guard is dropped here
             }
 
-            log::info!("Accepted new TCP client from {}", addr);
+            log::info!("Accepted new TCP client from {addr}");
             *is_connected_guard = true;
             drop(is_connected_guard); // Release the lock before spawning the task
 
@@ -89,10 +88,10 @@ impl ZigguratServer {
     /// Manages the entire lifecycle of a single client connection.
     async fn handle_client(self: Arc<Self>, stream: TcpStream, addr: SocketAddr) {
         if let Err(e) = self.handle_client_loop(stream, addr).await {
-            log::warn!("Error handling client {}: {:?}", addr, e);
+            log::warn!("Error handling client {addr}: {e:?}");
         }
 
-        log::info!("Client {} disconnected.", addr);
+        log::info!("Client {addr} disconnected.");
         *self.is_client_connected.lock().unwrap() = false;
         *self.server_state.lock().unwrap() = None;
         log::info!("Zigbee stack has been reset.");
@@ -108,10 +107,7 @@ impl ZigguratServer {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
 
-        log::info!(
-            "Client {} connected. Waiting for 'set_network_settings'...",
-            addr
-        );
+        log::info!("Client {addr} connected. Waiting for 'set_network_settings'...");
         loop {
             line.clear();
             match reader.read_line(&mut line).await {
@@ -120,7 +116,7 @@ impl ZigguratServer {
                     let cmd = match serde_json::from_str::<CommandRequest>(line.trim()) {
                         Ok(cmd) => cmd,
                         Err(e) => {
-                            log::warn!("JSON parse error from {}: {}", addr, e);
+                            log::warn!("JSON parse error from {addr}: {e}");
                             let resp = json!({"tid": 0, "cmd": "error", "data": {"reason": "invalid_json", "details": e.to_string()}});
                             writer.write_all(resp.to_string().as_bytes()).await?;
                             writer.write_all(b"\n").await?;
@@ -128,7 +124,7 @@ impl ZigguratServer {
                         }
                     };
 
-                    log::debug!("Received command from {}: {:?}", addr, cmd);
+                    log::debug!("Received command from {addr}: {cmd:?}");
                     let resp = self.process_command(cmd).await;
                     let resp_str = serde_json::to_string(&resp)?;
                     writer.write_all(resp_str.as_bytes()).await?;
@@ -174,15 +170,15 @@ impl ZigguratServer {
 
                     match serde_json::from_str::<CommandRequest>(line.trim()) {
                         Ok(cmd) => {
-                            log::debug!("Received command from {}: {:?}", addr, cmd);
+                            log::debug!("Received command from {addr}: {cmd:?}");
                             let resp = self.process_command(cmd).await;
                             let resp_str = serde_json::to_string(&resp)?;
-                            log::debug!("Sending response: {}", resp_str);
+                            log::debug!("Sending response: {resp_str}");
                             writer.write_all(resp_str.as_bytes()).await?;
                             writer.write_all(b"\n").await?;
                         },
                         Err(e) => {
-                            log::warn!("JSON parse error from {}: {}", addr, e);
+                            log::warn!("JSON parse error from {addr}: {e}");
                             let resp = json!({"tid": 0, "cmd": "error", "data": {"reason": "invalid_json", "details": e.to_string()}});
                             writer.write_all(resp.to_string().as_bytes()).await?;
                             writer.write_all(b"\n").await?;
@@ -202,15 +198,15 @@ impl ZigguratServer {
                                     "lqi": lqi, "rssi": rssi, "data": hex::encode(data),
                                 }
                             });
-                            log::debug!("Sending APS frame notification: {:?}", event);
+                            log::debug!("Sending APS frame notification: {event:?}");
                             writer.write_all(event.to_string().as_bytes()).await?;
                             writer.write_all(b"\n").await?;
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                            log::warn!("Client {} lagged {} messages, skipping...", addr, count);
+                            log::warn!("Client {addr} lagged {count} messages, skipping...");
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            log::warn!("Broadcast channel closed, ending client connection for {}", addr);
+                            log::warn!("Broadcast channel closed, ending client connection for {addr}");
                             break;
                         }
                     }

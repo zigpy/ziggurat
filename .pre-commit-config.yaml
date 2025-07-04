@@ -19,10 +19,8 @@ repos:
         language: system
         pass_filenames: false
 
-#      - id: rust-clippy
-#        name: Rust clippy
-#        entry: bash -c "cd ziggurat && cargo clippy --all-targets --all-features -- -Dclippy::all"
-#        pass_filenames: false
-#        types: [file, rust]
-#        language: system
-#        files: ^ziggurat/
+      - id: rust-clippy
+        name: Rust clippy
+        entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+        language: system
+        pass_filenames: false

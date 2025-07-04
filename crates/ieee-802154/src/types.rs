@@ -170,7 +170,7 @@ impl Key {
         }
 
         let mut key = [0; 16];
-        key.copy_from_slice(&bytes);
+        key.copy_from_slice(bytes);
 
         Ok(Self(key))
     }
@@ -195,9 +195,9 @@ impl fmt::Debug for Key {
 pub fn format_hex<T: AsRef<[u8]>>(data: T, f: &mut fmt::Formatter) -> fmt::Result {
     for (index, b) in data.as_ref().iter().enumerate() {
         if index == 0 {
-            write!(f, "{:02X}", b)?;
+            write!(f, "{b:02X}")?;
         } else {
-            write!(f, ":{:02X}", b)?;
+            write!(f, ":{b:02X}")?;
         }
     }
     Ok(())

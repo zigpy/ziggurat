@@ -233,6 +233,7 @@ impl Ieee802154Frame {
         data
     }
 
+    #[allow(clippy::identity_op)]
     pub fn compute_fcs(data: &[u8]) -> u16 {
         let mut crc: u16 = 0x0000;
 
@@ -260,12 +261,12 @@ mod test {
         let remaining = &bytes[2..];
 
         assert_eq!(frame_control.frame_type, Ieee802154FrameType::Data);
-        assert_eq!(frame_control.security_enabled, false);
-        assert_eq!(frame_control.frame_pending, false);
-        assert_eq!(frame_control.ack_request, true);
-        assert_eq!(frame_control.pan_id_compression, true);
-        assert_eq!(frame_control.sequence_number_suppression, false);
-        assert_eq!(frame_control.information_elements_present, false);
+        assert!(!frame_control.security_enabled);
+        assert!(!frame_control.frame_pending);
+        assert!(frame_control.ack_request);
+        assert!(frame_control.pan_id_compression);
+        assert!(!frame_control.sequence_number_suppression);
+        assert!(!frame_control.information_elements_present);
         assert_eq!(
             frame_control.dest_addr_mode,
             Ieee802154AddressingMode::Short

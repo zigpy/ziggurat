@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion)]
+
 use crate::{Command, Request, Response};
 use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Nwk, PanId};
