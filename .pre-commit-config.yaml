@@ -21,6 +21,6 @@ repos:
 
       - id: rust-clippy
         name: Rust clippy
-        entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+        entry: cargo clippy --all-targets --all-features -- -Dclippy::all -Dclippy::nursery
         language: system
         pass_filenames: false
