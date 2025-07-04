@@ -15,7 +15,7 @@ use tokio::time::{Duration, timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelTxFrame {
     pub psdu: Vec<u8>,
     pub channel: Option<u8>,
@@ -87,7 +87,7 @@ impl SpinelTxFrame {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelRxFrame {
     pub psdu: Vec<u8>,
     pub rssi: i8,

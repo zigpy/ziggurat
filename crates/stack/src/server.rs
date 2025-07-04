@@ -218,6 +218,7 @@ impl ZigguratServer {
     }
 
     /// Processes a single command from the client, mutating the server state if necessary.
+    #[allow(clippy::significant_drop_tightening)]
     async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
         match cmd.cmd.as_str() {
             "set_network_settings" => {

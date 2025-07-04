@@ -47,7 +47,7 @@ pub enum NwkRouteDiscovery {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkFrameControl {
     pub frame_type: NwkFrameType,
     pub protocol_version: u4,
@@ -62,7 +62,7 @@ pub struct NwkFrameControl {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkSourceRoute {
     #[abstract_bits(length_of = relays)]
     relay_count: u8,
@@ -70,7 +70,7 @@ pub struct NwkSourceRoute {
     pub relays: Vec<Nwk>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkHeader {
     pub frame_control: NwkFrameControl,
     pub destination: Nwk,
@@ -212,7 +212,7 @@ pub enum NwkSecurityLevel {
 }
 
 #[abstract_bits]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkSecurityHeaderControlField {
     pub security_level: NwkSecurityLevel,
     pub key_id: NwkSecurityHeaderKeyId,
@@ -221,7 +221,7 @@ pub struct NwkSecurityHeaderControlField {
     reserved: u1,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkAuxHeader {
     pub security_control: NwkSecurityHeaderControlField,
     pub frame_counter: u32,
@@ -230,6 +230,7 @@ pub struct NwkAuxHeader {
 }
 
 impl NwkAuxHeader {
+    #[allow(clippy::useless_let_if_seq)]
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
         if bytes.len() < 6 {
             return Err("Not enough data to parse NwkAuxHeader");
@@ -448,12 +449,13 @@ impl EncryptedNwkFrame {
         nonce
     }
 
-    pub fn get_crypto(&self) -> NwkCrypto<2, 4> {
+    pub const fn get_crypto(&self) -> NwkCrypto<2, 4> {
         // Only a single configuration is supported but to keep the cryptography code
         // readable, it's useful to be generic here
         NwkCrypto::<2, 4>
     }
 
+    #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         let mut remaining;
         let nwk_header;
@@ -542,7 +544,7 @@ impl NwkFrame {
         nonce
     }
 
-    pub fn get_crypto(&self) -> NwkCrypto<2, 4> {
+    pub const fn get_crypto(&self) -> NwkCrypto<2, 4> {
         // Only a single configuration is supported but to keep the cryptography code
         // readable, it's useful to be generic here
         NwkCrypto::<2, 4>
