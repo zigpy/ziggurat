@@ -31,6 +31,34 @@ impl ZigbeeStack {
             .sleepy_child_eui64(nwk)
     }
 
+    /// Clean up after a child that attached to another parent: leftover state would
+    /// keep hijacking its unicasts into our indirect queue. The address map entry and
+    /// any negotiated link key are kept, exactly as for a leave.
+    pub(super) fn cleanup_moved_child(&self, eui64: Eui64, nwk: Nwk, new_parent: Nwk) {
+        log::info!("Child {eui64:?} ({nwk:?}) is now parented by {new_parent:?}");
+
+        self.drop_indirect_transactions(Some(eui64), nwk);
+        self.state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .remove_route(nwk);
+    }
+
+    /// Drop our child entry for a device known to have attached to another parent.
+    pub(super) fn forget_moved_child(&self, eui64: Eui64, new_parent: Nwk) {
+        let removed = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .take_child(eui64);
+
+        if let Some(nwk) = removed {
+            self.cleanup_moved_child(eui64, nwk, new_parent);
+        }
+    }
+
     pub(super) fn maybe_age_neighbors(&self) {
         // TODO: this function should be replaced by real timers
         let stale_neighbors = self

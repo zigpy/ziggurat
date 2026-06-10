@@ -284,6 +284,87 @@ impl Neighbors {
         true
     }
 
+    /// Remove the entry for a child that attached to a different parent, returning
+    /// its network address for cleanup.
+    pub fn take_child(&mut self, eui64: Eui64) -> Option<Nwk> {
+        if !self.table.get(&eui64)?.is_child() {
+            return None;
+        }
+
+        self.table.remove(&eui64).map(|entry| entry.network_address)
+    }
+
+    /// Every end device child, for the post-boot parent announcement
+    /// (spec 2.4.3.1.12.1: keepalive state is intentionally not considered).
+    pub fn end_device_children(&self) -> Vec<Eui64> {
+        self.table
+            .values()
+            .filter(|entry| {
+                entry.is_child() && matches!(entry.device_type, NwkDeviceType::EndDevice)
+            })
+            .map(|entry| entry.extended_address)
+            .collect()
+    }
+
+    /// Whether the device is an end device child that has yet to confirm itself with
+    /// a keepalive. Confirmed children are dropped from follow-up parent
+    /// announcements (spec 2.4.3.1.12.1).
+    pub fn is_unconfirmed_end_device_child(&self, eui64: Eui64) -> bool {
+        self.table.get(&eui64).is_some_and(|entry| {
+            entry.is_child()
+                && matches!(entry.device_type, NwkDeviceType::EndDevice)
+                && !entry.keepalive_received
+        })
+    }
+
+    /// Spec 2.4.4.2.22.2: remove the entries for end devices that another router has
+    /// claimed with keepalive-confirmed ownership.
+    pub fn remove_claimed_children(&mut self, claimed: &[Eui64]) -> Vec<(Eui64, Nwk)> {
+        let mut removed = Vec::new();
+
+        for &eui64 in claimed {
+            let Some(entry) = self.table.get(&eui64) else {
+                continue;
+            };
+
+            if !matches!(entry.device_type, NwkDeviceType::EndDevice) {
+                continue;
+            }
+
+            removed.push((eui64, entry.network_address));
+            self.table.remove(&eui64);
+        }
+
+        removed
+    }
+
+    /// Spec 2.4.4.2.22.1: another router announced the end devices it believes are
+    /// its children. Announced devices we have heard a keepalive from are kept and
+    /// returned for claiming back; our entries for the rest are stale and removed.
+    pub fn process_parent_annce(&mut self, announced: &[Eui64]) -> (Vec<Eui64>, Vec<(Eui64, Nwk)>) {
+        let mut claimed = Vec::new();
+        let mut removed = Vec::new();
+
+        for &eui64 in announced {
+            let Some(entry) = self.table.get(&eui64) else {
+                continue;
+            };
+
+            if !matches!(entry.device_type, NwkDeviceType::EndDevice) {
+                continue;
+            }
+
+            if entry.keepalive_received {
+                claimed.push(eui64);
+            } else {
+                removed.push((eui64, entry.network_address));
+                self.table.remove(&eui64);
+            }
+        }
+
+        (claimed, removed)
+    }
+
     /// Remove children whose keepalive deadline has passed (spec 3.6.10.1), returning
     /// their addresses for cleanup.
     pub fn evict_timed_out_children(&mut self) -> Vec<(Eui64, Nwk)> {

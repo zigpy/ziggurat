@@ -633,6 +633,13 @@ impl ZigbeeStack {
             update.status
         );
 
+        // A join or rejoin through a router is authoritative evidence the device is
+        // no longer our child: a stale child entry would keep hijacking its unicasts
+        // into our indirect queue
+        if !matches!(update.status, ApsUpdateDeviceStatus::DeviceLeft) {
+            self.forget_moved_child(update.device_address, router_nwk);
+        }
+
         match update.status {
             ApsUpdateDeviceStatus::StandardDeviceUnsecuredJoin => {
                 self.state

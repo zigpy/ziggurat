@@ -32,6 +32,7 @@ pub mod neighbors;
 mod nwk;
 mod route;
 pub mod routing;
+mod zdp;
 
 pub use aps_security::ApsSecurity;
 pub use neighbors::Neighbors;
@@ -243,6 +244,14 @@ pub struct Constants {
     /// different value via the End Device Timeout Request command (spec 3.6.10.2).
     pub end_device_timeout_default: EndDeviceTimeout,
 
+    /// `apsParentAnnounceBaseTimer`: the base delay before each broadcast parent
+    /// announcement.
+    pub parent_annce_base_timer: Duration,
+
+    /// `apsParentAnnounceJitterMax`: the maximum random addition to
+    /// [`Self::parent_annce_base_timer`].
+    pub parent_annce_jitter_max: Duration,
+
     /// For most joins, the network key is encrypted with the well-known global link key
     pub global_link_key: Key,
 }
@@ -282,6 +291,8 @@ impl Constants {
             max_router_bootstrap_jitter: Duration::from_millis(1000),
             broadcast_delivery_time: Duration::from_millis(9000),
             end_device_timeout_default: EndDeviceTimeout::Minutes256,
+            parent_annce_base_timer: Duration::from_secs(10),
+            parent_annce_jitter_max: Duration::from_secs(10),
             global_link_key: Key::from_hex("5a6967426565416c6c69616e63653039"),
         }
     }
@@ -536,6 +547,9 @@ pub struct ZigbeeStack {
     /// What the RCP source address match table currently holds, i.e. which polling
     /// devices were told (via frame-pending=1) to stay awake
     pub(crate) src_match_written: Mutex<SrcMatchTable>,
+    /// When the last parent announcement was received; ours is deferred to avoid a
+    /// network-wide broadcast storm (spec 2.4.3.1.12.2)
+    pub(crate) parent_annce_received: Mutex<Option<Instant>>,
 
     /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
     /// a leaked background task keeps the old serial port open and its reader steals
@@ -592,6 +606,7 @@ impl ZigbeeStack {
             energy_scan_rx: AsyncMutex::new(energy_scan_rx),
             src_match_sync: Notify::new(),
             src_match_written: Mutex::new(SrcMatchTable::default()),
+            parent_annce_received: Mutex::new(None),
             background_tasks: Mutex::new(JoinSet::new()),
         });
 
@@ -668,6 +683,11 @@ impl ZigbeeStack {
                     };
 
                     log::debug!("Received APS data frame: {aps_frame:#?}");
+
+                    // The ZDP commands that maintain stack state (the neighbor and
+                    // address tables live here, not in the client) are consumed by
+                    // the stack; the client still observes the frames
+                    self.handle_zdp_frame(&nwk_frame, &aps_frame);
 
                     if aps_frame.frame_control.ack_request {
                         self.handle_aps_ack_request(&aps_frame, &nwk_frame);
@@ -802,6 +822,16 @@ impl ZigbeeStack {
 
         self.spawn_tracked(async move {
             arc_self.indirect_maintenance_task().await;
+        });
+
+        // Announce our end device children to the other routers after boot
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.parent_annce_task().await;
         });
 
         Ok(())
