@@ -19,11 +19,7 @@ Start the TCP server and attach it to a port:
 cargo run --bin ziggurat /dev/cu.SLAB_USBtoUART 0.0.0.0:9999
 ```
 
-A single-file radio library for zigpy and demo client can be run to test the server by taking over an existing Zigbee network with hard-coded settings, re-interviewing an existing device on the network, and finally toggling its relay indefinitely in a tight loop:
-
-```bash
-python src/tools/zigpy_client.py 127.0.0.1:9999
-```
+ZHA needs a small patch to work with [zigpy-ziggurat](https://github.com/zigpy/zigpy-ziggurat). Once that is applied, the normal ZHA setup and migration flows work as intended.
 
 
 ### Status
@@ -32,9 +28,9 @@ python src/tools/zigpy_client.py 127.0.0.1:9999
   - [x] Link status broadcasts
   - [x] Route discovery replies
   - [x] APS ACKs
-- [ ] Multi-hop route calculation
-- [ ] Route discovery
-- [ ] Device joining
+- [x] Multi-hop route calculation
+- [x] Route discovery
+- [x] Device joining
 - [ ] Child device message holding and management
 
 [^1]: An earlier iteration in Python is available as [zigpy-spinel](https://github.com/puddly/zigpy-spinel).
