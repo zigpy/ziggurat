@@ -183,8 +183,8 @@ impl Command for NwkRouteRecordCommand {
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 #[repr(u8)]
 pub enum NwkRejoinCapabilityInformationDeviceType {
-    Router = 0,
-    EndDevice = 1,
+    EndDevice = 0,
+    Router = 1,
 }
 
 #[abstract_bits(bits = 1)]
@@ -500,4 +500,52 @@ impl Response for NwkNetworkCommissioningResponseCommand {
 
 impl Command for NwkNetworkCommissioningResponseCommand {
     const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkCommissioningResponse;
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// The capability information bit assignments match the 802.15.4 association
+    /// request (Table 3-71): bit 1 set means the device is a router.
+    #[test]
+    fn test_rejoin_request_round_trip() {
+        let command = NwkRejoinRequestCommand {
+            capability_information: NwkRejoinCapabilityInformation {
+                alternate_pan_coordinator: false,
+                device_type: NwkRejoinCapabilityInformationDeviceType::Router,
+                power_source: NwkRejoinCapabilityInformationPowerSource::MainsPowered,
+                receiver_on_when_idle: true,
+                reserved1: 0b0,
+                reserved2: 0b0,
+                security_capability: false,
+                allocate_address: true,
+            },
+        };
+
+        let bytes = command.serialize().unwrap();
+        assert_eq!(bytes, vec![NwkCommandId::RejoinRequest as u8, 0x8E]);
+        assert_eq!(
+            NwkRejoinRequestCommand::deserialize(&bytes).unwrap(),
+            command
+        );
+    }
+
+    #[test]
+    fn test_rejoin_response_round_trip() {
+        let command = NwkRejoinResponseCommand {
+            network_address: Nwk(0x1234),
+            rejoin_status: Nwk802154AssociationStatus::AssociationSuccessful,
+        };
+
+        let bytes = command.serialize().unwrap();
+        assert_eq!(
+            bytes,
+            vec![NwkCommandId::RejoinResponse as u8, 0x34, 0x12, 0x00]
+        );
+        assert_eq!(
+            NwkRejoinResponseCommand::deserialize(&bytes).unwrap(),
+            command
+        );
+    }
 }

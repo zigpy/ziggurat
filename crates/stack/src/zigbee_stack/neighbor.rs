@@ -1,106 +1,158 @@
-use std::collections::VecDeque;
-use tokio::time::Instant;
-
 use ieee_802154::types::{Eui64, Nwk};
 
-use super::{LINK_QUALITY_SAMPLES, NwkDeviceType, lqi_to_link_cost};
+use crate::zigbee_nwk::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use zigbee_parts::Command;
+use zigbee_parts::commands::NwkLinkStatusCommand;
 
-#[derive(Debug)]
-pub struct TableEntry {
-    pub extended_address: Eui64,
-    pub network_address: Nwk,
-    pub device_type: NwkDeviceType,
-    pub rx_on_when_idle: bool,
-    pub end_device_configuration: u16,
+use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack};
 
-    /// The current time remaining, in seconds, for the end device
-    /// max: 15728640 seconds, ~182 days
-    pub timeout_at: Instant,
+impl ZigbeeStack {
+    pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
+        self.state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .record_lqa(sender_nwk, lqi);
+    }
 
-    /// This field indicates the timeout, in seconds, for the end device child
-    /// max: 129600 seconds, 36 hours
-    pub device_timeout_at: Instant,
-    pub relationship: Relationship,
+    pub(super) fn end_device_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
+        self.state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .end_device_child_eui64(nwk)
+    }
 
-    /// A value indicating if previous transmissions to the device were successful or
-    /// not. Higher values indicate more failures.
-    pub transmit_failure: u8,
-    /// TODO: replace with a fixed-size ring buffer
-    pub lqas: VecDeque<u8>,
+    pub(super) fn maybe_age_neighbors(&self) {
+        // TODO: this function should be replaced by real timers
+        let stale_neighbors = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .age();
 
-    /// The outgoing cost field contains the cost of the link as measured by the
-    /// neighbor. The value is obtained from the most recent link status command frame
-    /// received from the neighbor. A value of 0 indicates that no link status command
-    /// listing this device has been received.
-    pub outgoing_cost: u8,
-
-    /// The number of [`nwkLinkStatusPeriod`] intervals that have passed since
-    /// the last link status command frame was received, up to a maximum value
-    /// of [`nwkRouterAgeLimit`]
-    // Spec-expected field: `pub age: u8`, we instead keep track of a timestamp
-    pub last_link_status_timestamp: Instant,
-
-    pub incoming_beacon_timestamp: u32,
-    pub beacon_transmission_time_offset: u32,
-
-    /// This value indicates at least one keepalive has been received from the end device
-    /// since the router has rebooted.
-    pub keepalive_received: bool,
-    /// pub mac_interface_index: u8,
-    pub mac_unicast_bytes_transmitted: u32,
-    pub mac_unicast_bytes_received: u32,
-
-    /// The number of [`nwkLinkStatusPeriod`] intervals, which elapsed since this router
-    /// neighbor was added to the neighbor table. This value is only maintained on
-    /// routers and the coordinator and is only valid for entries with a relationship
-    /// of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating
-    /// up-counter, which does not roll-over.
-    // Spec-expected field: `pub router_age: u16`, we instead keep track of a timestamp
-    pub router_added_timestamp: Instant,
-
-    pub router_connectivity: u8,
-    pub router_neighbor_set_diversity: u8,
-    pub router_outbound_activity: u8,
-    pub router_inbound_activity: u8,
-    pub security_timer: u8,
-}
-
-impl TableEntry {
-    pub fn lqa(&self) -> Option<u8> {
-        let num_samples = self.lqas.len();
-        if num_samples < LINK_QUALITY_SAMPLES {
-            return None;
-        }
-
-        let mut sorted_lqas = Vec::from(self.lqas.clone());
-        sorted_lqas.sort_unstable();
-
-        // Calculate median
-        if num_samples % 2 == 1 {
-            Some(sorted_lqas[num_samples / 2])
-        } else {
-            // Average of the two middle elements for even number of samples
-            let mid1 = sorted_lqas[num_samples / 2 - 1];
-            let mid2 = sorted_lqas[num_samples / 2];
-            Some(((mid1 as u16 + mid2 as u16) / 2) as u8)
+        for neighbor_nwk in stale_neighbors {
+            self.invalidate_routes_via(neighbor_nwk);
         }
     }
 
-    pub fn incoming_link_cost(&self) -> u8 {
-        self.lqa().map_or(0, lqi_to_link_cost)
-    }
-}
+    pub(super) fn handle_link_status(&self, nwk_frame: &NwkFrame, lqi: u8) {
+        let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.payload) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing link status command: {e:?}");
+                return;
+            }
+        };
 
-#[derive(Debug)]
-pub enum Relationship {
-    Parent = 0x00,
-    Child = 0x01,
-    Sibling = 0x02,
-    NoneOfTheAbove = 0x03, // NotParentChildOrSibling?
-    PreviousChild = 0x04,
-    UnauthenticatedChild = 0x05,
-    UnauthorizedChildWithRelayAllowed = 0x06,
-    LostChild = 0x07,
-    AddressConflictChild = 0x08,
-    BackboneMeshSibling = 0x09,
+        log::info!("Link status command frame: {link_status_cmd:#?}");
+
+        self.maybe_age_neighbors();
+
+        let Some(source_ieee) = nwk_frame.nwk_header.source_ieee else {
+            log::warn!("Link status command source EUI64 is missing");
+            return;
+        };
+
+        let lost_link = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .on_link_status(
+                source_ieee,
+                nwk_frame.nwk_header.source,
+                lqi,
+                &link_status_cmd,
+            );
+
+        // Spec 3.6.4.4.2: when the outgoing cost collapses to zero the link is
+        // considered broken, and routes through this neighbor with it
+        if let Some(neighbor_nwk) = lost_link {
+            self.invalidate_routes_via(neighbor_nwk);
+        }
+    }
+
+    pub async fn send_link_status_broadcast(&self, empty: bool) {
+        log::debug!("Sending periodic link status broadcast");
+
+        if self.state.network_address == Nwk(0xFFFF) {
+            log::debug!("Skipping, stack has not been initialized yet");
+            return;
+        }
+
+        // Decrement the `recent_activity` field of every active routing table entry
+        self.state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .decay_activity();
+
+        self.maybe_age_neighbors();
+
+        // Decrement the inbound and outbound activity fields for neighbors
+        let mut link_statuses = {
+            let mut neighbors = self
+                .state
+                .neighbors
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
+            neighbors.decay_activity();
+
+            if empty {
+                Vec::new()
+            } else {
+                neighbors.link_status_entries()
+            }
+        };
+
+        // Link statuses are sorted in ascending order
+        link_statuses.sort_by_key(|a| a.address.as_u16());
+
+        let max_link_statuses = 7;
+        let mut remaining_link_statuses = link_statuses.clone();
+
+        loop {
+            let link_status_frame = self
+                .nwk_command_frame(
+                    BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                    NwkLinkStatusCommand {
+                        is_first_frame: remaining_link_statuses.len() == link_statuses.len(),
+                        is_last_frame: remaining_link_statuses.len() <= max_link_statuses,
+                        link_statuses: if remaining_link_statuses.is_empty() {
+                            vec![]
+                        } else {
+                            // Link status frames overlap by a single entry
+                            remaining_link_statuses
+                                .drain(
+                                    ..std::cmp::min(
+                                        remaining_link_statuses.len(),
+                                        max_link_statuses - 1,
+                                    ),
+                                )
+                                .collect()
+                        },
+                    }
+                    .serialize()
+                    .unwrap(),
+                )
+                .with_radius(1);
+
+            self.background_send_nwk_frame(link_status_frame, NwkSecurityMode::NetworkKey, false);
+
+            if remaining_link_statuses.is_empty() {
+                break;
+            }
+        }
+    }
+
+    pub async fn periodic_link_status_broadcast_task(&self) {
+        loop {
+            log::debug!("Sending periodic link status broadcast...");
+            tokio::time::sleep(self.constants.link_status_period).await;
+
+            self.send_link_status_broadcast(false).await;
+        }
+    }
 }

@@ -8,6 +8,10 @@ use tokio::sync::{mpsc, oneshot};
 const CRC_KERMIT: CrcAlgo<u16> = CrcAlgo::<u16>::new(0x1021, 16, 0xFFFF, 0xFFFF, true);
 const U21_MAX: u32 = 1 << 21;
 
+/// No valid HDLC frame comes close to this size; a buffer this large without a flag
+/// byte means we have desynced from the stream.
+const MAX_HDLC_BUFFER_SIZE: usize = 4096;
+
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelCommandId {
@@ -72,7 +76,7 @@ pub enum SpinelPropertyId {
     PhyRxSensitivity = 39,
 
     // MAC Properties
-    // MacScanState = 38,  // collides with PhyRssi
+    MacScanState = 48,
     MacScanMask = 49,
     MacScanPeriod = 50,
     MacScanBeacon = 51,
@@ -220,6 +224,21 @@ pub enum SpinelStatus {
     ResetOther = 118,
     ResetUnknown = 119,
     ResetWatchdog = 120,
+}
+
+impl SpinelStatus {
+    pub const fn is_reset(self) -> bool {
+        self as u8 >= Self::ResetPowerOn as u8
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[repr(u8)]
+pub enum SpinelMacScanState {
+    Idle = 0,
+    Beacon = 1,
+    Energy = 2,
+    Discover = 3,
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
@@ -529,6 +548,7 @@ pub struct SpinelProtocol {
     pub pending_frames: HashMap<u8, oneshot::Sender<SpinelFrame>>,
     pub unsolicited_frame_receiver: Option<mpsc::Sender<SpinelFrame>>,
     pub property_update_receivers: HashMap<SpinelPropertyId, mpsc::Sender<SpinelFramePropValueIs>>,
+    pub reset_notification_receiver: Option<mpsc::Sender<SpinelStatus>>,
 }
 
 impl Default for SpinelProtocol {
@@ -546,6 +566,7 @@ impl SpinelProtocol {
             pending_frames: HashMap::new(),
             unsolicited_frame_receiver: None,
             property_update_receivers: HashMap::new(),
+            reset_notification_receiver: None,
         }
     }
 
@@ -559,6 +580,24 @@ impl SpinelProtocol {
         tx: mpsc::Sender<SpinelFramePropValueIs>,
     ) {
         self.property_update_receivers.insert(property_id, tx);
+    }
+
+    pub fn set_reset_notification_receiver(&mut self, tx: mpsc::Sender<SpinelStatus>) {
+        self.reset_notification_receiver = Some(tx);
+    }
+
+    /// Dropping the senders resolves every in-flight `send_command` immediately with
+    /// `ChannelClosed` instead of stranding it until the timeout.
+    pub fn fail_all_pending_requests(&mut self) {
+        self.pending_frames.clear();
+    }
+
+    pub fn notify_reset(&mut self, status: SpinelStatus) {
+        self.fail_all_pending_requests();
+
+        if let Some(tx) = &self.reset_notification_receiver {
+            let _ = tx.try_send(status);
+        }
     }
 
     pub fn parse_frames_from_bytes_into(
@@ -611,6 +650,15 @@ impl SpinelProtocol {
             self.buffer.drain(0..index.unwrap() + 1);
         }
 
+        if self.buffer.len() > MAX_HDLC_BUFFER_SIZE {
+            log::warn!(
+                "Discarding {} buffered bytes without an HDLC flag, resyncing",
+                self.buffer.len()
+            );
+            self.buffer.clear();
+            self.ignoring_until_next_flag = true;
+        }
+
         num_parsed_frames
     }
 
@@ -637,6 +685,11 @@ impl SpinelProtocol {
             if frame.command_id == SpinelCommandId::PropValueIs {
                 match SpinelFramePropValueIs::from_bytes(&frame.payload) {
                     Ok(prop_value_is) => {
+                        if prop_value_is.property_id == SpinelPropertyId::LastStatus {
+                            self.handle_unsolicited_last_status(&prop_value_is.value);
+                            return;
+                        }
+
                         match self
                             .property_update_receivers
                             .get(&prop_value_is.property_id)
@@ -645,21 +698,53 @@ impl SpinelProtocol {
                                 let _ = sender.try_send(prop_value_is);
                             }
                             None => {
-                                eprintln!("No receiver for property update: {prop_value_is:?}");
+                                log::warn!("No receiver for property update: {prop_value_is:?}");
                             }
                         }
                     }
                     Err(_) => {
-                        eprintln!("Failed to parse PropValueIs frame: {frame:?}");
+                        log::warn!("Failed to parse PropValueIs frame: {frame:?}");
                     }
                 }
             } else {
-                eprintln!("Unhandled unsolicited frame: {frame:?}");
+                log::warn!("Unhandled unsolicited frame: {frame:?}");
             }
         } else if let Some(sender) = self.pending_frames.remove(&tid) {
             let _ = sender.send(frame);
         } else {
-            eprintln!("Unsolicited or unmatched frame: {frame:?}");
+            log::warn!("Unsolicited or unmatched frame: {frame:?}");
+        }
+    }
+
+    /// The RCP announces a reset (brownout, watchdog, firmware assert, our own
+    /// `CMD_RESET`) with an unsolicited `LastStatus = RESET_*` notification. The reset
+    /// wipes the radio configuration, so every in-flight command is failed and the
+    /// reset is forwarded for recovery.
+    fn handle_unsolicited_last_status(&mut self, value: &[u8]) {
+        let status = match packed_uint21_deserialize(value) {
+            Ok((status_int, _)) => {
+                match u8::try_from(status_int)
+                    .ok()
+                    .and_then(|s| SpinelStatus::try_from(s).ok())
+                {
+                    Some(status) => status,
+                    None => {
+                        log::warn!("Unknown unsolicited status: {status_int}");
+                        return;
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!("Failed to parse unsolicited status: {err:?}");
+                return;
+            }
+        };
+
+        if status.is_reset() {
+            log::error!("RCP announced a reset: {status:?}");
+            self.notify_reset(status);
+        } else {
+            log::warn!("Unsolicited status notification: {status:?}");
         }
     }
 
@@ -668,8 +753,14 @@ impl SpinelProtocol {
         command_id: SpinelCommandId,
         payload: Vec<u8>,
     ) -> (SpinelFrame, oneshot::Receiver<SpinelFrame>) {
-        // Cycle TIDs from 1..7
-        let tid = self.next_tid;
+        // Cycle TIDs from 1..7, skipping ones still awaiting a response: if a live TID
+        // were reused, the older command's timeout cancellation would remove the newer
+        // command's pending entry and orphan its response
+        let mut tid = self.next_tid;
+        while self.pending_frames.contains_key(&tid) {
+            tid = 1 + (tid % 7);
+            assert_ne!(tid, self.next_tid, "All Spinel TIDs are in flight");
+        }
         self.next_tid = 1 + (tid % 7);
 
         let header = SpinelHeader {
@@ -701,7 +792,7 @@ mod test {
     use super::*;
     use hex_literal::hex;
     use rand::Rng;
-    use rand::RngCore;
+    use rand::RngExt;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 

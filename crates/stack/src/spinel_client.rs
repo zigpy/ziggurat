@@ -1,19 +1,26 @@
 use crate::spinel::{
     HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelFrameParsingError, SpinelFramePropValueIs,
-    SpinelPropertyId, SpinelProtocol, SpinelStatus, packed_uint21_deserialize,
+    SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelStatus, packed_uint21_deserialize,
     packed_uint21_to_bytes,
 };
-use serial2_tokio::SerialPort;
 use std::string::String;
 use thiserror::Error;
+use tokio_serial::SerialStream;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// A local serial link answers in milliseconds; anything beyond this is a failure.
+const TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Consecutive command timeouts before the RCP is presumed wedged and the
+/// reset-recovery path is triggered.
+const MAX_CONSECUTIVE_TIMEOUTS: u32 = 4;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelTxFrame {
@@ -181,19 +188,29 @@ pub enum SpinelError {
 
 #[derive(Debug)]
 pub struct SpinelClient {
-    pub port: Arc<SerialPort>,
+    /// The reader half of the port, owned by the task spawned in `spawn_reader`.
+    reader: Mutex<Option<ReadHalf<SerialStream>>>,
+    /// The writer half of the port. The mutex also serializes outbound HDLC writes so
+    /// concurrent commands cannot interleave partial frames inside the byte stream.
+    writer: AsyncMutex<WriteHalf<SerialStream>>,
     pub protocol: Arc<Mutex<SpinelProtocol>>,
-    pub buffer: [u8; 2048],
-    pub send_lock: AsyncMutex<()>,
+    /// The RCP has a single TX buffer; transmit transactions are serialized end to end.
+    transmit_lock: AsyncMutex<()>,
+    consecutive_timeouts: AtomicU32,
+    reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl SpinelClient {
-    pub fn new(port: SerialPort) -> Self {
+    pub fn new(port: SerialStream) -> Self {
+        let (reader, writer) = tokio::io::split(port);
+
         Self {
-            port: Arc::new(port),
+            reader: Mutex::new(Some(reader)),
+            writer: AsyncMutex::new(writer),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
-            buffer: [0u8; 2048],
-            send_lock: AsyncMutex::new(()),
+            transmit_lock: AsyncMutex::new(()),
+            consecutive_timeouts: AtomicU32::new(0),
+            reader_task: Mutex::new(None),
         }
     }
 
@@ -209,31 +226,95 @@ impl SpinelClient {
             .insert(property_id, tx);
     }
 
+    pub fn set_reset_notification_receiver(&self, tx: mpsc::Sender<SpinelStatus>) {
+        self.protocol
+            .lock()
+            .expect("Failed to lock Spinel")
+            .set_reset_notification_receiver(tx);
+    }
+
     /// Start a reading loop to parse and handle inbound frames.
+    ///
+    /// Serial death (USB yank, EOF) exits the whole process: the supervisor (Docker)
+    /// restarts us. A half-dead process with a deaf radio is the worst failure mode.
     pub fn spawn_reader(&self) {
-        let port = Arc::clone(&self.port);
+        let mut reader = self
+            .reader
+            .lock()
+            .expect("Failed to lock reader")
+            .take()
+            .expect("Reader already taken");
         let protocol = Arc::clone(&self.protocol);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut buffer = [0u8; 2048];
 
             loop {
-                match port.read(&mut buffer).await {
+                match reader.read(&mut buffer).await {
                     Ok(n) if n > 0 => {
                         let mut protocol = protocol.lock().expect("Failed to lock Spinel");
                         protocol.handle_inbound_bytes(&buffer[..n])
                     }
                     Ok(_) => {
-                        eprintln!("EOF or 0 bytes read, stopping.");
-                        break;
+                        log::error!("Serial port EOF, exiting");
+                        std::process::exit(1);
                     }
                     Err(e) => {
-                        eprintln!("Error reading port: {e:?}");
-                        break;
+                        log::error!("Serial port read failed ({e}), exiting");
+                        std::process::exit(1);
                     }
                 }
             }
         });
+
+        *self.reader_task.lock().expect("Failed to lock reader task") = Some(handle);
+    }
+
+    /// Stops the reader task so that a replaced client releases the serial port
+    /// instead of competing with its successor for inbound frames.
+    pub fn shutdown(&self) {
+        let maybe_handle = self
+            .reader_task
+            .lock()
+            .expect("Failed to lock reader task")
+            .take();
+
+        if let Some(handle) = maybe_handle {
+            handle.abort();
+        }
+    }
+
+    async fn write_bytes(&self, data: &[u8]) -> Result<(), SpinelError> {
+        log::debug!("Writing {data:02X?}");
+
+        self.writer
+            .lock()
+            .await
+            .write_all(data)
+            .await
+            .map_err(SpinelError::IoError)?;
+
+        Ok(())
+    }
+
+    /// `CMD_RESET` is acknowledged with an unsolicited `LastStatus = RESET_*`
+    /// notification rather than a tid-matched response, so this only sends.
+    pub async fn send_reset(&self) -> Result<(), SpinelError> {
+        let frame = SpinelFrame {
+            header: SpinelHeader {
+                flag: 0b10,
+                network_link_id: 0,
+                transaction_id: 0,
+            },
+            command_id: SpinelCommandId::Reset,
+            payload: vec![],
+        };
+
+        let hdlc_frame = HdlcLiteFrame {
+            data: frame.to_bytes(),
+        };
+
+        self.write_bytes(&hdlc_frame.to_bytes_with_flags()).await
     }
 
     pub async fn send_command(
@@ -254,13 +335,13 @@ impl SpinelClient {
             data: frame.to_bytes(),
         };
 
-        let data = hdlc_frame.to_bytes_with_flags();
-
-        log::debug!("Writing {data:02X?}");
-        self.port.write(&data).await.map_err(SpinelError::IoError)?;
+        self.write_bytes(&hdlc_frame.to_bytes_with_flags()).await?;
 
         match timeout(TIMEOUT, rx).await {
-            Ok(Ok(response_frame)) => Ok(response_frame),
+            Ok(Ok(response_frame)) => {
+                self.consecutive_timeouts.store(0, Ordering::Relaxed);
+                Ok(response_frame)
+            }
             Ok(Err(_)) => {
                 self.protocol
                     .lock()
@@ -275,12 +356,34 @@ impl SpinelClient {
                     .expect("Failed to lock Spinel")
                     .cancel_request(frame.header.transaction_id);
 
+                let timeouts = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
+                if timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
+                    self.consecutive_timeouts.store(0, Ordering::Relaxed);
+                    log::error!(
+                        "RCP unresponsive after {timeouts} consecutive command timeouts, triggering reset recovery"
+                    );
+                    self.protocol
+                        .lock()
+                        .expect("Failed to lock Spinel")
+                        .notify_reset(SpinelStatus::ResponseTimeout);
+                }
+
                 Err(SpinelError::Timeout)
             }
         }
     }
 
     pub async fn prop_value_get(
+        &self,
+        property_id: SpinelPropertyId,
+    ) -> Result<Vec<u8>, SpinelError> {
+        match self.prop_value_get_once(property_id).await {
+            Err(SpinelError::Timeout) => self.prop_value_get_once(property_id).await,
+            result => result,
+        }
+    }
+
+    async fn prop_value_get_once(
         &self,
         property_id: SpinelPropertyId,
     ) -> Result<Vec<u8>, SpinelError> {
@@ -299,6 +402,17 @@ impl SpinelClient {
     }
 
     pub async fn prop_value_set(
+        &self,
+        property_id: SpinelPropertyId,
+        value: Vec<u8>,
+    ) -> Result<(SpinelPropertyId, Vec<u8>), SpinelError> {
+        match self.prop_value_set_once(property_id, value.clone()).await {
+            Err(SpinelError::Timeout) => self.prop_value_set_once(property_id, value).await,
+            result => result,
+        }
+    }
+
+    async fn prop_value_set_once(
         &self,
         property_id: SpinelPropertyId,
         value: Vec<u8>,
@@ -333,13 +447,12 @@ impl SpinelClient {
 
     // Convenience method wrapping broad functionality are below
     pub async fn get_ncp_version(&self) -> Result<String, SpinelError> {
-        let ncp_version_rsp = self
-            .prop_value_get(SpinelPropertyId::NcpVersion)
-            .await
-            .unwrap();
+        let ncp_version_rsp = self.prop_value_get(SpinelPropertyId::NcpVersion).await?;
 
         let ncp_version_with_null =
-            String::from_utf8(ncp_version_rsp).expect("Invalid UTF-8 string");
+            String::from_utf8(ncp_version_rsp).map_err(|_| SpinelError::InvalidResponseError {
+                reason: "NCP version is not valid UTF-8".to_string(),
+            })?;
 
         Ok(ncp_version_with_null
             .trim_matches(char::from(0x00))
@@ -350,12 +463,13 @@ impl SpinelClient {
         &self,
         tx_frame: &SpinelTxFrame,
     ) -> Result<SpinelStatus, SpinelError> {
-        let _send_lock = self.send_lock.lock().await;
+        let _transmit_lock = self.transmit_lock.lock().await;
 
+        // No retry on timeout: a duplicate transmit is worse than a failed one, and the
+        // NWK retry paths handle the failure
         let (rsp_prop_id, rsp) = self
-            .prop_value_set(SpinelPropertyId::StreamRaw, tx_frame.to_bytes())
-            .await
-            .unwrap();
+            .prop_value_set_once(SpinelPropertyId::StreamRaw, tx_frame.to_bytes())
+            .await?;
 
         if rsp_prop_id != SpinelPropertyId::LastStatus {
             return Err(SpinelError::InvalidResponseError {

@@ -49,7 +49,6 @@ fn serialize<T: AbstractBits>(thing: &T, id: NwkCommandId) -> Result<Vec<u8>, Se
             cause,
         })?;
     let len = writer.bytes_written();
-    dbg!(len);
     bytes.truncate(len + 1); // +1 for id
     Ok(bytes)
 }

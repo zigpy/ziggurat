@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-rust-version = "1.86" # latest as of creating this
+rust-version = "1.96" # latest as of creating this
 edition = "2024"
 license = "Apache-2.0"
 authors = []
@@ -12,10 +12,13 @@ authors = []
 inherits = "release"
 debug = true
 
+# A panic anywhere must kill the whole process instead of leaving it half-dead with
+# the Spinel reader still running; the client reconnects and a supervisor restarts us
 [profile.release]
 lto = true
 codegen-units = 1
 opt-level = 3
+panic = "abort"
 
 [workspace.dependencies]
 # TODO, shared dependencies here

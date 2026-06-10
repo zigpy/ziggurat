@@ -1,94 +1,605 @@
-use tokio::time::Instant;
+use std::cmp;
+use tokio::sync::broadcast;
+use tokio::time::{Duration, Instant, timeout};
 
 use ieee_802154::types::Nwk;
 
-pub type RequestId = u8;
+use crate::zigbee_nwk::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use zigbee_parts::Command;
+use zigbee_parts::commands::{
+    NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand, NwkRouteRequestCommand,
+    NwkRouteRequestManyToOne,
+};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Status {
-    Active = 0,
-    DiscoveryUnderway = 1,
-    DiscoveryFailed = 2,
-    Inactive = 3,
-}
+use super::routing::{RouteReplyDisposition, Status};
+use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
 
-#[derive(Debug)]
-pub struct TableEntry {
-    /// Destination address the routing table entry is for
-    pub destination: Nwk,
-    pub status: Status,
+impl ZigbeeStack {
+    fn notify_routing_change(&self, nwk: &Nwk) {
+        let tx = {
+            let pending_route_notifications = self
+                .state
+                .pending_route_notifications
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
 
-    /// A flag indicating that the destination indicated by this address does not store
-    /// source routes.
-    pub no_route_cache: bool,
+            if !pending_route_notifications.contains_key(nwk) {
+                return;
+            }
 
-    /// A flag indicating that the destination is a concentrator that issued a
-    /// many-to-one route request.
-    pub many_to_one: bool,
+            pending_route_notifications.get(nwk).unwrap().clone()
+        };
+        let _ = tx.send(());
+    }
 
-    /// A flag indicating that a route record command frame SHOULD be sent to the
-    /// destination prior to the next data packet.
-    pub route_record_required: bool,
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
+        let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.payload) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing route reply command: {e:?}");
+                return;
+            }
+        };
 
-    /// When set to TRUE, this flag indicates that an expected regular many-to-one route
-    /// request was missed, i.e. the last many-to-one route request for this destination
-    /// was received more than `nwkConcentratorDiscoveryTime` + `nwkRouteDiscoveryTime`
-    /// seconds ago. When the entry is created, this field is initially set to FALSE.
-    /// This flag only has meaning for entries, which have the many-to-one field set to
-    /// TRUE.
-    pub expired: bool,
+        log::info!("Route reply command frame: {route_reply_cmd:#?}");
 
-    /// Used for `TLVs` and a few subsequent fields
-    pub sequence_number_valid: bool,
+        // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
+        // R23 spec but real devices do not do this
 
-    /// The 16-bit network address of the next hop on the way to the destination.
-    /// This is the routing table entry's primary purpose.
-    pub next_hop_address: Nwk,
+        let sender_link = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .link(nwk_frame.nwk_header.source);
 
-    /// The 16-bit sequence number associated with this entry, obtained from the last
-    /// route message that successfully updated this entry and conveyed a sequence
-    /// number. Notice that routers prior to `R23` did neither maintain nor convey a
-    /// sequence number. The value stored in this field is only valid if the Sequence
-    /// Number Valid flag is set.
-    pub sequence_number: u16,
+        let Some(sender_link) = sender_link else {
+            log::debug!("Ignoring route reply from unknown neighbor");
+            return;
+        };
 
-    /// A 32-bit saturating counter, which is incremented whenever this routing table
-    /// entry is used to forward a data packet towards its destination
-    pub total_usage_count: u32,
+        if sender_link.outgoing_cost == 0 {
+            log::debug!("Ignoring route reply from neighbor with zero outgoing cost");
+            return;
+        }
 
-    /// An 8-bit saturating counter, which is pre-loaded with `nwkRouterAgeLimit` when the
-    /// routing table entry is created; incremented whenever this routing table entry is
-    /// used to forward a state packet towards its destination; and decremented
-    /// unconditionally once every `nwkLinkStatusPeriod`. A value of 0 indicates no
-    /// packets have recently been forwarded along this route.
-    pub recent_activity: u8,
-}
+        let updated_path_cost = route_reply_cmd
+            .path_cost
+            .saturating_add(sender_link.outgoing_cost);
 
-#[derive(Debug)]
-pub struct DiscoveryEntry {
-    /// A sequence number for a route request command frame that is incremented each time
-    /// a device initiates a route request. Notice that this 8-bit identifier is
-    /// distinct from the 16-bit Routing Sequence Number. The former is used to discern
-    /// route requests originating in a particular router; the latter is used to
-    /// identify stale routing information.
-    pub route_request_id: RequestId,
-    /// The 16-bit network address of the route request’s initiator.
-    pub source_address: Nwk,
-    /// The 16-bit network address of the device that has sent the most recent lowest
-    /// cost route request command frame corresponding to this entry’s route request
-    /// identifier and source address. This field is used to determine the path that an
-    /// eventual route reply command frame SHOULD follow.
-    pub sender_address: Nwk,
-    /// The accumulated path cost from the source of the route request to the current
-    /// device.
-    pub forward_cost: u8,
-    /// The accumulated path cost from the current device to the destination device.
-    pub residual_cost: u8,
-    /// A countdown timer indicating the number of milliseconds until route discovery
-    /// expires. The initial value is `nwkcRouteDiscoveryTime`.
-    pub expiration_time: Instant,
-    /// The 16-bit network address of the device this route discovery entry is
-    /// identifying a route for. This isn't mentioned in the spec as being a required
-    /// field.
-    pub destination_address: Nwk,
+        let disposition = self
+            .state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .accept_route_reply(
+                route_reply_cmd.originator_nwk,
+                route_reply_cmd.route_request_identifier,
+                route_reply_cmd.responder_nwk,
+                nwk_frame.nwk_header.source,
+                updated_path_cost,
+            );
+
+        let (next_hop_nwk, path_cost) = match disposition {
+            RouteReplyDisposition::Drop => return,
+            RouteReplyDisposition::Established => {
+                self.notify_routing_change(&route_reply_cmd.responder_nwk);
+                return;
+            }
+            RouteReplyDisposition::Relay {
+                next_hop,
+                path_cost,
+            } => (next_hop, path_cost),
+        };
+
+        self.notify_routing_change(&route_reply_cmd.responder_nwk);
+
+        let next_hop_link = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .link(next_hop_nwk);
+
+        let Some(next_hop_link) = next_hop_link else {
+            log::warn!("Next hop neighbor not found in neighbor table");
+            return;
+        };
+
+        let relayed_route_reply_frame = self
+            .nwk_command_frame(
+                next_hop_nwk,
+                NwkRouteReplyCommand {
+                    route_request_identifier: route_reply_cmd.route_request_identifier,
+                    originator_nwk: route_reply_cmd.originator_nwk,
+                    responder_nwk: route_reply_cmd.responder_nwk,
+                    // We increment the path cost
+                    path_cost: path_cost.saturating_add(next_hop_link.incoming_cost),
+                    originator_eui64: route_reply_cmd.originator_eui64,
+                    responder_eui64: route_reply_cmd.responder_eui64,
+                }
+                .serialize()
+                .unwrap(),
+            )
+            // Spec 3.4.2.2: relays decrement the radius, but a reply received with a
+            // radius of 1 is still forwarded with a radius of 1
+            .with_radius(cmp::max(nwk_frame.nwk_header.radius.saturating_sub(1), 1))
+            .with_destination_ieee(Some(next_hop_link.eui64));
+
+        // The next hop toward the originator is a direct radio neighbor
+        self.background_send_nwk_frame(
+            relayed_route_reply_frame,
+            NwkSecurityMode::NetworkKey,
+            true,
+        );
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
+        let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.payload) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing route request command: {e:?}");
+                return;
+            }
+        };
+
+        log::info!("Route request command frame (sender {sender_nwk:#?}): {route_request_cmd:#?}");
+
+        let network_address = self.state.network_address;
+        let many_to_one = route_request_cmd.many_to_one != NwkRouteRequestManyToOne::NotManyToOne;
+
+        // We need to know who sent the frame
+        let sender_link = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .link(sender_nwk);
+
+        let Some(sender_link) = sender_link else {
+            // Can we do anything here? Broadcast an unsolicited link status?
+            log::warn!("Route request relayer not found in neighbor table");
+            return;
+        };
+
+        if sender_link.outgoing_cost == 0 {
+            log::warn!("Path cost to neighbor is 0, not sending route reply");
+            return;
+        }
+
+        let sender_ieee = sender_link.eui64;
+
+        // The maximum of the incoming and outgoing costs is used for computations to
+        // deprioritize asymmetric routes
+        let contributing_path_cost = cmp::max(sender_link.outgoing_cost, sender_link.incoming_cost);
+        let updated_path_cost = route_request_cmd
+            .path_cost
+            .saturating_add(contributing_path_cost);
+
+        // Deduplicate route requests and track the best path back to the originator.
+        // Only requests advertising a strictly better forward cost are processed
+        // further; this also stops our own requests from echoing back at us.
+        let accepted = self
+            .state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .accept_route_request(
+                nwk_frame.nwk_header.source,
+                route_request_cmd.route_request_identifier,
+                route_request_cmd.destination_address,
+                sender_nwk,
+                updated_path_cost,
+                route_request_cmd.many_to_one,
+            );
+
+        if !accepted {
+            return;
+        }
+
+        self.notify_routing_change(&nwk_frame.nwk_header.source);
+
+        // TODO: what do we do if the address and the EUI64 don't agree? This would be
+        // an error, some device on the network is storing invalid information about
+        // either us or a child.
+        let responder_eui64 = if many_to_one {
+            // Many-to-one requests are advertisements; nobody replies to them
+            None
+        } else if route_request_cmd.destination_address == network_address
+            || route_request_cmd.destination_eui64 == Some(self.state.ieee_address)
+        {
+            Some(self.state.ieee_address)
+        } else {
+            // Spec 3.6.4.5.1.2: parents answer route requests for their end device
+            // children, which do not participate in route discovery
+            self.end_device_child_eui64(route_request_cmd.destination_address)
+        };
+
+        if let Some(responder_eui64) = responder_eui64 {
+            // Spec 3.4.2.2: the reply is addressed hop-by-hop, starting with the
+            // neighbor we accepted the request from, and accumulates its own path cost
+            // on the way back
+            let route_reply_frame = self
+                .nwk_command_frame(
+                    sender_nwk,
+                    NwkRouteReplyCommand {
+                        route_request_identifier: route_request_cmd.route_request_identifier,
+                        originator_nwk: nwk_frame.nwk_header.source,
+                        responder_nwk: route_request_cmd.destination_address,
+                        path_cost: contributing_path_cost,
+                        originator_eui64: nwk_frame.nwk_header.source_ieee,
+                        responder_eui64: Some(responder_eui64),
+                    }
+                    .serialize()
+                    .unwrap(),
+                )
+                .with_destination_ieee(Some(sender_ieee));
+
+            // The next hop toward the originator is a direct radio neighbor
+            self.background_send_nwk_frame(route_reply_frame, NwkSecurityMode::NetworkKey, true);
+            return;
+        }
+
+        // We are relaying. Track that discovery toward the destination is underway;
+        // many-to-one requests are addressed to a broadcast address, so there is no
+        // destination to track for them.
+        if !many_to_one {
+            self.state
+                .routing
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .note_relayed_discovery(route_request_cmd.destination_address);
+        }
+
+        let rebroadcast_radius = nwk_frame.nwk_header.radius.saturating_sub(1);
+
+        if rebroadcast_radius == 0 {
+            log::debug!("Not relaying route request, re-broadcast radius is 0");
+            return;
+        }
+
+        // Relayed route requests are not new frames: the originator's source address
+        // and sequence number are preserved, only the path cost and radius change
+        let relayed_route_request_cmd = self
+            .nwk_command_frame(
+                nwk_frame.nwk_header.destination,
+                NwkRouteRequestCommand {
+                    many_to_one: route_request_cmd.many_to_one,
+                    route_request_identifier: route_request_cmd.route_request_identifier,
+                    destination_address: route_request_cmd.destination_address,
+                    path_cost: updated_path_cost, // We update only the path cost
+                    destination_eui64: route_request_cmd.destination_eui64,
+                }
+                .serialize()
+                .unwrap(),
+            )
+            .with_source(nwk_frame.nwk_header.source)
+            .with_source_ieee(nwk_frame.nwk_header.source_ieee)
+            .with_radius(rebroadcast_radius)
+            .with_sequence_number(nwk_frame.nwk_header.sequence_number);
+
+        // Spec 3.6.4.5.1.4: relayed route requests are jittered and retried
+        let jitter = (self.constants.min_rreq_jitter
+            + (self.constants.max_rreq_jitter - self.constants.min_rreq_jitter)
+                .mul_f32(rand::random::<f32>()))
+            * 2;
+
+        self.background_broadcast_route_request(
+            relayed_route_request_cmd,
+            self.constants.rreq_retries + 1,
+            jitter,
+        );
+    }
+
+    /// Broadcast a route request `attempts` times, separated by the RREQ retry
+    /// interval. The frame's sequence number must already be assigned: route request
+    /// retries and relays are not new frames.
+    fn background_broadcast_route_request(
+        &self,
+        nwk_frame: NwkFrame,
+        attempts: u8,
+        initial_delay: Duration,
+    ) {
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            tokio::time::sleep(initial_delay).await;
+
+            for attempt in 0..attempts {
+                if attempt > 0 {
+                    tokio::time::sleep(arc_self.constants.rreq_retry_interval).await;
+                }
+
+                if let Err(err) = arc_self
+                    .transmit_broadcast_nwk_frame(nwk_frame.clone(), NwkSecurityMode::NetworkKey)
+                    .await
+                {
+                    log::warn!("Failed to broadcast route request: {err}");
+                }
+            }
+        });
+    }
+
+    /// Zigbee spec 3.6.4.5.1: advertise a many-to-one route to ourselves so that every
+    /// router records a path toward the concentrator. Devices can then reach us without
+    /// per-device route discoveries, and respond with route record commands that we
+    /// store for future source routing.
+    pub async fn send_many_to_one_route_request(&self) {
+        let route_request_identifier = self
+            .state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .begin_many_to_one_advertisement();
+
+        log::info!("Sending many-to-one route request {route_request_identifier}");
+
+        let many_to_one_request_frame = self
+            .nwk_command_frame(
+                BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                NwkRouteRequestCommand {
+                    many_to_one: NwkRouteRequestManyToOne::ManyToOneSenderSupportsRouteRecordTable,
+                    route_request_identifier,
+                    destination_address: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                    path_cost: 0,
+                    destination_eui64: None,
+                }
+                .serialize()
+                .unwrap(),
+            )
+            .with_radius(self.constants.concentrator_radius)
+            // Sent via `transmit_*`, which does not assign sequence numbers
+            .with_sequence_number(self.next_nwk_sequence_number());
+
+        // Many-to-one route requests are not retried (spec 3.6.4.5.1)
+        if let Err(err) = self
+            .transmit_broadcast_nwk_frame(many_to_one_request_frame, NwkSecurityMode::NetworkKey)
+            .await
+        {
+            log::warn!("Failed to broadcast many-to-one route request: {err}");
+        }
+    }
+
+    pub async fn periodic_many_to_one_route_request_task(&self) {
+        // Give link status exchanges a chance to establish neighbor link costs first:
+        // receivers drop route requests from senders with a zero outgoing cost
+        tokio::time::sleep(2 * self.constants.link_status_period).await;
+
+        loop {
+            self.send_many_to_one_route_request().await;
+            tokio::time::sleep(self.constants.concentrator_discovery_time).await;
+        }
+    }
+
+    pub(super) fn invalidate_routes_via(&self, next_hop: Nwk) {
+        self.state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .invalidate_via(next_hop);
+    }
+
+    /// Zigbee spec 3.6.4.8.1: another router could not deliver a frame we originated;
+    /// drop the route so the next transmission performs a fresh discovery.
+    pub(super) fn handle_network_status(&self, nwk_frame: &NwkFrame) {
+        let network_status_cmd = match NwkNetworkStatusCommand::deserialize(&nwk_frame.payload) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                log::warn!("Error parsing network status command: {e:?}");
+                return;
+            }
+        };
+
+        log::info!(
+            "Network status from {:?}: {network_status_cmd:#?}",
+            nwk_frame.nwk_header.source
+        );
+
+        match network_status_cmd.status_code {
+            NwkNetworkStatus::LegacyNoRouteAvailable
+            | NwkNetworkStatus::LegacyLinkFailure
+            | NwkNetworkStatus::LinkFailure
+            | NwkNetworkStatus::SourceRouteFailure => {
+                if self
+                    .state
+                    .routing
+                    .try_lock_for(MAX_LOCK_DURATION)
+                    .unwrap()
+                    .remove_route(network_status_cmd.network_address)
+                {
+                    log::info!(
+                        "Removed failed route to {:?}",
+                        network_status_cmd.network_address
+                    );
+                }
+            }
+            NwkNetworkStatus::ManyToOneRouteFailure => {
+                // Spec 3.6.4.8.2: the concentrator repairs many-to-one routes by
+                // advertising itself again
+                let arc_self = self
+                    .self_weak
+                    .upgrade()
+                    .expect("Unable to upgrade self reference");
+
+                self.spawn_tracked(async move {
+                    arc_self.send_many_to_one_route_request().await;
+                });
+            }
+            _ => {
+                log::warn!("Unhandled network status: {network_status_cmd:?}");
+            }
+        }
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, ZigbeeStackError> {
+        if self.state.hack_force_route_discovery
+            || self
+                .state
+                .routing
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .route_status(destination)
+                .is_none()
+        {
+            log::debug!("Starting route discovery for NWK {destination:?}");
+            self.send_route_discovery(destination).await;
+        }
+
+        // A route table entry will now exist
+        let route_entry_status = self
+            .state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .route_status(destination)
+            .unwrap();
+
+        log::debug!("Routing table status for {destination:?}: {route_entry_status:?}");
+
+        match route_entry_status {
+            Status::Active => {
+                let next_hop = self
+                    .state
+                    .routing
+                    .try_lock_for(MAX_LOCK_DURATION)
+                    .unwrap()
+                    .next_hop(destination)
+                    .unwrap();
+                log::debug!("Using existing next hop for NWK {destination:?}: {next_hop:?}");
+                return Ok(next_hop);
+            }
+            Status::DiscoveryUnderway => {
+                // Do nothing
+            }
+            Status::DiscoveryFailed | Status::Inactive => {
+                self.send_route_discovery(destination).await;
+            }
+        }
+
+        // Create a pending route notification
+        let mut rx = {
+            let mut pending_route_notifications = self
+                .state
+                .pending_route_notifications
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
+            let tx = pending_route_notifications
+                .entry(destination)
+                .or_insert_with(|| {
+                    let (tx, _) = broadcast::channel(1);
+                    tx
+                });
+
+            tx.subscribe()
+        };
+
+        // Pull the current route discovery entry for the device to determine the timeout
+        let discovery_timeout = {
+            let deadline = self
+                .state
+                .routing
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .discovery_deadline(destination);
+
+            // One should exist
+            match deadline {
+                Some(deadline) => deadline - Instant::now(),
+                None => {
+                    log::warn!("No route discovery entry found for {destination:?}");
+                    return Err(ZigbeeStackError::RouteDiscoveryFailure(
+                        "No discovery entry found".to_string(),
+                    ));
+                }
+            }
+        };
+
+        log::debug!(
+            "Waiting for route discovery notification for NWK {destination:?} with timeout {discovery_timeout:?}"
+        );
+
+        match timeout(discovery_timeout, rx.recv()).await {
+            Ok(_) => {
+                log::debug!("Route discovery completed for NWK {destination:#?}");
+            }
+            Err(err) => {
+                log::debug!("Route discovery timed out");
+                self.state
+                    .routing
+                    .try_lock_for(MAX_LOCK_DURATION)
+                    .unwrap()
+                    .mark_discovery_failed(destination);
+                return Err(ZigbeeStackError::RouteDiscoveryTimeout(err));
+            }
+        };
+
+        self.state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .next_hop(destination)
+            .ok_or_else(|| {
+                ZigbeeStackError::RouteDiscoveryFailure(
+                    "Route not active after discovery".to_string(),
+                )
+            })
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn send_route_discovery(&self, destination: Nwk) {
+        log::debug!("Sending route discovery for NWK {destination:?}");
+
+        let route_request_identifier = self
+            .state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .begin_discovery(destination);
+
+        // If we know the EUI64 corresponding to the NWK, use it
+        let destination_eui64 = self
+            .state
+            .address_map
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .iter()
+            .find_map(|(&eui64, &nwk)| {
+                if nwk == destination {
+                    Some(eui64)
+                } else {
+                    None
+                }
+            });
+
+        let route_request_frame = self
+            .nwk_command_frame(
+                BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                NwkRouteRequestCommand {
+                    many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
+                    route_request_identifier,
+                    destination_address: destination,
+                    path_cost: 0, // The path cost starts at 0, since we originate it
+                    destination_eui64,
+                }
+                .serialize()
+                .unwrap(),
+            )
+            // Retried broadcasts of a route request share one sequence number,
+            // assigned now: `transmit_*` does not touch it
+            .with_sequence_number(self.next_nwk_sequence_number());
+
+        // Spec 3.6.4.5.1: the initial broadcast is repeated `nwkcInitialRREQRetries`
+        // times, separated by the retry interval
+        self.background_broadcast_route_request(
+            route_request_frame,
+            self.constants.initial_rreq_retries + 1,
+            Duration::ZERO,
+        );
+    }
 }

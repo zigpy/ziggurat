@@ -1,5 +1,7 @@
+pub mod crypto;
 pub mod spinel;
 pub mod spinel_client;
+pub mod types;
 pub mod zigbee_aps;
 pub mod zigbee_nwk;
 pub mod zigbee_stack;

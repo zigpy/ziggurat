@@ -1,23 +1,60 @@
 use hex;
 use std::fmt;
 
+#[derive(Debug, thiserror::Error)]
+pub enum FromHexError {
+    #[error("invalid length, expected {expected} hex characters, got {got}")]
+    InvalidLength { expected: usize, got: usize },
+    #[error("invalid hex")]
+    InvalidHex(#[from] hex::FromHexError),
+}
+
+fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], FromHexError> {
+    // Strip off colons and a 0x prefix, if present
+    let text = text.replace(":", "").replace("0x", "");
+
+    if text.len() != 2 * N {
+        return Err(FromHexError::InvalidLength {
+            expected: 2 * N,
+            got: text.len(),
+        });
+    }
+
+    let mut bytes = [0; N];
+    hex::decode_to_slice(text, &mut bytes)?;
+
+    Ok(bytes)
+}
+
+/// Hex-string forms (as used in the client wire protocol) deserialize through
+/// `try_from_hex` so malformed client input is an error, never a panic.
+macro_rules! deserialize_via_try_from_hex {
+    ($ty:ty) => {
+        impl<'de> serde::Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let text = String::deserialize(deserializer)?;
+                Self::try_from_hex(&text).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+deserialize_via_try_from_hex!(Nwk);
+deserialize_via_try_from_hex!(Eui64);
+deserialize_via_try_from_hex!(PanId);
+deserialize_via_try_from_hex!(Key);
+
 #[abstract_bits::abstract_bits]
 #[derive(Eq, Hash, Copy, Clone, PartialEq)]
 pub struct Nwk(pub u16);
 
 impl Nwk {
+    pub fn try_from_hex(text: &str) -> Result<Self, FromHexError> {
+        Ok(Self(u16::from_be_bytes(decode_hex(text)?)))
+    }
+
     pub fn from_hex(text: &str) -> Self {
-        // Strip off colons and a 0x prefix, if present
-        let text = text.replace(":", "").replace("0x", "");
-
-        if text.len() != 4 {
-            panic!("Invalid Nwk length");
-        }
-
-        let mut nwk_bytes = [0; 2];
-        hex::decode_to_slice(text, &mut nwk_bytes).expect("Decoding failed");
-
-        Self(u16::from_be_bytes(nwk_bytes))
+        Self::try_from_hex(text).unwrap()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
@@ -50,20 +87,15 @@ impl fmt::Debug for Nwk {
 pub struct Eui64(pub [u8; 8]);
 
 impl Eui64 {
-    pub fn from_hex(text: &str) -> Self {
-        // Strip off colons and a 0x prefix, if present
-        let text = text.replace(":", "").replace("0x", "");
-
-        if text.len() != 16 {
-            panic!("Invalid Eui64 length");
-        }
-
-        let mut eui64 = [0; 8];
-        hex::decode_to_slice(text, &mut eui64).expect("Decoding failed");
-
+    pub fn try_from_hex(text: &str) -> Result<Self, FromHexError> {
+        let mut eui64: [u8; 8] = decode_hex(text)?;
         eui64.reverse();
 
-        Self(eui64)
+        Ok(Self(eui64))
+    }
+
+    pub fn from_hex(text: &str) -> Self {
+        Self::try_from_hex(text).unwrap()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
@@ -111,18 +143,12 @@ pub enum Address {
 pub struct PanId(pub u16);
 
 impl PanId {
+    pub fn try_from_hex(text: &str) -> Result<Self, FromHexError> {
+        Ok(Self(u16::from_be_bytes(decode_hex(text)?)))
+    }
+
     pub fn from_hex(text: &str) -> Self {
-        // Strip off colons and a 0x prefix, if present
-        let text = text.replace(":", "").replace("0x", "");
-
-        if text.len() != 4 {
-            panic!("Invalid PanId length");
-        }
-
-        let mut pan_id_bytes = [0; 2];
-        hex::decode_to_slice(text, &mut pan_id_bytes).expect("Decoding failed");
-
-        Self(u16::from_be_bytes(pan_id_bytes))
+        Self::try_from_hex(text).unwrap()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
@@ -147,24 +173,19 @@ impl fmt::Debug for PanId {
 }
 
 #[derive(Clone, Eq, PartialEq)]
+#[abstract_bits::abstract_bits]
 pub struct Key(pub [u8; 16]);
 
 impl Key {
-    pub fn from_hex(text: &str) -> Self {
-        // Strip off colons and a 0x prefix, if present
-        let text = text.replace(":", "").replace("0x", "");
-
-        if text.len() != 32 {
-            panic!("Invalid key length");
-        }
-
-        let mut key = [0; 16];
-        hex::decode_to_slice(text, &mut key).expect("Decoding failed");
-
-        Self(key)
+    pub fn try_from_hex(text: &str) -> Result<Self, FromHexError> {
+        Ok(Self(decode_hex(text)?))
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_hex(text: &str) -> Self {
+        Self::try_from_hex(text).unwrap()
+    }
+
+    pub const fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() != 16 {
             return Err("Invalid key length");
         }

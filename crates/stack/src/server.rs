@@ -1,22 +1,41 @@
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use serial2::Settings;
-use serial2_tokio::SerialPort;
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime::LocalRuntime;
 use tokio::sync::broadcast;
-use tokio::task::spawn_local;
+use tokio_serial::{FlowControl, SerialPortBuilderExt};
 
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::spinel_client::SpinelClient;
 use ziggurat::zigbee_aps::ApsDeliveryMode;
-use ziggurat::zigbee_stack::{ZigbeeNotification, ZigbeeStack};
+use ziggurat::zigbee_stack::{Constants, ZigbeeNotification, ZigbeeStack};
+
+/// Big-endian colon-separated hex, the format used by zigpy for EUI64 addresses
+fn eui64_to_string(eui64: Eui64) -> String {
+    let mut bytes = eui64.to_bytes();
+    bytes.reverse();
+
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn key_to_string(key: &Key) -> String {
+    key.to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
 
 #[derive(Deserialize, Debug)]
 struct CommandRequest {
@@ -31,6 +50,60 @@ struct CommandResponse {
     tid: u64,
     cmd: String,
     data: serde_json::Value,
+}
+
+// The structs below define the client wire protocol: each `data` payload deserializes
+// into the struct matching its `cmd`.
+
+#[derive(Deserialize, Debug)]
+struct KeyTableEntry {
+    partner_ieee: Eui64,
+    key: Key,
+}
+
+#[derive(Deserialize, Debug)]
+struct SetNetworkSettingsRequest {
+    channel: u8,
+    nwk_update_id: u8,
+    pan_id: PanId,
+    extended_pan_id: Eui64,
+    nwk_address: Nwk,
+    ieee_address: Eui64,
+    network_key: Key,
+    network_key_seq: u8,
+    network_key_tx_counter: u32,
+    tc_link_key: Option<Key>,
+    #[serde(default)]
+    key_table: Vec<KeyTableEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct SendApsCommandRequest {
+    delivery_mode: ApsDeliveryMode,
+    /// Resolved through the address map; takes precedence over `destination`
+    destination_eui64: Option<Eui64>,
+    destination: Option<Nwk>,
+    profile_id: u16,
+    cluster_id: u16,
+    src_ep: u8,
+    dst_ep: u8,
+    aps_ack: bool,
+    aps_seq: u8,
+    radius: u8,
+    /// Hex-encoded ASDU
+    data: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct EnergyScanRequest {
+    channels: Vec<u8>,
+    duration_per_channel_ms: u16,
+}
+
+#[derive(Deserialize, Debug)]
+struct PermitJoinsRequest {
+    #[serde(default)]
+    duration: u64,
 }
 
 /// Holds the state that exists only after the Zigbee stack is initialized.
@@ -79,7 +152,7 @@ impl ZigguratServer {
             drop(is_connected_guard); // Release the lock before spawning the task
 
             let server_clone = self.clone();
-            spawn_local(async move {
+            tokio::spawn(async move {
                 server_clone.handle_client(socket, addr).await;
             });
         }
@@ -93,7 +166,15 @@ impl ZigguratServer {
 
         log::info!("Client {addr} disconnected.");
         *self.is_client_connected.lock().unwrap() = false;
-        *self.server_state.lock().unwrap() = None;
+
+        // The stack's spawned tasks hold strong references to it: without an explicit
+        // shutdown the old stack would keep running alongside its successor, sharing
+        // the serial port and stealing its responses
+        let maybe_state = self.server_state.lock().unwrap().take();
+
+        if let Some(state) = maybe_state {
+            state.zigbee_stack.shutdown();
+        }
         log::info!("Zigbee stack has been reset.");
     }
 
@@ -188,18 +269,51 @@ impl ZigguratServer {
                 },
                 notify_event = notification_rx.recv() => {
                      match notify_event {
-                        Ok(ZigbeeNotification::ReceivedApsCommand {
-                            source, profile_id, cluster_id, src_ep, dst_ep, lqi, rssi, data,
-                        }) => {
-                            let event = json!({
-                                "tid": 0, "cmd": "received_aps_command",
-                                "data": {
-                                    "source": hex::encode(source.to_bytes()), "profile_id": profile_id,
-                                    "cluster_id": cluster_id, "src_ep": src_ep, "dst_ep": dst_ep,
-                                    "lqi": lqi, "rssi": rssi, "data": hex::encode(data),
-                                }
-                            });
-                            log::debug!("Sending APS frame notification: {event:?}");
+                        Ok(notification) => {
+                            let event = match notification {
+                                ZigbeeNotification::ReceivedApsCommand {
+                                    source, destination, group, profile_id, cluster_id,
+                                    src_ep, dst_ep, lqi, rssi, data,
+                                } => json!({
+                                    "tid": 0, "cmd": "received_aps_command",
+                                    "data": {
+                                        "source": hex::encode(source.to_bytes()),
+                                        "destination": hex::encode(destination.to_bytes()),
+                                        "group": group,
+                                        "profile_id": profile_id,
+                                        "cluster_id": cluster_id, "src_ep": src_ep, "dst_ep": dst_ep,
+                                        "lqi": lqi, "rssi": rssi, "data": hex::encode(data),
+                                    }
+                                }),
+                                ZigbeeNotification::FrameCounterUpdate { frame_counter } => json!({
+                                    "tid": 0, "cmd": "frame_counter_update",
+                                    "data": { "frame_counter": frame_counter }
+                                }),
+                                ZigbeeNotification::LinkKeyUpdate { ieee, key } => json!({
+                                    "tid": 0, "cmd": "link_key_update",
+                                    "data": {
+                                        "ieee": eui64_to_string(ieee),
+                                        "key": key_to_string(&key),
+                                    }
+                                }),
+                                ZigbeeNotification::DeviceJoined { nwk, ieee, parent } => json!({
+                                    "tid": 0, "cmd": "device_joined",
+                                    "data": {
+                                        "nwk": hex::encode(nwk.to_bytes()),
+                                        "ieee": eui64_to_string(ieee),
+                                        "parent": hex::encode(parent.to_bytes()),
+                                    }
+                                }),
+                                ZigbeeNotification::DeviceLeft { nwk, ieee } => json!({
+                                    "tid": 0, "cmd": "device_left",
+                                    "data": {
+                                        "nwk": hex::encode(nwk.to_bytes()),
+                                        "ieee": ieee.map(eui64_to_string),
+                                    }
+                                }),
+                            };
+
+                            log::debug!("Sending notification: {event:?}");
                             writer.write_all(event.to_string().as_bytes()).await?;
                             writer.write_all(b"\n").await?;
                         },
@@ -217,53 +331,58 @@ impl ZigguratServer {
         Ok(())
     }
 
+    fn initialized_stack(&self) -> Option<Arc<ZigbeeStack>> {
+        self.server_state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|server_state| server_state.zigbee_stack.clone())
+    }
+
     /// Processes a single command from the client, mutating the server state if necessary.
     #[allow(clippy::significant_drop_tightening)]
     async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
-        match cmd.cmd.as_str() {
+        let CommandRequest {
+            tid,
+            cmd: name,
+            data,
+        } = cmd;
+
+        let error = |reason: serde_json::Value, name: String| CommandResponse {
+            tid,
+            cmd: name,
+            data: json!({"status": "error", "reason": reason}),
+        };
+
+        match name.as_str() {
             "set_network_settings" => {
+                let request: SetNetworkSettingsRequest = match serde_json::from_value(data) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        return error(json!(format!("invalid_request: {e}")), name);
+                    }
+                };
+
                 let mut state_guard = self.server_state.lock().unwrap();
                 if state_guard.is_some() {
-                    return CommandResponse {
-                        tid: cmd.tid,
-                        cmd: cmd.cmd,
-                        data: json!({"status": "error", "reason": "stack_already_initialized"}),
-                    };
+                    return error(json!("stack_already_initialized"), name);
                 }
 
-                let channel = cmd.data.get("channel").unwrap().as_u64().unwrap() as u8;
-                let nwk_update_id = cmd.data.get("nwk_update_id").unwrap().as_u64().unwrap() as u8;
-                let pan_id = PanId::from_hex(cmd.data.get("pan_id").unwrap().as_str().unwrap());
-                let extended_pan_id =
-                    Eui64::from_hex(cmd.data.get("extended_pan_id").unwrap().as_str().unwrap());
-                let nwk_address =
-                    Nwk::from_hex(cmd.data.get("nwk_address").unwrap().as_str().unwrap());
-                let ieee_address =
-                    Eui64::from_hex(cmd.data.get("ieee_address").unwrap().as_str().unwrap());
-                let network_key =
-                    Key::from_hex(cmd.data.get("network_key").unwrap().as_str().unwrap());
-                let network_key_seq =
-                    cmd.data.get("network_key_seq").unwrap().as_u64().unwrap() as u8;
-                let network_key_tx_counter = cmd
-                    .data
-                    .get("network_key_tx_counter")
-                    .unwrap()
-                    .as_u64()
-                    .unwrap() as u32;
+                let mut constants = Constants::new();
+                if let Some(tc_link_key) = request.tc_link_key {
+                    constants.global_link_key = tc_link_key;
+                }
 
                 log::info!("Initializing Zigbee stack with new settings...");
-                let port = match SerialPort::open(&self.serial_path, |mut settings: Settings| {
-                    settings.set_raw();
-                    settings.set_baud_rate(460_800)?;
-                    Ok(settings)
-                }) {
+                // Without flow control the RCP's UART drops bytes under load,
+                // corrupting host->RCP frames ("Framing error" + command timeout)
+                let port = match tokio_serial::new(&self.serial_path, 460_800)
+                    .flow_control(FlowControl::Hardware)
+                    .open_native_async()
+                {
                     Ok(p) => p,
                     Err(e) => {
-                        return CommandResponse {
-                            tid: cmd.tid,
-                            cmd: cmd.cmd,
-                            data: json!({"status": "error", "reason": format!("serial_port_error: {}", e)}),
-                        };
+                        return error(json!(format!("serial_port_error: {e}")), name);
                     }
                 };
 
@@ -272,19 +391,34 @@ impl ZigguratServer {
 
                 let (zigbee_stack, notification_rx) = ZigbeeStack::new(
                     spinel,
-                    channel,
-                    nwk_update_id,
-                    pan_id,
-                    extended_pan_id,
-                    nwk_address,
-                    ieee_address,
-                    network_key,
-                    network_key_seq,
-                    network_key_tx_counter,
+                    constants,
+                    request.channel,
+                    request.nwk_update_id,
+                    request.pan_id,
+                    request.extended_pan_id,
+                    request.nwk_address,
+                    request.ieee_address,
+                    request.network_key,
+                    request.network_key_seq,
+                    request.network_key_tx_counter,
                 );
 
+                // Restore unique trust center link keys negotiated in earlier sessions
+                if !request.key_table.is_empty() {
+                    let mut aps_security = zigbee_stack.state.aps_security.lock();
+
+                    for entry in request.key_table {
+                        aps_security.restore_device_key(entry.partner_ieee, entry.key);
+                    }
+
+                    log::info!(
+                        "Restored {} trust center link keys",
+                        aps_security.device_key_count()
+                    );
+                }
+
                 let stack_clone = zigbee_stack.clone();
-                spawn_local(async move {
+                zigbee_stack.spawn_tracked(async move {
                     stack_clone.run().await;
                 });
 
@@ -295,90 +429,127 @@ impl ZigguratServer {
 
                 log::info!("Zigbee stack initialized and running.");
                 CommandResponse {
-                    tid: cmd.tid,
-                    cmd: cmd.cmd,
+                    tid,
+                    cmd: name,
                     data: json!({"status": "success"}),
                 }
             }
             "send_aps_command" => {
-                let zigbee_stack = {
-                    let state_guard = self.server_state.lock().unwrap();
-                    if let Some(server_state) = &*state_guard {
-                        server_state.zigbee_stack.clone()
-                    } else {
-                        return CommandResponse {
-                            tid: cmd.tid,
-                            cmd: cmd.cmd,
-                            data: json!({"status": "error", "reason": "not_initialized"}),
-                        };
+                let request: SendApsCommandRequest = match serde_json::from_value(data) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        return error(json!(format!("invalid_request: {e}")), name);
                     }
                 };
 
-                {
-                    // ... (parsing logic remains the same)
-                    let delivery_mode = match cmd
-                        .data
-                        .get("delivery_mode")
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                    {
-                        "unicast" => ApsDeliveryMode::Unicast,
-                        "broadcast" => ApsDeliveryMode::Broadcast,
-                        "multicast" => ApsDeliveryMode::Multicast,
-                        _ => {
-                            return CommandResponse {
-                                tid: cmd.tid,
-                                cmd: cmd.cmd,
-                                data: json!({"status": "error", "reason": "invalid_delivery_mode"}),
-                            };
+                let Some(zigbee_stack) = self.initialized_stack() else {
+                    return error(json!("not_initialized"), name);
+                };
+
+                // EUI64-addressed packets are resolved through the address map
+                let destination = match (request.destination_eui64, request.destination) {
+                    (Some(eui64), _) => {
+                        let nwk = zigbee_stack.state.address_map.lock().get(&eui64).copied();
+
+                        match nwk {
+                            Some(nwk) => nwk,
+                            None => {
+                                return error(json!("unknown_destination_eui64"), name);
+                            }
                         }
-                    };
-                    let destination =
-                        Nwk::from_hex(cmd.data.get("destination").unwrap().as_str().unwrap());
-                    let profile_id = cmd.data.get("profile_id").unwrap().as_u64().unwrap() as u16;
-                    let cluster_id = cmd.data.get("cluster_id").unwrap().as_u64().unwrap() as u16;
-                    let src_ep = cmd.data.get("src_ep").unwrap().as_u64().unwrap() as u8;
-                    let dst_ep = cmd.data.get("dst_ep").unwrap().as_u64().unwrap() as u8;
-                    let aps_ack = cmd.data.get("aps_ack").unwrap().as_bool().unwrap();
-                    let aps_seq = cmd.data.get("aps_seq").unwrap().as_u64().unwrap() as u8;
-                    let radius = cmd.data.get("radius").unwrap().as_u64().unwrap() as u8;
-                    let data =
-                        hex::decode(cmd.data.get("data").unwrap().as_str().unwrap()).unwrap();
-
-                    let status = zigbee_stack
-                        .send_aps_command(
-                            delivery_mode,
-                            destination,
-                            profile_id,
-                            cluster_id,
-                            src_ep,
-                            dst_ep,
-                            aps_ack,
-                            radius,
-                            aps_seq,
-                            data,
-                        )
-                        .await;
-
-                    CommandResponse {
-                        tid: cmd.tid,
-                        cmd: cmd.cmd,
-                        data: json!({"status": if status.is_ok() { "success" } else { "error" }, "reason": status.err().map(|e| e.to_string())}),
                     }
+                    (None, Some(nwk)) => nwk,
+                    (None, None) => {
+                        return error(json!("missing_destination"), name);
+                    }
+                };
+
+                let asdu = match hex::decode(&request.data) {
+                    Ok(asdu) => asdu,
+                    Err(e) => {
+                        return error(json!(format!("invalid_data: {e}")), name);
+                    }
+                };
+
+                let status = zigbee_stack
+                    .send_aps_command(
+                        request.delivery_mode,
+                        destination,
+                        request.profile_id,
+                        request.cluster_id,
+                        request.src_ep,
+                        request.dst_ep,
+                        request.aps_ack,
+                        request.radius,
+                        request.aps_seq,
+                        asdu,
+                    )
+                    .await;
+
+                CommandResponse {
+                    tid,
+                    cmd: name,
+                    data: json!({"status": if status.is_ok() { "success" } else { "error" }, "reason": status.err().map(|e| e.to_string())}),
                 }
             }
-            _ => CommandResponse {
-                tid: cmd.tid,
-                cmd: cmd.cmd,
-                data: json!({ "status": "error", "reason": "unknown_command" }),
-            },
+            "energy_scan" => {
+                let request: EnergyScanRequest = match serde_json::from_value(data) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        return error(json!(format!("invalid_request: {e}")), name);
+                    }
+                };
+
+                let Some(zigbee_stack) = self.initialized_stack() else {
+                    return error(json!("not_initialized"), name);
+                };
+
+                let results = zigbee_stack
+                    .energy_scan(
+                        &request.channels,
+                        Duration::from_millis(u64::from(request.duration_per_channel_ms)),
+                    )
+                    .await;
+
+                match results {
+                    Ok(results) => CommandResponse {
+                        tid,
+                        cmd: name,
+                        data: json!({
+                            "status": "success",
+                            "results": results.into_iter().collect::<HashMap<u8, i8>>(),
+                        }),
+                    },
+                    Err(e) => error(json!(format!("energy_scan_failed: {e}")), name),
+                }
+            }
+            "permit_joins" => {
+                let request: PermitJoinsRequest = match serde_json::from_value(data) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        return error(json!(format!("invalid_request: {e}")), name);
+                    }
+                };
+
+                let Some(zigbee_stack) = self.initialized_stack() else {
+                    return error(json!("not_initialized"), name);
+                };
+
+                zigbee_stack.permit_joins(request.duration);
+
+                CommandResponse {
+                    tid,
+                    cmd: name,
+                    data: json!({"status": "success", "reason": "none"}),
+                }
+            }
+            _ => error(json!("unknown_command"), name),
         }
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rt = LocalRuntime::new()?;
+    let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         env_logger::builder()
             .format_timestamp_micros()

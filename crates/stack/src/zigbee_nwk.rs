@@ -4,18 +4,13 @@ use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 
-use aes::Aes128;
-use aes::Block;
-use aes::cipher::BlockModeEncrypt;
-use aes::cipher::KeyInit;
-use aes::cipher::KeyIvInit;
-use cbc::Encryptor;
-use cbc::cipher::BlockCipherEncrypt;
 use constant_time_eq::constant_time_eq;
 use num_enum::TryFromPrimitive;
 
 use derivative::Derivative;
 use thiserror::Error;
+
+use crate::crypto::NwkCrypto;
 
 pub const BROADCAST_ALL_DEVICES: Nwk = Nwk(0xFFFF);
 pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
@@ -26,6 +21,8 @@ pub const BROADCAST_LOW_POWER_ROUTERS: Nwk = Nwk(0xFFFB);
 pub enum NwkDecryptionError {
     #[error("Invalid MAC tag")]
     InvalidMacTag,
+    #[error("Ciphertext too short to contain a MAC tag")]
+    CiphertextTooShort,
 }
 
 #[abstract_bits(bits = 2)]
@@ -125,6 +122,10 @@ impl NwkHeader {
 
         let multicast_control = match frame_control.multicast {
             true => {
+                if remaining.is_empty() {
+                    return Err("Not enough data to parse multicast control");
+                }
+
                 let control = remaining[0];
                 remaining = &remaining[1..];
                 Some(control)
@@ -252,6 +253,10 @@ impl NwkAuxHeader {
             extended_source = Some(ieee);
         }
 
+        if remaining.is_empty() {
+            return Err("Not enough data to parse key sequence number");
+        }
+
         let key_sequence_number = remaining[0];
         remaining = &remaining[1..];
 
@@ -282,123 +287,6 @@ impl NwkAuxHeader {
     }
 }
 
-fn right_pad_to_multiple_of_16(data: &[u8]) -> Vec<Block> {
-    // Pre-allocate enough blocks
-    let mut blocks = Vec::<Block>::with_capacity(data.len().div_ceil(16));
-
-    // Push all full 16-byte chunks
-    for chunk in data.chunks_exact(16) {
-        blocks.push(Block::try_from(chunk).expect("16-byte chunk is always valid"));
-    }
-
-    // If there's a remainder, copy it into a new block and pad the rest with zeros
-    let remainder = data.len() % 16;
-    if remainder != 0 {
-        let offset = data.len() - remainder;
-
-        let mut last_block = Block::default();
-        last_block[..remainder].copy_from_slice(&data[offset..]);
-        blocks.push(last_block);
-    }
-
-    blocks
-}
-
-pub struct NwkCrypto<const L: usize, const M: usize>;
-
-impl<const L: usize, const M: usize> NwkCrypto<L, M> {
-    pub fn split_mac_tag(&self, tagged_ciphertext: &[u8]) -> (Vec<u8>, [u8; M]) {
-        let ciphertext = tagged_ciphertext[..tagged_ciphertext.len() - M].to_vec();
-
-        let mut mac_tag = [0; M];
-        mac_tag.copy_from_slice(&tagged_ciphertext[tagged_ciphertext.len() - M..]);
-
-        (ciphertext, mac_tag)
-    }
-
-    #[allow(clippy::unusual_byte_groupings)]
-    pub fn compute_mac(
-        &self,
-        nwk_header: &NwkHeader,
-        key: &Key,
-        plaintext: &[u8],
-        aux_header: &NwkAuxHeader,
-        nonce: &[u8; 13],
-    ) -> [u8; M] {
-        let mut auth_data = Vec::new();
-        auth_data.extend(nwk_header.to_bytes());
-        auth_data.extend(aux_header.to_bytes());
-
-        let encoded_auth_data_len = auth_data.len().to_be_bytes();
-        let mut added_auth_data = Vec::new();
-        added_auth_data.extend(&encoded_auth_data_len[encoded_auth_data_len.len() - L..]);
-        added_auth_data.extend(&auth_data);
-
-        let encoded_plaintext_len = plaintext.len().to_be_bytes();
-        let mut b0 = Block::default();
-        b0[0] = 0b0_1_001_001; // Flags
-        b0[1..14].copy_from_slice(nonce);
-        b0[14..16].copy_from_slice(&encoded_plaintext_len[encoded_plaintext_len.len() - L..]);
-
-        let mut authed_plaintext = Vec::<Block>::new();
-        authed_plaintext.extend(right_pad_to_multiple_of_16(&added_auth_data));
-        authed_plaintext.extend(right_pad_to_multiple_of_16(plaintext));
-
-        let mut ciphertext_buffer = Vec::<Block>::new();
-        ciphertext_buffer.push(b0);
-        ciphertext_buffer.extend(&authed_plaintext);
-
-        let iv = [0x00; 16];
-        let mut encryptor = Encryptor::<Aes128>::new(&(key.0).into(), &iv.into());
-        encryptor.encrypt_blocks(&mut ciphertext_buffer);
-
-        let mut mac_tag = [0; M];
-        mac_tag.copy_from_slice(&ciphertext_buffer[ciphertext_buffer.len() - 1][..M]);
-
-        mac_tag
-    }
-
-    #[allow(clippy::unusual_byte_groupings)]
-    pub fn encrypt_decrypt(
-        &self,
-        key: &Key,
-        nonce: &[u8; 13],
-        mac_tag: &[u8; M],
-        plaintext: &[u8],
-    ) -> ([u8; M], Vec<u8>) {
-        let cipher = Aes128::new(&(key.0).into());
-
-        let mut tagged_plaintext_blocks = Vec::<Block>::new();
-        tagged_plaintext_blocks.extend(right_pad_to_multiple_of_16(mac_tag));
-        tagged_plaintext_blocks.extend(right_pad_to_multiple_of_16(plaintext));
-
-        let mut tagged_ciphertext_blocks = Vec::<Block>::new();
-        let mut buffer_block = Block::default();
-
-        for (block_num, plaintext_block) in tagged_plaintext_blocks.iter().enumerate() {
-            let encoded_block_num = block_num.to_be_bytes();
-            let mut counter_block = Block::default();
-            counter_block[0] = 0b0_0_000_001;
-            counter_block[1..14].copy_from_slice(nonce);
-            counter_block[14..16]
-                .copy_from_slice(&encoded_block_num[encoded_block_num.len() - L..]);
-
-            cipher.encrypt_block_b2b(&counter_block, &mut buffer_block);
-            tagged_ciphertext_blocks.push(Block::from_fn(|i| buffer_block[i] ^ plaintext_block[i]));
-        }
-
-        // The first M bytes of the first block is the "encrypted_mac_tag":
-        let mut encrypted_mac_tag = [0; M];
-        encrypted_mac_tag.copy_from_slice(&tagged_ciphertext_blocks[0][0..M]);
-
-        // The actual ciphertext portion starts at the second block
-        let ciphertext_vec = tagged_ciphertext_blocks[1..].concat();
-        let ciphertext = ciphertext_vec[..plaintext.len()].to_vec();
-
-        (encrypted_mac_tag, ciphertext)
-    }
-}
-
 #[derive(Derivative)]
 #[derivative(Debug, Clone, PartialEq)]
 pub struct EncryptedNwkFrame {
@@ -417,6 +305,51 @@ pub struct NwkFrame {
     pub payload: Vec<u8>,
 }
 
+/// Chainable overrides for the rare frames that deviate from the defaults set by
+/// `ZigbeeStack::nwk_command_frame` / `nwk_data_frame`.
+impl NwkFrame {
+    pub const fn with_radius(mut self, radius: u8) -> Self {
+        self.nwk_header.radius = radius;
+        self
+    }
+
+    /// Frames sent via `transmit_*` (relays, retried route request broadcasts) keep
+    /// this sequence number; frames sent via `send_*` have it rewritten.
+    pub const fn with_sequence_number(mut self, sequence_number: u8) -> Self {
+        self.nwk_header.sequence_number = sequence_number;
+        self
+    }
+
+    /// For relayed frames, which preserve the originator's source address.
+    pub const fn with_source(mut self, source: Nwk) -> Self {
+        self.nwk_header.source = source;
+        self
+    }
+
+    pub const fn with_destination_ieee(mut self, ieee: Option<Eui64>) -> Self {
+        self.nwk_header.frame_control.destination = ieee.is_some();
+        self.nwk_header.destination_ieee = ieee;
+        self
+    }
+
+    pub const fn with_source_ieee(mut self, ieee: Option<Eui64>) -> Self {
+        self.nwk_header.frame_control.extended_source = ieee.is_some();
+        self.nwk_header.source_ieee = ieee;
+        self
+    }
+
+    pub const fn with_discover_route(mut self, discover_route: NwkRouteDiscovery) -> Self {
+        self.nwk_header.frame_control.discover_route = discover_route;
+        self
+    }
+
+    /// Must be paired with `NwkSecurityMode::Unsecured` at the send call site.
+    pub const fn unsecured(mut self) -> Self {
+        self.nwk_header.frame_control.security = false;
+        self
+    }
+}
+
 impl EncryptedNwkFrame {
     pub fn get_modified_aux_header(&self, nib_security_level: NwkSecurityLevel) -> NwkAuxHeader {
         if self.aux_header.is_none() {
@@ -429,6 +362,7 @@ impl EncryptedNwkFrame {
         aux_header
     }
 
+    #[allow(clippy::unnecessary_unwrap)]
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
         let source;
 
@@ -495,10 +429,17 @@ impl EncryptedNwkFrame {
 
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
-        let (ciphertext, encrypted_mac_tag) = crypto.split_mac_tag(&self.ciphertext);
+        let (ciphertext, encrypted_mac_tag) = crypto
+            .split_mac_tag(&self.ciphertext)
+            .ok_or(NwkDecryptionError::CiphertextTooShort)?;
         let (provided_mac_tag, plaintext) =
             crypto.encrypt_decrypt(key, &nonce, &encrypted_mac_tag, &ciphertext);
-        let mac_tag = crypto.compute_mac(&self.nwk_header, key, &plaintext, &aux_header, &nonce);
+
+        let mut auth_data = Vec::new();
+        auth_data.extend(self.nwk_header.to_bytes());
+        auth_data.extend(aux_header.to_bytes());
+
+        let mac_tag = crypto.compute_mac(&auth_data, key, &plaintext, &nonce);
 
         if !constant_time_eq(&provided_mac_tag, &mac_tag) {
             return Err(NwkDecryptionError::InvalidMacTag);
@@ -524,6 +465,7 @@ impl NwkFrame {
         aux_header
     }
 
+    #[allow(clippy::unnecessary_unwrap)]
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
         let source;
 
@@ -557,7 +499,11 @@ impl NwkFrame {
         let nonce = self.get_nonce(&aux_header);
         let plaintext = &self.payload;
 
-        let mac_tag = crypto.compute_mac(&self.nwk_header, key, plaintext, &aux_header, &nonce);
+        let mut auth_data = Vec::new();
+        auth_data.extend(self.nwk_header.to_bytes());
+        auth_data.extend(aux_header.to_bytes());
+
+        let mac_tag = crypto.compute_mac(&auth_data, key, plaintext, &nonce);
         let (encrypted_mac_tag, ciphertext) =
             crypto.encrypt_decrypt(key, &nonce, &mac_tag, plaintext);
 

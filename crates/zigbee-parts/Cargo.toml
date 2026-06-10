@@ -15,4 +15,4 @@ hex = "0.4.3"
 thiserror = "2.0.12"
 
 [dev-dependencies]
-hex-literal = "1.0.0"
+hex-literal = "1.1.0"
