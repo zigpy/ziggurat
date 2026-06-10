@@ -460,14 +460,16 @@ impl ZigbeeStack {
             self.send_route_discovery(destination).await;
         }
 
-        // A route table entry will now exist
+        // The entry just ensured above can be torn down concurrently (e.g. a
+        // link-failure network status removing the route), so a missing entry is
+        // treated like an inactive route and discovery starts over
         let route_entry_status = self
             .state
             .routing
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
             .route_status(destination)
-            .unwrap();
+            .unwrap_or(Status::Inactive);
 
         log::debug!("Routing table status for {destination:?}: {route_entry_status:?}");
 
@@ -478,10 +480,15 @@ impl ZigbeeStack {
                     .routing
                     .try_lock_for(MAX_LOCK_DURATION)
                     .unwrap()
-                    .next_hop(destination)
-                    .unwrap();
-                log::debug!("Using existing next hop for NWK {destination:?}: {next_hop:?}");
-                return Ok(next_hop);
+                    .next_hop(destination);
+
+                // The same concurrent teardown can strike between the two reads
+                if let Some(next_hop) = next_hop {
+                    log::debug!("Using existing next hop for NWK {destination:?}: {next_hop:?}");
+                    return Ok(next_hop);
+                }
+
+                self.send_route_discovery(destination).await;
             }
             Status::DiscoveryUnderway => {
                 // Do nothing
