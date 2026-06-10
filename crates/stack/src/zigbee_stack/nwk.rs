@@ -182,6 +182,10 @@ impl ZigbeeStack {
                 Ok(NwkCommandId::NetworkStatus) => {
                     self.handle_network_status(nwk_frame);
                 }
+                Ok(NwkCommandId::EndDeviceTimeoutRequest) => {
+                    log::info!("End device timeout request command frame received");
+                    self.handle_end_device_timeout_request(nwk_frame);
+                }
                 Err(_) => {
                     log::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
                 }
@@ -388,6 +392,59 @@ impl ZigbeeStack {
         result
     }
 
+    /// Wrap an encrypted NWK payload in a unicast 802.15.4 data frame. The sequence
+    /// number is assigned at transmit time.
+    fn build_unicast_802154_data_frame(
+        &self,
+        next_hop_address: Nwk,
+        payload: Vec<u8>,
+    ) -> Ieee802154Frame {
+        Ieee802154Frame::Data(Ieee802154DataFrame {
+            header: Ieee802154FrameHeader {
+                frame_control: Ieee802154FrameControl {
+                    frame_type: Ieee802154FrameType::Data,
+                    security_enabled: false,
+                    frame_pending: false,
+                    ack_request: true,
+                    pan_id_compression: true,
+                    reserved1: false,
+                    sequence_number_suppression: false,
+                    information_elements_present: false,
+                    dest_addr_mode: Ieee802154AddressingMode::Short,
+                    frame_version: 0,
+                    src_addr_mode: Ieee802154AddressingMode::Short,
+                },
+                sequence_number: Some(
+                    *self
+                        .state
+                        .ieee802154_sequence_number
+                        .try_lock_for(MAX_LOCK_DURATION)
+                        .unwrap(),
+                ),
+                dest_pan_id: Some(*self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap()),
+                dest_address: Some(Ieee802154Address::Nwk(next_hop_address)),
+                src_pan_id: None,
+                src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
+            },
+            payload,
+            fcs: 0x0000, // It'll be replaced
+        })
+    }
+
+    /// Secure, encrypt and wrap a fully-formed NWK frame into a transmittable
+    /// 802.15.4 unicast, without sending it.
+    pub(super) fn finish_unicast_nwk_frame(
+        &self,
+        mut nwk_frame: NwkFrame,
+        next_hop_address: Nwk,
+        security: NwkSecurityMode,
+    ) -> Ieee802154Frame {
+        self.apply_nwk_aux_header(&mut nwk_frame, security);
+        let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
+
+        self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame.to_bytes())
+    }
+
     /// Encrypt a fully-formed NWK frame and unicast it to the given next hop, with
     /// retries. Unlike [`Self::send_unicast_nwk_frame`], the sequence number is not
     /// touched: relayed frames keep the originator's sequence number (spec 3.6.4.3).
@@ -397,41 +454,26 @@ impl ZigbeeStack {
         next_hop_address: Nwk,
         security: NwkSecurityMode,
     ) -> Result<(), ZigbeeStackError> {
+        // Sleepy children cannot hear direct transmissions: the finished frame waits
+        // in the indirect queue until the child polls for it. No retry loop applies;
+        // the child re-polling is the retry mechanism and expiry the failure signal.
+        if let Some(child_eui64) = self.sleepy_child_eui64(next_hop_address) {
+            let frame = self.finish_unicast_nwk_frame(nwk_frame, next_hop_address, security);
+
+            self.increment_tx_total();
+
+            return self
+                .queue_indirect_frame(Ieee802154Address::Eui64(child_eui64), frame)
+                .await;
+        }
+
         self.apply_nwk_aux_header(&mut nwk_frame, security);
 
         for attempt in 0..=self.constants.unicast_retries {
             let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
 
-            let ieee802154_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
-                header: Ieee802154FrameHeader {
-                    frame_control: Ieee802154FrameControl {
-                        frame_type: Ieee802154FrameType::Data,
-                        security_enabled: false,
-                        frame_pending: false,
-                        ack_request: true,
-                        pan_id_compression: true,
-                        reserved1: false,
-                        sequence_number_suppression: false,
-                        information_elements_present: false,
-                        dest_addr_mode: Ieee802154AddressingMode::Short,
-                        frame_version: 0,
-                        src_addr_mode: Ieee802154AddressingMode::Short,
-                    },
-                    sequence_number: Some(
-                        *self
-                            .state
-                            .ieee802154_sequence_number
-                            .try_lock_for(MAX_LOCK_DURATION)
-                            .unwrap(),
-                    ),
-                    dest_pan_id: Some(*self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap()),
-                    dest_address: Some(Ieee802154Address::Nwk(next_hop_address)),
-                    src_pan_id: None,
-                    src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
-                },
-                payload: encrypted_nwk_frame.to_bytes(),
-                fcs: 0x0000, // It'll be replaced
-            });
+            let ieee802154_frame = self
+                .build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame.to_bytes());
 
             // When forwarding packets to another node, update the counters for the neighbor
             // TODO: maybe wrap the send state into some sort of struct to avoid

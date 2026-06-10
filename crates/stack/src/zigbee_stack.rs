@@ -1,4 +1,4 @@
-use crate::ieee_802154::{Ieee802154Address, Ieee802154AssociationStatus, Ieee802154Frame};
+use crate::ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
 use crate::spinel::{
     SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelMacScanState, SpinelPropertyId,
@@ -14,15 +14,17 @@ use thiserror::Error;
 use tokio::time::error::Elapsed;
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, Weak};
-use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
+use zigbee_parts::commands::EndDeviceTimeout;
 
 mod aps;
 pub mod aps_security;
+mod indirect;
 mod joining;
 mod mac;
 mod neighbor;
@@ -38,6 +40,11 @@ pub use routing::Routing;
 // TODO: remove this once all long locks have been found
 const MAX_LOCK_DURATION: Duration = Duration::from_millis(10);
 const APS_ACK_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// APS acks from a sleepy child arrive only after it polls for the frame, so the
+/// wait must cover a full indirect transaction lifetime (7.68s) plus the ack's trip
+/// back.
+const APS_ACK_TIMEOUT_INDIRECT: Duration = Duration::from_millis(10000);
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
 const RESET_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -65,6 +72,8 @@ pub enum ZigbeeStackError {
     SpinelTransmitFailure(SpinelStatus),
     #[error("aps ack timeout")]
     ApsAckTimeout,
+    #[error("indirect transaction expired before {destination:?} polled")]
+    IndirectExpired { destination: Ieee802154Address },
     #[error("spinel error: {0}")]
     SpinelError(#[from] SpinelError),
 }
@@ -100,6 +109,25 @@ pub enum NwkSecurityCapability {
     Capable = 1,
 }
 
+/// Spinel EUI64 fields are byte-reversed relative to the 802.15.4 over-the-air order
+/// that [`Eui64`] stores: OpenThread parses addresses out of frames with
+/// `kReverseByteOrder` and spinel carries that internal representation verbatim.
+pub(crate) const fn eui64_to_spinel_bytes(eui64: Eui64) -> [u8; 8] {
+    let mut bytes = eui64.to_bytes();
+    bytes.reverse();
+    bytes
+}
+
+/// `nwkParentInformation` (spec Table 3-62): the keepalive methods and features we
+/// advertise to end device children. The spec allows advertising only a single
+/// keepalive method (3.6.10.2).
+#[derive(Debug, Clone, Copy)]
+pub struct ParentInformation {
+    pub mac_data_poll_keepalive: bool,
+    pub end_device_timeout_request_keepalive: bool,
+    pub power_negotiation: bool,
+}
+
 #[derive(Debug)]
 pub struct NwkCapabilityInformation {
     pub alternate_pan_coordinator: bool,
@@ -121,13 +149,36 @@ pub struct NwkSecurityDescriptor {
     pub network_key_type: NetworkKeyType,
 }
 
-/// An association response awaiting indirect delivery: the joiner extracts it by
-/// polling with a MAC Data Request (802.15.4 spec 6.4.1).
+/// The source address match table contents most recently written to the RCP, used to
+/// tell whether the auto-ACK of a given poll advertised frame-pending=1.
+#[derive(Debug, Default)]
+pub struct SrcMatchTable {
+    pub short_addresses: HashSet<Nwk>,
+    pub extended_addresses: HashSet<Eui64>,
+}
+
+impl SrcMatchTable {
+    pub fn contains(&self, address: Ieee802154Address) -> bool {
+        match address {
+            Ieee802154Address::Nwk(nwk) => self.short_addresses.contains(&nwk),
+            Ieee802154Address::Eui64(eui64) => self.extended_addresses.contains(&eui64),
+        }
+    }
+}
+
+/// A finished 802.15.4 frame awaiting indirect delivery (802.15.4 spec 6.7.3).
+///
+/// The destination extracts it by polling with a MAC Data Request; the radio's
+/// automatic ACK of that poll has its frame pending bit set (via the source address
+/// match table), telling the device to keep listening.
 #[derive(Debug)]
-pub struct PendingAssociationResponse {
-    pub short_address: Nwk,
-    pub status: Ieee802154AssociationStatus,
+pub struct PendingIndirectTransaction {
+    /// The frame as queued; the frame pending bit is applied to a copy at delivery
+    /// time, based on whether more transactions remain.
+    pub frame: Ieee802154Frame,
     pub expires_at: Instant,
+    /// Resolved with the transmit result on extraction, or an error on expiry.
+    pub completion: oneshot::Sender<Result<(), ZigbeeStackError>>,
 }
 
 #[derive(Debug)]
@@ -140,7 +191,7 @@ pub struct NwkBroadcastTransaction {
     // pub relayed_neighbors: HashMap<Eui64, Instant>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NwkDeviceType {
     Coordinator = 0x00,
     Router = 0x01,
@@ -188,9 +239,9 @@ pub struct Constants {
     pub max_router_bootstrap_jitter: Duration,
     pub broadcast_delivery_time: Duration,
 
-    /// This is an index into Table 3-54. It indicates the default timeout in minutes for
-    /// any end device that does not negotiate a different timeout value.
-    pub end_device_timeout_default: u8,
+    /// The default timeout for any end device child that does not negotiate a
+    /// different value via the End Device Timeout Request command (spec 3.6.10.2).
+    pub end_device_timeout_default: EndDeviceTimeout,
 
     /// For most joins, the network key is encrypted with the well-known global link key
     pub global_link_key: Key,
@@ -230,7 +281,7 @@ impl Constants {
             min_router_bootstrap_jitter: Duration::from_millis(500),
             max_router_bootstrap_jitter: Duration::from_millis(1000),
             broadcast_delivery_time: Duration::from_millis(9000),
-            end_device_timeout_default: 0,
+            end_device_timeout_default: EndDeviceTimeout::Minutes256,
             global_link_key: Key::from_hex("5a6967426565416c6c69616e63653039"),
         }
     }
@@ -271,7 +322,10 @@ pub struct State {
 
     pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
     pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
-    pub pending_association_responses: Mutex<HashMap<Eui64, PendingAssociationResponse>>,
+    /// Frames awaiting extraction by a polling device, in arrival order. Keys are
+    /// whichever address form the frame was queued under; a poll is matched against
+    /// both its extended and short source address.
+    pub indirect_queue: Mutex<HashMap<Ieee802154Address, VecDeque<PendingIndirectTransaction>>>,
     pub start_time: Instant,
     pub permitting_joins: Mutex<bool>,
 
@@ -336,7 +390,7 @@ pub struct State {
     /// received by the local device is accepted.
     pub leave_request_allowed: bool,
 
-    pub parent_information: u8,
+    pub parent_information: ParentInformation,
 
     /// This policy determines whether a NWK leave request is accepted when the Rejoin
     /// bit in the message is set to FALSE
@@ -376,7 +430,7 @@ impl State {
             aps_security: Mutex::new(ApsSecurity::new(global_link_key, ieee_address)),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
-            pending_association_responses: Mutex::new(HashMap::new()),
+            indirect_queue: Mutex::new(HashMap::new()),
             start_time: Instant::now(),
             permitting_joins: Mutex::new(false),
 
@@ -425,7 +479,11 @@ impl State {
             pan_id: Mutex::new(pan_id),
             tx_total: Mutex::new(0),
             leave_request_allowed: false,
-            parent_information: 0,
+            parent_information: ParentInformation {
+                mac_data_poll_keepalive: true,
+                end_device_timeout_request_keepalive: false,
+                power_negotiation: false,
+            },
             leave_request_without_rejoin_allowed: false,
             ieee_address,
             hub_connectivity: true,
@@ -471,6 +529,13 @@ pub struct ZigbeeStack {
     pub raw_frame_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
     pub reset_rx: AsyncMutex<mpsc::Receiver<SpinelStatus>>,
     pub energy_scan_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
+
+    /// Wakes the task that rewrites the RCP source address match table whenever the
+    /// set of devices with queued indirect transactions changes
+    pub(crate) src_match_sync: Notify,
+    /// What the RCP source address match table currently holds, i.e. which polling
+    /// devices were told (via frame-pending=1) to stay awake
+    pub(crate) src_match_written: Mutex<SrcMatchTable>,
 
     /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
     /// a leaked background task keeps the old serial port open and its reader steals
@@ -525,6 +590,8 @@ impl ZigbeeStack {
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
             energy_scan_rx: AsyncMutex::new(energy_scan_rx),
+            src_match_sync: Notify::new(),
+            src_match_written: Mutex::new(SrcMatchTable::default()),
             background_tasks: Mutex::new(JoinSet::new()),
         });
 
@@ -717,6 +784,26 @@ impl ZigbeeStack {
             arc_self.radio_recovery_task().await;
         });
 
+        // Mirror the indirect queue state into the RCP source address match table
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.src_match_sync_task().await;
+        });
+
+        // Expire undelivered indirect transactions and age out silent children
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.indirect_maintenance_task().await;
+        });
+
         Ok(())
     }
 
@@ -782,7 +869,7 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Laddr,
-                self.state.ieee_address.to_bytes().to_vec(),
+                eui64_to_spinel_bytes(self.state.ieee_address).to_vec(),
             )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
@@ -810,6 +897,16 @@ impl ZigbeeStack {
             .prop_value_set(SpinelPropertyId::MacRawStreamEnabled, vec![true as u8])
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
+
+        // The frame pending bit in auto-ACKs to MAC Data Requests comes from the
+        // source address match table: with matching enabled, FP=1 only for devices
+        // with queued indirect transactions. A reset wipes the table, so it is
+        // rebuilt from the queue state rather than merely re-enabled.
+        self.spinel
+            .prop_value_set(SpinelPropertyId::MacSrcMatchEnabled, vec![true as u8])
+            .await
+            .map_err(ZigbeeStackError::SpinelError)?;
+        self.write_src_match_table().await?;
 
         Ok(())
     }

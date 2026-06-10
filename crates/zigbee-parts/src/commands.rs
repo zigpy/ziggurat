@@ -330,6 +330,17 @@ pub enum EndDeviceTimeout {
     Minutes16384 = 14,
 }
 
+impl EndDeviceTimeout {
+    /// The actual timeout for an enumeration value (spec Table 3-58): index 0 is
+    /// 10 seconds, every other index n is 2^n minutes.
+    pub const fn duration(self) -> core::time::Duration {
+        match self {
+            Self::Seconds10 => core::time::Duration::from_secs(10),
+            _ => core::time::Duration::from_secs(60 * (1 << (self as u32))),
+        }
+    }
+}
+
 /// Zigbee spec 3.4.9: Network Report Command
 #[abstract_bits(bits = 3)]
 #[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
@@ -387,7 +398,9 @@ impl Command for NwkNetworkUpdateCommand {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkEndDeviceTimeoutRequestCommand {
     pub request_timeout_enum: EndDeviceTimeout,
-    reserved: u8, // reserved for future use
+    /// A bitmask of requested end device features. No bits are defined by the spec yet;
+    /// a parent SHALL reject nonzero values with UNSUPPORTED_FEATURE (spec 3.4.11.3.2).
+    pub end_device_configuration: u8,
 }
 
 impl Request for NwkEndDeviceTimeoutRequestCommand {

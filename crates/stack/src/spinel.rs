@@ -91,6 +91,9 @@ pub enum SpinelPropertyId {
     Mac154AltSaddr = 60,
     MacWhitelist = 4864,
     MacWhitelistEnabled = 4865,
+    MacSrcMatchEnabled = 4867,
+    MacSrcMatchShortAddresses = 4868,
+    MacSrcMatchExtendedAddresses = 4869,
 
     // NET Properties
     NetSaved = 64,

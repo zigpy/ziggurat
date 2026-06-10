@@ -8,7 +8,8 @@ use std::cmp;
 use tokio::sync::oneshot;
 
 use super::{
-    APS_ACK_TIMEOUT, ApsAckData, MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
+    APS_ACK_TIMEOUT, APS_ACK_TIMEOUT_INDIRECT, ApsAckData, MAX_LOCK_DURATION, NwkSecurityMode,
+    ZigbeeStack, ZigbeeStackError,
 };
 
 impl ZigbeeStack {
@@ -145,8 +146,14 @@ impl ZigbeeStack {
 
         self.background_send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false);
 
-        // With a 5s timeout
-        match tokio::time::timeout(APS_ACK_TIMEOUT, ack_rx).await {
+        // A sleepy child only sees the frame (and acks it) after polling
+        let ack_timeout = if self.sleepy_child_eui64(destination).is_some() {
+            APS_ACK_TIMEOUT_INDIRECT
+        } else {
+            APS_ACK_TIMEOUT
+        };
+
+        match tokio::time::timeout(ack_timeout, ack_rx).await {
             Ok(Ok(())) => {
                 log::info!("APS ACK received");
             }

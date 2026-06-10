@@ -8,7 +8,7 @@ use num_enum::TryFromPrimitive;
 
 use derivative::Derivative;
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
 pub enum Ieee802154Address {
     Nwk(Nwk),
     Eui64(Eui64),
@@ -89,7 +89,7 @@ pub enum Ieee802154CommandId {
     GtsRequest = 0x09,
 }
 
-#[derive(Derivative)]
+#[derive(Derivative, Clone)]
 #[derivative(Debug, Eq, PartialEq)]
 pub struct Ieee802154FrameHeader {
     pub frame_control: Ieee802154FrameControl,
@@ -100,7 +100,7 @@ pub struct Ieee802154FrameHeader {
     pub src_address: Option<Ieee802154Address>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Ieee802154Frame {
     Beacon(Ieee802154BeaconFrame),
     Data(Ieee802154DataFrame),
@@ -109,7 +109,7 @@ pub enum Ieee802154Frame {
 }
 
 #[abstract_bits]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SuperframeSpecification {
     pub beacon_interval: u4,
     pub superframe_interval: u4,
@@ -120,7 +120,7 @@ pub struct SuperframeSpecification {
     pub association_permit: bool,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ieee802154BeaconFrame {
     pub header: Ieee802154FrameHeader,
     pub superframe_specification: SuperframeSpecification,
@@ -130,7 +130,7 @@ pub struct Ieee802154BeaconFrame {
     pub fcs: u16,
 }
 
-#[derive(Derivative)]
+#[derive(Derivative, Clone)]
 #[derivative(Debug, Eq, PartialEq)]
 pub struct Ieee802154DataFrame {
     pub header: Ieee802154FrameHeader,
@@ -139,13 +139,13 @@ pub struct Ieee802154DataFrame {
     pub fcs: u16,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ieee802154AckFrame {
     pub header: Ieee802154FrameHeader,
     pub fcs: u16,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ieee802154CommandFrame {
     pub header: Ieee802154FrameHeader,
     pub command_id: Ieee802154CommandId,
@@ -227,7 +227,7 @@ fn deserialize_command<T: AbstractBits>(
     })
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Ieee802154CommandPayload {
     AssociationRequest(commands::Ieee802154AssociationRequestCommand),
     AssociationResponse(commands::Ieee802154AssociationResponseCommand),

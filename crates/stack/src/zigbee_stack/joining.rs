@@ -22,13 +22,13 @@ use std::collections::VecDeque;
 use tokio::time::{Duration, Instant};
 use zigbee_parts::Command;
 use zigbee_parts::commands::{
-    Nwk802154AssociationStatus, NwkCommandId, NwkLeaveCommand,
+    Nwk802154AssociationStatus, NwkCommandId, NwkEndDeviceTimeoutRequestCommand,
+    NwkEndDeviceTimeoutResponseCommand, NwkEndDeviceTimeoutResponseStatus, NwkLeaveCommand,
     NwkRejoinCapabilityInformationDeviceType, NwkRejoinRequestCommand, NwkRejoinResponseCommand,
 };
 
 use super::{
-    MAX_LOCK_DURATION, NwkDeviceType, NwkSecurityMode, PendingAssociationResponse,
-    ZigbeeNotification, ZigbeeStack, neighbors,
+    MAX_LOCK_DURATION, NwkDeviceType, NwkSecurityMode, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl ZigbeeStack {
@@ -55,16 +55,32 @@ impl ZigbeeStack {
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap();
 
-        // Sleepy devices require indirect transmission support, which does not exist yet
-        let accepted = permitting_joins && request.receive_on_when_idle;
+        // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
+        // admitted only while capacity remains
+        let (already_known, at_capacity) = {
+            let neighbors = self
+                .state
+                .neighbors
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
 
-        if !accepted {
-            log::info!("Denying association request from {source_eui64:?}");
-            self.queue_association_response(
-                source_eui64,
-                Nwk(0xFFFF),
-                Ieee802154AssociationStatus::PanAccessDenied,
-            );
+            (
+                neighbors.contains(source_eui64),
+                neighbors.child_count() >= usize::from(self.constants.max_children),
+            )
+        };
+
+        let denial_status = if !permitting_joins {
+            Some(Ieee802154AssociationStatus::PanAccessDenied)
+        } else if !already_known && at_capacity {
+            Some(Ieee802154AssociationStatus::PanAtCapacity)
+        } else {
+            None
+        };
+
+        if let Some(status) = denial_status {
+            log::info!("Denying association request from {source_eui64:?}: {status:?}");
+            self.queue_association_response(source_eui64, Nwk(0xFFFF), status);
             return;
         }
 
@@ -81,6 +97,19 @@ impl ZigbeeStack {
         // and table entries must be stable across retries
         self.update_nwk_eui64_mapping(short_address, source_eui64);
 
+        let device_type = match request.device_type {
+            AssociationRequestDeviceType::FullFunctionDevice => NwkDeviceType::Router,
+            AssociationRequestDeviceType::ReducedFunctionDevice => NwkDeviceType::EndDevice,
+        };
+
+        // Spec 3.6.10.5: end device children start with the default keepalive
+        // timeout; router children are not aged
+        let device_timeout = if device_type == NwkDeviceType::EndDevice {
+            self.constants.end_device_timeout_default.duration()
+        } else {
+            Duration::from_secs(0xFFFFFFFF)
+        };
+
         {
             let mut neighbors = self
                 .state
@@ -91,14 +120,11 @@ impl ZigbeeStack {
             let neighbor_entry = neighbors.upsert(source_eui64, || neighbors::TableEntry {
                 extended_address: source_eui64,
                 network_address: short_address,
-                device_type: match request.device_type {
-                    AssociationRequestDeviceType::FullFunctionDevice => NwkDeviceType::Router,
-                    AssociationRequestDeviceType::ReducedFunctionDevice => NwkDeviceType::EndDevice,
-                },
+                device_type,
                 rx_on_when_idle: request.receive_on_when_idle,
                 end_device_configuration: 0x0000,
-                timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
-                device_timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
+                timeout_at: Instant::now() + device_timeout,
+                device_timeout,
                 relationship: neighbors::Relationship::Child,
                 transmit_failure: 0,
                 lqas: VecDeque::new(),
@@ -117,7 +143,14 @@ impl ZigbeeStack {
                 security_timer: 0,
             });
 
+            // A device may re-associate with different capabilities (e.g. re-flashed
+            // from router to end device), so existing entries are refreshed too
             neighbor_entry.network_address = short_address;
+            neighbor_entry.device_type = device_type;
+            neighbor_entry.rx_on_when_idle = request.receive_on_when_idle;
+            neighbor_entry.device_timeout = device_timeout;
+            neighbor_entry.timeout_at = Instant::now() + device_timeout;
+            neighbor_entry.relationship = neighbors::Relationship::Child;
         }
 
         self.queue_association_response(
@@ -128,67 +161,42 @@ impl ZigbeeStack {
     }
 
     /// 802.15.4 spec 6.4.1: association responses are sent indirectly. The joiner
-    /// extracts the queued response by polling with a MAC Data Request; the radio's
-    /// automatic ACK of that poll has its frame pending bit set, telling the joiner to
-    /// keep listening.
+    /// extracts the queued response by polling with a MAC Data Request; once the
+    /// response is extracted and acknowledged, the network key follows.
     fn queue_association_response(
         &self,
         eui64: Eui64,
         short_address: Nwk,
         status: Ieee802154AssociationStatus,
     ) {
-        self.state
-            .pending_association_responses
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .insert(
-                eui64,
-                PendingAssociationResponse {
-                    short_address,
-                    status,
-                    expires_at: Instant::now() + self.constants.transaction_persistence_time,
-                },
-            );
-    }
+        // Joiners that miss the response retry the association request, so anything
+        // still queued from the previous attempt is stale
+        self.drop_indirect_transactions(Some(eui64), short_address);
 
-    pub(super) fn handle_data_request(&self, command_frame: &Ieee802154CommandFrame) {
-        let Some(Ieee802154Address::Eui64(source_eui64)) = command_frame.header.src_address else {
-            // Polls during association use extended addressing; short-addressed polls
-            // come from sleepy children, which have no indirect queue yet
-            return;
-        };
+        let response_frame = self.build_802154_association_response(eui64, short_address, status);
 
-        let pending = {
-            let mut pending_association_responses = self
-                .state
-                .pending_association_responses
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
 
-            let now = Instant::now();
-            pending_association_responses.retain(|_, entry| entry.expires_at > now);
-
-            pending_association_responses
-                .get(&source_eui64)
-                .map(|entry| (entry.short_address, entry.status))
-        };
-
-        let Some((short_address, status)) = pending else {
-            return;
-        };
-
-        log::info!("Delivering pending association response to {source_eui64:?}");
-
-        self.send_802154_association_response(
-            command_frame.header.src_address,
-            short_address,
-            status,
-        );
-
-        // The entry stays queued until it expires so that re-polls are answered too
-        if matches!(status, Ieee802154AssociationStatus::AssociationSuccessful) {
-            self.send_network_key(short_address, source_eui64);
-        }
+        self.spawn_tracked(async move {
+            match arc_self
+                .queue_indirect_frame(Ieee802154Address::Eui64(eui64), response_frame)
+                .await
+            {
+                Ok(()) => {
+                    // Zigbee spec 4.6.3.2: the network key is delivered once the
+                    // device has confirmed receipt of its short address
+                    if matches!(status, Ieee802154AssociationStatus::AssociationSuccessful) {
+                        arc_self.send_network_key(short_address, eui64);
+                    }
+                }
+                Err(err) => {
+                    log::warn!("Association response to {eui64:?} was not extracted: {err}");
+                }
+            }
+        });
     }
 
     /// Pick an unused random network address for a joining device, reusing the previous
@@ -235,13 +243,13 @@ impl ZigbeeStack {
         }
     }
 
-    fn send_802154_association_response(
+    fn build_802154_association_response(
         &self,
-        dest_address: Option<Ieee802154Address>,
+        destination_eui64: Eui64,
         short_address: Nwk,
         association_status: Ieee802154AssociationStatus,
-    ) {
-        let association_response_frame = Ieee802154Frame::Command(Ieee802154CommandFrame {
+    ) -> Ieee802154Frame {
+        Ieee802154Frame::Command(Ieee802154CommandFrame {
             header: Ieee802154FrameHeader {
                 frame_control: Ieee802154FrameControl {
                     frame_type: Ieee802154FrameType::Command,
@@ -264,7 +272,7 @@ impl ZigbeeStack {
                         .unwrap(),
                 ),
                 src_address: Some(Ieee802154Address::Eui64(self.state.ieee_address)),
-                dest_address,
+                dest_address: Some(Ieee802154Address::Eui64(destination_eui64)),
                 src_pan_id: None,
                 dest_pan_id: Some(*self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap()),
             },
@@ -276,9 +284,7 @@ impl ZigbeeStack {
                 },
             ),
             fcs: 0x0000,
-        });
-
-        self.background_send_802154_frame(association_response_frame);
+        })
     }
 
     pub(super) fn is_neighbor(&self, nwk: Nwk) -> bool {
@@ -762,14 +768,28 @@ impl ZigbeeStack {
         let requested_nwk = nwk_frame.nwk_header.source;
         let capability = &rejoin_request.capability_information;
 
-        // Sleepy devices require indirect transmission support, which does not exist yet
-        if !capability.receiver_on_when_idle {
-            log::info!("Denying rejoin request from sleepy device {source_ieee:?}");
+        // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
+        // admitted only while capacity remains
+        let (already_known, at_capacity) = {
+            let neighbors = self
+                .state
+                .neighbors
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
+
+            (
+                neighbors.contains(source_ieee),
+                neighbors.child_count() >= usize::from(self.constants.max_children),
+            )
+        };
+
+        if !already_known && at_capacity {
+            log::info!("Denying rejoin request from {source_ieee:?}, no child capacity left");
             self.send_rejoin_response(
                 requested_nwk,
                 source_ieee,
                 Nwk(0xFFFF),
-                Nwk802154AssociationStatus::PanAccessDenied,
+                Nwk802154AssociationStatus::PanAtCapacity,
                 secured,
             );
             return;
@@ -795,6 +815,19 @@ impl ZigbeeStack {
 
         self.update_nwk_eui64_mapping(assigned_nwk, source_ieee);
 
+        let device_type = match capability.device_type {
+            NwkRejoinCapabilityInformationDeviceType::Router => NwkDeviceType::Router,
+            NwkRejoinCapabilityInformationDeviceType::EndDevice => NwkDeviceType::EndDevice,
+        };
+
+        // Spec 3.6.10.5: end device children start with the default keepalive
+        // timeout; router children are not aged
+        let device_timeout = if device_type == NwkDeviceType::EndDevice {
+            self.constants.end_device_timeout_default.duration()
+        } else {
+            Duration::from_secs(0xFFFFFFFF)
+        };
+
         {
             let mut neighbors = self
                 .state
@@ -805,14 +838,11 @@ impl ZigbeeStack {
             let neighbor_entry = neighbors.upsert(source_ieee, || neighbors::TableEntry {
                 extended_address: source_ieee,
                 network_address: assigned_nwk,
-                device_type: match capability.device_type {
-                    NwkRejoinCapabilityInformationDeviceType::Router => NwkDeviceType::Router,
-                    NwkRejoinCapabilityInformationDeviceType::EndDevice => NwkDeviceType::EndDevice,
-                },
+                device_type,
                 rx_on_when_idle: capability.receiver_on_when_idle,
                 end_device_configuration: 0x0000,
-                timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
-                device_timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
+                timeout_at: Instant::now() + device_timeout,
+                device_timeout,
                 relationship: neighbors::Relationship::Child,
                 transmit_failure: 0,
                 lqas: VecDeque::new(),
@@ -831,7 +861,13 @@ impl ZigbeeStack {
                 security_timer: 0,
             });
 
+            // A device may rejoin with different capabilities, so existing entries
+            // are refreshed too
             neighbor_entry.network_address = assigned_nwk;
+            neighbor_entry.device_type = device_type;
+            neighbor_entry.rx_on_when_idle = capability.receiver_on_when_idle;
+            neighbor_entry.device_timeout = device_timeout;
+            neighbor_entry.timeout_at = Instant::now() + device_timeout;
             neighbor_entry.relationship = if secured {
                 neighbors::Relationship::Child
             } else {
@@ -937,6 +973,7 @@ impl ZigbeeStack {
 
         // The address map entry and any negotiated link key are kept around so that the
         // device can rejoin later
+        self.drop_indirect_transactions(source_ieee, source);
         self.state
             .routing
             .try_lock_for(MAX_LOCK_DURATION)
@@ -947,6 +984,84 @@ impl ZigbeeStack {
             nwk: source,
             ieee: source_ieee,
         });
+    }
+
+    /// Spec 3.6.10.2: an end device child negotiates its keepalive timeout. The
+    /// response tells the device which keepalive method to use.
+    pub(super) fn handle_end_device_timeout_request(&self, nwk_frame: &NwkFrame) {
+        let source = nwk_frame.nwk_header.source;
+
+        let request = match NwkEndDeviceTimeoutRequestCommand::deserialize(&nwk_frame.payload) {
+            Ok(request) => request,
+            Err(e) => {
+                // An out-of-range timeout enumeration fails deserialization
+                log::warn!("Invalid end device timeout request from {source:?}: {e:?}");
+                self.send_end_device_timeout_response(
+                    source,
+                    NwkEndDeviceTimeoutResponseStatus::IncorrectValue,
+                );
+                return;
+            }
+        };
+
+        // No end device configuration bits are defined yet, so any requested feature
+        // is unknown and rejected
+        if request.end_device_configuration != 0 {
+            log::warn!(
+                "End device timeout request from {source:?} with unsupported configuration: {:#04x}",
+                request.end_device_configuration
+            );
+            self.send_end_device_timeout_response(
+                source,
+                NwkEndDeviceTimeoutResponseStatus::UnsupportedFeature,
+            );
+            return;
+        }
+
+        let timeout = request.request_timeout_enum.duration();
+
+        let updated = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .set_child_timeout(source, timeout, u16::from(request.end_device_configuration));
+
+        // Requests from devices that are not our end device children are dropped
+        if !updated {
+            log::warn!("Ignoring end device timeout request from non-child {source:?}");
+            return;
+        }
+
+        log::info!("Child {source:?} negotiated an end device timeout of {timeout:?}");
+        self.send_end_device_timeout_response(source, NwkEndDeviceTimeoutResponseStatus::Success);
+    }
+
+    fn send_end_device_timeout_response(
+        &self,
+        destination: Nwk,
+        status: NwkEndDeviceTimeoutResponseStatus,
+    ) {
+        let parent_information = self.state.parent_information;
+
+        let response_frame = self
+            .nwk_command_frame(
+                destination,
+                NwkEndDeviceTimeoutResponseCommand {
+                    status,
+                    mac_data_poll_keepalive_supported: parent_information.mac_data_poll_keepalive,
+                    end_device_timeout_request_keepalive_supported: parent_information
+                        .end_device_timeout_request_keepalive,
+                    power_negotation_support: parent_information.power_negotiation,
+                }
+                .serialize()
+                .unwrap(),
+            )
+            .with_radius(1);
+
+        // The child is a direct neighbor; responses to sleepy children go through the
+        // indirect queue via the NWK unicast fork
+        self.background_send_nwk_frame(response_frame, NwkSecurityMode::NetworkKey, true);
     }
 
     pub fn permit_joins(&self, duration: u64) {

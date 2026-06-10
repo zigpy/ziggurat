@@ -23,6 +23,14 @@ impl ZigbeeStack {
             .end_device_child_eui64(nwk)
     }
 
+    pub(super) fn sleepy_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
+        self.state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .sleepy_child_eui64(nwk)
+    }
+
     pub(super) fn maybe_age_neighbors(&self) {
         // TODO: this function should be replaced by real timers
         let stale_neighbors = self

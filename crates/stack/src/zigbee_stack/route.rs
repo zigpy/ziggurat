@@ -438,6 +438,12 @@ impl ZigbeeStack {
 
     #[allow(clippy::significant_drop_tightening)]
     pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, ZigbeeStackError> {
+        // End device children do not participate in route discovery (they could never
+        // answer a route request); their parent always delivers directly
+        if self.end_device_child_eui64(destination).is_some() {
+            return Ok(destination);
+        }
+
         if self.state.hack_force_route_discovery
             || self
                 .state

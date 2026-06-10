@@ -56,6 +56,14 @@ impl ZigbeeStack {
         log::debug!("Sending 802.15.4 beacon frame");
         log::debug!("Permitting joins: {permitting_joins}");
 
+        let end_device_capacity = {
+            self.state
+                .neighbors
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .child_count()
+        } < usize::from(self.constants.max_children);
+
         let beacon_frame = Ieee802154Frame::Beacon(ieee_802154::Ieee802154BeaconFrame {
             header: Ieee802154FrameHeader {
                 frame_control: Ieee802154FrameControl {
@@ -99,7 +107,7 @@ impl ZigbeeStack {
                 reserved1: 0b00,
                 router_capacity: true,
                 device_depth: 0,
-                end_device_capacity: true,
+                end_device_capacity,
                 extended_pan_id: self.state.extended_pan_id,
                 tx_offset: RenamedU24(u24::new(0xFFFFFF)),
                 update_id: *self

@@ -34,13 +34,14 @@ pub struct TableEntry {
     pub rx_on_when_idle: bool,
     pub end_device_configuration: u16,
 
-    /// The current time remaining, in seconds, for the end device
-    /// max: 15728640 seconds, ~182 days
+    /// The end device child is evicted once this deadline passes without a keepalive
+    /// (the spec's "Timeout Counter", kept as a deadline instead of a countdown)
     pub timeout_at: Instant,
 
-    /// This field indicates the timeout, in seconds, for the end device child
-    /// max: 129600 seconds, 36 hours
-    pub device_timeout_at: Instant,
+    /// The keepalive period that refreshes `timeout_at`, defaulted from
+    /// `nwkEndDeviceTimeoutDefault` and renegotiable via the End Device Timeout
+    /// Request command (the spec's "Device Timeout")
+    pub device_timeout: Duration,
     pub relationship: Relationship,
 
     /// A value indicating if previous transmissions to the device were successful or
@@ -109,6 +110,13 @@ impl TableEntry {
 
     pub fn incoming_link_cost(&self) -> u8 {
         self.lqa().map_or(0, lqi_to_link_cost)
+    }
+
+    pub const fn is_child(&self) -> bool {
+        matches!(
+            self.relationship,
+            Relationship::Child | Relationship::UnauthenticatedChild
+        )
     }
 }
 
@@ -211,6 +219,88 @@ impl Neighbors {
                 None
             }
         })
+    }
+
+    /// The EUI64 of the sleepy (rx-off-when-idle) child with the given network
+    /// address, if one exists. Frames to sleepy children cannot be transmitted
+    /// directly and must go through the indirect transaction queue.
+    pub fn sleepy_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
+        self.table.values().find_map(|entry| {
+            (entry.network_address == nwk && !entry.rx_on_when_idle && entry.is_child())
+                .then_some(entry.extended_address)
+        })
+    }
+
+    pub fn contains(&self, eui64: Eui64) -> bool {
+        self.table.contains_key(&eui64)
+    }
+
+    /// The number of children, for join admission and beacon capacity decisions.
+    pub fn child_count(&self) -> usize {
+        self.table.values().filter(|entry| entry.is_child()).count()
+    }
+
+    /// Spec 3.6.10.4: a MAC data poll from a known device refreshes its keepalive
+    /// deadline. Returns whether the device has a neighbor table entry at all.
+    pub fn refresh_child_timeout(&mut self, eui64: Option<Eui64>, nwk: Option<Nwk>) -> bool {
+        if let Some(eui64) = eui64
+            && let Some(entry) = self.table.get_mut(&eui64)
+        {
+            entry.timeout_at = Instant::now() + entry.device_timeout;
+            entry.keepalive_received = true;
+            return true;
+        }
+
+        if let Some(nwk) = nwk
+            && let Some(entry) = self
+                .table
+                .values_mut()
+                .find(|entry| entry.network_address == nwk)
+        {
+            entry.timeout_at = Instant::now() + entry.device_timeout;
+            entry.keepalive_received = true;
+            return true;
+        }
+
+        false
+    }
+
+    /// Spec 3.6.10.2 steps 2, 4 and 5: store the keepalive timeout an end device
+    /// child requested. Returns false if the device is not an end device child.
+    pub fn set_child_timeout(&mut self, nwk: Nwk, timeout: Duration, configuration: u16) -> bool {
+        let Some(entry) = self.table.values_mut().find(|entry| {
+            entry.network_address == nwk
+                && entry.is_child()
+                && matches!(entry.device_type, NwkDeviceType::EndDevice)
+        }) else {
+            return false;
+        };
+
+        entry.device_timeout = timeout;
+        entry.timeout_at = Instant::now() + timeout;
+        entry.end_device_configuration = configuration;
+        entry.keepalive_received = true;
+
+        true
+    }
+
+    /// Remove children whose keepalive deadline has passed (spec 3.6.10.1), returning
+    /// their addresses for cleanup.
+    pub fn evict_timed_out_children(&mut self) -> Vec<(Eui64, Nwk)> {
+        let now = Instant::now();
+
+        let evicted: Vec<(Eui64, Nwk)> = self
+            .table
+            .values()
+            .filter(|entry| entry.is_child() && entry.timeout_at <= now)
+            .map(|entry| (entry.extended_address, entry.network_address))
+            .collect();
+
+        for (eui64, _) in &evicted {
+            self.table.remove(eui64);
+        }
+
+        evicted
     }
 
     /// Get-or-create an entry for a joining device, keeping any existing state so the
@@ -330,7 +420,7 @@ impl Neighbors {
                 rx_on_when_idle: true,
                 end_device_configuration: 0x0000,
                 timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
-                device_timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
+                device_timeout: Duration::from_secs(0xFFFFFFFF),
                 relationship: Relationship::Sibling,
                 transmit_failure: 0,
                 lqas: VecDeque::new(),

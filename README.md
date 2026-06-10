@@ -31,6 +31,6 @@ ZHA needs a small patch to work with [zigpy-ziggurat](https://github.com/zigpy/z
 - [x] Multi-hop route calculation
 - [x] Route discovery
 - [x] Device joining
-- [ ] Child device message holding and management
+- [x] Child device message holding and management
 
 [^1]: An earlier iteration in Python is available as [zigpy-spinel](https://github.com/puddly/zigpy-spinel).
