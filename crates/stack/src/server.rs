@@ -1,21 +1,33 @@
+use futures_util::{SinkExt, StreamExt};
 use log::LevelFilter;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tokio_serial::{FlowControl, SerialPortBuilderExt};
+use tokio_tungstenite::tungstenite::Message;
 
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::spinel_client::SpinelClient;
 use ziggurat::zigbee_aps::ApsDeliveryMode;
 use ziggurat::zigbee_stack::{Constants, ZigbeeNotification, ZigbeeStack};
+
+const PROTOCOL_VERSION: u32 = 1;
+
+/// Outbound messages a connection can queue before it is considered too slow and
+/// disconnected. Received frames dominate the traffic; a client that cannot keep up
+/// with them is broken.
+const OUTBOUND_QUEUE_DEPTH: usize = 1024;
+
+/// The server-level notification hub buffers this many notifications for slow
+/// connection forwarders before they start lagging.
+const NOTIFICATION_HUB_DEPTH: usize = 1024;
 
 /// Big-endian colon-separated hex, the format used by zigpy for EUI64 addresses
 fn eui64_to_string(eui64: Eui64) -> String {
@@ -37,23 +49,38 @@ fn key_to_string(key: &Key) -> String {
         .join(":")
 }
 
+// The client wire protocol: requests carry a client-chosen correlation id; the
+// server answers each request with exactly one `response`, preceded by zero or more
+// `event` messages sharing the id. `notification` messages are unsolicited.
+
 #[derive(Deserialize, Debug)]
-struct CommandRequest {
-    tid: u64,
-    cmd: String,
+struct Request {
+    id: u64,
+    method: String,
     #[serde(default)]
-    data: serde_json::Value,
+    params: serde_json::Value,
 }
 
-#[derive(Serialize, Debug)]
-struct CommandResponse {
-    tid: u64,
-    cmd: String,
-    data: serde_json::Value,
+fn event(id: u64, event: &str) -> serde_json::Value {
+    json!({"type": "event", "id": id, "event": event})
 }
 
-// The structs below define the client wire protocol: each `data` payload deserializes
-// into the struct matching its `cmd`.
+fn response(id: u64, result: serde_json::Value) -> serde_json::Value {
+    json!({"type": "response", "id": id, "result": result})
+}
+
+fn error_response(id: u64, code: &str, message: impl ToString) -> serde_json::Value {
+    json!({
+        "type": "response", "id": id,
+        "error": {"code": code, "message": message.to_string()},
+    })
+}
+
+fn notification(event: &str, data: serde_json::Value) -> serde_json::Value {
+    json!({"type": "notification", "event": event, "data": data})
+}
+
+// Each `params` payload deserializes into the struct matching its `method`.
 
 #[derive(Deserialize, Debug)]
 struct KeyTableEntry {
@@ -62,7 +89,7 @@ struct KeyTableEntry {
 }
 
 #[derive(Deserialize, Debug)]
-struct SetNetworkSettingsRequest {
+struct ConfigureRequest {
     channel: u8,
     nwk_update_id: u8,
     pan_id: PanId,
@@ -78,7 +105,7 @@ struct SetNetworkSettingsRequest {
 }
 
 #[derive(Deserialize, Debug)]
-struct SendApsCommandRequest {
+struct SendApsRequest {
     delivery_mode: ApsDeliveryMode,
     /// Resolved through the address map; takes precedence over `destination`
     destination_eui64: Option<Eui64>,
@@ -106,445 +133,416 @@ struct PermitJoinsRequest {
     duration: u64,
 }
 
-/// Holds the state that exists only after the Zigbee stack is initialized.
-struct ServerState {
-    zigbee_stack: Arc<ZigbeeStack>,
-    notification_rx: broadcast::Receiver<ZigbeeNotification>,
+fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json::Value {
+    match notification_event {
+        ZigbeeNotification::ReceivedApsCommand {
+            source,
+            destination,
+            group,
+            profile_id,
+            cluster_id,
+            src_ep,
+            dst_ep,
+            lqi,
+            rssi,
+            data,
+        } => notification(
+            "received_aps_command",
+            json!({
+                "source": hex::encode(source.to_bytes()),
+                "destination": hex::encode(destination.to_bytes()),
+                "group": group,
+                "profile_id": profile_id,
+                "cluster_id": cluster_id, "src_ep": src_ep, "dst_ep": dst_ep,
+                "lqi": lqi, "rssi": rssi, "data": hex::encode(data),
+            }),
+        ),
+        ZigbeeNotification::FrameCounterUpdate { frame_counter } => notification(
+            "frame_counter_update",
+            json!({"frame_counter": frame_counter}),
+        ),
+        ZigbeeNotification::LinkKeyUpdate { ieee, key } => notification(
+            "link_key_update",
+            json!({
+                "ieee": eui64_to_string(ieee),
+                "key": key_to_string(&key),
+            }),
+        ),
+        ZigbeeNotification::DeviceJoined { nwk, ieee, parent } => notification(
+            "device_joined",
+            json!({
+                "nwk": hex::encode(nwk.to_bytes()),
+                "ieee": eui64_to_string(ieee),
+                "parent": hex::encode(parent.to_bytes()),
+            }),
+        ),
+        ZigbeeNotification::DeviceLeft { nwk, ieee } => notification(
+            "device_left",
+            json!({
+                "nwk": hex::encode(nwk.to_bytes()),
+                "ieee": ieee.map(eui64_to_string),
+            }),
+        ),
+    }
 }
 
 pub struct ZigguratServer {
     serial_path: String,
-    server_state: Mutex<Option<ServerState>>,
-    is_client_connected: Mutex<bool>,
+    stack: Mutex<Option<Arc<ZigbeeStack>>>,
+    /// The server-level notification hub: connections subscribe to it, and it
+    /// survives stack replacement (the forwarder task is swapped instead)
+    notification_tx: broadcast::Sender<ZigbeeNotification>,
+    notification_forwarder: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ZigguratServer {
-    /// The serial port is not opened and the Zigbee stack is not created until a client
-    /// connects and sends the `set_network_settings` command.
+    /// The serial port is not opened and the Zigbee stack is not created until a
+    /// client sends the `configure` command.
     pub fn new(serial_path: &str) -> Self {
+        let (notification_tx, _) = broadcast::channel(NOTIFICATION_HUB_DEPTH);
+
         Self {
             serial_path: serial_path.to_string(),
-            server_state: Mutex::new(None),
-            is_client_connected: Mutex::new(false),
+            stack: Mutex::new(None),
+            notification_tx,
+            notification_forwarder: Mutex::new(None),
         }
     }
 
-    /// Listens for and handles incoming TCP connections.
-    pub async fn run_tcp_server(self: Arc<Self>, listen_addr: &str) -> std::io::Result<()> {
+    pub async fn run(self: Arc<Self>, listen_addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(listen_addr).await?;
-        log::info!("Listening for a single TCP client on {listen_addr}");
+        log::info!("Listening for WebSocket clients on {listen_addr}");
 
         loop {
             let (socket, addr) = listener.accept().await?;
+            let server = self.clone();
 
-            // Enforce the single-client rule using the async mutex
-            let mut is_connected_guard = self.is_client_connected.lock().unwrap();
-            if *is_connected_guard {
-                log::warn!(
-                    "Rejecting connection from {addr}: another client is already connected."
-                );
-                drop(socket);
-                continue; // The lock guard is dropped here
-            }
-
-            log::info!("Accepted new TCP client from {addr}");
-            *is_connected_guard = true;
-            drop(is_connected_guard); // Release the lock before spawning the task
-
-            let server_clone = self.clone();
             tokio::spawn(async move {
-                server_clone.handle_client(socket, addr).await;
+                if let Err(e) = server.handle_connection(socket, addr).await {
+                    log::warn!("Connection {addr} ended with error: {e}");
+                }
+
+                log::info!("Client {addr} disconnected");
             });
         }
     }
 
-    /// Manages the entire lifecycle of a single client connection.
-    async fn handle_client(self: Arc<Self>, stream: TcpStream, addr: SocketAddr) {
-        if let Err(e) = self.handle_client_loop(stream, addr).await {
-            log::warn!("Error handling client {addr}: {e:?}");
-        }
-
-        log::info!("Client {addr} disconnected.");
-        *self.is_client_connected.lock().unwrap() = false;
-
-        // The stack's spawned tasks hold strong references to it: without an explicit
-        // shutdown the old stack would keep running alongside its successor, sharing
-        // the serial port and stealing its responses
-        let maybe_state = self.server_state.lock().unwrap().take();
-
-        if let Some(state) = maybe_state {
-            state.zigbee_stack.shutdown();
-        }
-        log::info!("Zigbee stack has been reset.");
+    fn current_stack(&self) -> Option<Arc<ZigbeeStack>> {
+        self.stack.lock().unwrap().clone()
     }
 
-    /// The core logic loop for handling client messages.
-    async fn handle_client_loop(
-        &self,
-        stream: TcpStream,
+    async fn handle_connection(
+        self: &Arc<Self>,
+        socket: TcpStream,
         addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let websocket = tokio_tungstenite::accept_async(socket).await?;
+        let (mut sink, mut stream) = websocket.split();
 
-        log::info!("Client {addr} connected. Waiting for 'set_network_settings'...");
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => return Ok(()), // Client disconnected
-                Ok(_) => {
-                    let cmd = match serde_json::from_str::<CommandRequest>(line.trim()) {
-                        Ok(cmd) => cmd,
+        log::info!("Client {addr} connected");
+
+        let (outbound_tx, mut outbound_rx) =
+            mpsc::channel::<serde_json::Value>(OUTBOUND_QUEUE_DEPTH);
+
+        // All outbound traffic (responses, events, notifications) converges on a
+        // single writer task, so concurrent commands never contend on the socket
+        let writer = tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                if sink.send(Message::text(message.to_string())).await.is_err() {
+                    break;
+                }
+            }
+
+            let _ = sink.close().await;
+        });
+
+        let state = if self.current_stack().is_some() {
+            "running"
+        } else {
+            "awaiting_configuration"
+        };
+        outbound_tx
+            .send(json!({"type": "hello", "version": PROTOCOL_VERSION, "state": state}))
+            .await?;
+
+        // Forward hub notifications to this connection
+        let mut notification_rx = self.notification_tx.subscribe();
+        let notification_outbound = outbound_tx.clone();
+        let notification_forwarder = tokio::spawn(async move {
+            loop {
+                match notification_rx.recv().await {
+                    Ok(event) => {
+                        let message = notification_to_message(event);
+
+                        if notification_outbound.send(message).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        log::warn!("Client {addr} lagged {count} notifications");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        while let Some(message) = stream.next().await {
+            match message {
+                Ok(Message::Text(text)) => {
+                    let request = match serde_json::from_str::<Request>(&text) {
+                        Ok(request) => request,
                         Err(e) => {
-                            log::warn!("JSON parse error from {addr}: {e}");
-                            let resp = json!({"tid": 0, "cmd": "error", "data": {"reason": "invalid_json", "details": e.to_string()}});
-                            writer.write_all(resp.to_string().as_bytes()).await?;
-                            writer.write_all(b"\n").await?;
+                            log::warn!("Invalid request from {addr}: {e}");
+                            let _ = outbound_tx
+                                .send(error_response(0, "invalid_request", e))
+                                .await;
                             continue;
                         }
                     };
 
-                    log::debug!("Received command from {addr}: {cmd:?}");
-                    let resp = self.process_command(cmd).await;
-                    let resp_str = serde_json::to_string(&resp)?;
-                    writer.write_all(resp_str.as_bytes()).await?;
-                    writer.write_all(b"\n").await?;
-
-                    if resp.cmd == "set_network_settings"
-                        && resp.data.get("status").and_then(|v| v.as_str()) == Some("success")
-                    {
-                        break;
-                    }
+                    log::debug!("Request from {addr}: {request:?}");
+                    outbound_tx.send(event(request.id, "accepted")).await?;
+                    self.dispatch(request, outbound_tx.clone());
                 }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        let notification_rx = {
-            let state_guard = self.server_state.lock().unwrap();
-            state_guard.as_ref().unwrap().notification_rx.resubscribe()
-        };
-
-        log::info!("Stack initialized. Now listening for commands and notifications.");
-
-        self.run_initialized_loop(reader, writer, notification_rx, addr)
-            .await
-    }
-
-    /// Runs the main operational loop after the Zigbee stack has been initialized.
-    async fn run_initialized_loop(
-        &self,
-        reader: BufReader<OwnedReadHalf>,
-        mut writer: OwnedWriteHalf,
-        mut notification_rx: broadcast::Receiver<ZigbeeNotification>,
-        addr: SocketAddr,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut reader = reader;
-        let mut line = String::new();
-
-        loop {
-            line.clear();
-            tokio::select! {
-                read_result = reader.read_line(&mut line) => {
-                    let n = read_result?;
-                    if n == 0 { break; }
-
-                    match serde_json::from_str::<CommandRequest>(line.trim()) {
-                        Ok(cmd) => {
-                            log::debug!("Received command from {addr}: {cmd:?}");
-                            let resp = self.process_command(cmd).await;
-                            let resp_str = serde_json::to_string(&resp)?;
-                            log::debug!("Sending response: {resp_str}");
-                            writer.write_all(resp_str.as_bytes()).await?;
-                            writer.write_all(b"\n").await?;
-                        },
-                        Err(e) => {
-                            log::warn!("JSON parse error from {addr}: {e}");
-                            let resp = json!({"tid": 0, "cmd": "error", "data": {"reason": "invalid_json", "details": e.to_string()}});
-                            writer.write_all(resp.to_string().as_bytes()).await?;
-                            writer.write_all(b"\n").await?;
-                        }
-                    }
-                },
-                notify_event = notification_rx.recv() => {
-                     match notify_event {
-                        Ok(notification) => {
-                            let event = match notification {
-                                ZigbeeNotification::ReceivedApsCommand {
-                                    source, destination, group, profile_id, cluster_id,
-                                    src_ep, dst_ep, lqi, rssi, data,
-                                } => json!({
-                                    "tid": 0, "cmd": "received_aps_command",
-                                    "data": {
-                                        "source": hex::encode(source.to_bytes()),
-                                        "destination": hex::encode(destination.to_bytes()),
-                                        "group": group,
-                                        "profile_id": profile_id,
-                                        "cluster_id": cluster_id, "src_ep": src_ep, "dst_ep": dst_ep,
-                                        "lqi": lqi, "rssi": rssi, "data": hex::encode(data),
-                                    }
-                                }),
-                                ZigbeeNotification::FrameCounterUpdate { frame_counter } => json!({
-                                    "tid": 0, "cmd": "frame_counter_update",
-                                    "data": { "frame_counter": frame_counter }
-                                }),
-                                ZigbeeNotification::LinkKeyUpdate { ieee, key } => json!({
-                                    "tid": 0, "cmd": "link_key_update",
-                                    "data": {
-                                        "ieee": eui64_to_string(ieee),
-                                        "key": key_to_string(&key),
-                                    }
-                                }),
-                                ZigbeeNotification::DeviceJoined { nwk, ieee, parent } => json!({
-                                    "tid": 0, "cmd": "device_joined",
-                                    "data": {
-                                        "nwk": hex::encode(nwk.to_bytes()),
-                                        "ieee": eui64_to_string(ieee),
-                                        "parent": hex::encode(parent.to_bytes()),
-                                    }
-                                }),
-                                ZigbeeNotification::DeviceLeft { nwk, ieee } => json!({
-                                    "tid": 0, "cmd": "device_left",
-                                    "data": {
-                                        "nwk": hex::encode(nwk.to_bytes()),
-                                        "ieee": ieee.map(eui64_to_string),
-                                    }
-                                }),
-                            };
-
-                            log::debug!("Sending notification: {event:?}");
-                            writer.write_all(event.to_string().as_bytes()).await?;
-                            writer.write_all(b"\n").await?;
-                        },
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                            log::warn!("Client {addr} lagged {count} messages, skipping...");
-                        },
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            log::warn!("Broadcast channel closed, ending client connection for {addr}");
-                            break;
-                        }
-                    }
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {} // Pings and pongs are handled by tungstenite itself
+                Err(e) => {
+                    log::warn!("WebSocket error from {addr}: {e}");
+                    break;
                 }
             }
         }
+
+        notification_forwarder.abort();
+        drop(outbound_tx);
+        let _ = writer.await;
+
         Ok(())
     }
 
-    fn initialized_stack(&self) -> Option<Arc<ZigbeeStack>> {
-        self.server_state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|server_state| server_state.zigbee_stack.clone())
+    /// Dispatches a request, spawning everything that can block on network activity:
+    /// a command waiting on a slow device must never delay other commands.
+    fn dispatch(self: &Arc<Self>, request: Request, outbound: mpsc::Sender<serde_json::Value>) {
+        let server = self.clone();
+
+        tokio::spawn(async move {
+            let Request { id, method, params } = request;
+
+            let message = match method.as_str() {
+                "configure" => server.handle_configure(id, params),
+                "send_aps" => server.handle_send_aps(id, params, &outbound).await,
+                "energy_scan" => server.handle_energy_scan(id, params).await,
+                "permit_joins" => server.handle_permit_joins(id, params),
+                _ => error_response(id, "unknown_method", method),
+            };
+
+            let _ = outbound.send(message).await;
+        });
     }
 
-    /// Processes a single command from the client, mutating the server state if necessary.
+    /// (Re)initializes the Zigbee stack. The stack deliberately outlives client
+    /// connections; reconfiguring replaces it wholesale.
     #[allow(clippy::significant_drop_tightening)]
-    async fn process_command(&self, cmd: CommandRequest) -> CommandResponse {
-        let CommandRequest {
-            tid,
-            cmd: name,
-            data,
-        } = cmd;
-
-        let error = |reason: serde_json::Value, name: String| CommandResponse {
-            tid,
-            cmd: name,
-            data: json!({"status": "error", "reason": reason}),
+    fn handle_configure(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: ConfigureRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
         };
 
-        match name.as_str() {
-            "set_network_settings" => {
-                let request: SetNetworkSettingsRequest = match serde_json::from_value(data) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        return error(json!(format!("invalid_request: {e}")), name);
-                    }
-                };
-
-                let mut state_guard = self.server_state.lock().unwrap();
-                if state_guard.is_some() {
-                    return error(json!("stack_already_initialized"), name);
-                }
-
-                let mut constants = Constants::new();
-                if let Some(tc_link_key) = request.tc_link_key {
-                    constants.global_link_key = tc_link_key;
-                }
-
-                log::info!("Initializing Zigbee stack with new settings...");
-                // Without flow control the RCP's UART drops bytes under load,
-                // corrupting host->RCP frames ("Framing error" + command timeout)
-                let port = match tokio_serial::new(&self.serial_path, 460_800)
-                    .flow_control(FlowControl::Hardware)
-                    .open_native_async()
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return error(json!(format!("serial_port_error: {e}")), name);
-                    }
-                };
-
-                let spinel = SpinelClient::new(port);
-                spinel.spawn_reader();
-
-                let (zigbee_stack, notification_rx) = ZigbeeStack::new(
-                    spinel,
-                    constants,
-                    request.channel,
-                    request.nwk_update_id,
-                    request.pan_id,
-                    request.extended_pan_id,
-                    request.nwk_address,
-                    request.ieee_address,
-                    request.network_key,
-                    request.network_key_seq,
-                    request.network_key_tx_counter,
-                );
-
-                // Restore unique trust center link keys negotiated in earlier sessions
-                if !request.key_table.is_empty() {
-                    let mut aps_security = zigbee_stack.state.aps_security.lock();
-
-                    for entry in request.key_table {
-                        aps_security.restore_device_key(entry.partner_ieee, entry.key);
-                    }
-
-                    log::info!(
-                        "Restored {} trust center link keys",
-                        aps_security.device_key_count()
-                    );
-                }
-
-                let stack_clone = zigbee_stack.clone();
-                zigbee_stack.spawn_tracked(async move {
-                    stack_clone.run().await;
-                });
-
-                *state_guard = Some(ServerState {
-                    zigbee_stack,
-                    notification_rx,
-                });
-
-                log::info!("Zigbee stack initialized and running.");
-                CommandResponse {
-                    tid,
-                    cmd: name,
-                    data: json!({"status": "success"}),
-                }
-            }
-            "send_aps_command" => {
-                let request: SendApsCommandRequest = match serde_json::from_value(data) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        return error(json!(format!("invalid_request: {e}")), name);
-                    }
-                };
-
-                let Some(zigbee_stack) = self.initialized_stack() else {
-                    return error(json!("not_initialized"), name);
-                };
-
-                // EUI64-addressed packets are resolved through the address map
-                let destination = match (request.destination_eui64, request.destination) {
-                    (Some(eui64), _) => {
-                        let nwk = zigbee_stack.state.address_map.lock().get(&eui64).copied();
-
-                        match nwk {
-                            Some(nwk) => nwk,
-                            None => {
-                                return error(json!("unknown_destination_eui64"), name);
-                            }
-                        }
-                    }
-                    (None, Some(nwk)) => nwk,
-                    (None, None) => {
-                        return error(json!("missing_destination"), name);
-                    }
-                };
-
-                let asdu = match hex::decode(&request.data) {
-                    Ok(asdu) => asdu,
-                    Err(e) => {
-                        return error(json!(format!("invalid_data: {e}")), name);
-                    }
-                };
-
-                let status = zigbee_stack
-                    .send_aps_command(
-                        request.delivery_mode,
-                        destination,
-                        request.profile_id,
-                        request.cluster_id,
-                        request.src_ep,
-                        request.dst_ep,
-                        request.aps_ack,
-                        request.radius,
-                        request.aps_seq,
-                        asdu,
-                    )
-                    .await;
-
-                CommandResponse {
-                    tid,
-                    cmd: name,
-                    data: json!({"status": if status.is_ok() { "success" } else { "error" }, "reason": status.err().map(|e| e.to_string())}),
-                }
-            }
-            "energy_scan" => {
-                let request: EnergyScanRequest = match serde_json::from_value(data) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        return error(json!(format!("invalid_request: {e}")), name);
-                    }
-                };
-
-                let Some(zigbee_stack) = self.initialized_stack() else {
-                    return error(json!("not_initialized"), name);
-                };
-
-                let results = zigbee_stack
-                    .energy_scan(
-                        &request.channels,
-                        Duration::from_millis(u64::from(request.duration_per_channel_ms)),
-                    )
-                    .await;
-
-                match results {
-                    Ok(results) => CommandResponse {
-                        tid,
-                        cmd: name,
-                        data: json!({
-                            "status": "success",
-                            "results": results.into_iter().collect::<HashMap<u8, i8>>(),
-                        }),
-                    },
-                    Err(e) => error(json!(format!("energy_scan_failed: {e}")), name),
-                }
-            }
-            "permit_joins" => {
-                let request: PermitJoinsRequest = match serde_json::from_value(data) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        return error(json!(format!("invalid_request: {e}")), name);
-                    }
-                };
-
-                let Some(zigbee_stack) = self.initialized_stack() else {
-                    return error(json!("not_initialized"), name);
-                };
-
-                zigbee_stack.permit_joins(request.duration);
-
-                CommandResponse {
-                    tid,
-                    cmd: name,
-                    data: json!({"status": "success", "reason": "none"}),
-                }
-            }
-            _ => error(json!("unknown_command"), name),
+        let mut constants = Constants::new();
+        if let Some(tc_link_key) = request.tc_link_key {
+            constants.global_link_key = tc_link_key;
         }
+
+        // A replaced stack must be fully stopped first: its spawned tasks hold strong
+        // references and its serial reader would steal the successor's responses
+        let old_stack = self.stack.lock().unwrap().take();
+        if let Some(old_stack) = old_stack {
+            log::info!("Replacing the running Zigbee stack");
+            old_stack.shutdown();
+        }
+
+        let old_forwarder = self.notification_forwarder.lock().unwrap().take();
+        if let Some(old_forwarder) = old_forwarder {
+            old_forwarder.abort();
+        }
+
+        log::info!("Initializing Zigbee stack with new settings...");
+        // Without flow control the RCP's UART drops bytes under load, corrupting
+        // host->RCP frames ("Framing error" + command timeout)
+        let port = match tokio_serial::new(&self.serial_path, 460_800)
+            .flow_control(FlowControl::Hardware)
+            .open_native_async()
+        {
+            Ok(p) => p,
+            Err(e) => return error_response(id, "serial_port_error", e),
+        };
+
+        let spinel = SpinelClient::new(port);
+        spinel.spawn_reader();
+
+        let (stack, mut stack_notification_rx) = ZigbeeStack::new(
+            spinel,
+            constants,
+            request.channel,
+            request.nwk_update_id,
+            request.pan_id,
+            request.extended_pan_id,
+            request.nwk_address,
+            request.ieee_address,
+            request.network_key,
+            request.network_key_seq,
+            request.network_key_tx_counter,
+        );
+
+        // Restore unique trust center link keys negotiated in earlier sessions
+        if !request.key_table.is_empty() {
+            let mut aps_security = stack.state.aps_security.lock();
+
+            for entry in request.key_table {
+                aps_security.restore_device_key(entry.partner_ieee, entry.key);
+            }
+
+            log::info!(
+                "Restored {} trust center link keys",
+                aps_security.device_key_count()
+            );
+        }
+
+        let stack_clone = stack.clone();
+        stack.spawn_tracked(async move {
+            stack_clone.run().await;
+        });
+
+        // Pump the stack's notifications into the server-level hub
+        let hub_tx = self.notification_tx.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Ok(event) = stack_notification_rx.recv().await {
+                // Send errors just mean no client is connected right now
+                let _ = hub_tx.send(event);
+            }
+        });
+
+        *self.stack.lock().unwrap() = Some(stack);
+        *self.notification_forwarder.lock().unwrap() = Some(forwarder);
+
+        log::info!("Zigbee stack initialized and running.");
+        response(id, json!({"status": "success"}))
+    }
+
+    async fn handle_send_aps(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+        outbound: &mpsc::Sender<serde_json::Value>,
+    ) -> serde_json::Value {
+        let request: SendApsRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        // EUI64-addressed packets are resolved through the address map
+        let destination = match (request.destination_eui64, request.destination) {
+            (Some(eui64), _) => {
+                let nwk = stack.state.address_map.lock().get(&eui64).copied();
+
+                match nwk {
+                    Some(nwk) => nwk,
+                    None => {
+                        return error_response(
+                            id,
+                            "unknown_destination_eui64",
+                            format!("{eui64:?}"),
+                        );
+                    }
+                }
+            }
+            (None, Some(nwk)) => nwk,
+            (None, None) => {
+                return error_response(id, "missing_destination", "no destination given");
+            }
+        };
+
+        let asdu = match hex::decode(&request.data) {
+            Ok(asdu) => asdu,
+            Err(e) => return error_response(id, "invalid_data", e),
+        };
+
+        let ack_waiter = match stack
+            .send_aps_command(
+                request.delivery_mode,
+                destination,
+                request.profile_id,
+                request.cluster_id,
+                request.src_ep,
+                request.dst_ep,
+                request.aps_ack,
+                request.radius,
+                request.aps_seq,
+                asdu,
+            )
+            .await
+        {
+            Ok(ack_waiter) => ack_waiter,
+            Err(e) => return error_response(id, "transmit_failed", e),
+        };
+
+        // The frame is on the air (or extracted from the indirect queue); the
+        // terminal response then reports end-to-end delivery when an ack was requested
+        let _ = outbound.send(event(id, "transmitted")).await;
+
+        match ack_waiter {
+            None => response(id, json!({"status": "sent"})),
+            Some(waiter) => match stack.wait_aps_ack(waiter).await {
+                Ok(()) => response(id, json!({"status": "delivered"})),
+                Err(e) => error_response(id, "aps_ack_timeout", e),
+            },
+        }
+    }
+
+    async fn handle_energy_scan(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: EnergyScanRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        let results = stack
+            .energy_scan(
+                &request.channels,
+                Duration::from_millis(u64::from(request.duration_per_channel_ms)),
+            )
+            .await;
+
+        match results {
+            Ok(results) => response(
+                id,
+                json!({"results": results.into_iter().collect::<HashMap<u8, i8>>()}),
+            ),
+            Err(e) => error_response(id, "energy_scan_failed", e),
+        }
+    }
+
+    fn handle_permit_joins(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: PermitJoinsRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        stack.permit_joins(request.duration);
+
+        response(id, json!({"status": "success"}))
     }
 }
 
@@ -559,18 +557,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let args: Vec<String> = env::args().collect();
         if args.len() < 2 {
-            eprintln!("Usage: {} <serial_path> [tcp_listen_addr]", args[0]);
+            eprintln!("Usage: {} <serial_path> [ws_listen_addr]", args[0]);
             return Ok(());
         }
         let serial_path = &args[1];
-        let tcp_listen_addr = args
+        let listen_addr = args
             .get(2)
             .cloned()
             .unwrap_or_else(|| "0.0.0.0:9999".to_string());
 
         let server = Arc::new(ZigguratServer::new(serial_path));
 
-        server.run_tcp_server(&tcp_listen_addr).await?;
+        server.run(&listen_addr).await?;
 
         Ok(())
     })

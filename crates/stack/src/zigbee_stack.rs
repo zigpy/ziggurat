@@ -309,7 +309,7 @@ impl Constants {
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ApsAckData {
     pub src: Nwk,
     pub destination_endpoint: Option<u8>,
@@ -330,6 +330,15 @@ impl ApsAckData {
             counter: ack.counter,
         }
     }
+}
+
+/// The end-to-end delivery confirmation of a transmitted APS frame, pending until the
+/// destination's APS ack arrives. Resolved via [`ZigbeeStack::wait_aps_ack`].
+#[derive(Debug)]
+pub struct ApsAckWaiter {
+    pub(crate) receiver: oneshot::Receiver<()>,
+    pub(crate) timeout: Duration,
+    pub(crate) ack_data: ApsAckData,
 }
 
 #[derive(Debug)]

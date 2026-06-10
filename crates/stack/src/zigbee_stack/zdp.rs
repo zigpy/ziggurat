@@ -328,6 +328,7 @@ impl ZigbeeStack {
             command.serialize(tsn).unwrap(),
         )
         .await
+        .map(|_| ())
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming
