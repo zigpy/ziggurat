@@ -430,6 +430,9 @@ impl ZigbeeStack {
                     arc_self.send_many_to_one_route_request().await;
                 });
             }
+            NwkNetworkStatus::AddressConflict => {
+                self.handle_address_conflict(network_status_cmd.network_address, false);
+            }
             _ => {
                 log::warn!("Unhandled network status: {network_status_cmd:?}");
             }

@@ -196,6 +196,10 @@ impl Neighbors {
             })
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &TableEntry> {
+        self.table.values()
+    }
+
     pub fn has_network_address(&self, nwk: Nwk) -> bool {
         self.table
             .values()
@@ -282,6 +286,20 @@ impl Neighbors {
         entry.keepalive_received = true;
 
         true
+    }
+
+    /// A known device announced a new network address (e.g. after address conflict
+    /// resolution); keep its neighbor entry in sync.
+    pub fn update_network_address(&mut self, eui64: Eui64, nwk: Nwk) {
+        if let Some(entry) = self.table.get_mut(&eui64)
+            && entry.network_address != nwk
+        {
+            log::info!(
+                "Neighbor {eui64:?} changed its network address from {:?} to {nwk:?}",
+                entry.network_address
+            );
+            entry.network_address = nwk;
+        }
     }
 
     /// Remove the entry for a child that attached to a different parent, returning

@@ -1,7 +1,7 @@
 use crate::zigbee_aps::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType,
 };
-use crate::zigbee_nwk::{NwkFrame, NwkRouteDiscovery};
+use crate::zigbee_nwk::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 use ieee_802154::types::Nwk;
 
 use std::cmp;
@@ -112,8 +112,16 @@ impl ZigbeeStack {
 
         log::debug!("Prepared APS frame: {aps_frame:#?}");
 
+        // Zigbee 3.0 groupcast: the group lives only in the APS header; the NWK frame
+        // is broadcast to all rx-on-when-idle devices (spec 2.2.4.1.1.1)
+        let nwk_destination = if delivery_mode == ApsDeliveryMode::Multicast {
+            BROADCAST_RX_ON_WHEN_IDLE
+        } else {
+            destination
+        };
+
         let nwk_frame = self
-            .nwk_data_frame(destination, aps_frame.to_bytes())
+            .nwk_data_frame(nwk_destination, aps_frame.to_bytes())
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 

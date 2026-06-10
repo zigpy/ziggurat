@@ -15,7 +15,9 @@ use crate::zigbee_aps::{
     ApsTunnelCommandFrame, ApsUpdateDeviceCommandFrame, ApsUpdateDeviceStatus,
     ApsVerifyKeyCommandFrame, EncryptedApsCommandFrame,
 };
-use crate::zigbee_nwk::{NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId};
+use crate::zigbee_nwk::{
+    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId,
+};
 use ieee_802154::types::{Eui64, Nwk};
 
 use std::collections::VecDeque;
@@ -24,7 +26,8 @@ use zigbee_parts::Command;
 use zigbee_parts::commands::{
     Nwk802154AssociationStatus, NwkCommandId, NwkEndDeviceTimeoutRequestCommand,
     NwkEndDeviceTimeoutResponseCommand, NwkEndDeviceTimeoutResponseStatus, NwkLeaveCommand,
-    NwkRejoinCapabilityInformationDeviceType, NwkRejoinRequestCommand, NwkRejoinResponseCommand,
+    NwkNetworkStatus, NwkNetworkStatusCommand, NwkRejoinCapabilityInformationDeviceType,
+    NwkRejoinRequestCommand, NwkRejoinResponseCommand,
 };
 
 use super::{
@@ -201,7 +204,6 @@ impl ZigbeeStack {
 
     /// Pick an unused random network address for a joining device, reusing the previous
     /// one if the device has joined before.
-    #[allow(clippy::significant_drop_tightening)]
     fn allocate_network_address(&self, eui64: Eui64) -> Nwk {
         if let Some(existing) = self
             .state
@@ -213,6 +215,11 @@ impl ZigbeeStack {
             return *existing;
         }
 
+        self.generate_unused_network_address()
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    fn generate_unused_network_address(&self) -> Nwk {
         let address_map = self
             .state
             .address_map
@@ -241,6 +248,138 @@ impl ZigbeeStack {
 
             return candidate;
         }
+    }
+
+    /// Spec 3.6.1.10.5: two devices use the same network address. The network is
+    /// notified unless we learned of the conflict from such a notification; end
+    /// device children are moved to a fresh address; routers resolve on their own.
+    pub(super) fn handle_address_conflict(&self, address: Nwk, detected_locally: bool) {
+        {
+            let mut conflicts = self
+                .state
+                .address_conflicts
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
+
+            let now = Instant::now();
+            let window = self.constants.broadcast_delivery_time;
+
+            // Detection re-triggers on every frame from the conflicted devices, so a
+            // conflict is handled once per delivery window
+            if let Some(conflict) = conflicts.get_mut(&address)
+                && now < conflict.handled_at + window
+            {
+                conflict.heard_from_network |= !detected_locally;
+                return;
+            }
+
+            conflicts.retain(|_, conflict| now < conflict.handled_at + 2 * window);
+            conflicts.insert(
+                address,
+                super::AddressConflict {
+                    handled_at: now,
+                    heard_from_network: !detected_locally,
+                },
+            );
+        }
+
+        log::warn!("Address conflict detected on {address:?}");
+
+        if detected_locally {
+            self.broadcast_address_conflict(address);
+        }
+
+        if address == self.state.network_address {
+            // A coordinator never changes its address (spec 3.6.1.10.5); the
+            // notification tells the conflicting device to move
+            log::error!("Another device is using our own network address");
+            return;
+        }
+
+        if let Some(child_eui64) = self.end_device_child_eui64(address) {
+            self.reassign_child_address(child_eui64, address);
+            return;
+        }
+
+        // Routers resolve their own conflicts after hearing the notification; our
+        // mapping for the address is ambiguous until the keeper re-announces
+        self.state
+            .address_map
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .retain(|_, &mut nwk| nwk != address);
+        self.state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .remove_route(address);
+    }
+
+    /// Spec 3.6.1.10.5: notify the network of an address conflict with a jittered
+    /// Network Status broadcast, cancelled when another device reports it first.
+    fn broadcast_address_conflict(&self, address: Nwk) {
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            tokio::time::sleep(
+                arc_self
+                    .constants
+                    .max_broadcast_jitter
+                    .mul_f32(rand::random::<f32>()),
+            )
+            .await;
+
+            let heard_from_network = arc_self
+                .state
+                .address_conflicts
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .get(&address)
+                .is_some_and(|conflict| conflict.heard_from_network);
+
+            if heard_from_network {
+                log::debug!(
+                    "Address conflict on {address:?} was already reported, not rebroadcasting"
+                );
+                return;
+            }
+
+            let conflict_frame = arc_self.nwk_command_frame(
+                BROADCAST_RX_ON_WHEN_IDLE,
+                NwkNetworkStatusCommand {
+                    status_code: NwkNetworkStatus::AddressConflict,
+                    network_address: address,
+                }
+                .serialize()
+                .unwrap(),
+            );
+
+            arc_self.background_send_nwk_frame(conflict_frame, NwkSecurityMode::NetworkKey, false);
+        });
+    }
+
+    /// Spec 3.6.1.10.5: pick a new address for an end device child caught in an
+    /// address conflict, delivered with an unsolicited, encrypted rejoin response
+    /// (indirectly for a sleepy child, so it arrives on its next keepalive poll).
+    /// All local state keeps the old address until the child confirms the change
+    /// with a device announcement.
+    fn reassign_child_address(&self, eui64: Eui64, old_address: Nwk) {
+        let new_address = self.generate_unused_network_address();
+
+        log::warn!(
+            "Moving end device child {eui64:?} away from conflicted {old_address:?} to {new_address:?}"
+        );
+
+        self.send_rejoin_response(
+            old_address,
+            eui64,
+            new_address,
+            Nwk802154AssociationStatus::AssociationSuccessful,
+            true,
+        );
     }
 
     fn build_802154_association_response(

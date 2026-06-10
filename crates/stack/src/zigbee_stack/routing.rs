@@ -168,6 +168,10 @@ impl Routing {
         self.route_table.get(&destination).map(|entry| entry.status)
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &TableEntry> {
+        self.route_table.values()
+    }
+
     /// The next hop toward a destination with an active route.
     pub fn next_hop(&self, destination: Nwk) -> Option<Nwk> {
         self.route_table

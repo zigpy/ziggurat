@@ -4,13 +4,22 @@ use ieee_802154::types::{Eui64, Nwk};
 
 use tokio::time::Instant;
 use zigbee_parts::zdp::{
-    DeviceAnnce, ParentAnnce, ParentAnnceRsp, ZDP_PROFILE_ID, ZdpClusterId, ZdpCommand, ZdpStatus,
+    DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
+    ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
+    ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus,
 };
 
-use super::{MAX_LOCK_DURATION, ZigbeeStack, ZigbeeStackError};
+use super::{MAX_LOCK_DURATION, NwkDeviceType, ZigbeeStack, ZigbeeStackError, neighbors, routing};
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
+
+/// Neighbor records per Mgmt_Lqi_rsp; the spec caps the count field at 2
+/// (Table 2-101) and clients paginate with the start index.
+const MGMT_LQI_DESCRIPTORS_PER_FRAME: usize = 2;
+
+/// Routing records per Mgmt_Rtg_rsp, keeping the ASDU within the NWK payload budget.
+const MGMT_RTG_DESCRIPTORS_PER_FRAME: usize = 10;
 
 impl ZigbeeStack {
     /// Dispatch the ZDP commands the stack itself consumes: the neighbor table they
@@ -24,8 +33,166 @@ impl ZigbeeStack {
             Ok(ZdpClusterId::DeviceAnnce) => self.handle_device_annce(nwk_frame, aps_frame),
             Ok(ZdpClusterId::ParentAnnce) => self.handle_parent_annce(nwk_frame, aps_frame),
             Ok(ZdpClusterId::ParentAnnceRsp) => self.handle_parent_annce_rsp(nwk_frame, aps_frame),
-            Err(_) => {}
+            Ok(ZdpClusterId::MgmtLqiReq) => self.handle_mgmt_lqi_req(nwk_frame, aps_frame),
+            Ok(ZdpClusterId::MgmtRtgReq) => self.handle_mgmt_rtg_req(nwk_frame, aps_frame),
+            // Management responses from other devices are the client's business
+            Ok(ZdpClusterId::MgmtLqiRsp | ZdpClusterId::MgmtRtgRsp) | Err(_) => {}
         }
+    }
+
+    /// Spec 2.4.4.3.2: answer a neighbor table query, two records at a time. The
+    /// tables live in the stack, so the client cannot answer these itself.
+    #[allow(clippy::significant_drop_tightening)]
+    fn handle_mgmt_lqi_req(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
+        // Management queries are answered only when addressed to us directly
+        if nwk_frame.nwk_header.destination != self.state.network_address {
+            return;
+        }
+
+        let source = nwk_frame.nwk_header.source;
+
+        let (tsn, request) = match MgmtLqiReq::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                log::warn!("Malformed neighbor table request from {source:?}: {err}");
+                return;
+            }
+        };
+
+        let (total, descriptors) = {
+            let neighbors = self
+                .state
+                .neighbors
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
+
+            let mut entries: Vec<&neighbors::TableEntry> = neighbors.entries().collect();
+            entries.sort_by_key(|entry| entry.network_address.as_u16());
+
+            let descriptors: Vec<NeighborDescriptor> = entries
+                .iter()
+                .skip(usize::from(request.start_index))
+                .take(MGMT_LQI_DESCRIPTORS_PER_FRAME)
+                .map(|entry| NeighborDescriptor {
+                    extended_pan_id: self.state.extended_pan_id,
+                    extended_address: entry.extended_address,
+                    network_address: entry.network_address,
+                    device_type: match entry.device_type {
+                        NwkDeviceType::Coordinator => ZdpDeviceType::Coordinator,
+                        NwkDeviceType::Router => ZdpDeviceType::Router,
+                        NwkDeviceType::EndDevice => ZdpDeviceType::EndDevice,
+                    },
+                    rx_on_when_idle: if entry.rx_on_when_idle {
+                        ZdpRxOnWhenIdle::On
+                    } else {
+                        ZdpRxOnWhenIdle::Off
+                    },
+                    // Spec 2.4.4.3.2.1: relationships past Sibling are reported as
+                    // NoneOfTheAbove
+                    affinity: match entry.relationship {
+                        neighbors::Relationship::Parent => ZdpAffinity::Parent,
+                        neighbors::Relationship::Child => ZdpAffinity::Child,
+                        neighbors::Relationship::Sibling => ZdpAffinity::Sibling,
+                        _ => ZdpAffinity::NoneOfTheAbove,
+                    },
+                    permit_joining: ZdpPermitJoining::Unknown,
+                    // We are the coordinator (tree depth 0), so every neighbor of
+                    // ours sits at depth 1
+                    depth: 1,
+                    lqa: entry.lqa().unwrap_or(0),
+                })
+                .collect();
+
+            (entries.len(), descriptors)
+        };
+
+        let response = MgmtLqiRsp {
+            status: ZdpStatus::Success,
+            neighbor_table_entries: total as u8,
+            start_index: request.start_index,
+            neighbor_table_list: descriptors,
+        };
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            if let Err(err) = arc_self
+                .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
+                .await
+            {
+                log::warn!("Failed to send a neighbor table response to {source:?}: {err}");
+            }
+        });
+    }
+
+    /// Spec 2.4.4.3.3: answer a routing table query.
+    #[allow(clippy::significant_drop_tightening)]
+    fn handle_mgmt_rtg_req(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
+        if nwk_frame.nwk_header.destination != self.state.network_address {
+            return;
+        }
+
+        let source = nwk_frame.nwk_header.source;
+
+        let (tsn, request) = match MgmtRtgReq::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                log::warn!("Malformed routing table request from {source:?}: {err}");
+                return;
+            }
+        };
+
+        let (total, descriptors) = {
+            let routing = self.state.routing.try_lock_for(MAX_LOCK_DURATION).unwrap();
+
+            let mut entries: Vec<&routing::TableEntry> = routing.entries().collect();
+            entries.sort_by_key(|entry| entry.destination.as_u16());
+
+            let descriptors: Vec<RoutingDescriptor> = entries
+                .iter()
+                .skip(usize::from(request.start_index))
+                .take(MGMT_RTG_DESCRIPTORS_PER_FRAME)
+                .map(|entry| RoutingDescriptor {
+                    destination_address: entry.destination,
+                    status: match entry.status {
+                        routing::Status::Active => ZdpRouteStatus::Active,
+                        routing::Status::DiscoveryUnderway => ZdpRouteStatus::DiscoveryUnderway,
+                        routing::Status::DiscoveryFailed => ZdpRouteStatus::DiscoveryFailed,
+                        routing::Status::Inactive => ZdpRouteStatus::Inactive,
+                    },
+                    memory_constrained: false,
+                    many_to_one: entry.many_to_one,
+                    route_record_required: entry.route_record_required,
+                    next_hop_address: entry.next_hop_address,
+                })
+                .collect();
+
+            (entries.len(), descriptors)
+        };
+
+        let response = MgmtRtgRsp {
+            status: ZdpStatus::Success,
+            routing_table_entries: total as u8,
+            start_index: request.start_index,
+            routing_table_list: descriptors,
+        };
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            if let Err(err) = arc_self
+                .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
+                .await
+            {
+                log::warn!("Failed to send a routing table response to {source:?}: {err}");
+            }
+        });
     }
 
     /// Spec 2.4.3.1.11.2: a (re)joined device announced its address pair. The address
@@ -66,6 +233,16 @@ impl ZigbeeStack {
         // The spec allows announcements with an unknown (all-ones) IEEE address
         if annce.ieee_addr != Eui64([0xFF; 8]) {
             address_map.insert(annce.ieee_addr, annce.nwk_addr);
+            drop(address_map);
+
+            // A child of ours confirming an address change (e.g. after conflict
+            // resolution) must keep its neighbor entry in sync, or its new address
+            // would bypass the indirect queue
+            self.state
+                .neighbors
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .update_network_address(annce.ieee_addr, annce.nwk_addr);
         }
     }
 

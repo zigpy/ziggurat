@@ -20,19 +20,41 @@ use super::{
 
 impl ZigbeeStack {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let old_nwk = self
-            .state
-            .address_map
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .insert(eui64, nwk);
-        match old_nwk {
-            None => {
-                log::debug!("Added new address mapping: {eui64:?} -> {nwk:?}")
+        let conflict = {
+            let mut address_map = self
+                .state
+                .address_map
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
+
+            if address_map.get(&eui64) == Some(&nwk) {
+                return;
             }
-            Some(old_nwk) => {
-                log::warn!("Updated address mapping: {eui64:?} -> {nwk:?} (was {old_nwk:?})",)
+
+            // Spec 3.6.1.10.2: a network address claimed by a second IEEE address is
+            // an address conflict; the mapping is not updated
+            let conflict = address_map
+                .iter()
+                .any(|(&other_eui64, &other_nwk)| other_nwk == nwk && other_eui64 != eui64);
+
+            if !conflict {
+                match address_map.insert(eui64, nwk) {
+                    None => {
+                        log::debug!("Added new address mapping: {eui64:?} -> {nwk:?}")
+                    }
+                    Some(old_nwk) => {
+                        log::warn!(
+                            "Updated address mapping: {eui64:?} -> {nwk:?} (was {old_nwk:?})",
+                        )
+                    }
+                }
             }
+
+            conflict
+        };
+
+        if conflict {
+            self.handle_address_conflict(nwk, true);
         }
     }
 
@@ -102,6 +124,15 @@ impl ZigbeeStack {
             self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
         }
 
+        // Spec 3.6.1.10.2: a frame addressed to our network address but a different
+        // IEEE address means another device is using our address
+        if nwk_frame.nwk_header.destination == self.state.network_address
+            && let Some(destination_ieee) = nwk_frame.nwk_header.destination_ieee
+            && destination_ieee != self.state.ieee_address
+        {
+            self.handle_address_conflict(self.state.network_address, true);
+        }
+
         // Handle LQA calculation
         self.maybe_age_neighbors();
         self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
@@ -131,6 +162,17 @@ impl ZigbeeStack {
         {
             if self.filter_broadcast(nwk_frame) {
                 log::debug!("Filtering broadcast, stopping further processing");
+                return;
+            }
+
+            // Spec 3.6.1.10.2: a fresh broadcast claiming our address as its source
+            // means another device is using our address. Our own broadcasts never
+            // reach this point: the send path pre-fills the transaction table. The
+            // frame is discarded instead of relayed (3.6.1.10).
+            if nwk_frame.nwk_header.source == self.state.network_address {
+                if self.state.start_time + self.constants.broadcast_delivery_time < Instant::now() {
+                    self.handle_address_conflict(self.state.network_address, true);
+                }
                 return;
             }
 

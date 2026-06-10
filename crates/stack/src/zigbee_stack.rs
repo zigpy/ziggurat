@@ -150,6 +150,17 @@ pub struct NwkSecurityDescriptor {
     pub network_key_type: NetworkKeyType,
 }
 
+/// Bookkeeping for a network address conflict (spec 3.6.1.10.5).
+///
+/// Detection re-triggers on every frame from the conflicted devices, so a conflict
+/// is handled once per delivery window, and our own notification broadcast is
+/// cancelled when another device reported the same conflict first.
+#[derive(Debug, Clone, Copy)]
+pub struct AddressConflict {
+    pub handled_at: Instant,
+    pub heard_from_network: bool,
+}
+
 /// The source address match table contents most recently written to the RCP, used to
 /// tell whether the auto-ACK of a given poll advertised frame-pending=1.
 #[derive(Debug, Default)]
@@ -333,6 +344,7 @@ pub struct State {
 
     pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
     pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
+    pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
     /// Frames awaiting extraction by a polling device, in arrival order. Keys are
     /// whichever address form the frame was queued under; a poll is matched against
     /// both its extended and short source address.
@@ -441,6 +453,7 @@ impl State {
             aps_security: Mutex::new(ApsSecurity::new(global_link_key, ieee_address)),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
+            address_conflicts: Mutex::new(HashMap::new()),
             indirect_queue: Mutex::new(HashMap::new()),
             start_time: Instant::now(),
             permitting_joins: Mutex::new(false),

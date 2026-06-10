@@ -17,7 +17,11 @@ pub const ZDP_PROFILE_ID: u16 = 0x0000;
 pub enum ZdpClusterId {
     DeviceAnnce = 0x0013,
     ParentAnnce = 0x001F,
+    MgmtLqiReq = 0x0031,
+    MgmtRtgReq = 0x0032,
     ParentAnnceRsp = 0x801F,
+    MgmtLqiRsp = 0x8031,
+    MgmtRtgRsp = 0x8032,
 }
 
 /// Zigbee spec Table 2-129 (partial): ZDP response status values.
@@ -82,6 +86,140 @@ pub struct ParentAnnceRsp {
 
 impl ZdpCommand for ParentAnnceRsp {
     const CLUSTER_ID: ZdpClusterId = ZdpClusterId::ParentAnnceRsp;
+}
+
+/// Zigbee spec 2.4.3.3.2: request a slice of the remote device's neighbor table.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtLqiReq {
+    pub start_index: u8,
+}
+
+impl ZdpCommand for MgmtLqiReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtLqiReq;
+}
+
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum ZdpDeviceType {
+    Coordinator = 0x00,
+    Router = 0x01,
+    EndDevice = 0x02,
+    Unknown = 0x03,
+}
+
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum ZdpRxOnWhenIdle {
+    Off = 0x00,
+    On = 0x01,
+    Unknown = 0x02,
+}
+
+/// The neighbor relationship as reported over ZDP: any relationship past Sibling is
+/// reported as NoneOfTheAbove (spec 2.4.4.3.2.1).
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum ZdpAffinity {
+    Parent = 0x00,
+    Child = 0x01,
+    Sibling = 0x02,
+    NoneOfTheAbove = 0x03,
+}
+
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum ZdpPermitJoining {
+    NotAccepting = 0x00,
+    Accepting = 0x01,
+    Unknown = 0x02,
+}
+
+/// Zigbee spec Table 2-102: one neighbor table record of a Mgmt_Lqi_rsp.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NeighborDescriptor {
+    pub extended_pan_id: Eui64,
+    pub extended_address: Eui64,
+    pub network_address: Nwk,
+    pub device_type: ZdpDeviceType,
+    pub rx_on_when_idle: ZdpRxOnWhenIdle,
+    pub affinity: ZdpAffinity,
+    reserved: u1,
+    pub permit_joining: ZdpPermitJoining,
+    reserved: u6,
+    pub depth: u8,
+    pub lqa: u8,
+}
+
+/// Zigbee spec 2.4.4.3.2: a slice of our neighbor table.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtLqiRsp {
+    pub status: ZdpStatus,
+    pub neighbor_table_entries: u8,
+    pub start_index: u8,
+    #[abstract_bits(length_of = neighbor_table_list)]
+    neighbor_table_list_count: u8,
+    pub neighbor_table_list: Vec<NeighborDescriptor>,
+}
+
+impl ZdpCommand for MgmtLqiRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtLqiRsp;
+}
+
+/// Zigbee spec 2.4.3.3.3: request a slice of the remote device's routing table.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtRtgReq {
+    pub start_index: u8,
+}
+
+impl ZdpCommand for MgmtRtgReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtRtgReq;
+}
+
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum ZdpRouteStatus {
+    Active = 0x00,
+    DiscoveryUnderway = 0x01,
+    DiscoveryFailed = 0x02,
+    Inactive = 0x03,
+}
+
+/// Zigbee spec Table 2-104: one routing table record of a Mgmt_Rtg_rsp.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RoutingDescriptor {
+    pub destination_address: Nwk,
+    pub status: ZdpRouteStatus,
+    pub memory_constrained: bool,
+    pub many_to_one: bool,
+    pub route_record_required: bool,
+    reserved: u2,
+    pub next_hop_address: Nwk,
+}
+
+/// Zigbee spec 2.4.4.3.3: a slice of our routing table.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtRtgRsp {
+    pub status: ZdpStatus,
+    pub routing_table_entries: u8,
+    pub start_index: u8,
+    #[abstract_bits(length_of = routing_table_list)]
+    routing_table_list_count: u8,
+    pub routing_table_list: Vec<RoutingDescriptor>,
+}
+
+impl ZdpCommand for MgmtRtgRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtRtgRsp;
 }
 
 fn serialize<T: AbstractBits>(thing: &T, tsn: u8) -> Result<Vec<u8>, SerializeError> {
