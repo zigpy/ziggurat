@@ -11,8 +11,4 @@ ieee-802154 = { path = "../ieee-802154" }
 
 abstract-bits = "0.2.0"
 num_enum = "0.7.3"
-hex = "0.4.3"
 thiserror = "2.0.12"
-
-[dev-dependencies]
-hex-literal = "1.1.0"
