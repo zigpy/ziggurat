@@ -135,6 +135,12 @@ struct PermitJoinsRequest {
     duration: u64,
 }
 
+#[derive(Deserialize, Debug)]
+struct SetProvisionalKeyRequest {
+    ieee: Eui64,
+    key: Key,
+}
+
 fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json::Value {
     match notification_event {
         ZigbeeNotification::ReceivedApsCommand {
@@ -335,6 +341,7 @@ impl ZigguratServer {
                 "send_aps" => server.handle_send_aps(id, params, &outbound).await,
                 "energy_scan" => server.handle_energy_scan(id, params).await,
                 "permit_joins" => server.handle_permit_joins(id, params),
+                "set_provisional_key" => server.handle_set_provisional_key(id, params),
                 _ => error_response(id, "unknown_method", method),
             };
 
@@ -544,6 +551,21 @@ impl ZigguratServer {
         };
 
         stack.permit_joins(request.duration);
+
+        response(id, json!({"status": "success"}))
+    }
+
+    fn handle_set_provisional_key(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: SetProvisionalKeyRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        stack.set_provisional_key(request.ieee, request.key);
 
         response(id, json!({"status": "success"}))
     }

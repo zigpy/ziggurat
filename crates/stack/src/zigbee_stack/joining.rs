@@ -18,7 +18,7 @@ use crate::zigbee_aps::{
 use crate::zigbee_nwk::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId,
 };
-use ieee_802154::types::{Eui64, Nwk};
+use ieee_802154::types::{Eui64, Key, Nwk};
 
 use std::collections::VecDeque;
 use tokio::time::{Duration, Instant};
@@ -90,11 +90,7 @@ impl ZigbeeStack {
         let short_address = self.allocate_network_address(source_eui64);
         log::info!("Device {source_eui64:?} is joining as {short_address:?}");
 
-        self.state
-            .aps_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .forget_device_key(source_eui64);
+        self.begin_join(source_eui64);
 
         // Joiners retry association requests if they miss our response, so the address
         // and table entries must be stable across retries
@@ -432,6 +428,38 @@ impl ZigbeeStack {
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
             .has_network_address(nwk)
+    }
+
+    /// Register an install-code-derived link key for a device expected to join:
+    /// an `apsDeviceKeyPairSet` entry with `PROVISIONAL_KEY` attributes that
+    /// replaces the well-known key for that device's network key delivery.
+    pub fn set_provisional_key(&self, ieee: Eui64, key: Key) {
+        log::info!("Registered provisional link key for {ieee:?}");
+
+        self.state
+            .aps_security
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .set_provisional_key(ieee, key);
+    }
+
+    /// Reset a joining device's link key state. The provisional key kept in effect,
+    /// if any, is sent to the client so the device survives a stack restart.
+    fn begin_join(&self, ieee: Eui64) {
+        let provisional_key = self
+            .state
+            .aps_security
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .begin_join(ieee);
+
+        if let Some(key) = provisional_key {
+            log::info!("Device {ieee:?} is joining with its provisional link key");
+
+            let _ = self
+                .notification_tx
+                .send(ZigbeeNotification::LinkKeyUpdate { ieee, key });
+        }
     }
 
     /// Build the APS Transport Key command that delivers the network key to a device,
@@ -781,11 +809,7 @@ impl ZigbeeStack {
 
         match update.status {
             ApsUpdateDeviceStatus::StandardDeviceUnsecuredJoin => {
-                self.state
-                    .aps_security
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .forget_device_key(update.device_address);
+                self.begin_join(update.device_address);
 
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
                 self.send_tunneled_network_key(router_nwk, update.device_address);

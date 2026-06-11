@@ -7,6 +7,17 @@ use crate::crypto::{key_load_key, key_transport_key, verify_key_hash};
 use crate::zigbee_aps::{ApsAuxHeader, ApsCommandFrame, EncryptedApsCommandFrame};
 use crate::zigbee_nwk::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
+/// The `KeyAttributes` of an `apsDeviceKeyPairSet` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAttributes {
+    /// Provisioned out of band before the device joined, e.g. derived from an
+    /// install code; replaces the well-known key for that device's join.
+    Provisional = 0x00,
+    /// Issued to the device but not yet proven via a Verify-Key exchange
+    Unverified = 0x01,
+    Verified = 0x02,
+}
+
 /// A single entry of the `apsDeviceKeyPairSet`: a link key shared with one device.
 ///
 /// Devices start out sharing the well-known global link key (which is not stored here)
@@ -14,8 +25,7 @@ use crate::zigbee_nwk::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, N
 #[derive(Debug, Clone)]
 pub struct DeviceLinkKey {
     pub key: Key,
-    /// Whether the device has proven possession of the key via a Verify-Key exchange
-    pub verified: bool,
+    pub attributes: KeyAttributes,
 }
 
 /// The APS security layer: the spec's `apsDeviceKeyPairSet`, link-key derivation, and
@@ -52,15 +62,39 @@ impl ApsSecurity {
             eui64,
             DeviceLinkKey {
                 key,
-                verified: true,
+                attributes: KeyAttributes::Verified,
             },
         );
     }
 
-    /// A factory-reset device only knows the well-known link key; any previously
-    /// negotiated unique key is stale.
-    pub fn forget_device_key(&mut self, eui64: Eui64) {
-        self.device_keys.remove(&eui64);
+    /// Register a link key provisioned out of band (derived from an install code)
+    /// for a device expected to join: an `apsDeviceKeyPairSet` entry with
+    /// `PROVISIONAL_KEY` attributes, replacing the well-known key for that device.
+    pub fn set_provisional_key(&mut self, eui64: Eui64, key: Key) {
+        self.device_keys.insert(
+            eui64,
+            DeviceLinkKey {
+                key,
+                attributes: KeyAttributes::Provisional,
+            },
+        );
+    }
+
+    /// A device is joining fresh. A provisional (install-code) entry is its
+    /// pre-configured link key and survives the join, returned for the client to
+    /// persist; any other key on record is stale, since a factory-new device only
+    /// knows the well-known link key.
+    pub fn begin_join(&mut self, eui64: Eui64) -> Option<Key> {
+        match self.device_keys.get(&eui64) {
+            Some(entry) if entry.attributes == KeyAttributes::Provisional => {
+                Some(entry.key.clone())
+            }
+            Some(_) => {
+                self.device_keys.remove(&eui64);
+                None
+            }
+            None => None,
+        }
     }
 
     pub fn has_device_key(&self, eui64: Eui64) -> bool {
@@ -80,7 +114,7 @@ impl ApsSecurity {
             eui64,
             DeviceLinkKey {
                 key: key.clone(),
-                verified: false,
+                attributes: KeyAttributes::Unverified,
             },
         );
 
@@ -101,7 +135,7 @@ impl ApsSecurity {
         let entry = self.device_keys.get_mut(&eui64)?;
 
         if constant_time_eq(&verify_key_hash(&entry.key), hash) {
-            entry.verified = true;
+            entry.attributes = KeyAttributes::Verified;
             Some(true)
         } else {
             Some(false)
