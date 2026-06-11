@@ -178,8 +178,8 @@ impl SpinelRxFrame {
 pub enum SpinelError {
     #[error("io error")]
     IoError(#[from] std::io::Error),
-    #[error("client has disconnected")]
-    ChannelClosed,
+    #[error("command cancelled by an RCP reset")]
+    CancelledByReset,
     #[error("timeout")]
     Timeout,
     #[error("spinel U21 parsing error")]
@@ -375,7 +375,7 @@ impl SpinelClient {
                     .expect("Failed to lock Spinel")
                     .cancel_request(frame.header.transaction_id);
 
-                Err(SpinelError::ChannelClosed)
+                Err(SpinelError::CancelledByReset)
             }
             Err(_) => {
                 self.protocol

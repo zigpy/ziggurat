@@ -627,7 +627,7 @@ impl SpinelProtocol {
     }
 
     /// Dropping the senders resolves every in-flight `send_command` immediately with
-    /// `ChannelClosed` instead of stranding it until the timeout.
+    /// `CancelledByReset` instead of stranding it until the timeout.
     pub fn fail_all_pending_requests(&mut self) {
         self.pending_frames.clear();
     }

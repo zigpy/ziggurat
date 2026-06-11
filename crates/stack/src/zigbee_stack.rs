@@ -709,8 +709,6 @@ impl ZigbeeStack {
     // This function intentionally holds locks across await points to maintain
     // exclusive access to shared state during frame processing.
     pub async fn run(&self) {
-        self.start_network().await.expect("Failed to start network");
-
         loop {
             let (packet, ieee802154_frame) = self.recv_frame().await;
 
@@ -861,9 +859,15 @@ impl ZigbeeStack {
     }
 
     pub async fn start_network(&self) -> Result<(), ZigbeeStackError> {
-        // Never inherit whatever state the RCP was left in
-        self.reset_radio().await?;
-        self.apply_radio_configuration().await?;
+        // Never inherit whatever state the RCP was left in. The radio lock is held so
+        // that a concurrent transmit or scan cannot interleave with the reset and
+        // reprogramming; it must be released before the link status broadcast below,
+        // which takes it to transmit.
+        {
+            let _radio_lock = self.spinel.lock_radio().await;
+            self.reset_radio().await?;
+            self.apply_radio_configuration().await?;
+        }
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will
         // "respond" to empty link status broadcasts proactively, independent of the
@@ -1054,6 +1058,11 @@ impl ZigbeeStack {
             };
 
             log::error!("RCP reset detected ({status:?}), reprogramming the radio");
+
+            // The reset failed every in-flight command, so current lock holders
+            // release promptly; holding the lock keeps new transmits and scans off
+            // the radio until it is fully reprogrammed
+            let _radio_lock = self.spinel.lock_radio().await;
 
             while let Err(err) = self.apply_radio_configuration().await {
                 log::error!("Failed to reprogram the radio: {err}, retrying");

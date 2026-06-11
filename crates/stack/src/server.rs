@@ -346,7 +346,7 @@ impl ZigguratServer {
             let Request { id, method, params } = request;
 
             let message = match method.as_str() {
-                "configure" => server.handle_configure(id, params),
+                "configure" => server.handle_configure(id, params).await,
                 "send_aps" => server.handle_send_aps(id, params, &outbound).await,
                 "energy_scan" => server.handle_energy_scan(id, params).await,
                 "permit_joins" => server.handle_permit_joins(id, params),
@@ -361,7 +361,7 @@ impl ZigguratServer {
     /// (Re)initializes the Zigbee stack. The stack deliberately outlives client
     /// connections; reconfiguring replaces it wholesale.
     #[allow(clippy::significant_drop_tightening)]
-    fn handle_configure(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+    async fn handle_configure(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
         let request: ConfigureRequest = match serde_json::from_value(params) {
             Ok(request) => request,
             Err(e) => return error_response(id, "invalid_request", e),
@@ -438,6 +438,14 @@ impl ZigguratServer {
                 "Restored {} trust center link keys",
                 aps_security.device_key_count()
             );
+        }
+
+        // The success response is the client's permission to send commands: the
+        // network must be fully up (RCP reset handled, radio programmed) before
+        // replying, or the client's first command would race with the boot-time reset.
+        if let Err(e) = stack.start_network().await {
+            stack.shutdown();
+            return error_response(id, "network_start_failed", e);
         }
 
         let stack_clone = stack.clone();
