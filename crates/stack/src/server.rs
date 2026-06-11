@@ -102,6 +102,8 @@ struct ConfigureRequest {
     tc_link_key: Option<Key>,
     #[serde(default)]
     key_table: Vec<KeyTableEntry>,
+    #[serde(default)]
+    source_routing: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -393,6 +395,7 @@ impl ZigguratServer {
             request.network_key,
             request.network_key_seq,
             request.network_key_tx_counter,
+            request.source_routing,
         );
 
         // Restore unique trust center link keys negotiated in earlier sessions

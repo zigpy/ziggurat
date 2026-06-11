@@ -117,6 +117,15 @@ pub struct DiscoveryEntry {
     pub destination_address: Nwk,
 }
 
+/// An outbound routing decision for a frame we originate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Transmit to this next hop; intermediate routers handle the rest
+    NextHop(Nwk),
+    /// Embed a source route subframe; the MAC destination is the last relay
+    SourceRouted(Vec<Nwk>),
+}
+
 /// What to do with an accepted route reply.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteReplyDisposition {
@@ -134,8 +143,7 @@ pub enum RouteReplyDisposition {
 ///
 /// IO-free by design: pure state and computation — no locks, no async, no radio — so
 /// routing scenarios are testable without hardware. The async shell parses frames,
-/// resolves neighbor costs, and executes the returned decisions. Source routing will
-/// land here: `next_hop` grows a source-route arm consuming the route record table.
+/// resolves neighbor costs, and executes the returned decisions.
 #[derive(Debug)]
 pub struct Routing {
     network_address: Nwk,
@@ -226,7 +234,38 @@ impl Routing {
     }
 
     pub fn store_route_record(&mut self, source: Nwk, relays: Vec<Nwk>) {
+        // Spec 3.6.4.5.5: the new route also replaces any existing source routes to
+        // the intermediary relays. The relays between relay `i` and us form its own
+        // route; the last relay delivered the record to us directly.
+        for i in 1..relays.len() {
+            self.route_record_table
+                .insert(relays[i - 1], relays[i..].to_vec());
+        }
+        if let Some(&last) = relays.last() {
+            self.route_record_table.insert(last, Vec::new());
+        }
+
         self.route_record_table.insert(source, relays);
+    }
+
+    pub fn remove_route_record(&mut self, destination: Nwk) -> bool {
+        self.route_record_table.remove(&destination).is_some()
+    }
+
+    /// The outbound route for a frame we originate. A stored source route wins over
+    /// the routing table: it is self-contained, while a table entry relies on every
+    /// intermediate router still holding state (and our entries toward devices are
+    /// mostly reverse-route side effects of their discoveries). This deviates from
+    /// the spec's table-first order (3.6.4.3).
+    pub fn route_to(&self, destination: Nwk, max_source_route: u8) -> Option<Route> {
+        match self.route_record_table.get(&destination) {
+            // Spec 3.6.4.3.1: no intermediate relays means direct transmission
+            Some(relays) if relays.is_empty() => Some(Route::NextHop(destination)),
+            Some(relays) if relays.len() < max_source_route as usize => {
+                Some(Route::SourceRouted(relays.clone()))
+            }
+            _ => self.next_hop(destination).map(Route::NextHop),
+        }
     }
 
     /// Prepare table state for a route discovery we originate: the routing entry enters

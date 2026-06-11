@@ -193,6 +193,14 @@ pub struct PendingIndirectTransaction {
     pub completion: oneshot::Sender<Result<(), ZigbeeStackError>>,
 }
 
+/// Route-repair signals counted between many-to-one route requests; crossing a
+/// threshold advances the next advertisement to the scheduler's min interval
+#[derive(Debug, Default)]
+pub struct MtorrTriggers {
+    pub route_errors: u8,
+    pub delivery_failures: u8,
+}
+
 #[derive(Debug)]
 pub struct NwkBroadcastTransaction {
     pub source_nwk: Nwk,
@@ -213,7 +221,6 @@ pub enum NwkDeviceType {
 #[derive(Debug)]
 pub struct Constants {
     pub concentrator_radius: u8,
-    pub concentrator_discovery_time: Duration,
     pub stack_profile: u8,
     pub transaction_persistence_time: Duration,
     pub max_source_route: u8,
@@ -224,10 +231,21 @@ pub struct Constants {
     /// The maximum number of retries allowed after a broadcast transmission failure.
     pub max_broadcast_retries: u8,
 
-    /// The minimum time, in seconds, between two consecutive concentrator route
-    /// discoveries. If set to 0x00, there is no minimum separation. This only applies
-    /// when the device is operating as a Concentrator.
-    pub concentrator_discovery_separation_time: Duration,
+    /// The minimum time between two consecutive many-to-one route requests, even when
+    /// error thresholds are crossed.
+    pub mtorr_min_interval: Duration,
+
+    /// The maximum time between two consecutive many-to-one route requests; the
+    /// baseline advertisement period.
+    pub mtorr_max_interval: Duration,
+
+    /// The number of received route-failure network status commands that triggers an
+    /// early many-to-one route request.
+    pub mtorr_route_error_threshold: u8,
+
+    /// The number of locally failed unicast deliveries that triggers an early
+    /// many-to-one route request.
+    pub mtorr_delivery_failure_threshold: u8,
 
     /// The time between link status command frames.
     pub link_status_period: Duration,
@@ -284,8 +302,10 @@ impl Constants {
             transaction_persistence_time: Duration::from_millis(7680),
             stack_profile: 2,
             concentrator_radius: 10,
-            concentrator_discovery_time: Duration::from_secs(60),
-            concentrator_discovery_separation_time: Duration::from_secs(0),
+            mtorr_min_interval: Duration::from_secs(10),
+            mtorr_max_interval: Duration::from_secs(60),
+            mtorr_route_error_threshold: 3,
+            mtorr_delivery_failure_threshold: 1,
             link_status_period: Duration::from_secs(15),
             router_age_limit: 3,
             protocol_version: 2,
@@ -454,6 +474,7 @@ impl State {
         global_link_key: Key,
         route_discovery_time: Duration,
         max_neighbor_age: Duration,
+        source_routing: bool,
     ) -> Self {
         Self {
             channel: Mutex::new(channel),
@@ -489,7 +510,7 @@ impl State {
             network_address,
             broadcast_transaction_table: Mutex::new(HashMap::new()),
             extended_pan_id,
-            is_concentrator: true,
+            is_concentrator: source_routing,
             security_level: 5,
             security_material_primary: Mutex::new(NwkSecurityDescriptor {
                 key_seq_number,
@@ -573,6 +594,12 @@ pub struct ZigbeeStack {
     /// network-wide broadcast storm (spec 2.4.3.1.12.2)
     pub(crate) parent_annce_received: Mutex<Option<Instant>>,
 
+    /// Wakes the MTORR scheduler before its max interval when accumulated route
+    /// errors or delivery failures cross their thresholds
+    pub(crate) mtorr_kick: Notify,
+    /// Route-repair signals accumulated since the last many-to-one route request
+    pub(crate) mtorr_triggers: Mutex<MtorrTriggers>,
+
     /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
     /// a leaked background task keeps the old serial port open and its reader steals
     /// responses from the new stack
@@ -593,6 +620,7 @@ impl ZigbeeStack {
         key: Key,
         key_seq_number: u8,
         outgoing_frame_counter: u32,
+        source_routing: bool,
     ) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
         let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
@@ -619,6 +647,7 @@ impl ZigbeeStack {
                 constants.global_link_key.clone(),
                 constants.route_discovery_time,
                 u32::from(constants.router_age_limit) * constants.link_status_period,
+                source_routing,
             ),
             constants,
             spinel,
@@ -629,6 +658,8 @@ impl ZigbeeStack {
             src_match_sync: Notify::new(),
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
+            mtorr_kick: Notify::new(),
+            mtorr_triggers: Mutex::new(MtorrTriggers::default()),
             background_tasks: Mutex::new(JoinSet::new()),
         });
 

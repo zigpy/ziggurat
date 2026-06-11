@@ -12,7 +12,7 @@ use zigbee_parts::commands::{
 };
 
 use super::routing::{RouteReplyDisposition, Status};
-use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
+use super::{MAX_LOCK_DURATION, MtorrTriggers, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     fn notify_routing_change(&self, nwk: &Nwk) {
@@ -372,7 +372,52 @@ impl ZigbeeStack {
 
         loop {
             self.send_many_to_one_route_request().await;
-            tokio::time::sleep(self.constants.concentrator_discovery_time).await;
+
+            *self.mtorr_triggers.try_lock_for(MAX_LOCK_DURATION).unwrap() =
+                MtorrTriggers::default();
+
+            let min_deadline = Instant::now() + self.constants.mtorr_min_interval;
+            let max_deadline = Instant::now() + self.constants.mtorr_max_interval;
+
+            // Avertise every max interval, sooner when accumulated route errors or
+            // delivery failures signal that routes toward us have gone bad, but never
+            // within the min interval
+            tokio::select! {
+                () = tokio::time::sleep_until(max_deadline) => {}
+                () = self.mtorr_kick.notified() => {
+                    tokio::time::sleep_until(min_deadline).await;
+                }
+            }
+        }
+    }
+
+    /// Count a received route-failure network status toward an early many-to-one
+    /// route request.
+    pub(super) fn note_route_error(&self) {
+        if !self.state.is_concentrator {
+            return;
+        }
+
+        let mut triggers = self.mtorr_triggers.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        triggers.route_errors = triggers.route_errors.saturating_add(1);
+
+        if triggers.route_errors >= self.constants.mtorr_route_error_threshold {
+            self.mtorr_kick.notify_one();
+        }
+    }
+
+    /// Count a locally failed unicast delivery toward an early many-to-one route
+    /// request.
+    pub(super) fn note_delivery_failure(&self) {
+        if !self.state.is_concentrator {
+            return;
+        }
+
+        let mut triggers = self.mtorr_triggers.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        triggers.delivery_failures = triggers.delivery_failures.saturating_add(1);
+
+        if triggers.delivery_failures >= self.constants.mtorr_delivery_failure_threshold {
+            self.mtorr_kick.notify_one();
         }
     }
 
@@ -405,30 +450,37 @@ impl ZigbeeStack {
             | NwkNetworkStatus::LegacyLinkFailure
             | NwkNetworkStatus::LinkFailure
             | NwkNetworkStatus::SourceRouteFailure => {
-                if self
-                    .state
-                    .routing
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .remove_route(network_status_cmd.network_address)
-                {
+                let mut routing = self.state.routing.try_lock_for(MAX_LOCK_DURATION).unwrap();
+
+                let removed_route = routing.remove_route(network_status_cmd.network_address);
+
+                // A relay reported the stored path broken; the next transmission
+                // falls back to discovery until a fresh route record arrives
+                let removed_record = network_status_cmd.status_code
+                    == NwkNetworkStatus::SourceRouteFailure
+                    && routing.remove_route_record(network_status_cmd.network_address);
+
+                drop(routing);
+
+                if removed_route {
                     log::info!(
                         "Removed failed route to {:?}",
                         network_status_cmd.network_address
                     );
                 }
+                if removed_record {
+                    log::info!(
+                        "Removed failed source route to {:?}",
+                        network_status_cmd.network_address
+                    );
+                }
+
+                self.note_route_error();
             }
             NwkNetworkStatus::ManyToOneRouteFailure => {
                 // Spec 3.6.4.8.2: the concentrator repairs many-to-one routes by
-                // advertising itself again
-                let arc_self = self
-                    .self_weak
-                    .upgrade()
-                    .expect("Unable to upgrade self reference");
-
-                self.spawn_tracked(async move {
-                    arc_self.send_many_to_one_route_request().await;
-                });
+                // advertising itself again; the scheduler throttles the repair
+                self.note_route_error();
             }
             NwkNetworkStatus::AddressConflict => {
                 self.handle_address_conflict(network_status_cmd.network_address, false);

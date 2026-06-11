@@ -5,7 +5,7 @@ use crate::ieee_802154::{
 use crate::zigbee_nwk::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, EncryptedNwkFrame,
     NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
-    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel, NwkSourceRoute,
 };
 use ieee_802154::types::{Eui64, Nwk};
 use tokio::time::Instant;
@@ -14,6 +14,7 @@ use zigbee_parts::commands::{
     NwkCommandId, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
 };
 
+use super::routing::Route;
 use super::{
     MAX_LOCK_DURATION, NwkBroadcastTransaction, NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
 };
@@ -405,18 +406,55 @@ impl ZigbeeStack {
         }
     }
 
+    /// The outbound route for a frame we originate, preferring stored source routes
+    /// (concentrator behavior). None falls back to ad-hoc route discovery.
+    fn outbound_route(&self, destination: Nwk) -> Option<Route> {
+        if !self.state.is_concentrator || self.state.hack_force_route_discovery {
+            return None;
+        }
+
+        // Our own end device children are always addressed directly; a stale route
+        // record could otherwise outlive a device rejoining as our child
+        if self.end_device_child_eui64(destination).is_some() {
+            return None;
+        }
+
+        self.state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .route_to(destination, self.constants.max_source_route)
+    }
+
     pub async fn send_unicast_nwk_frame(
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         route_directly: bool,
     ) -> Result<(), ZigbeeStackError> {
+        let destination = nwk_frame.nwk_header.destination;
+
         // Compute a next-hop address
-        let next_hop_address = if !route_directly {
-            self.discover_route(nwk_frame.nwk_header.destination)
-                .await?
+        let next_hop_address = if route_directly {
+            destination
         } else {
-            nwk_frame.nwk_header.destination
+            match self.outbound_route(destination) {
+                Some(Route::NextHop(next_hop)) => next_hop,
+                Some(Route::SourceRouted(relays)) => {
+                    // Spec 3.6.4.3.1: the MAC destination is the relay closest to
+                    // us, which is listed last; the relay index starts at one less
+                    // than the relay count
+                    let next_hop = *relays.last().unwrap();
+                    nwk_frame.nwk_header.frame_control.source_route = true;
+                    nwk_frame.nwk_header.frame_control.discover_route = NwkRouteDiscovery::Suppress;
+                    nwk_frame.nwk_header.source_route = Some(NwkSourceRoute {
+                        relay_index: relays.len() as u8 - 1,
+                        relays,
+                    });
+                    next_hop
+                }
+                None => self.discover_route(destination).await?,
+            }
         };
 
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
@@ -425,10 +463,27 @@ impl ZigbeeStack {
             .transmit_unicast_nwk_frame(nwk_frame, next_hop_address, security)
             .await;
 
-        // A dead next hop invalidates every route through it; the next transmission
-        // will rediscover
+        // A dead next hop invalidates every route through it and any stored source
+        // route to the destination; the next transmission will rediscover
         if result.is_err() {
             self.invalidate_routes_via(next_hop_address);
+
+            if self
+                .state
+                .routing
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .remove_route_record(destination)
+            {
+                log::info!("Removed source route to {destination:?} after delivery failure");
+            }
+
+            // Failed deliveries push the MTORR scheduler toward an early
+            // advertisement; expired indirect transactions to our own sleepy
+            // children are not routing failures
+            if self.sleepy_child_eui64(next_hop_address).is_none() {
+                self.note_delivery_failure();
+            }
         }
 
         result
