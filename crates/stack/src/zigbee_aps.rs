@@ -710,7 +710,7 @@ fn encrypt_aps_payload(
     let mut auth_data = header.to_vec();
     modified_aux_header.serialize_into(&mut auth_data);
 
-    encrypt_ccm(key, &nonce, &auth_data, plaintext)
+    encrypt_ccm(key, &nonce, &auth_data, plaintext.to_vec())
 }
 
 /// Reverse of [`encrypt_aps_payload`]: verify the MIC and return the decrypted payload.
@@ -729,7 +729,12 @@ fn decrypt_aps_payload(
     let mut auth_data = header.to_vec();
     modified_aux_header.serialize_into(&mut auth_data);
 
-    Ok(decrypt_ccm(key, &nonce, &auth_data, tagged_ciphertext)?)
+    Ok(decrypt_ccm(
+        key,
+        &nonce,
+        &auth_data,
+        tagged_ciphertext.to_vec(),
+    )?)
 }
 
 #[derive(Educe, Clone, PartialEq, Eq)]

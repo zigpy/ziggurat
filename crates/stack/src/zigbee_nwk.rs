@@ -425,7 +425,9 @@ impl EncryptedNwkFrame {
         bytes
     }
 
-    pub fn decrypt(&self, key: &Key) -> Result<NwkFrame, DecryptionError> {
+    /// Consumes the frame: the ciphertext buffer is decrypted in place and becomes the
+    /// payload, and the headers move into the decrypted frame.
+    pub fn decrypt(self, key: &Key) -> Result<NwkFrame, DecryptionError> {
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
 
@@ -433,11 +435,11 @@ impl EncryptedNwkFrame {
         self.nwk_header.serialize_into(&mut auth_data);
         aux_header.serialize_into(&mut auth_data);
 
-        let payload = decrypt_ccm(key, &nonce, &auth_data, &self.ciphertext)?;
+        let payload = decrypt_ccm(key, &nonce, &auth_data, self.ciphertext)?;
 
         Ok(NwkFrame {
-            nwk_header: self.nwk_header.clone(),
-            aux_header: self.aux_header.clone(),
+            nwk_header: self.nwk_header,
+            aux_header: self.aux_header,
             payload,
         })
     }
@@ -487,7 +489,7 @@ impl NwkFrame {
         EncryptedNwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
-            ciphertext: encrypt_ccm(key, &nonce, &auth_data, &self.payload),
+            ciphertext: encrypt_ccm(key, &nonce, &auth_data, self.payload.clone()),
         }
     }
 }
@@ -542,7 +544,7 @@ mod test {
         assert_eq!(nwk_frame, expected_nwk_frame);
 
         let key = Key::from_hex("e8785a1ed5996b3ef715cb3fbdd69187");
-        let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
+        let decrypted_nwk_frame = nwk_frame.clone().decrypt(&key).unwrap();
 
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
@@ -607,7 +609,7 @@ mod test {
         assert_eq!(nwk_frame, expected_nwk_frame);
 
         let key = Key::from_hex("31908c7c51c2f01552bc90cc16e5443d");
-        let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
+        let decrypted_nwk_frame = nwk_frame.clone().decrypt(&key).unwrap();
 
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,

@@ -136,11 +136,10 @@ fn cipher_for(key: &Key) -> ZigbeeCcm {
         .clone()
 }
 
-/// CCM*-protect a payload: `auth_data` is authenticated, `plaintext` is encrypted, and
-/// the encrypted MIC ("MAC tag") is appended.
-pub fn encrypt_ccm(key: &Key, nonce: &[u8; 13], auth_data: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let mut buffer = Vec::with_capacity(plaintext.len() + MIC_LENGTH);
-    buffer.extend_from_slice(plaintext);
+/// CCM*-protect a payload in place: `auth_data` is authenticated, the buffer is
+/// encrypted, and the encrypted MIC ("MAC tag") is appended to it.
+pub fn encrypt_ccm(key: &Key, nonce: &[u8; 13], auth_data: &[u8], mut buffer: Vec<u8>) -> Vec<u8> {
+    buffer.reserve_exact(MIC_LENGTH);
     let mic = cipher_for(key)
         .encrypt_inout_detached(&(*nonce).into(), auth_data, buffer.as_mut_slice().into())
         .expect("frames are far below the CCM length limits");
@@ -148,30 +147,33 @@ pub fn encrypt_ccm(key: &Key, nonce: &[u8; 13], auth_data: &[u8], plaintext: &[u
     buffer
 }
 
-/// Reverse of [`encrypt_ccm`]: verify the MIC and return the decrypted payload.
+/// Reverse of [`encrypt_ccm`]: verify the MIC and decrypt in place, returning the
+/// buffer truncated to the plaintext.
 pub fn decrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
-    tagged_ciphertext: &[u8],
+    mut tagged_ciphertext: Vec<u8>,
 ) -> Result<Vec<u8>, DecryptionError> {
     let ciphertext_len = tagged_ciphertext
         .len()
         .checked_sub(MIC_LENGTH)
         .ok_or(DecryptionError::CiphertextTooShort)?;
-    let (ciphertext, mic) = tagged_ciphertext.split_at(ciphertext_len);
+    let (ciphertext, mic) = tagged_ciphertext.split_at_mut(ciphertext_len);
 
-    let mut buffer = ciphertext.to_vec();
     cipher_for(key)
         .decrypt_inout_detached(
             &(*nonce).into(),
             auth_data,
-            buffer.as_mut_slice().into(),
-            mic.try_into().expect("the MIC is exactly MIC_LENGTH bytes"),
+            ciphertext.into(),
+            (&*mic)
+                .try_into()
+                .expect("the MIC is exactly MIC_LENGTH bytes"),
         )
         .map_err(|_| DecryptionError::InvalidMacTag)?;
 
-    Ok(buffer)
+    tagged_ciphertext.truncate(ciphertext_len);
+    Ok(tagged_ciphertext)
 }
 
 #[cfg(test)]
