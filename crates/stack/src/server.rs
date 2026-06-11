@@ -347,6 +347,7 @@ impl ZigguratServer {
 
             let message = match method.as_str() {
                 "configure" => server.handle_configure(id, params).await,
+                "get_hw_address" => server.handle_get_hw_address(id).await,
                 "send_aps" => server.handle_send_aps(id, params, &outbound).await,
                 "energy_scan" => server.handle_energy_scan(id, params).await,
                 "permit_joins" => server.handle_permit_joins(id, params),
@@ -467,6 +468,18 @@ impl ZigguratServer {
 
         log::info!("Zigbee stack initialized and running.");
         response(id, json!({"status": "success"}))
+    }
+
+    /// Reads the radio's factory-programmed EUI64.
+    async fn handle_get_hw_address(&self, id: u64) -> serde_json::Value {
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        match stack.spinel.get_hw_address().await {
+            Ok(ieee) => response(id, json!({"ieee_address": eui64_to_string(ieee)})),
+            Err(e) => error_response(id, "hw_address_failed", e),
+        }
     }
 
     async fn handle_send_aps(

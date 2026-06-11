@@ -4,6 +4,7 @@ use crate::spinel::{
     hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
 };
 use ieee_802154::FrameBytes;
+use ieee_802154::types::Eui64;
 use std::string::String;
 use thiserror::Error;
 use tokio_serial::SerialStream;
@@ -494,6 +495,23 @@ impl SpinelClient {
         Ok(ncp_version_with_null
             .trim_matches(char::from(0x00))
             .to_string())
+    }
+
+    /// The radio's factory-programmed EUI64, a core property readable in any RCP state.
+    pub async fn get_hw_address(&self) -> Result<Eui64, SpinelError> {
+        let rsp = self.prop_value_get(SpinelPropertyId::Hwaddr).await?;
+
+        let mut bytes: [u8; 8] =
+            rsp.try_into()
+                .map_err(|rsp: Vec<u8>| SpinelError::InvalidResponseError {
+                    reason: format!("Invalid hardware address: {rsp:02X?}"),
+                })?;
+
+        // Spinel EUI64 fields are byte-reversed relative to the over-the-air order
+        // that `Eui64` stores
+        bytes.reverse();
+
+        Ok(Eui64(bytes))
     }
 
     pub async fn transmit_frame(
