@@ -206,9 +206,15 @@ pub struct NwkBroadcastTransaction {
     pub source_nwk: Nwk,
     pub sequence_number: u8,
     pub expiration_time: Instant,
-    // The spec does not describe how this is supposed to be implemented so we just do
-    // it naively
-    // pub relayed_neighbors: HashMap<Eui64, Instant>,
+    /// The router neighbors that were the transmission's audience, snapshotted when
+    /// the transaction is created. A passive acknowledgment is expected only from
+    /// audience members that are still live neighbors: routers that became
+    /// neighbors later owe no ack, and routers that ceased being neighbors can
+    /// never give one
+    pub expected_relayers: Vec<Nwk>,
+    /// Neighbors heard relaying this broadcast: their passive acknowledgments
+    /// (spec 3.6.6)
+    pub heard_from: HashSet<Nwk>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +236,12 @@ pub struct Constants {
 
     /// The maximum number of retries allowed after a broadcast transmission failure.
     pub max_broadcast_retries: u8,
+
+    /// A broadcast with at least this many expected relayers is considered passively
+    /// acknowledged once this many of them have been heard, instead of all of them.
+    // TODO: replace the fixed quorum with probabilistic modeling of propagation,
+    // e.g. per-neighbor estimates of how reliably we hear their rebroadcasts
+    pub broadcast_passive_ack_quorum: usize,
 
     /// The minimum time between two consecutive many-to-one route requests, even when
     /// error thresholds are crossed.
@@ -296,6 +308,7 @@ impl Constants {
         Self {
             passive_ack_timeout: Duration::from_millis(500),
             max_broadcast_retries: 2,
+            broadcast_passive_ack_quorum: 8,
             max_children: 32,
             max_depth: 15,
             max_source_route: 12,

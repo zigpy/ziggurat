@@ -8,6 +8,7 @@ use crate::zigbee_nwk::{
     NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel, NwkSourceRoute,
 };
 use ieee_802154::types::{Eui64, Nwk};
+use std::collections::HashSet;
 use tokio::time::Instant;
 use zigbee_parts::Command;
 use zigbee_parts::commands::{
@@ -60,7 +61,7 @@ impl ZigbeeStack {
     }
 
     /// Filter broadcast frames based on the NWK broadcast transaction table
-    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame) -> bool {
+    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) -> bool {
         let now = Instant::now();
 
         // We cannot handle broadcasts until the network has been running for at least
@@ -77,6 +78,15 @@ impl ZigbeeStack {
             nwk_frame.nwk_header.sequence_number,
         );
 
+        // The passive ack contract is formed when the transaction is created: only
+        // routers that were neighbors at that point are expected to relay
+        let expected_relayers = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .expected_broadcast_relayers();
+
         let mut broadcast_transaction_table = self
             .state
             .broadcast_transaction_table
@@ -86,7 +96,10 @@ impl ZigbeeStack {
         // Expired entries can be dropped wholesale
         broadcast_transaction_table.retain(|_, entry| entry.expiration_time > now);
 
-        if broadcast_transaction_table.contains_key(&key) {
+        if let Some(transaction) = broadcast_transaction_table.get_mut(&key) {
+            // Spec 3.6.6: a neighbor relaying a broadcast we know about is its
+            // passive acknowledgment of that broadcast
+            transaction.heard_from.insert(sender_nwk);
             return true;
         }
 
@@ -96,10 +109,55 @@ impl ZigbeeStack {
                 source_nwk: nwk_frame.nwk_header.source,
                 sequence_number: nwk_frame.nwk_header.sequence_number,
                 expiration_time: now + self.constants.broadcast_delivery_time,
+                expected_relayers,
+                // Whoever delivered the frame to us has already broadcast it
+                heard_from: HashSet::from([sender_nwk]),
             },
         );
 
         false
+    }
+
+    /// Spec 3.6.6: a broadcast is fully delivered once every router that was in the
+    /// transaction's audience and is still a live neighbor has been heard relaying
+    /// it. Routers that became neighbors after the transmission owe no passive ack;
+    /// routers that ceased being neighbors can never give one.
+    ///
+    /// In dense neighborhoods and with unbounded neighbor tables it is unreasonable to
+    /// wait for all ~40 nearby routers to acknowledge a broadcast. We instead just wait
+    /// for _enough_ of them (8) to have rebroadcast it.
+    fn broadcast_passively_acked(&self, key: (Nwk, u8)) -> bool {
+        let live_relayers = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .expected_broadcast_relayers();
+
+        // An expired (absent) entry means the delivery window has already closed
+        self.state
+            .broadcast_transaction_table
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .get(&key)
+            .is_none_or(|transaction| {
+                let audience: Vec<Nwk> = transaction
+                    .expected_relayers
+                    .iter()
+                    .filter(|nwk| live_relayers.contains(nwk))
+                    .copied()
+                    .collect();
+
+                let heard = audience
+                    .iter()
+                    .filter(|nwk| transaction.heard_from.contains(nwk))
+                    .count();
+
+                heard
+                    >= audience
+                        .len()
+                        .min(self.constants.broadcast_passive_ack_quorum)
+            })
     }
 
     pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, lqi: u8, rssi: i8) {
@@ -161,7 +219,7 @@ impl ZigbeeStack {
             >= BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
             && !bypasses_transaction_table
         {
-            if self.filter_broadcast(nwk_frame) {
+            if self.filter_broadcast(nwk_frame, sender_nwk) {
                 log::debug!("Filtering broadcast, stopping further processing");
                 return;
             }
@@ -638,6 +696,20 @@ impl ZigbeeStack {
     ) -> Result<(), ZigbeeStackError> {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
+        let key = (
+            nwk_frame.nwk_header.source,
+            nwk_frame.nwk_header.sequence_number,
+        );
+
+        // The passive ack contract is formed at transmission time: only routers that
+        // are neighbors right now are expected to relay
+        let expected_relayers = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .expected_broadcast_relayers();
+
         // Record our own broadcast so that copies relayed back to us by neighbors are
         // filtered instead of re-processed (spec 3.6.6)
         self.state
@@ -645,39 +717,37 @@ impl ZigbeeStack {
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
             .insert(
-                (
-                    nwk_frame.nwk_header.source,
-                    nwk_frame.nwk_header.sequence_number,
-                ),
+                key,
                 NwkBroadcastTransaction {
                     source_nwk: nwk_frame.nwk_header.source,
                     sequence_number: nwk_frame.nwk_header.sequence_number,
                     expiration_time: Instant::now() + self.constants.broadcast_delivery_time,
+                    expected_relayers,
+                    heard_from: HashSet::new(),
                 },
             );
 
-        // TODO: implement logic to detect when broadcasts have been successfully
-        // sent. This is done by keeping track of which neighbor routers have been
-        // "heard" relaying it. For now, we just retry a few times.
+        // Spec 3.6.6: retransmit only while some live router neighbor has not been
+        // heard relaying the frame within the passive ack timeout
         for attempt in 0..=self.constants.max_broadcast_retries {
+            if attempt > 0 {
+                tokio::time::sleep(self.constants.passive_ack_timeout).await;
+
+                if self.broadcast_passively_acked(key) {
+                    log::debug!("Broadcast {key:?} passively acknowledged by all routers");
+                    return Ok(());
+                }
+
+                log::debug!(
+                    "Broadcast {key:?} is missing passive acks, retransmitting \
+                     (attempt {attempt} of {})",
+                    self.constants.max_broadcast_retries,
+                );
+            }
+
             let _ = self
                 .transmit_broadcast_nwk_frame(nwk_frame.clone(), security)
                 .await;
-
-            if attempt < self.constants.max_broadcast_retries {
-                let sleep_time = self
-                    .constants
-                    .max_broadcast_jitter
-                    .mul_f32(rand::random::<f32>());
-                log::debug!(
-                    "Retrying broadcast frame send, attempt {} of {} in {:?}",
-                    attempt,
-                    self.constants.max_broadcast_retries,
-                    sleep_time,
-                );
-
-                tokio::time::sleep(sleep_time).await;
-            }
         }
 
         Ok(())
@@ -941,22 +1011,37 @@ impl ZigbeeStack {
             return;
         }
 
+        let key = (
+            relayed_frame.nwk_header.source,
+            relayed_frame.nwk_header.sequence_number,
+        );
+
         let arc_self = self
             .self_weak
             .upgrade()
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            // Without passive acknowledgement tracking, the frame is retransmitted a
-            // fixed number of times
-            for _ in 0..=arc_self.constants.max_broadcast_retries {
-                tokio::time::sleep(
-                    arc_self
-                        .constants
-                        .max_broadcast_jitter
-                        .mul_f32(rand::random::<f32>()),
-                )
-                .await;
+            // The relay is jittered to avoid synchronized rebroadcasts (spec 3.6.6)
+            tokio::time::sleep(
+                arc_self
+                    .constants
+                    .max_broadcast_jitter
+                    .mul_f32(rand::random::<f32>()),
+            )
+            .await;
+
+            // Retransmissions follow the same passive acknowledgment rule as our own
+            // broadcasts; the neighbor we heard the frame from is already counted
+            for attempt in 0..=arc_self.constants.max_broadcast_retries {
+                if attempt > 0 {
+                    tokio::time::sleep(arc_self.constants.passive_ack_timeout).await;
+
+                    if arc_self.broadcast_passively_acked(key) {
+                        log::debug!("Relayed broadcast {key:?} passively acknowledged");
+                        return;
+                    }
+                }
 
                 if let Err(err) = arc_self
                     .transmit_broadcast_nwk_frame(

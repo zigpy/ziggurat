@@ -412,6 +412,17 @@ impl Neighbors {
         self.table.remove(&eui64);
     }
 
+    /// Router neighbors with a live link, which are expected to relay our broadcasts
+    /// (passive acknowledgment, spec 3.6.6). Aging zeroes the outgoing cost, so a
+    /// non-zero cost means the router is still exchanging link statuses with us.
+    pub fn expected_broadcast_relayers(&self) -> Vec<Nwk> {
+        self.table
+            .values()
+            .filter(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
+            .map(|entry| entry.network_address)
+            .collect()
+    }
+
     /// Reset link costs of neighbors that have stopped sending link status frames,
     /// returning their addresses so routes through them can be invalidated.
     pub fn age(&mut self) -> Vec<Nwk> {
