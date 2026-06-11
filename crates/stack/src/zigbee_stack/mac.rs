@@ -46,13 +46,7 @@ impl ZigbeeStack {
     }
 
     pub fn send_802154_beacon(&self) {
-        let permitting_joins = {
-            *self
-                .state
-                .permitting_joins
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-        };
+        let permitting_joins = self.permitting_joins();
         log::debug!("Sending 802.15.4 beacon frame");
         log::debug!("Permitting joins: {permitting_joins}");
 

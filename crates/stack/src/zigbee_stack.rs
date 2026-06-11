@@ -395,7 +395,11 @@ pub struct State {
     /// both its extended and short source address.
     pub indirect_queue: Mutex<HashMap<Ieee802154Address, VecDeque<PendingIndirectTransaction>>>,
     pub start_time: Instant,
-    pub permitting_joins: Mutex<bool>,
+    /// The deadline until which joins are permitted; `None` or a past deadline
+    /// means joins are denied. A deadline instead of a flag-plus-disable-timer
+    /// makes renewals extend the window instead of being cut short by the
+    /// earlier request's timer.
+    pub permitting_joins_until: Mutex<Option<Instant>>,
 
     // We intentionally violate the spec with these options
     //
@@ -502,7 +506,7 @@ impl State {
             address_conflicts: Mutex::new(HashMap::new()),
             indirect_queue: Mutex::new(HashMap::new()),
             start_time: Instant::now(),
-            permitting_joins: Mutex::new(false),
+            permitting_joins_until: Mutex::new(None),
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,

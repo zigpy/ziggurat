@@ -52,11 +52,7 @@ impl ZigbeeStack {
             }
         };
 
-        let permitting_joins = *self
-            .state
-            .permitting_joins
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
+        let permitting_joins = self.permitting_joins();
 
         // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
         // admitted only while capacity remains
@@ -1245,40 +1241,27 @@ impl ZigbeeStack {
     }
 
     pub fn permit_joins(&self, duration: u64) {
-        if duration == 0 {
-            let mut permitting_joins = self
-                .state
-                .permitting_joins
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-            *permitting_joins = false;
+        let deadline = if duration == 0 {
+            log::debug!("Permitting joins disabled");
+            None
         } else {
             log::debug!("Permitting joins for {duration} seconds");
+            Some(Instant::now() + Duration::from_secs(duration))
+        };
 
-            {
-                let mut permitting_joins = self
-                    .state
-                    .permitting_joins
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap();
-                *permitting_joins = true;
-            }
+        *self
+            .state
+            .permitting_joins_until
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap() = deadline;
+    }
 
-            // Spawn a task to disable permitting joins after the specified duration
-            let arc_self = self
-                .self_weak
-                .upgrade()
-                .expect("Unable to upgrade self reference");
-            self.spawn_tracked(async move {
-                tokio::time::sleep(Duration::from_secs(duration)).await;
-                let mut permitting_joins = arc_self
-                    .state
-                    .permitting_joins
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap();
-                *permitting_joins = false;
-                log::debug!("Permitting joins disabled");
-            });
-        }
+    /// Whether joins are permitted right now.
+    pub(super) fn permitting_joins(&self) -> bool {
+        self.state
+            .permitting_joins_until
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .is_some_and(|deadline| deadline > Instant::now())
     }
 }
