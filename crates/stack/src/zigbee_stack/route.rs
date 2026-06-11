@@ -42,7 +42,7 @@ impl ZigbeeStack {
             }
         };
 
-        log::info!("Route reply command frame: {route_reply_cmd:#?}");
+        log::debug!("Route reply command frame: {route_reply_cmd:?}");
 
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
@@ -145,7 +145,7 @@ impl ZigbeeStack {
             }
         };
 
-        log::info!("Route request command frame (sender {sender_nwk:#?}): {route_request_cmd:#?}");
+        log::debug!("Route request command frame (sender {sender_nwk:?}): {route_request_cmd:?}");
 
         let network_address = self.state.network_address;
         let many_to_one = route_request_cmd.many_to_one != NwkRouteRequestManyToOne::NotManyToOne;
@@ -160,7 +160,7 @@ impl ZigbeeStack {
 
         let Some(sender_link) = sender_link else {
             // Can we do anything here? Broadcast an unsolicited link status?
-            log::warn!("Route request relayer not found in neighbor table");
+            log::debug!("Route request relayer {sender_nwk:?} not found in neighbor table");
             return;
         };
 
@@ -337,7 +337,7 @@ impl ZigbeeStack {
             .unwrap()
             .begin_many_to_one_advertisement();
 
-        log::info!("Sending many-to-one route request {route_request_identifier}");
+        log::debug!("Sending many-to-one route request {route_request_identifier}");
 
         let many_to_one_request_frame = self
             .nwk_command_frame(
@@ -461,7 +461,7 @@ impl ZigbeeStack {
         };
 
         log::info!(
-            "Network status from {:?}: {network_status_cmd:#?}",
+            "Network status from {:?}: {network_status_cmd:?}",
             nwk_frame.nwk_header.source
         );
 

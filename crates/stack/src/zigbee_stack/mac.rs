@@ -47,8 +47,7 @@ impl ZigbeeStack {
 
     pub fn send_802154_beacon(&self) {
         let permitting_joins = self.permitting_joins();
-        log::debug!("Sending 802.15.4 beacon frame");
-        log::debug!("Permitting joins: {permitting_joins}");
+        log::debug!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
 
         let end_device_capacity = {
             self.state
@@ -230,7 +229,7 @@ impl ZigbeeStack {
             .get(&src_eui64)
         {
             None => {
-                log::warn!("Unknown sender, not validating frame counter");
+                log::debug!("Unknown sender, not validating frame counter");
             }
             Some(last_stored_frame_counter) => {
                 if aux_header.frame_counter <= *last_stored_frame_counter {
@@ -267,7 +266,7 @@ impl ZigbeeStack {
             }
         };
 
-        log::info!("Decrypted frame: {decrypted_nwk_frame:#?}");
+        log::debug!("Decrypted frame: {decrypted_nwk_frame:?}");
 
         // NWK frames are always relayed with 16-bit MAC addressing; anything else is
         // malformed and dropped rather than panicking on remote input
@@ -331,8 +330,8 @@ impl ZigbeeStack {
             frame
         };
 
-        log::info!("Sending 802.15.4 frame: {final_frame:#?}");
-        log::info!(
+        log::debug!("Sending 802.15.4 frame: {final_frame:?}");
+        log::trace!(
             "Sending 802.15.4 frame bytes: {:02X?}",
             final_frame.to_bytes()
         );

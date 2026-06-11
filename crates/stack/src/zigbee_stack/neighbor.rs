@@ -82,7 +82,7 @@ impl ZigbeeStack {
             }
         };
 
-        log::info!("Link status command frame: {link_status_cmd:#?}");
+        log::debug!("Link status command frame: {link_status_cmd:?}");
 
         self.maybe_age_neighbors();
 
@@ -197,7 +197,6 @@ impl ZigbeeStack {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            log::debug!("Sending periodic link status broadcast...");
             tokio::time::sleep(self.constants.link_status_period).await;
 
             self.send_link_status_broadcast(false).await;

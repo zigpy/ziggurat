@@ -673,7 +673,7 @@ impl SpinelProtocol {
     }
 
     pub fn handle_inbound_bytes(&mut self, bytes: &[u8]) {
-        log::debug!("RX bytes: {bytes:?}");
+        log::trace!("RX bytes: {bytes:?}");
 
         for frame in self.parse_frames_from_bytes(bytes) {
             self.handle_inbound_frame(frame);
@@ -701,7 +701,9 @@ impl SpinelProtocol {
                                 let _ = sender.try_send(prop_value_is);
                             }
                             None => {
-                                log::warn!("No receiver for property update: {prop_value_is:?}");
+                                // Expected for e.g. the MacScanState=IDLE update at
+                                // the end of each scanned channel
+                                log::debug!("No receiver for property update: {prop_value_is:?}");
                             }
                         }
                     }

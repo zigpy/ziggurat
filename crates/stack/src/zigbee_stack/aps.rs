@@ -241,7 +241,7 @@ impl ZigbeeStack {
             },
         };
 
-        log::debug!("Prepared APS frame: {aps_frame:#?}");
+        log::debug!("Prepared APS frame: {aps_frame:?}");
 
         let aps_payload = if let Some(destination_eui64) = aps_security {
             let encrypted = self
@@ -271,8 +271,6 @@ impl ZigbeeStack {
             .nwk_data_frame(nwk_destination, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
-
-        log::debug!("Prepared NWK frame: {nwk_frame:#?}");
 
         if !aps_ack {
             self.send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false)
@@ -330,7 +328,7 @@ impl ZigbeeStack {
     pub async fn wait_aps_ack(&self, waiter: ApsAckWaiter) -> Result<(), ZigbeeStackError> {
         match tokio::time::timeout(waiter.timeout, waiter.receiver).await {
             Ok(Ok(())) => {
-                log::info!("APS ACK received");
+                log::debug!("APS ACK received");
                 Ok(())
             }
             Ok(Err(_)) | Err(_) => {

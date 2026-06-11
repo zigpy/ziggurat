@@ -174,7 +174,7 @@ impl ZigbeeStack {
             return false;
         };
 
-        log::info!("Delivering queued indirect frame to {destination:?}");
+        log::debug!("Delivering queued indirect frame to {destination:?}");
 
         let arc_self = self
             .self_weak

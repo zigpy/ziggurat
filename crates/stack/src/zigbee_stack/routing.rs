@@ -308,7 +308,7 @@ impl Routing {
                 destination_address: destination,
             });
 
-        log::debug!("Route discovery entry: [{key:?}] = {discovery_entry:#?}");
+        log::debug!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
 
         request_id
     }
@@ -516,7 +516,7 @@ impl Routing {
 
         self.discovery_table.retain(|_, entry| {
             if entry.expiration_time <= now {
-                log::debug!("Removing expired route discovery entry: {entry:#?}");
+                log::debug!("Removing expired route discovery entry: {entry:?}");
                 expired_destinations.push(entry.destination_address);
                 false
             } else {

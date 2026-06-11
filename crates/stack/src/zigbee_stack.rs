@@ -712,8 +712,6 @@ impl ZigbeeStack {
         loop {
             let (packet, ieee802154_frame) = self.recv_frame().await;
 
-            log::debug!("Received 802.15.4 packet: {ieee802154_frame:?}");
-
             // Ignore our own packets
             if ieee802154_frame.header().src_address
                 == Some(Ieee802154Address::Nwk(self.state.network_address))
@@ -782,7 +780,7 @@ impl ZigbeeStack {
                         }
                     };
 
-                    log::debug!("Received APS data frame: {aps_frame:#?}");
+                    log::debug!("Received APS data frame: {aps_frame:?}");
 
                     // The ZDP commands that maintain stack state (the neighbor and
                     // address tables live here, not in the client) are consumed by
@@ -1060,7 +1058,7 @@ impl ZigbeeStack {
                 sleep(RADIO_RECOVERY_RETRY_INTERVAL).await;
             }
 
-            log::error!("Radio reprogrammed, resuming normal operation");
+            log::info!("Radio reprogrammed, resuming normal operation");
         }
     }
 

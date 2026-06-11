@@ -920,7 +920,6 @@ impl ZigbeeStack {
 
         match NwkCommandId::try_from(nwk_frame.payload[0]) {
             Ok(NwkCommandId::RejoinRequest) => {
-                log::info!("Unsecured (trust center) rejoin request received");
                 self.handle_rejoin_request(nwk_frame, false);
             }
             _ => {
@@ -1219,7 +1218,7 @@ impl ZigbeeStack {
             return;
         }
 
-        log::info!("Child {source:?} negotiated an end device timeout of {timeout:?}");
+        log::debug!("Child {source:?} negotiated an end device timeout of {timeout:?}");
 
         // A renegotiated timeout may move the child's deadline closer
         self.maintenance_wake.notify_one();
@@ -1256,10 +1255,10 @@ impl ZigbeeStack {
 
     pub fn permit_joins(&self, duration: u64) {
         let deadline = if duration == 0 {
-            log::debug!("Permitting joins disabled");
+            log::info!("Permitting joins disabled");
             None
         } else {
-            log::debug!("Permitting joins for {duration} seconds");
+            log::info!("Permitting joins for {duration} seconds");
             Some(Instant::now() + Duration::from_secs(duration))
         };
 

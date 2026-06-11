@@ -279,12 +279,10 @@ impl ZigbeeStack {
             match NwkCommandId::try_from(nwk_frame.payload[0]) {
                 Ok(NwkCommandId::LinkStatus) => {
                     // TODO: Error handling for decoding?
-                    log::info!("Link status command frame received");
                     self.handle_link_status(nwk_frame, lqi);
                 }
                 Ok(NwkCommandId::RouteReply) => {
                     // TODO: Error handling for decoding?
-                    log::info!("Route reply command frame received");
                     self.handle_route_reply(nwk_frame);
                 }
                 Ok(NwkCommandId::RouteRecord) => {
@@ -296,7 +294,7 @@ impl ZigbeeStack {
                                 return;
                             }
                         };
-                    log::info!("Route record command frame received: {route_record_cmd:#?}");
+                    log::debug!("Route record command frame received: {route_record_cmd:?}");
                     self.state
                         .routing
                         .try_lock_for(MAX_LOCK_DURATION)
@@ -304,22 +302,18 @@ impl ZigbeeStack {
                         .store_route_record(nwk_frame.nwk_header.source, route_record_cmd.relays);
                 }
                 Ok(NwkCommandId::RouteRequest) => {
-                    log::info!("Route request command frame received");
                     self.handle_route_request(nwk_frame, sender_nwk);
                 }
                 Ok(NwkCommandId::RejoinRequest) => {
-                    log::info!("Secured rejoin request command frame received");
                     self.handle_rejoin_request(nwk_frame, true);
                 }
                 Ok(NwkCommandId::Leave) => {
-                    log::info!("Leave command frame received");
                     self.handle_leave(nwk_frame);
                 }
                 Ok(NwkCommandId::NetworkStatus) => {
                     self.handle_network_status(nwk_frame);
                 }
                 Ok(NwkCommandId::EndDeviceTimeoutRequest) => {
-                    log::info!("End device timeout request command frame received");
                     self.handle_end_device_timeout_request(nwk_frame);
                 }
                 Err(_) => {

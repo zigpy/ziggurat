@@ -287,7 +287,7 @@ impl SpinelClient {
     }
 
     async fn write_bytes(&self, data: &[u8]) -> Result<(), SpinelError> {
-        log::debug!("Writing {data:02X?}");
+        log::trace!("Writing {data:02X?}");
 
         self.writer
             .lock()
@@ -440,7 +440,7 @@ impl SpinelClient {
             }
         })?;
 
-        log::info!(
+        log::debug!(
             "Setting property {property_id:?}={value:02X?}, result {rsp_property_id:?}={payload:02X?}"
         );
 

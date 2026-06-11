@@ -609,7 +609,7 @@ impl Neighbors {
             // nwkcMinRouterBootstrapJitter < nwkcMaxRouterBootstrapJitter
         }
 
-        log::debug!("Updated neighbor table entry: {neighbor_entry:#?}");
+        log::debug!("Updated neighbor table entry: {neighbor_entry:?}");
 
         let lost_link = previous_outgoing_cost > 0 && neighbor_entry.outgoing_cost == 0;
 
