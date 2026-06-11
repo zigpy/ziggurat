@@ -1,5 +1,6 @@
 use abstract_bits::{AbstractBits, abstract_bits};
 use educe::Educe;
+use ieee_802154::extend_abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 use num_enum::TryFromPrimitive;
 
@@ -106,7 +107,7 @@ impl ApsAckFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
+        extend_abstract_bits(&mut bytes, &self.frame_control);
 
         if let Some(destination_endpoint) = self.destination_endpoint {
             bytes.extend(destination_endpoint.to_le_bytes());
@@ -189,7 +190,7 @@ impl ApsDataFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
+        extend_abstract_bits(&mut bytes, &self.frame_control);
 
         if let Some(group_id) = self.group_id {
             bytes.extend(group_id.to_le_bytes());
@@ -203,7 +204,7 @@ impl ApsDataFrame {
         bytes.extend(self.profile_id.to_le_bytes());
         bytes.extend(self.source_endpoint.to_le_bytes());
         bytes.extend(self.counter.to_le_bytes());
-        bytes.extend(self.asdu.clone());
+        bytes.extend_from_slice(&self.asdu);
 
         bytes
     }
@@ -564,7 +565,7 @@ impl ApsCommandFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
+        extend_abstract_bits(&mut bytes, &self.frame_control);
         bytes.push(self.counter);
         bytes.extend(self.payload_to_bytes());
 
@@ -575,7 +576,7 @@ impl ApsCommandFrame {
     /// auxiliary header when APS security is applied.
     fn header_to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
+        extend_abstract_bits(&mut bytes, &self.frame_control);
         bytes.push(self.counter);
 
         bytes
@@ -651,10 +652,8 @@ impl ApsAuxHeader {
         ))
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        bytes.extend(self.security_control.to_abstract_bits().unwrap());
+    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
+        bytes.extend(self.security_control.to_bytes());
         bytes.extend(self.frame_counter.to_le_bytes());
 
         if let Some(ieee) = self.extended_source {
@@ -664,7 +663,11 @@ impl ApsAuxHeader {
         if let Some(key_sequence_number) = self.key_sequence_number {
             bytes.push(key_sequence_number);
         }
+    }
 
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.serialize_into(&mut bytes);
         bytes
     }
 
@@ -682,7 +685,7 @@ impl ApsAuxHeader {
         let mut nonce = [0; 13];
         nonce[..8].copy_from_slice(&source.to_bytes());
         nonce[8..12].copy_from_slice(&self.frame_counter.to_le_bytes());
-        nonce[12..13].copy_from_slice(&self.security_control.to_abstract_bits().unwrap());
+        nonce[12..13].copy_from_slice(&self.security_control.to_bytes());
 
         nonce
     }
@@ -705,7 +708,7 @@ fn encrypt_aps_payload(
     let nonce = modified_aux_header.get_nonce(source);
 
     let mut auth_data = header.to_vec();
-    auth_data.extend(modified_aux_header.to_bytes());
+    modified_aux_header.serialize_into(&mut auth_data);
 
     encrypt_ccm(key, &nonce, &auth_data, plaintext)
 }
@@ -724,7 +727,7 @@ fn decrypt_aps_payload(
     let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
 
     let mut auth_data = header.to_vec();
-    auth_data.extend(modified_aux_header.to_bytes());
+    modified_aux_header.serialize_into(&mut auth_data);
 
     Ok(decrypt_ccm(key, &nonce, &auth_data, tagged_ciphertext)?)
 }
@@ -761,10 +764,10 @@ impl EncryptedApsCommandFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
+        extend_abstract_bits(&mut bytes, &self.frame_control);
         bytes.push(self.counter);
-        bytes.extend(self.aux_header.to_bytes());
-        bytes.extend(self.ciphertext.clone());
+        self.aux_header.serialize_into(&mut bytes);
+        bytes.extend_from_slice(&self.ciphertext);
 
         bytes
     }
@@ -777,7 +780,7 @@ impl EncryptedApsCommandFrame {
             .ok_or("APS command frames without an extended nonce are not supported")?;
 
         let mut header = Vec::new();
-        header.extend(self.frame_control.to_abstract_bits().unwrap());
+        extend_abstract_bits(&mut header, &self.frame_control);
         header.push(self.counter);
 
         let plaintext =
@@ -834,8 +837,8 @@ impl EncryptedApsDataFrame {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = self.header.to_bytes();
-        bytes.extend(self.aux_header.to_bytes());
-        bytes.extend(self.ciphertext.clone());
+        self.aux_header.serialize_into(&mut bytes);
+        bytes.extend_from_slice(&self.ciphertext);
 
         bytes
     }
@@ -897,8 +900,8 @@ impl EncryptedApsAckFrame {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = self.header.to_bytes();
-        bytes.extend(self.aux_header.to_bytes());
-        bytes.extend(self.ciphertext.clone());
+        self.aux_header.serialize_into(&mut bytes);
+        bytes.extend_from_slice(&self.ciphertext);
 
         bytes
     }

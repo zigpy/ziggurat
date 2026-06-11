@@ -139,7 +139,8 @@ fn cipher_for(key: &Key) -> ZigbeeCcm {
 /// CCM*-protect a payload: `auth_data` is authenticated, `plaintext` is encrypted, and
 /// the encrypted MIC ("MAC tag") is appended.
 pub fn encrypt_ccm(key: &Key, nonce: &[u8; 13], auth_data: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let mut buffer = plaintext.to_vec();
+    let mut buffer = Vec::with_capacity(plaintext.len() + MIC_LENGTH);
+    buffer.extend_from_slice(plaintext);
     let mic = cipher_for(key)
         .encrypt_inout_detached(&(*nonce).into(), auth_data, buffer.as_mut_slice().into())
         .expect("frames are far below the CCM length limits");

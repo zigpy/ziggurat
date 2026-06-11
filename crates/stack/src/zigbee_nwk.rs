@@ -1,7 +1,9 @@
 #![allow(clippy::useless_conversion)]
 
 use abstract_bits::AbstractBits;
+use abstract_bits::BitWriter;
 use abstract_bits::abstract_bits;
+use ieee_802154::extend_abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 
 use num_enum::TryFromPrimitive;
@@ -149,10 +151,8 @@ impl NwkHeader {
         ))
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
+    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
+        extend_abstract_bits(bytes, &self.frame_control);
         bytes.extend(self.destination.to_bytes());
         bytes.extend(self.source.to_bytes());
         bytes.push(self.radius);
@@ -171,9 +171,13 @@ impl NwkHeader {
         }
 
         if let Some(source_route) = &self.source_route {
-            bytes.extend(source_route.to_abstract_bits().unwrap());
+            extend_abstract_bits(bytes, source_route);
         }
+    }
 
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.serialize_into(&mut bytes);
         bytes
     }
 }
@@ -210,6 +214,17 @@ pub struct NwkSecurityHeaderControlField {
     pub extended_nonce: bool,
     pub require_verified_frame_counter: bool,
     reserved: u1,
+}
+
+impl NwkSecurityHeaderControlField {
+    /// The field's single serialized byte, without `to_abstract_bits`'s allocation:
+    /// it goes into every CCM* nonce.
+    pub fn to_bytes(&self) -> [u8; 1] {
+        let mut buffer = [0u8; 1];
+        let mut writer = BitWriter::from(&mut buffer[..]);
+        self.write_abstract_bits(&mut writer).unwrap();
+        buffer
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,18 +276,20 @@ impl NwkAuxHeader {
         ))
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        bytes.extend(self.security_control.to_abstract_bits().unwrap());
-        bytes.extend(self.frame_counter.to_le_bytes().to_vec());
+    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
+        bytes.extend(self.security_control.to_bytes());
+        bytes.extend(self.frame_counter.to_le_bytes());
 
         if let Some(ieee) = self.extended_source {
             bytes.extend(ieee.to_bytes());
         }
 
         bytes.push(self.key_sequence_number);
+    }
 
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.serialize_into(&mut bytes);
         bytes
     }
 }
@@ -368,7 +385,7 @@ impl EncryptedNwkFrame {
         let mut nonce = [0; 13];
         nonce[..8].copy_from_slice(&source.to_bytes());
         nonce[8..12].copy_from_slice(&aux_header.frame_counter.to_le_bytes());
-        nonce[12..13].copy_from_slice(&aux_header.security_control.to_abstract_bits().unwrap());
+        nonce[12..13].copy_from_slice(&aux_header.security_control.to_bytes());
 
         nonce
     }
@@ -397,13 +414,13 @@ impl EncryptedNwkFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        bytes.extend(self.nwk_header.to_bytes());
+        self.nwk_header.serialize_into(&mut bytes);
 
         if let Some(aux_header) = &self.aux_header {
-            bytes.extend(aux_header.to_bytes());
+            aux_header.serialize_into(&mut bytes);
         }
 
-        bytes.extend(self.ciphertext.clone());
+        bytes.extend_from_slice(&self.ciphertext);
 
         bytes
     }
@@ -413,8 +430,8 @@ impl EncryptedNwkFrame {
         let nonce = self.get_nonce(&aux_header);
 
         let mut auth_data = Vec::new();
-        auth_data.extend(self.nwk_header.to_bytes());
-        auth_data.extend(aux_header.to_bytes());
+        self.nwk_header.serialize_into(&mut auth_data);
+        aux_header.serialize_into(&mut auth_data);
 
         let payload = decrypt_ccm(key, &nonce, &auth_data, &self.ciphertext)?;
 
@@ -454,7 +471,7 @@ impl NwkFrame {
         let mut nonce = [0; 13];
         nonce[..8].copy_from_slice(&source.to_bytes());
         nonce[8..12].copy_from_slice(&aux_header.frame_counter.to_le_bytes());
-        nonce[12..13].copy_from_slice(&aux_header.security_control.to_abstract_bits().unwrap());
+        nonce[12..13].copy_from_slice(&aux_header.security_control.to_bytes());
 
         nonce
     }
@@ -464,8 +481,8 @@ impl NwkFrame {
         let nonce = self.get_nonce(&aux_header);
 
         let mut auth_data = Vec::new();
-        auth_data.extend(self.nwk_header.to_bytes());
-        auth_data.extend(aux_header.to_bytes());
+        self.nwk_header.serialize_into(&mut auth_data);
+        aux_header.serialize_into(&mut auth_data);
 
         EncryptedNwkFrame {
             nwk_header: self.nwk_header.clone(),

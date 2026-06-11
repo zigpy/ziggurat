@@ -185,6 +185,19 @@ pub enum DeserializeError {
     ZeroBytes,
 }
 
+/// Append a structure's serialized form to `bytes`.
+///
+/// Avoids the intermediate Vec that [`AbstractBits::to_abstract_bits`] allocates; the
+/// scratch buffer fits anything that can go on the air (a full 802.15.4 frame is at
+/// most 127 bytes).
+pub fn extend_abstract_bits<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) {
+    let mut buffer = [0u8; 128];
+    let mut writer = abstract_bits::BitWriter::from(&mut buffer[..]);
+    value.write_abstract_bits(&mut writer).unwrap();
+    let written = writer.bytes_written();
+    bytes.extend_from_slice(&buffer[..written]);
+}
+
 fn serialize_command<T: AbstractBits>(
     thing: &T,
     id: Ieee802154CommandId,
@@ -426,7 +439,7 @@ impl Ieee802154Frame {
         let header = self.header();
 
         // Serialize frame control
-        data.extend(header.frame_control.to_abstract_bits().unwrap());
+        extend_abstract_bits(&mut data, &header.frame_control);
 
         // Serialize sequence number
         if let Some(seq) = header.sequence_number {
@@ -461,7 +474,7 @@ impl Ieee802154Frame {
         // Add payload based on frame type
         match self {
             Self::Beacon(frame) => {
-                data.extend(&frame.superframe_specification.to_abstract_bits().unwrap());
+                extend_abstract_bits(&mut data, &frame.superframe_specification);
                 data.push(frame.gts_specification);
                 data.push(frame.pending_address_specification);
                 data.extend(&frame.beacon_payload);
