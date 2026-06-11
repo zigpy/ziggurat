@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use constant_time_eq::constant_time_eq;
 use ieee_802154::types::{Eui64, Key};
 use serde::Deserialize;
+use subtle::ConstantTimeEq;
 
 use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
 use crate::zigbee_aps::{
@@ -203,7 +203,7 @@ impl ApsSecurity {
     pub fn verify_device_key(&mut self, eui64: Eui64, hash: &[u8; 16]) -> Option<bool> {
         let entry = self.device_keys.get_mut(&eui64)?;
 
-        if constant_time_eq(&verify_key_hash(&entry.key), hash) {
+        if verify_key_hash(&entry.key).ct_eq(hash).into() {
             entry.attributes = KeyAttributes::Verified;
             Some(true)
         } else {

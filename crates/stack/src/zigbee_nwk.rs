@@ -6,7 +6,7 @@ use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 
 use num_enum::TryFromPrimitive;
 
-use derivative::Derivative;
+use educe::Educe;
 
 use crate::crypto::{DecryptionError, decrypt_ccm, encrypt_ccm};
 
@@ -277,21 +277,21 @@ impl NwkAuxHeader {
     }
 }
 
-#[derive(Derivative)]
-#[derivative(Debug, Clone, PartialEq)]
+#[derive(Educe, Clone, PartialEq, Eq)]
+#[educe(Debug)]
 pub struct EncryptedNwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
-    #[derivative(Debug(format_with = "format_hex"))]
+    #[educe(Debug(method(format_hex)))]
     pub ciphertext: Vec<u8>,
 }
 
-#[derive(Derivative)]
-#[derivative(Debug, Clone, PartialEq)]
+#[derive(Educe, Clone, PartialEq, Eq)]
+#[educe(Debug)]
 pub struct NwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
-    #[derivative(Debug(format_with = "format_hex"))]
+    #[educe(Debug(method(format_hex)))]
     pub payload: Vec<u8>,
 }
 

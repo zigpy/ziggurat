@@ -1,5 +1,5 @@
 use abstract_bits::{AbstractBits, abstract_bits};
-use derivative::Derivative;
+use educe::Educe;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 use num_enum::TryFromPrimitive;
 
@@ -411,17 +411,15 @@ pub struct ApsSwitchKeyCommandFrame {
 }
 
 /// Zigbee spec 4.4.11.6: Tunnel Command
-#[derive(Derivative)]
-#[derivative(Debug, Clone, PartialEq)]
+#[derive(Educe, Clone, PartialEq, Eq)]
+#[educe(Debug)]
 pub struct ApsTunnelCommandFrame {
     pub destination_address: Eui64,
     /// The complete APS frame to relay: APS header, auxiliary header, encrypted
     /// command, and MIC
-    #[derivative(Debug(format_with = "format_hex"))]
+    #[educe(Debug(method(format_hex)))]
     pub tunneled_frame: Vec<u8>,
 }
-
-impl Eq for ApsTunnelCommandFrame {}
 
 impl ApsTunnelCommandFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
@@ -731,13 +729,13 @@ fn decrypt_aps_payload(
     Ok(decrypt_ccm(key, &nonce, &auth_data, tagged_ciphertext)?)
 }
 
-#[derive(Derivative)]
-#[derivative(Debug, Clone, PartialEq)]
+#[derive(Educe, Clone, PartialEq, Eq)]
+#[educe(Debug)]
 pub struct EncryptedApsCommandFrame {
     pub frame_control: ApsFrameControl,
     pub counter: u8,
     pub aux_header: ApsAuxHeader,
-    #[derivative(Debug(format_with = "format_hex"))]
+    #[educe(Debug(method(format_hex)))]
     pub ciphertext: Vec<u8>,
 }
 
@@ -794,13 +792,13 @@ impl EncryptedApsCommandFrame {
 
 /// An APS-secured data frame (spec 4.4.1.1): the APS header is cleartext, the ASDU is
 /// encrypted.
-#[derive(Derivative)]
-#[derivative(Debug, Clone, PartialEq)]
+#[derive(Educe, Clone, PartialEq, Eq)]
+#[educe(Debug)]
 pub struct EncryptedApsDataFrame {
     /// The cleartext APS header fields; its `asdu` is empty
     pub header: ApsDataFrame,
     pub aux_header: ApsAuxHeader,
-    #[derivative(Debug(format_with = "format_hex"))]
+    #[educe(Debug(method(format_hex)))]
     pub ciphertext: Vec<u8>,
 }
 
@@ -862,12 +860,12 @@ impl EncryptedApsDataFrame {
 
 /// An APS-secured acknowledgement frame. ACKs carry no payload, so the ciphertext is
 /// just the encrypted MIC authenticating the headers.
-#[derive(Derivative)]
-#[derivative(Debug, Clone, PartialEq)]
+#[derive(Educe, Clone, PartialEq, Eq)]
+#[educe(Debug)]
 pub struct EncryptedApsAckFrame {
     pub header: ApsAckFrame,
     pub aux_header: ApsAuxHeader,
-    #[derivative(Debug(format_with = "format_hex"))]
+    #[educe(Debug(method(format_hex)))]
     pub ciphertext: Vec<u8>,
 }
 

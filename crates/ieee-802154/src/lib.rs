@@ -6,7 +6,7 @@ use crate::types::{Eui64, Nwk, PanId, format_hex};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
 use num_enum::TryFromPrimitive;
 
-use derivative::Derivative;
+use educe::Educe;
 
 #[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
 pub enum Ieee802154Address {
@@ -89,8 +89,7 @@ pub enum Ieee802154CommandId {
     GtsRequest = 0x09,
 }
 
-#[derive(Derivative, Clone)]
-#[derivative(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ieee802154FrameHeader {
     pub frame_control: Ieee802154FrameControl,
     pub sequence_number: Option<u8>,
@@ -130,11 +129,11 @@ pub struct Ieee802154BeaconFrame {
     pub fcs: u16,
 }
 
-#[derive(Derivative, Clone)]
-#[derivative(Debug, Eq, PartialEq)]
+#[derive(Educe, Clone, Eq, PartialEq)]
+#[educe(Debug)]
 pub struct Ieee802154DataFrame {
     pub header: Ieee802154FrameHeader,
-    #[derivative(Debug(format_with = "format_hex"))]
+    #[educe(Debug(method(format_hex)))]
     pub payload: Vec<u8>,
     pub fcs: u16,
 }
