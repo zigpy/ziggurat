@@ -252,6 +252,17 @@ impl Routing {
         self.route_record_table.remove(&destination).is_some()
     }
 
+    /// Spec 3.6.4.3.2: relaying a source-routed frame proves the concentrator that
+    /// originated it holds a route record for the frame's source; no route record
+    /// has to precede the next frame toward it (unless it keeps no route cache).
+    pub fn note_source_routed_frame(&mut self, concentrator: Nwk) {
+        if let Some(entry) = self.route_table.get_mut(&concentrator)
+            && !entry.no_route_cache
+        {
+            entry.route_record_required = false;
+        }
+    }
+
     /// The outbound route for a frame we originate. A stored source route wins over
     /// the routing table: it is self-contained, while a table entry relies on every
     /// intermediate router still holding state (and our entries toward devices are

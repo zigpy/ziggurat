@@ -775,9 +775,65 @@ impl ZigbeeStack {
 
         let destination = nwk_frame.nwk_header.destination;
 
-        // Children and direct neighbors are addressed directly, everything else goes
-        // through the routing table
-        let next_hop_address = if self.is_neighbor(destination) {
+        // Spec 3.6.4.5.5: each relay appends its network address to a transiting
+        // route record command before forwarding it
+        if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command
+            && matches!(
+                nwk_frame
+                    .payload
+                    .first()
+                    .map(|&id| NwkCommandId::try_from(id)),
+                Some(Ok(NwkCommandId::RouteRecord))
+            )
+        {
+            let mut route_record_cmd = match NwkRouteRecordCommand::deserialize(&nwk_frame.payload)
+            {
+                Ok(cmd) => cmd,
+                Err(err) => {
+                    log::warn!("Dropping malformed transiting route record: {err:?}");
+                    return;
+                }
+            };
+
+            route_record_cmd.relays.push(self.state.network_address);
+            nwk_frame.payload = route_record_cmd.serialize().unwrap();
+        }
+
+        let next_hop_address = if let Some(source_route) = &mut nwk_frame.nwk_header.source_route {
+            // Spec 3.6.4.3.2: a source-routed frame names its own path; the relay
+            // list is followed instead of the routing table
+            let index = usize::from(source_route.relay_index);
+
+            let next_hop = if index == 0 {
+                // The final relay forwards directly to the NWK destination
+                destination
+            } else {
+                if source_route.relays.get(index) != Some(&self.state.network_address) {
+                    log::debug!("Dropping source routed frame not addressed through us");
+                    return;
+                }
+
+                source_route.relay_index -= 1;
+                source_route.relays[index - 1]
+            };
+
+            // Delivery to our own end device child skips the rest of the relay list
+            let next_hop = if self.end_device_child_eui64(destination).is_some() {
+                destination
+            } else {
+                next_hop
+            };
+
+            self.state
+                .routing
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .note_source_routed_frame(nwk_frame.nwk_header.source);
+
+            next_hop
+        } else if self.is_neighbor(destination) {
+            // Children and direct neighbors are addressed directly, everything else
+            // goes through the routing table
             destination
         } else {
             let next_hop = self
@@ -839,11 +895,19 @@ impl ZigbeeStack {
             .iter()
             .find_map(|(&eui64, &nwk)| if nwk == source { Some(eui64) } else { None });
 
+        // Spec 3.6.4.8.1: failures while relaying along a source route are reported
+        // as such, so the concentrator can drop the stored route
+        let status_code = if nwk_frame.nwk_header.source_route.is_some() {
+            NwkNetworkStatus::SourceRouteFailure
+        } else {
+            NwkNetworkStatus::LinkFailure
+        };
+
         let network_status_frame = self
             .nwk_command_frame(
                 source,
                 NwkNetworkStatusCommand {
-                    status_code: NwkNetworkStatus::LinkFailure,
+                    status_code,
                     network_address: nwk_frame.nwk_header.destination,
                 }
                 .serialize()
