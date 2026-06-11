@@ -205,6 +205,10 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
 
 pub struct ZigguratServer {
     serial_path: String,
+    /// The Spinel client owns the serial port for the lifetime of the process: it is
+    /// opened lazily by the first command that needs it and never reopened, so stack
+    /// replacement cannot race a straggling port handle (`EBUSY`)
+    spinel: Mutex<Option<Arc<SpinelClient>>>,
     stack: Mutex<Option<Arc<ZigbeeStack>>>,
     /// The server-level notification hub: connections subscribe to it, and it
     /// survives stack replacement (the forwarder task is swapped instead)
@@ -214,12 +218,13 @@ pub struct ZigguratServer {
 
 impl ZigguratServer {
     /// The serial port is not opened and the Zigbee stack is not created until a
-    /// client sends the `configure` command.
+    /// client sends a command that needs them.
     pub fn new(serial_path: &str) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_HUB_DEPTH);
 
         Self {
             serial_path: serial_path.to_string(),
+            spinel: Mutex::new(None),
             stack: Mutex::new(None),
             notification_tx,
             notification_forwarder: Mutex::new(None),
@@ -246,6 +251,28 @@ impl ZigguratServer {
 
     fn current_stack(&self) -> Option<Arc<ZigbeeStack>> {
         self.stack.lock().unwrap().clone()
+    }
+
+    /// The process-lifetime Spinel client, opening the serial port on first use.
+    fn spinel_client(&self) -> Result<Arc<SpinelClient>, tokio_serial::Error> {
+        let mut spinel = self.spinel.lock().unwrap();
+
+        if let Some(spinel) = &*spinel {
+            return Ok(spinel.clone());
+        }
+
+        // Without flow control the RCP's UART drops bytes under load, corrupting
+        // host->RCP frames ("Framing error" + command timeout)
+        let port = tokio_serial::new(&self.serial_path, 460_800)
+            .flow_control(FlowControl::Hardware)
+            .open_native_async()?;
+
+        let client = Arc::new(SpinelClient::new(port));
+        client.spawn_reader();
+        *spinel = Some(client.clone());
+        drop(spinel);
+
+        Ok(client)
     }
 
     async fn handle_connection(
@@ -385,12 +412,12 @@ impl ZigguratServer {
             }
         }
 
-        // A replaced stack must be fully stopped first: its spawned tasks hold strong
-        // references and its serial reader would steal the successor's responses
+        // A replaced stack must be fully stopped before its successor registers its
+        // own receivers with the shared Spinel client
         let old_stack = self.stack.lock().unwrap().take();
         if let Some(old_stack) = old_stack {
             log::info!("Replacing the running Zigbee stack");
-            old_stack.shutdown();
+            old_stack.shutdown().await;
         }
 
         let old_forwarder = self.notification_forwarder.lock().unwrap().take();
@@ -399,18 +426,10 @@ impl ZigguratServer {
         }
 
         log::info!("Initializing Zigbee stack with new settings...");
-        // Without flow control the RCP's UART drops bytes under load, corrupting
-        // host->RCP frames ("Framing error" + command timeout)
-        let port = match tokio_serial::new(&self.serial_path, 460_800)
-            .flow_control(FlowControl::Hardware)
-            .open_native_async()
-        {
-            Ok(p) => p,
+        let spinel = match self.spinel_client() {
+            Ok(s) => s,
             Err(e) => return error_response(id, "serial_port_error", e),
         };
-
-        let spinel = SpinelClient::new(port);
-        spinel.spawn_reader();
 
         let (stack, mut stack_notification_rx) = ZigbeeStack::new(
             spinel,
@@ -445,7 +464,7 @@ impl ZigguratServer {
         // network must be fully up (RCP reset handled, radio programmed) before
         // replying, or the client's first command would race with the boot-time reset.
         if let Err(e) = stack.start_network().await {
-            stack.shutdown();
+            stack.shutdown().await;
             return error_response(id, "network_start_failed", e);
         }
 
@@ -470,13 +489,15 @@ impl ZigguratServer {
         response(id, json!({"status": "success"}))
     }
 
-    /// Reads the radio's factory-programmed EUI64.
+    /// Reads the radio's factory-programmed EUI64, which a client needs before it can
+    /// form a network with `configure`.
     async fn handle_get_hw_address(&self, id: u64) -> serde_json::Value {
-        let Some(stack) = self.current_stack() else {
-            return error_response(id, "not_configured", "no stack is running");
+        let spinel = match self.spinel_client() {
+            Ok(s) => s,
+            Err(e) => return error_response(id, "serial_port_error", e),
         };
 
-        match stack.spinel.get_hw_address().await {
+        match spinel.get_hw_address().await {
             Ok(ieee) => response(id, json!({"ieee_address": eui64_to_string(ieee)})),
             Err(e) => error_response(id, "hw_address_failed", e),
         }

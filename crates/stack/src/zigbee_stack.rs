@@ -608,7 +608,9 @@ pub struct ZigbeeStack {
 
     pub state: State,
     pub constants: Constants,
-    pub spinel: SpinelClient,
+    /// Shared with the server, which owns the serial port for the process lifetime:
+    /// a replaced stack only stops its tasks, the port is never reopened
+    pub spinel: Arc<SpinelClient>,
     pub notification_tx: broadcast::Sender<ZigbeeNotification>,
     pub raw_frame_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
     pub reset_rx: AsyncMutex<mpsc::Receiver<SpinelStatus>>,
@@ -638,15 +640,15 @@ pub struct ZigbeeStack {
     pub(crate) maintenance_wake: Notify,
 
     /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
-    /// a leaked background task keeps the old serial port open and its reader steals
-    /// responses from the new stack
+    /// a leaked background task would keep the replaced stack processing frames and
+    /// transmitting alongside its successor
     background_tasks: Mutex<JoinSet<()>>,
 }
 
 impl ZigbeeStack {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        spinel: SpinelClient,
+        spinel: Arc<SpinelClient>,
         constants: Constants,
         channel: u8,
         update_id: u8,
@@ -1176,15 +1178,19 @@ impl ZigbeeStack {
             .spawn(future);
     }
 
-    /// Stops all of the stack's tasks, including the serial port reader. The spawned
-    /// tasks hold strong references to the stack, so without this the stack of a
-    /// disconnected client would keep running (and transmitting) forever.
-    pub fn shutdown(&self) {
-        self.background_tasks
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .abort_all();
-        self.spinel.shutdown();
+    /// Stops all of the stack's tasks and waits for them to terminate, so that a
+    /// replaced stack provably stops processing frames and transmitting before its
+    /// successor takes over the shared Spinel client.
+    pub async fn shutdown(&self) {
+        let mut tasks = std::mem::take(
+            &mut *self
+                .background_tasks
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap(),
+        );
+
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
     }
 
     pub fn next_aps_counter(&self) -> u8 {

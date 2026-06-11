@@ -211,7 +211,6 @@ pub struct SpinelClient {
     /// [`Self::lock_radio`].
     radio_lock: AsyncMutex<()>,
     consecutive_timeouts: AtomicU32,
-    reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl SpinelClient {
@@ -229,7 +228,6 @@ impl SpinelClient {
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
             radio_lock: AsyncMutex::new(()),
             consecutive_timeouts: AtomicU32::new(0),
-            reader_task: Mutex::new(None),
         }
     }
 
@@ -265,7 +263,7 @@ impl SpinelClient {
             .expect("Reader already taken");
         let protocol = Arc::clone(&self.protocol);
 
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut buffer = [0u8; 2048];
 
             loop {
@@ -285,22 +283,6 @@ impl SpinelClient {
                 }
             }
         });
-
-        *self.reader_task.lock().expect("Failed to lock reader task") = Some(handle);
-    }
-
-    /// Stops the reader task so that a replaced client releases the serial port
-    /// instead of competing with its successor for inbound frames.
-    pub fn shutdown(&self) {
-        let maybe_handle = self
-            .reader_task
-            .lock()
-            .expect("Failed to lock reader task")
-            .take();
-
-        if let Some(handle) = maybe_handle {
-            handle.abort();
-        }
     }
 
     /// Serialize and HDLC-frame `frame` into the writer's persistent scratch buffers
