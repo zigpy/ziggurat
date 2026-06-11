@@ -1,8 +1,9 @@
 use crate::spinel::{
-    HdlcLiteFrame, SpinelCommandId, SpinelFrame, SpinelFrameParsingError, SpinelFramePropValueIs,
-    SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelStatus, packed_uint21_deserialize,
-    packed_uint21_to_bytes,
+    HdlcSpecial, SPINEL_FRAME_MAX_SIZE, SpinelCommandId, SpinelFrame, SpinelFrameParsingError,
+    SpinelFramePropValueIs, SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelStatus,
+    hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
 };
+use ieee_802154::FrameBytes;
 use std::string::String;
 use thiserror::Error;
 use tokio_serial::SerialStream;
@@ -96,7 +97,7 @@ impl SpinelTxFrame {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelRxFrame {
-    pub psdu: Vec<u8>,
+    pub psdu: FrameBytes,
     pub rssi: i8,
     pub noise_floor: i8,
     pub flags: u32,
@@ -118,7 +119,8 @@ impl SpinelRxFrame {
             return Err("Invalid frame length");
         }
 
-        let psdu = bytes[offset..offset + psdu_len].to_vec();
+        let psdu = FrameBytes::from_slice(&bytes[offset..offset + psdu_len])
+            .map_err(|_| "PSDU too long")?;
         offset += psdu_len;
 
         let rssi = bytes[offset] as i8;
@@ -186,13 +188,22 @@ pub enum SpinelError {
     InvalidResponseError { reason: String },
 }
 
+/// The writer half of the port plus its serialization scratch: frames go out one at a
+/// time, so two persistent buffers cover every TX without per-frame allocation.
+#[derive(Debug)]
+struct SpinelWriter {
+    port: WriteHalf<SerialStream>,
+    frame_scratch: Vec<u8>,
+    hdlc_scratch: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct SpinelClient {
     /// The reader half of the port, owned by the task spawned in `spawn_reader`.
     reader: Mutex<Option<ReadHalf<SerialStream>>>,
     /// The writer half of the port. The mutex also serializes outbound HDLC writes so
     /// concurrent commands cannot interleave partial frames inside the byte stream.
-    writer: AsyncMutex<WriteHalf<SerialStream>>,
+    writer: AsyncMutex<SpinelWriter>,
     pub protocol: Arc<Mutex<SpinelProtocol>>,
     /// The RCP has a single radio (and a single TX buffer): transmit transactions are
     /// serialized end to end, and energy scans hold the lock per scanned channel via
@@ -208,7 +219,12 @@ impl SpinelClient {
 
         Self {
             reader: Mutex::new(Some(reader)),
-            writer: AsyncMutex::new(writer),
+            writer: AsyncMutex::new(SpinelWriter {
+                port: writer,
+                frame_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
+                // Worst-case HDLC escaping doubles the frame, plus two flags
+                hdlc_scratch: Vec::with_capacity(2 * SPINEL_FRAME_MAX_SIZE + 2),
+            }),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
             radio_lock: AsyncMutex::new(()),
             consecutive_timeouts: AtomicU32::new(0),
@@ -286,13 +302,30 @@ impl SpinelClient {
         }
     }
 
-    async fn write_bytes(&self, data: &[u8]) -> Result<(), SpinelError> {
-        log::trace!("Writing {data:02X?}");
+    /// Serialize and HDLC-frame `frame` into the writer's persistent scratch buffers
+    /// and put it on the wire.
+    // The writer lock is intentionally held until the write completes: it is what
+    // serializes outbound frames on the wire
+    #[allow(clippy::significant_drop_tightening)]
+    async fn send_frame(&self, frame: &SpinelFrame) -> Result<(), SpinelError> {
+        let mut writer = self.writer.lock().await;
+        let SpinelWriter {
+            port,
+            frame_scratch,
+            hdlc_scratch,
+        } = &mut *writer;
 
-        self.writer
-            .lock()
-            .await
-            .write_all(data)
+        frame_scratch.clear();
+        frame.serialize_into(frame_scratch);
+
+        hdlc_scratch.clear();
+        hdlc_scratch.push(HdlcSpecial::Flag as u8);
+        hdlc_escape_into(frame_scratch, hdlc_scratch);
+        hdlc_scratch.push(HdlcSpecial::Flag as u8);
+
+        log::trace!("Writing {hdlc_scratch:02X?}");
+
+        port.write_all(hdlc_scratch)
             .await
             .map_err(SpinelError::IoError)?;
 
@@ -312,11 +345,7 @@ impl SpinelClient {
             payload: vec![],
         };
 
-        let hdlc_frame = HdlcLiteFrame {
-            data: frame.to_bytes(),
-        };
-
-        self.write_bytes(&hdlc_frame.to_bytes_with_flags()).await
+        self.send_frame(&frame).await
     }
 
     pub async fn send_command(
@@ -333,11 +362,7 @@ impl SpinelClient {
 
         log::debug!("Sending frame {frame:?}");
 
-        let hdlc_frame = HdlcLiteFrame {
-            data: frame.to_bytes(),
-        };
-
-        self.write_bytes(&hdlc_frame.to_bytes_with_flags()).await?;
+        self.send_frame(&frame).await?;
 
         match timeout(TIMEOUT, rx).await {
             Ok(Ok(response_frame)) => {

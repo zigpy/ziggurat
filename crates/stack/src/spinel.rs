@@ -12,6 +12,9 @@ const U21_MAX: u32 = 1 << 21;
 /// byte means we have desynced from the stream.
 const MAX_HDLC_BUFFER_SIZE: usize = 4096;
 
+/// OpenThread's `SPINEL_FRAME_MAX_SIZE`: no spinel frame exceeds this unescaped.
+pub const SPINEL_FRAME_MAX_SIZE: usize = 1300;
+
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelCommandId {
@@ -339,96 +342,112 @@ pub struct HdlcLiteFrame {
     pub data: Vec<u8>,
 }
 
-impl HdlcLiteFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, HdlcLiteFrameParsingError> {
-        if bytes.len() < 2 {
-            return Err(HdlcLiteFrameParsingError::FrameTooShort {
-                expected: 2,
-                got: bytes.len(),
-            });
-        }
-
-        let mut data = Vec::with_capacity(bytes.len());
-        let mut unescaping = false;
-
-        for byte in bytes.iter() {
-            let mut result_byte = *byte;
-
-            if unescaping {
-                result_byte ^= 0x20;
-                unescaping = false;
-
-                if result_byte != (HdlcSpecial::Flag as u8)
-                    && result_byte != (HdlcSpecial::Escape as u8)
-                    && result_byte != (HdlcSpecial::Xon as u8)
-                    && result_byte != (HdlcSpecial::Xoff as u8)
-                    && result_byte != (HdlcSpecial::Vendor as u8)
-                {
-                    return Err(HdlcLiteFrameParsingError::BadEscapeByte { byte: result_byte });
-                }
-            } else if result_byte == HdlcSpecial::Escape as u8 {
-                unescaping = true;
-                continue;
-            } else if result_byte == HdlcSpecial::Flag as u8 {
-                continue;
-            }
-
-            data.push(result_byte);
-        }
-
-        if data.len() < 2 {
-            return Err(HdlcLiteFrameParsingError::PayloadTooShort {
-                expected: 2,
-                got: data.len(),
-            });
-        }
-
-        let mut crc = 0x0000u16;
-        CRC_KERMIT.init_crc(&mut crc);
-        CRC_KERMIT.update_crc(&mut crc, &data[..data.len() - 2]);
-        CRC_KERMIT.finish_crc(&crc);
-        crc ^= 0xFFFF;
-
-        let expected_crc = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
-
-        if crc != expected_crc {
-            return Err(HdlcLiteFrameParsingError::InvalidCrc {
-                expected_crc,
-                got_crc: crc,
-            });
-        }
-
-        data.truncate(data.len() - 2);
-        Ok(Self { data })
+/// Unescape and CRC-check one HDLC-lite frame into `data`, cleared first.
+///
+/// The trailing CRC is left out. Writing into a caller-provided buffer lets the
+/// reader reuse one scratch allocation for every frame.
+pub fn hdlc_unescape_into(
+    bytes: &[u8],
+    data: &mut Vec<u8>,
+) -> Result<(), HdlcLiteFrameParsingError> {
+    if bytes.len() < 2 {
+        return Err(HdlcLiteFrameParsingError::FrameTooShort {
+            expected: 2,
+            got: bytes.len(),
+        });
     }
 
-    fn escape_into(&self, result: &mut Vec<u8>) {
-        let mut crc = 0x0000u16;
-        CRC_KERMIT.init_crc(&mut crc);
-        CRC_KERMIT.update_crc(&mut crc, &self.data);
-        CRC_KERMIT.finish_crc(&crc);
-        crc ^= 0xFFFF;
+    data.clear();
+    let mut unescaping = false;
 
-        for byte in self.data.iter().chain(&crc.to_le_bytes()) {
-            let result_byte = *byte;
+    for byte in bytes.iter() {
+        let mut result_byte = *byte;
 
-            if result_byte == (HdlcSpecial::Flag as u8)
-                || result_byte == (HdlcSpecial::Escape as u8)
-                || result_byte == (HdlcSpecial::Xon as u8)
-                || result_byte == (HdlcSpecial::Xoff as u8)
-                || result_byte == (HdlcSpecial::Vendor as u8)
+        if unescaping {
+            result_byte ^= 0x20;
+            unescaping = false;
+
+            if result_byte != (HdlcSpecial::Flag as u8)
+                && result_byte != (HdlcSpecial::Escape as u8)
+                && result_byte != (HdlcSpecial::Xon as u8)
+                && result_byte != (HdlcSpecial::Xoff as u8)
+                && result_byte != (HdlcSpecial::Vendor as u8)
             {
-                result.push(HdlcSpecial::Escape as u8);
-                result.push(result_byte ^ 0x20);
-            } else {
-                result.push(result_byte);
+                return Err(HdlcLiteFrameParsingError::BadEscapeByte { byte: result_byte });
             }
+        } else if result_byte == HdlcSpecial::Escape as u8 {
+            unescaping = true;
+            continue;
+        } else if result_byte == HdlcSpecial::Flag as u8 {
+            continue;
         }
+
+        data.push(result_byte);
+    }
+
+    if data.len() < 2 {
+        return Err(HdlcLiteFrameParsingError::PayloadTooShort {
+            expected: 2,
+            got: data.len(),
+        });
+    }
+
+    let mut crc = 0x0000u16;
+    CRC_KERMIT.init_crc(&mut crc);
+    CRC_KERMIT.update_crc(&mut crc, &data[..data.len() - 2]);
+    CRC_KERMIT.finish_crc(&crc);
+    crc ^= 0xFFFF;
+
+    let expected_crc = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
+
+    if crc != expected_crc {
+        return Err(HdlcLiteFrameParsingError::InvalidCrc {
+            expected_crc,
+            got_crc: crc,
+        });
+    }
+
+    data.truncate(data.len() - 2);
+    Ok(())
+}
+
+/// Append the CRC-suffixed, escaped form of `data` to `result`, without the framing
+/// flag bytes.
+pub fn hdlc_escape_into(data: &[u8], result: &mut Vec<u8>) {
+    let mut crc = 0x0000u16;
+    CRC_KERMIT.init_crc(&mut crc);
+    CRC_KERMIT.update_crc(&mut crc, data);
+    CRC_KERMIT.finish_crc(&crc);
+    crc ^= 0xFFFF;
+
+    for byte in data.iter().chain(&crc.to_le_bytes()) {
+        let result_byte = *byte;
+
+        if result_byte == (HdlcSpecial::Flag as u8)
+            || result_byte == (HdlcSpecial::Escape as u8)
+            || result_byte == (HdlcSpecial::Xon as u8)
+            || result_byte == (HdlcSpecial::Xoff as u8)
+            || result_byte == (HdlcSpecial::Vendor as u8)
+        {
+            result.push(HdlcSpecial::Escape as u8);
+            result.push(result_byte ^ 0x20);
+        } else {
+            result.push(result_byte);
+        }
+    }
+}
+
+impl HdlcLiteFrame {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, HdlcLiteFrameParsingError> {
+        let mut data = Vec::with_capacity(bytes.len());
+        hdlc_unescape_into(bytes, &mut data)?;
+
+        Ok(Self { data })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::with_capacity(self.data.len() + 8);
-        self.escape_into(&mut result);
+        hdlc_escape_into(&self.data, &mut result);
         result
     }
 
@@ -436,7 +455,7 @@ impl HdlcLiteFrame {
         let mut result = Vec::with_capacity(self.data.len() + 10);
 
         result.push(HdlcSpecial::Flag as u8);
-        self.escape_into(&mut result);
+        hdlc_escape_into(&self.data, &mut result);
         result.push(HdlcSpecial::Flag as u8);
 
         result
@@ -481,38 +500,51 @@ pub struct SpinelFrame {
     pub payload: Vec<u8>,
 }
 
+/// Parse a Spinel frame into its header, command and a borrowed payload, so callers
+/// that only route the frame can avoid copying the payload out of the read buffer.
+pub fn parse_spinel_parts(
+    bytes: &[u8],
+) -> Result<(SpinelHeader, SpinelCommandId, &[u8]), SpinelFrameParsingError> {
+    if bytes.len() < 3 {
+        return Err(SpinelFrameParsingError::PayloadTooShort {
+            expected: 3,
+            got: bytes.len(),
+        });
+    }
+
+    let header = SpinelHeader::from_bytes(&bytes[..1])?;
+
+    if header.flag != 0b10 {
+        return Err(SpinelFrameParsingError::NotSpinelFrame { flag: header.flag });
+    }
+
+    let command_id = bytes[1];
+    let command_id = SpinelCommandId::try_from(command_id)
+        .map_err(|_| SpinelFrameParsingError::InvalidCommandId { command_id })?;
+
+    Ok((header, command_id, &bytes[2..]))
+}
+
 impl SpinelFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
-        if bytes.len() < 3 {
-            return Err(SpinelFrameParsingError::PayloadTooShort {
-                expected: 3,
-                got: bytes.len(),
-            });
-        }
-
-        let header = SpinelHeader::from_bytes(&bytes[..1])?;
-
-        if header.flag != 0b10 {
-            return Err(SpinelFrameParsingError::NotSpinelFrame { flag: header.flag });
-        }
-
-        let command_id = bytes[1];
-        let payload = bytes[2..].to_vec();
+        let (header, command_id, payload) = parse_spinel_parts(bytes)?;
 
         Ok(Self {
             header,
-            command_id: SpinelCommandId::try_from(command_id)
-                .map_err(|_| SpinelFrameParsingError::InvalidCommandId { command_id })?,
-            payload,
+            command_id,
+            payload: payload.to_vec(),
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut result = Vec::new();
-
+    pub fn serialize_into(&self, result: &mut Vec<u8>) {
         result.extend(&self.header.to_bytes());
         result.push(self.command_id as u8);
-        result.extend(self.payload.iter());
+        result.extend_from_slice(&self.payload);
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(2 + self.payload.len());
+        self.serialize_into(&mut result);
 
         result
     }
@@ -547,6 +579,9 @@ impl SpinelFramePropValueIs {
 #[derive(Debug)]
 pub struct SpinelProtocol {
     pub buffer: Vec<u8>,
+    /// Reused for the unescaped form of every inbound frame: the transport needs
+    /// exactly one frame's worth of scratch, since frames arrive serially.
+    unescape_scratch: Vec<u8>,
     pub ignoring_until_next_flag: bool,
     pub next_tid: u8,
     pub pending_frames: HashMap<u8, oneshot::Sender<SpinelFrame>>,
@@ -565,6 +600,7 @@ impl SpinelProtocol {
     pub fn new() -> Self {
         Self {
             buffer: Vec::new(),
+            unescape_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
             ignoring_until_next_flag: true,
             next_tid: 1,
             pending_frames: HashMap::new(),
@@ -604,121 +640,135 @@ impl SpinelProtocol {
         }
     }
 
-    pub fn parse_frames_from_bytes_into(
-        &mut self,
-        bytes: &[u8],
-        into: &mut Vec<SpinelFrame>,
-    ) -> usize {
-        self.buffer.extend(bytes);
-
-        let mut num_parsed_frames = 0;
-
+    /// Extract the next complete HDLC frame from the accumulation buffer into
+    /// `scratch`, returning `false` once no complete frame remains. Garbage between
+    /// flags (bad CRC, runts, post-resync noise) is discarded silently.
+    fn next_frame_into(&mut self, scratch: &mut Vec<u8>) -> bool {
         loop {
-            let index = self
+            let Some(index) = self
                 .buffer
                 .iter()
-                .position(|&x| x == HdlcSpecial::Flag as u8);
-
-            if index.is_none() {
-                break;
-            }
-
-            if self.ignoring_until_next_flag {
-                self.ignoring_until_next_flag = false;
-                continue;
-            }
-
-            // Ignore consecutive flags
-            if index.unwrap() > 0 {
-                match HdlcLiteFrame::from_bytes(&self.buffer[0..index.unwrap()]) {
-                    Err(HdlcLiteFrameParsingError::BadEscapeByte { .. })
-                    | Err(HdlcLiteFrameParsingError::InvalidCrc { .. })
-                    | Err(HdlcLiteFrameParsingError::FrameTooShort { .. })
-                    | Err(HdlcLiteFrameParsingError::PayloadTooShort { .. }) => {}
-                    Ok(frame) => match SpinelFrame::from_bytes(&frame.data) {
-                        Err(SpinelFrameParsingError::PayloadTooShort { .. })
-                        | Err(SpinelFrameParsingError::PackedU21DidNotTerminate)
-                        | Err(SpinelFrameParsingError::NotSpinelFrame { .. }) => {}
-                        Err(SpinelFrameParsingError::InvalidPropertyId { .. }) => { /* This cannot happen */
-                        }
-                        Err(SpinelFrameParsingError::InvalidCommandId { .. }) => { /* This cannot happen */
-                        }
-                        Ok(parsed_frame) => {
-                            into.push(parsed_frame);
-                            num_parsed_frames += 1;
-                        }
-                    },
+                .position(|&x| x == HdlcSpecial::Flag as u8)
+            else {
+                if self.buffer.len() > MAX_HDLC_BUFFER_SIZE {
+                    log::warn!(
+                        "Discarding {} buffered bytes without an HDLC flag, resyncing",
+                        self.buffer.len()
+                    );
+                    self.buffer.clear();
+                    self.ignoring_until_next_flag = true;
                 }
+
+                return false;
+            };
+
+            let ignoring = self.ignoring_until_next_flag;
+            self.ignoring_until_next_flag = false;
+
+            // `index > 0` ignores consecutive flags
+            let parsed = !ignoring
+                && index > 0
+                && hdlc_unescape_into(&self.buffer[..index], scratch).is_ok();
+            self.buffer.drain(0..=index);
+
+            if parsed {
+                return true;
             }
-
-            self.buffer.drain(0..index.unwrap() + 1);
         }
-
-        if self.buffer.len() > MAX_HDLC_BUFFER_SIZE {
-            log::warn!(
-                "Discarding {} buffered bytes without an HDLC flag, resyncing",
-                self.buffer.len()
-            );
-            self.buffer.clear();
-            self.ignoring_until_next_flag = true;
-        }
-
-        num_parsed_frames
     }
 
     pub fn parse_frames_from_bytes(&mut self, bytes: &[u8]) -> Vec<SpinelFrame> {
-        let mut frames = Vec::new();
-        self.parse_frames_from_bytes_into(bytes, &mut frames);
+        self.buffer.extend(bytes);
 
+        let mut scratch = std::mem::take(&mut self.unescape_scratch);
+        let mut frames = Vec::new();
+
+        while self.next_frame_into(&mut scratch) {
+            if let Ok(frame) = SpinelFrame::from_bytes(&scratch) {
+                frames.push(frame);
+            }
+        }
+
+        self.unescape_scratch = scratch;
         frames
     }
 
     pub fn handle_inbound_bytes(&mut self, bytes: &[u8]) {
         log::trace!("RX bytes: {bytes:?}");
+        self.buffer.extend(bytes);
 
-        for frame in self.parse_frames_from_bytes(bytes) {
-            self.handle_inbound_frame(frame);
+        // The scratch is moved out of `self` so the routing below can borrow the
+        // payload from it while still mutating protocol state
+        let mut scratch = std::mem::take(&mut self.unescape_scratch);
+
+        while self.next_frame_into(&mut scratch) {
+            match parse_spinel_parts(&scratch) {
+                Ok((header, command_id, payload)) => {
+                    self.handle_inbound_frame(header, command_id, payload);
+                }
+                Err(err) => {
+                    log::warn!("Failed to parse Spinel frame: {err:?}");
+                }
+            }
         }
+
+        self.unescape_scratch = scratch;
     }
 
-    pub fn handle_inbound_frame(&mut self, frame: SpinelFrame) {
-        log::debug!("RX: {frame:?}");
-        let tid = frame.header.transaction_id;
+    /// Route one inbound frame. The payload is borrowed from the read scratch and is
+    /// only copied at the boundary where a frame is actually handed to a consumer.
+    pub fn handle_inbound_frame(
+        &mut self,
+        header: SpinelHeader,
+        command_id: SpinelCommandId,
+        payload: &[u8],
+    ) {
+        log::debug!("RX: {header:?} {command_id:?} {payload:02X?}");
+        let tid = header.transaction_id;
 
         if tid == 0 {
-            if frame.command_id == SpinelCommandId::PropValueIs {
-                match SpinelFramePropValueIs::from_bytes(&frame.payload) {
-                    Ok(prop_value_is) => {
-                        if prop_value_is.property_id == SpinelPropertyId::LastStatus {
-                            self.handle_unsolicited_last_status(&prop_value_is.value);
-                            return;
-                        }
+            if command_id == SpinelCommandId::PropValueIs {
+                let property = match packed_uint21_deserialize(payload) {
+                    Ok((property_id, value)) => SpinelPropertyId::try_from(property_id)
+                        .ok()
+                        .map(|property_id| (property_id, value)),
+                    Err(_) => None,
+                };
 
-                        match self
-                            .property_update_receivers
-                            .get(&prop_value_is.property_id)
-                        {
+                match property {
+                    Some((SpinelPropertyId::LastStatus, value)) => {
+                        self.handle_unsolicited_last_status(value);
+                    }
+                    Some((property_id, value)) => {
+                        match self.property_update_receivers.get(&property_id) {
                             Some(sender) => {
-                                let _ = sender.try_send(prop_value_is);
+                                let _ = sender.try_send(SpinelFramePropValueIs {
+                                    property_id,
+                                    value: value.to_vec(),
+                                });
                             }
                             None => {
                                 // Expected for e.g. the MacScanState=IDLE update at
                                 // the end of each scanned channel
-                                log::debug!("No receiver for property update: {prop_value_is:?}");
+                                log::debug!("No receiver for property update: {property_id:?}");
                             }
                         }
                     }
-                    Err(_) => {
-                        log::warn!("Failed to parse PropValueIs frame: {frame:?}");
+                    None => {
+                        log::warn!("Failed to parse PropValueIs frame: {payload:02X?}");
                     }
                 }
             } else {
-                log::warn!("Unhandled unsolicited frame: {frame:?}");
+                log::warn!("Unhandled unsolicited frame: {command_id:?} {payload:02X?}");
             }
         } else if let Some(sender) = self.pending_frames.remove(&tid) {
-            let _ = sender.send(frame);
+            let _ = sender.send(SpinelFrame {
+                header,
+                command_id,
+                payload: payload.to_vec(),
+            });
         } else {
-            log::warn!("Unsolicited or unmatched frame: {frame:?}");
+            log::warn!("Unsolicited or unmatched frame: {command_id:?} {payload:02X?}");
         }
     }
 
