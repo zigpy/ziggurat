@@ -175,9 +175,19 @@ impl ZigbeeStack {
                     .serialize()
                     .unwrap(),
                 )
-                .with_radius(1);
+                .with_radius(1)
+                // Sent via `transmit_*`, which does not assign sequence numbers
+                .with_sequence_number(self.next_nwk_sequence_number());
 
-            self.background_send_nwk_frame(link_status_frame, NwkSecurityMode::NetworkKey, false);
+            // Spec 3.6.4.4.1: link statuses are one-hop broadcasts sent without
+            // retries. Nobody relays a radius-1 frame, so the passive ack machinery
+            // of the regular broadcast path could never complete for them anyway.
+            if let Err(err) = self
+                .transmit_broadcast_nwk_frame(link_status_frame, NwkSecurityMode::NetworkKey)
+                .await
+            {
+                log::warn!("Failed to broadcast link status: {err}");
+            }
 
             if remaining_link_statuses.is_empty() {
                 break;

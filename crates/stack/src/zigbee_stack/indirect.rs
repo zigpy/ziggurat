@@ -4,7 +4,7 @@ use ieee_802154::types::{Eui64, Nwk};
 
 use std::collections::HashSet;
 use tokio::sync::oneshot;
-use tokio::time::{Duration, Instant, timeout_at};
+use tokio::time::{Instant, timeout_at};
 use zigbee_parts::Command;
 use zigbee_parts::commands::NwkLeaveCommand;
 
