@@ -613,10 +613,11 @@ impl ZigguratServer {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
+        // Debug by default, overridable through RUST_LOG
         env_logger::builder()
             .format_timestamp_micros()
             .filter(None, LevelFilter::Debug)
-            //.filter_module("ziggurat::spinel", LevelFilter::Info
+            .parse_default_env()
             .init();
 
         let args: Vec<String> = env::args().collect();
