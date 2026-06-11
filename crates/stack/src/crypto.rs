@@ -11,6 +11,7 @@ use ccm::consts::{U4, U13};
 use parking_lot::Mutex;
 use thiserror::Error;
 
+use ieee_802154::FrameBytes;
 use ieee_802154::types::{Eui64, Key};
 
 /// AES-MMO (Matyas-Meyer-Oseas) cryptographic hash, Zigbee spec B.1.3/B.4. Only the
@@ -138,12 +139,18 @@ fn cipher_for(key: &Key) -> ZigbeeCcm {
 
 /// CCM*-protect a payload in place: `auth_data` is authenticated, the buffer is
 /// encrypted, and the encrypted MIC ("MAC tag") is appended to it.
-pub fn encrypt_ccm(key: &Key, nonce: &[u8; 13], auth_data: &[u8], mut buffer: Vec<u8>) -> Vec<u8> {
-    buffer.reserve_exact(MIC_LENGTH);
+pub fn encrypt_ccm(
+    key: &Key,
+    nonce: &[u8; 13],
+    auth_data: &[u8],
+    mut buffer: FrameBytes,
+) -> FrameBytes {
     let mic = cipher_for(key)
         .encrypt_inout_detached(&(*nonce).into(), auth_data, buffer.as_mut_slice().into())
         .expect("frames are far below the CCM length limits");
-    buffer.extend_from_slice(&mic);
+    buffer
+        .extend_from_slice(&mic)
+        .expect("a frame always has room for its MIC");
     buffer
 }
 
@@ -153,8 +160,8 @@ pub fn decrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
-    mut tagged_ciphertext: Vec<u8>,
-) -> Result<Vec<u8>, DecryptionError> {
+    mut tagged_ciphertext: FrameBytes,
+) -> Result<FrameBytes, DecryptionError> {
     let ciphertext_len = tagged_ciphertext
         .len()
         .checked_sub(MIC_LENGTH)

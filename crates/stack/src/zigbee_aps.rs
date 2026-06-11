@@ -1,7 +1,7 @@
 use abstract_bits::{AbstractBits, abstract_bits};
 use educe::Educe;
-use ieee_802154::extend_abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
+use ieee_802154::{FrameBytes, extend_abstract_bits};
 use num_enum::TryFromPrimitive;
 
 use crate::crypto::{decrypt_ccm, encrypt_ccm};
@@ -136,7 +136,7 @@ pub struct ApsDataFrame {
     pub profile_id: u16,
     pub source_endpoint: u8,
     pub counter: u8,
-    pub asdu: Vec<u8>,
+    pub asdu: FrameBytes,
 }
 
 impl ApsDataFrame {
@@ -173,7 +173,7 @@ impl ApsDataFrame {
         let profile_id = u16::from_le_bytes([remaining[2], remaining[3]]);
         let source_endpoint = remaining[4];
         let counter = remaining[5];
-        let asdu = remaining[6..].to_vec();
+        let asdu = FrameBytes::from_slice(&remaining[6..]).map_err(|_| "ASDU too long")?;
 
         Ok(Self {
             frame_control,
@@ -419,7 +419,7 @@ pub struct ApsTunnelCommandFrame {
     /// The complete APS frame to relay: APS header, auxiliary header, encrypted
     /// command, and MIC
     #[educe(Debug(method(format_hex)))]
-    pub tunneled_frame: Vec<u8>,
+    pub tunneled_frame: FrameBytes,
 }
 
 impl ApsTunnelCommandFrame {
@@ -428,7 +428,8 @@ impl ApsTunnelCommandFrame {
 
         Ok(Self {
             destination_address,
-            tunneled_frame: remaining.to_vec(),
+            tunneled_frame: FrameBytes::from_slice(remaining)
+                .map_err(|_| "Tunneled frame too long")?,
         })
     }
 
@@ -700,7 +701,7 @@ fn encrypt_aps_payload(
     aux_header: &ApsAuxHeader,
     header: &[u8],
     plaintext: &[u8],
-) -> Vec<u8> {
+) -> FrameBytes {
     let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
     let source = aux_header
         .extended_source
@@ -710,7 +711,8 @@ fn encrypt_aps_payload(
     let mut auth_data = header.to_vec();
     modified_aux_header.serialize_into(&mut auth_data);
 
-    encrypt_ccm(key, &nonce, &auth_data, plaintext.to_vec())
+    let buffer = FrameBytes::from_slice(plaintext).expect("plaintext is frame-bounded");
+    encrypt_ccm(key, &nonce, &auth_data, buffer)
 }
 
 /// Reverse of [`encrypt_aps_payload`]: verify the MIC and return the decrypted payload.
@@ -722,19 +724,15 @@ fn decrypt_aps_payload(
     source: Eui64,
     header: &[u8],
     tagged_ciphertext: &[u8],
-) -> Result<Vec<u8>, &'static str> {
+) -> Result<FrameBytes, &'static str> {
     let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
     let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
 
     let mut auth_data = header.to_vec();
     modified_aux_header.serialize_into(&mut auth_data);
 
-    Ok(decrypt_ccm(
-        key,
-        &nonce,
-        &auth_data,
-        tagged_ciphertext.to_vec(),
-    )?)
+    let buffer = FrameBytes::from_slice(tagged_ciphertext).expect("ciphertext is frame-bounded");
+    Ok(decrypt_ccm(key, &nonce, &auth_data, buffer)?)
 }
 
 #[derive(Educe, Clone, PartialEq, Eq)]
@@ -744,7 +742,7 @@ pub struct EncryptedApsCommandFrame {
     pub counter: u8,
     pub aux_header: ApsAuxHeader,
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: FrameBytes,
 }
 
 impl EncryptedApsCommandFrame {
@@ -762,7 +760,7 @@ impl EncryptedApsCommandFrame {
             frame_control,
             counter,
             aux_header,
-            ciphertext: remaining.to_vec(),
+            ciphertext: FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?,
         })
     }
 
@@ -807,13 +805,13 @@ pub struct EncryptedApsDataFrame {
     pub header: ApsDataFrame,
     pub aux_header: ApsAuxHeader,
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: FrameBytes,
 }
 
 impl ApsDataFrame {
     pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsDataFrame {
         let header = Self {
-            asdu: Vec::new(),
+            asdu: FrameBytes::new(),
             ..self.clone()
         };
         let ciphertext = encrypt_aps_payload(key, aux_header, &header.to_bytes(), &self.asdu);
@@ -830,8 +828,8 @@ impl EncryptedApsDataFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         let mut header = ApsDataFrame::from_bytes(bytes)?;
         let (aux_header, remaining) = ApsAuxHeader::deserialize(&header.asdu)?;
-        let ciphertext = remaining.to_vec();
-        header.asdu = Vec::new();
+        let ciphertext = FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?;
+        header.asdu = FrameBytes::new();
 
         Ok(Self {
             header,
@@ -874,7 +872,7 @@ pub struct EncryptedApsAckFrame {
     pub header: ApsAckFrame,
     pub aux_header: ApsAuxHeader,
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: FrameBytes,
 }
 
 impl ApsAckFrame {
@@ -905,7 +903,7 @@ impl EncryptedApsAckFrame {
         Ok(Self {
             header,
             aux_header,
-            ciphertext: remaining.to_vec(),
+            ciphertext: FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?,
         })
     }
 
@@ -993,7 +991,7 @@ mod test {
             profile_id: 0x0104,
             source_endpoint: 1,
             counter: 3,
-            asdu: hex!("01 5a 00").to_vec(),
+            asdu: FrameBytes::from_slice(&hex!("01 5a 00")).unwrap(),
         };
 
         assert_eq!(aps_frame, expected_aps_frame);
@@ -1020,7 +1018,7 @@ mod test {
             profile_id: 0x0000,
             source_endpoint: 0,
             counter: 0,
-            asdu: hex!("00426b4fdeb726004b12008e").to_vec(),
+            asdu: FrameBytes::from_slice(&hex!("00426b4fdeb726004b12008e")).unwrap(),
         };
 
         assert_eq!(aps_frame, expected_aps_frame);
@@ -1138,7 +1136,7 @@ mod test {
             profile_id: 0x0104,
             source_endpoint: 1,
             counter: 77,
-            asdu: vec![0x01, 0x02, 0x03, 0x04, 0x05],
+            asdu: FrameBytes::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]).unwrap(),
         };
 
         let key = Key::from_hex("5a6967426565416c6c69616e63653039");
@@ -1286,7 +1284,7 @@ mod test {
             command_id: ApsCommandId::Tunnel,
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: Eui64::from_hex("bc:02:6e:ff:fe:49:4a:31"),
-                tunneled_frame: encrypted_inner.to_bytes(),
+                tunneled_frame: FrameBytes::from_slice(&encrypted_inner.to_bytes()).unwrap(),
             }),
         };
 

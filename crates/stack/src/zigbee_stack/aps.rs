@@ -3,6 +3,7 @@ use crate::zigbee_aps::{
     EncryptedApsAckFrame, EncryptedApsDataFrame,
 };
 use crate::zigbee_nwk::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
+use ieee_802154::FrameBytes;
 use ieee_802154::types::{Eui64, Nwk};
 
 use std::cmp;
@@ -187,6 +188,8 @@ impl ZigbeeStack {
         data: Vec<u8>,
         aps_security: Option<Eui64>,
     ) -> Result<Option<ApsAckWaiter>, ZigbeeStackError> {
+        let asdu = FrameBytes::from_slice(&data).map_err(|_| ZigbeeStackError::PayloadTooLong)?;
+
         let aps_frame = match delivery_mode {
             ApsDeliveryMode::Unicast => ApsDataFrame {
                 frame_control: ApsFrameControl {
@@ -203,7 +206,7 @@ impl ZigbeeStack {
                 profile_id,
                 source_endpoint: src_ep,
                 counter: aps_seq,
-                asdu: data.to_vec(),
+                asdu: asdu.clone(),
             },
             ApsDeliveryMode::Broadcast => ApsDataFrame {
                 frame_control: ApsFrameControl {
@@ -220,7 +223,7 @@ impl ZigbeeStack {
                 profile_id,
                 source_endpoint: src_ep,
                 counter: aps_seq,
-                asdu: data.to_vec(),
+                asdu: asdu.clone(),
             },
             ApsDeliveryMode::Multicast => ApsDataFrame {
                 frame_control: ApsFrameControl {
@@ -237,7 +240,7 @@ impl ZigbeeStack {
                 profile_id,
                 source_endpoint: src_ep,
                 counter: aps_seq,
-                asdu: data.to_vec(),
+                asdu: asdu.clone(),
             },
         };
 

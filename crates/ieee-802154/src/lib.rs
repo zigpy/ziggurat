@@ -134,7 +134,7 @@ pub struct Ieee802154BeaconFrame {
 pub struct Ieee802154DataFrame {
     pub header: Ieee802154FrameHeader,
     #[educe(Debug(method(format_hex)))]
-    pub payload: Vec<u8>,
+    pub payload: FrameBytes,
     pub fcs: u16,
 }
 
@@ -154,6 +154,12 @@ pub struct Ieee802154CommandFrame {
 
 /// `aMaxPhyPacketSize`: a full 802.15.4 frame, FCS included, fits in 127 bytes
 pub const MAX_PHY_PACKET_SIZE: usize = 127;
+
+/// Frame-bounded byte storage: an owned, inline buffer for payloads and ciphertexts.
+///
+/// Nothing carried within a single 802.15.4 frame can exceed its capacity, and APS
+/// fragmentation does not exist in practice.
+pub type FrameBytes = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
 
 /// Maximum 802.15.4 MAC payload length
 const MAC_COMMAND_MAX_LEN: usize = MAX_PHY_PACKET_SIZE - 2 - 23; // FCS and maximum header
@@ -364,7 +370,7 @@ impl Ieee802154Frame {
                 }))
             }
             Ieee802154FrameType::Data => {
-                let payload = remaining.to_vec();
+                let payload = FrameBytes::from_slice(remaining).map_err(|_| "Payload too long")?;
                 Ok(Self::Data(Ieee802154DataFrame {
                     header,
                     payload,
@@ -731,7 +737,7 @@ mod test {
                 src_pan_id: Some(PanId(0xBEEF)),
                 src_address: Some(Ieee802154Address::Nwk(Nwk(0x3E44))),
             },
-            payload: hex!("48020000443e1eb4287cc54700e095dd0c018817000033a8fc4eb11941104ea261f13064f175f477d311e62736b708a6a390a4f8b120df6cd3ec5c24").to_vec(),
+            payload: FrameBytes::from_slice(&hex!("48020000443e1eb4287cc54700e095dd0c018817000033a8fc4eb11941104ea261f13064f175f477d311e62736b708a6a390a4f8b120df6cd3ec5c24")).unwrap(),
             fcs: 0x8146,
         });
 
@@ -766,10 +772,10 @@ mod test {
                 src_pan_id: Some(PanId(0x7240)),
                 src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
             },
-            payload: hex!(
+            payload: FrameBytes::from_slice(&hex!(
                 "0802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b"
-            )
-            .to_vec(),
+            ))
+            .unwrap(),
             fcs: 0x2e1c,
         });
 
@@ -805,10 +811,10 @@ mod test {
                 src_pan_id: Some(PanId(0x7240)),
                 src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
             },
-            payload: hex!(
+            payload: FrameBytes::from_slice(&hex!(
                 "0802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b"
-            )
-            .to_vec(),
+            ))
+            .unwrap(),
             fcs: 0x4bdd,
         });
 

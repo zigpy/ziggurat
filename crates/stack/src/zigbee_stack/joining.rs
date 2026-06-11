@@ -18,6 +18,7 @@ use crate::zigbee_aps::{
 use crate::zigbee_nwk::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId,
 };
+use ieee_802154::FrameBytes;
 use ieee_802154::types::{Eui64, Key, Nwk};
 
 use std::collections::VecDeque;
@@ -898,7 +899,8 @@ impl ZigbeeStack {
             command_id: ApsCommandId::Tunnel,
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: device_eui64,
-                tunneled_frame: encrypted_transport_key.to_bytes(),
+                tunneled_frame: FrameBytes::from_slice(&encrypted_transport_key.to_bytes())
+                    .expect("an encrypted APS command is frame-bounded"),
             }),
         };
 

@@ -7,6 +7,7 @@ use crate::zigbee_nwk::{
     NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
     NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel, NwkSourceRoute,
 };
+use ieee_802154::FrameBytes;
 use ieee_802154::types::{Eui64, Nwk};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -329,7 +330,7 @@ impl ZigbeeStack {
     /// A NWK command frame originated by us, with stack-wide defaults: secured, route
     /// discovery suppressed, radius `2 * max_depth`, sequence number assigned on send,
     /// our EUI64 as the extended source. Deviations chain `with_*` overrides.
-    pub(super) const fn nwk_command_frame(&self, destination: Nwk, payload: Vec<u8>) -> NwkFrame {
+    pub(super) fn nwk_command_frame(&self, destination: Nwk, payload: Vec<u8>) -> NwkFrame {
         NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -353,13 +354,13 @@ impl ZigbeeStack {
                 source_route: None,
             },
             aux_header: None, // Applied at encryption time
-            payload,
+            payload: FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
         }
     }
 
     /// A NWK data frame originated by us; same defaults as [`Self::nwk_command_frame`]
     /// except data frames carry no extended source.
-    pub(super) const fn nwk_data_frame(&self, destination: Nwk, payload: Vec<u8>) -> NwkFrame {
+    pub(super) fn nwk_data_frame(&self, destination: Nwk, payload: Vec<u8>) -> NwkFrame {
         NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -383,7 +384,7 @@ impl ZigbeeStack {
                 source_route: None,
             },
             aux_header: None, // Applied at encryption time
-            payload,
+            payload: FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
         }
     }
 
@@ -610,7 +611,7 @@ impl ZigbeeStack {
                 src_pan_id: None,
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
             },
-            payload,
+            payload: FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
             fcs: 0x0000, // It'll be replaced
         })
     }
@@ -838,7 +839,8 @@ impl ZigbeeStack {
                 src_pan_id: None,
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
             },
-            payload: encrypted_nwk_frame.to_bytes(),
+            payload: FrameBytes::from_slice(&encrypted_nwk_frame.to_bytes())
+                .expect("an encrypted NWK frame is frame-bounded"),
             fcs: 0x0000, // It'll be replaced
         });
 
@@ -910,7 +912,8 @@ impl ZigbeeStack {
             };
 
             route_record_cmd.relays.push(self.state.network_address);
-            nwk_frame.payload = route_record_cmd.serialize().unwrap();
+            nwk_frame.payload = FrameBytes::from_slice(&route_record_cmd.serialize().unwrap())
+                .expect("a relayed route record is frame-bounded");
         }
 
         let next_hop_address = if let Some(source_route) = &mut nwk_frame.nwk_header.source_route {

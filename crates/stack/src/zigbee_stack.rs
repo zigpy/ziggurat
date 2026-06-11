@@ -73,6 +73,8 @@ pub enum ZigbeeStackError {
     SpinelTransmitFailure(SpinelStatus),
     #[error("aps ack timeout")]
     ApsAckTimeout,
+    #[error("payload does not fit in a single frame")]
+    PayloadTooLong,
     #[error("aps security material unavailable or unusable")]
     ApsSecurityFailed,
     #[error("indirect transaction expired before {destination:?} polled")]
@@ -801,7 +803,7 @@ impl ZigbeeStack {
                         dst_ep: aps_frame.destination_endpoint.unwrap_or(0),
                         lqi: packet.lqi,
                         rssi: packet.rssi,
-                        data: aps_frame.asdu,
+                        data: aps_frame.asdu.to_vec(),
                     };
                     let _ = self.notification_tx.send(notification);
                 }

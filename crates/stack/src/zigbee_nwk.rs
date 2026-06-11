@@ -3,8 +3,8 @@
 use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use abstract_bits::{BitReader, BitWriter};
-use ieee_802154::extend_abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
+use ieee_802154::{FrameBytes, extend_abstract_bits};
 
 use num_enum::TryFromPrimitive;
 
@@ -303,7 +303,7 @@ pub struct EncryptedNwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: FrameBytes,
 }
 
 #[derive(Educe, Clone, PartialEq, Eq)]
@@ -312,7 +312,7 @@ pub struct NwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
     #[educe(Debug(method(format_hex)))]
-    pub payload: Vec<u8>,
+    pub payload: FrameBytes,
 }
 
 /// Chainable overrides for the rare frames that deviate from the defaults set by
@@ -410,7 +410,7 @@ impl EncryptedNwkFrame {
         Ok(Self {
             nwk_header,
             aux_header,
-            ciphertext: remaining.to_vec(),
+            ciphertext: FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?,
         })
     }
 
@@ -541,7 +541,7 @@ mod test {
                 extended_source: Some(Eui64::from_hex("00:12:4b:00:1e:17:ef:a8")),
                 key_sequence_number: 0,
             }),
-            ciphertext: hex!("f7a7e37b47adb47593c8a375c98ba6").to_vec(),
+            ciphertext: FrameBytes::from_slice(&hex!("f7a7e37b47adb47593c8a375c98ba6")).unwrap(),
         };
 
         assert_eq!(nwk_frame, expected_nwk_frame);
@@ -552,7 +552,7 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: hex!("00010600040101a9015701").to_vec(),
+            payload: FrameBytes::from_slice(&hex!("00010600040101a9015701")).unwrap(),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
@@ -606,7 +606,7 @@ mod test {
                 extended_source: Some(Eui64::from_hex("00:17:88:01:0c:71:3c:02")),
                 key_sequence_number: 0,
             }),
-            ciphertext: hex!("0b73db5468c7cbc47caf8705").to_vec(),
+            ciphertext: FrameBytes::from_slice(&hex!("0b73db5468c7cbc47caf8705")).unwrap(),
         };
 
         assert_eq!(nwk_frame, expected_nwk_frame);
@@ -617,7 +617,7 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: hex!("020106000401405b").to_vec(),
+            payload: FrameBytes::from_slice(&hex!("020106000401405b")).unwrap(),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
