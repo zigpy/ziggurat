@@ -1078,52 +1078,82 @@ impl ZigbeeStack {
             .try_lock()
             .expect("Energy scan receiver is locked");
 
+        // Discard results of an earlier scan that failed after starting a channel
+        while energy_scan_rx.try_recv().is_ok() {}
+
         let scan_period_ms = u16::try_from(duration_per_channel.as_millis())
             .expect("Scan duration does not fit into a u16");
 
-        let mut results = Vec::with_capacity(channels.len());
+        let scan = async {
+            let mut results = Vec::with_capacity(channels.len());
 
-        for &channel in channels {
-            self.spinel
-                .prop_value_set(SpinelPropertyId::MacScanMask, vec![channel])
-                .await?;
-            self.spinel
-                .prop_value_set(
-                    SpinelPropertyId::MacScanPeriod,
-                    scan_period_ms.to_le_bytes().to_vec(),
+            for &channel in channels {
+                // The RCP rejects a scan start while a transmit is in flight, so the
+                // radio is owned exclusively for each channel's scan. Taking the (fair)
+                // lock per channel lets transmissions queued during one channel slip
+                // out before the next, instead of blacking out transmission for the
+                // whole sweep.
+                let _radio_lock = self.spinel.lock_radio().await;
+
+                self.spinel
+                    .prop_value_set(SpinelPropertyId::MacScanMask, vec![channel])
+                    .await?;
+                self.spinel
+                    .prop_value_set(
+                        SpinelPropertyId::MacScanPeriod,
+                        scan_period_ms.to_le_bytes().to_vec(),
+                    )
+                    .await?;
+
+                // A rejected scan start is answered with a `LastStatus` instead of the
+                // scan state, and no result would ever arrive
+                let (response_property, response_value) = self
+                    .spinel
+                    .prop_value_set(
+                        SpinelPropertyId::MacScanState,
+                        vec![SpinelMacScanState::Energy as u8],
+                    )
+                    .await?;
+
+                if response_property != SpinelPropertyId::MacScanState {
+                    return Err(ZigbeeStackError::SpinelError(
+                        SpinelError::InvalidResponseError {
+                            reason: format!(
+                                "Energy scan of channel {channel} was rejected: \
+                                 {response_property:?}={response_value:02X?}"
+                            ),
+                        },
+                    ));
+                }
+
+                // The single scan result update doubles as the completion notification
+                let update = timeout(
+                    duration_per_channel + ENERGY_SCAN_RESULT_TIMEOUT,
+                    energy_scan_rx.recv(),
                 )
-                .await?;
-            self.spinel
-                .prop_value_set(
-                    SpinelPropertyId::MacScanState,
-                    vec![SpinelMacScanState::Energy as u8],
-                )
-                .await?;
+                .await
+                .map_err(|_| ZigbeeStackError::SpinelError(SpinelError::Timeout))?
+                .expect("Spinel energy scan sender hung up");
 
-            // The single scan result update doubles as the completion notification
-            let update = timeout(
-                duration_per_channel + ENERGY_SCAN_RESULT_TIMEOUT,
-                energy_scan_rx.recv(),
-            )
-            .await
-            .map_err(|_| ZigbeeStackError::SpinelError(SpinelError::Timeout))?
-            .expect("Spinel energy scan sender hung up");
+                let [scanned_channel, max_rssi] = update.value[..] else {
+                    panic!("Invalid energy scan result: {:02X?}", update.value);
+                };
+                assert_eq!(scanned_channel, channel);
 
-            let [scanned_channel, max_rssi] = update.value[..] else {
-                panic!("Invalid energy scan result: {:02X?}", update.value);
-            };
-            assert_eq!(scanned_channel, channel);
+                results.push((scanned_channel, max_rssi as i8));
+            }
 
-            results.push((scanned_channel, max_rssi as i8));
-        }
+            Ok(results)
+        };
+        let results = scan.await;
 
-        // The scan leaves the radio tuned to the last scanned channel
+        // The scan leaves the radio tuned to the last scanned channel, even on failure
         let network_channel = *self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap();
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan, vec![network_channel])
             .await?;
 
-        Ok(results)
+        results
     }
 
     /// Spawns a task tied to the stack's lifetime: it is aborted on `shutdown`.

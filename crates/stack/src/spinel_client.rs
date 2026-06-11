@@ -194,8 +194,10 @@ pub struct SpinelClient {
     /// concurrent commands cannot interleave partial frames inside the byte stream.
     writer: AsyncMutex<WriteHalf<SerialStream>>,
     pub protocol: Arc<Mutex<SpinelProtocol>>,
-    /// The RCP has a single TX buffer; transmit transactions are serialized end to end.
-    transmit_lock: AsyncMutex<()>,
+    /// The RCP has a single radio (and a single TX buffer): transmit transactions are
+    /// serialized end to end, and energy scans hold the lock per scanned channel via
+    /// [`Self::lock_radio`].
+    radio_lock: AsyncMutex<()>,
     consecutive_timeouts: AtomicU32,
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -208,7 +210,7 @@ impl SpinelClient {
             reader: Mutex::new(Some(reader)),
             writer: AsyncMutex::new(writer),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
-            transmit_lock: AsyncMutex::new(()),
+            radio_lock: AsyncMutex::new(()),
             consecutive_timeouts: AtomicU32::new(0),
             reader_task: Mutex::new(None),
         }
@@ -445,6 +447,16 @@ impl SpinelClient {
         Ok((rsp_property_id, payload.to_vec()))
     }
 
+    /// Take exclusive ownership of the radio, pausing transmissions for as long as the
+    /// guard is held. A transmit submitted during an energy scan is put on the air by
+    /// the RCP the moment the scanned channel completes, and a scan start is rejected
+    /// with `INVALID_STATE` while a frame is in flight — holding this lock around a
+    /// scan makes that race impossible, since a transmit holds it until its frame is
+    /// off the air.
+    pub async fn lock_radio(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.radio_lock.lock().await
+    }
+
     // Convenience method wrapping broad functionality are below
     pub async fn get_ncp_version(&self) -> Result<String, SpinelError> {
         let ncp_version_rsp = self.prop_value_get(SpinelPropertyId::NcpVersion).await?;
@@ -463,7 +475,7 @@ impl SpinelClient {
         &self,
         tx_frame: &SpinelTxFrame,
     ) -> Result<SpinelStatus, SpinelError> {
-        let _transmit_lock = self.transmit_lock.lock().await;
+        let _radio_lock = self.radio_lock.lock().await;
 
         // No retry on timeout: a duplicate transmit is worse than a failed one, and the
         // NWK retry paths handle the failure
