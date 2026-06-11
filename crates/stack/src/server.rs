@@ -16,7 +16,8 @@ use tokio_tungstenite::tungstenite::Message;
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::spinel_client::SpinelClient;
 use ziggurat::zigbee_aps::ApsDeliveryMode;
-use ziggurat::zigbee_stack::{Constants, ZigbeeNotification, ZigbeeStack};
+use ziggurat::zigbee_stack::aps_security::TclkFlavor;
+use ziggurat::zigbee_stack::{Constants, TclkSeed, ZigbeeNotification, ZigbeeStack};
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -100,6 +101,10 @@ struct ConfigureRequest {
     network_key_seq: u8,
     network_key_tx_counter: u32,
     tc_link_key: Option<Key>,
+    /// A TCLK seed carried over from a microcontroller stack; unique link keys are
+    /// derived from it instead of generated randomly. Requires `tclk_flavor`.
+    tclk_seed: Option<Key>,
+    tclk_flavor: Option<TclkFlavor>,
     #[serde(default)]
     key_table: Vec<KeyTableEntry>,
     #[serde(default)]
@@ -121,6 +126,10 @@ struct SendApsRequest {
     radius: u8,
     /// Hex-encoded ASDU
     data: String,
+    /// APS-encrypt the ASDU with the destination's link key; requires a unicast
+    /// `destination_eui64`
+    #[serde(default)]
+    aps_encryption: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -363,6 +372,18 @@ impl ZigguratServer {
             constants.global_link_key = tc_link_key;
         }
 
+        match (request.tclk_seed, request.tclk_flavor) {
+            (Some(seed), Some(flavor)) => constants.tclk_seed = Some(TclkSeed { seed, flavor }),
+            (None, None) => {}
+            _ => {
+                return error_response(
+                    id,
+                    "invalid_request",
+                    "tclk_seed and tclk_flavor must be provided together",
+                );
+            }
+        }
+
         // A replaced stack must be fully stopped first: its spawned tasks hold strong
         // references and its serial reader would steal the successor's responses
         let old_stack = self.stack.lock().unwrap().take();
@@ -455,9 +476,11 @@ impl ZigguratServer {
             return error_response(id, "not_configured", "no stack is running");
         };
 
-        // EUI64-addressed packets are resolved through the address map
+        // A network address is authoritative when given (`destination_eui64` then only
+        // selects the link key); EUI64-only packets are resolved through the address map
         let destination = match (request.destination_eui64, request.destination) {
-            (Some(eui64), _) => {
+            (_, Some(nwk)) => nwk,
+            (Some(eui64), None) => {
                 let nwk = stack.state.address_map.lock().get(&eui64).copied();
 
                 match nwk {
@@ -471,7 +494,6 @@ impl ZigguratServer {
                     }
                 }
             }
-            (None, Some(nwk)) => nwk,
             (None, None) => {
                 return error_response(id, "missing_destination", "no destination given");
             }
@@ -480,6 +502,22 @@ impl ZigguratServer {
         let asdu = match hex::decode(&request.data) {
             Ok(asdu) => asdu,
             Err(e) => return error_response(id, "invalid_data", e),
+        };
+
+        // Link keys are pairwise: encryption needs a unicast EUI64-addressed target
+        let aps_security = if request.aps_encryption {
+            match (request.destination_eui64, request.delivery_mode) {
+                (Some(eui64), ApsDeliveryMode::Unicast) => Some(eui64),
+                _ => {
+                    return error_response(
+                        id,
+                        "invalid_request",
+                        "aps_encryption requires a unicast destination_eui64",
+                    );
+                }
+            }
+        } else {
+            None
         };
 
         let ack_waiter = match stack
@@ -494,6 +532,7 @@ impl ZigguratServer {
                 request.radius,
                 request.aps_seq,
                 asdu,
+                aps_security,
             )
             .await
         {

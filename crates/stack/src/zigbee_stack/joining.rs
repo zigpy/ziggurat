@@ -187,7 +187,7 @@ impl ZigbeeStack {
                     // Zigbee spec 4.6.3.2: the network key is delivered once the
                     // device has confirmed receipt of its short address
                     if matches!(status, Ieee802154AssociationStatus::AssociationSuccessful) {
-                        arc_self.send_network_key(short_address, eui64);
+                        arc_self.send_network_key(short_address, eui64, true);
                     }
                 }
                 Err(err) => {
@@ -462,10 +462,14 @@ impl ZigbeeStack {
     }
 
     /// Build the APS Transport Key command that delivers the network key to a device,
-    /// encrypted with the key-transport key derived from the device's link key.
+    /// encrypted with the key-transport key derived from the device's link key. A
+    /// factory-new joiner only knows the well-known key (or its provisional
+    /// install-code key), while a rejoining device holds whatever key it was last
+    /// issued — possibly derived from a TCLK seed by the network's previous owner.
     fn build_encrypted_network_key_transport(
         &self,
         destination_eui64: Eui64,
+        fresh_join: bool,
     ) -> EncryptedApsCommandFrame {
         let transport_key_command = ApsCommandFrame {
             frame_control: ApsFrameControl {
@@ -495,22 +499,31 @@ impl ZigbeeStack {
             }),
         };
 
-        self.state
+        let mut aps_security = self
+            .state
             .aps_security
             .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .encrypt_command(
-                destination_eui64,
-                NwkSecurityHeaderKeyId::KeyTransportKey,
-                &transport_key_command,
-            )
+            .unwrap();
+
+        let link_key = if fresh_join {
+            aps_security.join_link_key(destination_eui64)
+        } else {
+            aps_security.device_link_key(destination_eui64)
+        };
+
+        aps_security.encrypt_command_with_link_key(
+            &link_key,
+            NwkSecurityHeaderKeyId::KeyTransportKey,
+            &transport_key_command,
+        )
     }
 
     /// Zigbee spec 4.6.3.2: deliver the network key to a joining device. The NWK frame
     /// is unsecured; the APS command is encrypted with the key-transport key derived
     /// from the joiner's link key.
-    fn send_network_key(&self, destination: Nwk, destination_eui64: Eui64) {
-        let encrypted_command = self.build_encrypted_network_key_transport(destination_eui64);
+    fn send_network_key(&self, destination: Nwk, destination_eui64: Eui64, fresh_join: bool) {
+        let encrypted_command =
+            self.build_encrypted_network_key_transport(destination_eui64, fresh_join);
 
         let nwk_frame = self
             .nwk_data_frame(destination, encrypted_command.to_bytes())
@@ -811,7 +824,7 @@ impl ZigbeeStack {
                 self.begin_join(update.device_address);
 
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
-                self.send_tunneled_network_key(router_nwk, update.device_address);
+                self.send_tunneled_network_key(router_nwk, update.device_address, true);
 
                 let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
                     nwk: update.device_short_address,
@@ -828,7 +841,7 @@ impl ZigbeeStack {
                     .aps_security
                     .try_lock_for(MAX_LOCK_DURATION)
                     .unwrap()
-                    .has_device_key(update.device_address)
+                    .has_unique_link_key(update.device_address)
                 {
                     log::warn!(
                         "Trust center rejoin from {:?} without a unique link key",
@@ -837,7 +850,7 @@ impl ZigbeeStack {
                 }
 
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
-                self.send_tunneled_network_key(router_nwk, update.device_address);
+                self.send_tunneled_network_key(router_nwk, update.device_address, false);
 
                 let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
                     nwk: update.device_short_address,
@@ -867,8 +880,9 @@ impl ZigbeeStack {
 
     /// Zigbee spec 4.6.3.7: wrap an APS-encrypted Transport Key command in a Tunnel
     /// command so a parent router can forward it to a joiner we cannot reach directly.
-    fn send_tunneled_network_key(&self, router_nwk: Nwk, device_eui64: Eui64) {
-        let encrypted_transport_key = self.build_encrypted_network_key_transport(device_eui64);
+    fn send_tunneled_network_key(&self, router_nwk: Nwk, device_eui64: Eui64, fresh_join: bool) {
+        let encrypted_transport_key =
+            self.build_encrypted_network_key_transport(device_eui64, fresh_join);
 
         let tunnel_command = ApsCommandFrame {
             frame_control: ApsFrameControl {
@@ -1058,7 +1072,7 @@ impl ZigbeeStack {
         // A trust center rejoin means the device no longer has the network key
         if !secured {
             // `send_network_key` also emits the join notification
-            self.send_network_key(assigned_nwk, source_ieee);
+            self.send_network_key(assigned_nwk, source_ieee, false);
         } else {
             let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
                 nwk: assigned_nwk,

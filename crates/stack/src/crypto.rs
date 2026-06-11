@@ -6,7 +6,7 @@ use aes::cipher::KeyIvInit;
 use cbc::Encryptor;
 use cbc::cipher::BlockCipherEncrypt;
 
-use ieee_802154::types::Key;
+use ieee_802154::types::{Eui64, Key};
 
 /// AES-MMO (Matyas-Meyer-Oseas) cryptographic hash, Zigbee spec B.1.3/B.4. Only the
 /// short-message padding scheme is implemented (inputs below 2^16 bits).
@@ -72,6 +72,25 @@ pub fn key_load_key(link_key: &Key) -> Key {
 /// link key without revealing it.
 pub fn verify_key_hash(link_key: &Key) -> [u8; 16] {
     keyed_hash(link_key, &[VERIFY_KEY_HASH_INPUT])
+}
+
+/// Z-Stack derives unique trust center link keys from a 16-byte "TCLK seed" instead of
+/// storing them: the seed, rotated left by a per-device shift, is XORed with the
+/// device's EUI64 repeated twice.
+///
+/// The shift only becomes nonzero when a device's key is updated, which nothing does
+/// in practice, so keys are issued with a shift of 0.
+pub fn zstack_tclk(seed: &Key, eui64: Eui64, shift: usize) -> Key {
+    let eui64 = eui64.to_bytes();
+    Key(std::array::from_fn(|i| {
+        seed.0[(i + shift) % 16] ^ eui64[i % 8]
+    }))
+}
+
+/// EmberZNet's "hashed link key": unique trust center link keys are the keyed hash of
+/// the device's EUI64 under a seed, so any device's key can be recomputed on demand.
+pub fn ezsp_tclk(seed: &Key, eui64: Eui64) -> Key {
+    Key(keyed_hash(seed, &eui64.to_bytes()))
 }
 
 fn right_pad_to_multiple_of_16(data: &[u8]) -> Vec<Block> {
@@ -220,6 +239,33 @@ mod test {
                 &hex!("C0")
             ),
             hex!("4512807BF94CB3400F0E2C25FB76E999")
+        );
+    }
+
+    /// Cross-validated against zigpy-znp's `compute_key`
+    #[test]
+    fn test_zstack_tclk() {
+        let seed = Key::from_hex("0011223344556677889900AABBCCDDEE");
+        let eui64 = Eui64::from_hex("00124b001cdd5b88");
+
+        assert_eq!(
+            zstack_tclk(&seed, eui64, 0),
+            Key::from_hex("884aff2f441e747700c2ddb6bb87cfee")
+        );
+    }
+
+    /// Cross-validated against zigpy's `aes_mmo_hash`
+    #[test]
+    fn test_ezsp_tclk() {
+        let eui64 = Eui64::from_hex("00124b001cdd5b88");
+
+        assert_eq!(
+            ezsp_tclk(&Key::from_hex("0011223344556677889900AABBCCDDEE"), eui64),
+            Key::from_hex("7b5f66c194034b877607ba312627634b")
+        );
+        assert_eq!(
+            ezsp_tclk(&Key::from_hex("5a6967426565416c6c69616e63653039"), eui64),
+            Key::from_hex("35373a9861b18802c2aef128330a92bb")
         );
     }
 }

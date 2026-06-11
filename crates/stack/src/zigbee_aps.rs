@@ -574,30 +574,29 @@ impl ApsCommandFrame {
         bytes
     }
 
+    /// The APS frame control byte and counter, i.e. the cleartext header preceding the
+    /// auxiliary header when APS security is applied.
+    fn header_to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(self.frame_control.to_abstract_bits().unwrap());
+        bytes.push(self.counter);
+
+        bytes
+    }
+
     pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsCommandFrame {
-        let crypto = NwkCrypto::<2, 4>;
-
-        let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
-        let nonce = modified_aux_header.get_nonce();
-        let plaintext = self.payload_to_bytes();
-
-        let mut auth_data = Vec::new();
-        auth_data.extend(self.frame_control.to_abstract_bits().unwrap());
-        auth_data.push(self.counter);
-        auth_data.extend(modified_aux_header.to_bytes());
-
-        let mac_tag = crypto.compute_mac(&auth_data, key, &plaintext, &nonce);
-        let (encrypted_mac_tag, ciphertext) =
-            crypto.encrypt_decrypt(key, &nonce, &mac_tag, &plaintext);
-
-        let mut ciphertext_with_tag = ciphertext;
-        ciphertext_with_tag.extend(encrypted_mac_tag);
+        let ciphertext = encrypt_aps_payload(
+            key,
+            aux_header,
+            &self.header_to_bytes(),
+            &self.payload_to_bytes(),
+        );
 
         EncryptedApsCommandFrame {
             frame_control: self.frame_control.clone(),
             counter: self.counter,
             aux_header: aux_header.clone(),
-            ciphertext: ciphertext_with_tag,
+            ciphertext,
         }
     }
 }
@@ -679,11 +678,10 @@ impl ApsAuxHeader {
         aux_header
     }
 
-    pub fn get_nonce(&self) -> [u8; 13] {
-        let source = self
-            .extended_source
-            .expect("APS frames without an extended nonce are not supported");
-
+    /// The CCM* nonce (spec 4.5.2.2). The frame originator's EUI64 must be passed in:
+    /// frames without an extended nonce do not carry it (spec 4.4.1.2 step 2 resolves
+    /// it through the address map).
+    pub fn get_nonce(&self, source: Eui64) -> [u8; 13] {
         let mut nonce = [0; 13];
         nonce[..8].copy_from_slice(&source.to_bytes());
         nonce[8..12].copy_from_slice(&self.frame_counter.to_le_bytes());
@@ -691,6 +689,69 @@ impl ApsAuxHeader {
 
         nonce
     }
+}
+
+/// CCM*-protect an APS frame payload (spec 4.4.1.1): the cleartext APS header and
+/// auxiliary header are authenticated, the payload is encrypted, and the encrypted MIC
+/// is appended. The security level is fixed network-wide and transmitted as 0 in the
+/// auxiliary header, so the real level is patched in for the computation.
+fn encrypt_aps_payload(
+    key: &Key,
+    aux_header: &ApsAuxHeader,
+    header: &[u8],
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let crypto = NwkCrypto::<2, 4>;
+
+    let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
+    let source = aux_header
+        .extended_source
+        .expect("outgoing secured APS frames always carry an extended nonce");
+    let nonce = modified_aux_header.get_nonce(source);
+
+    let mut auth_data = header.to_vec();
+    auth_data.extend(modified_aux_header.to_bytes());
+
+    let mac_tag = crypto.compute_mac(&auth_data, key, plaintext, &nonce);
+    let (encrypted_mac_tag, ciphertext) = crypto.encrypt_decrypt(key, &nonce, &mac_tag, plaintext);
+
+    let mut ciphertext_with_tag = ciphertext;
+    ciphertext_with_tag.extend(encrypted_mac_tag);
+
+    ciphertext_with_tag
+}
+
+/// Reverse of [`encrypt_aps_payload`]: verify the MIC and return the decrypted payload.
+/// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
+/// carries no extended nonce.
+fn decrypt_aps_payload(
+    key: &Key,
+    aux_header: &ApsAuxHeader,
+    source: Eui64,
+    header: &[u8],
+    tagged_ciphertext: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let crypto = NwkCrypto::<2, 4>;
+
+    let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
+    let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
+
+    let (ciphertext, encrypted_mac_tag) = crypto
+        .split_mac_tag(tagged_ciphertext)
+        .ok_or("Ciphertext too short to contain a MAC tag")?;
+    let (provided_mac_tag, plaintext) =
+        crypto.encrypt_decrypt(key, &nonce, &encrypted_mac_tag, &ciphertext);
+
+    let mut auth_data = header.to_vec();
+    auth_data.extend(modified_aux_header.to_bytes());
+
+    let mac_tag = crypto.compute_mac(&auth_data, key, &plaintext, &nonce);
+
+    if !constant_time_eq(&provided_mac_tag, &mac_tag) {
+        return Err("Invalid MAC tag");
+    }
+
+    Ok(plaintext)
 }
 
 #[derive(Derivative)]
@@ -734,39 +795,159 @@ impl EncryptedApsCommandFrame {
     }
 
     pub fn decrypt(&self, key: &Key) -> Result<ApsCommandFrame, &'static str> {
-        let crypto = NwkCrypto::<2, 4>;
+        // Spec 4.4.1.1 step 4a: APS commands always carry an extended nonce
+        let source = self
+            .aux_header
+            .extended_source
+            .ok_or("APS command frames without an extended nonce are not supported")?;
 
-        let modified_aux_header = self.aux_header.get_modified(NwkSecurityLevel::EncMic32);
-        let nonce = modified_aux_header.get_nonce();
-        let (ciphertext, encrypted_mac_tag) = crypto
-            .split_mac_tag(&self.ciphertext)
-            .ok_or("Ciphertext too short to contain a MAC tag")?;
-        let (provided_mac_tag, plaintext) =
-            crypto.encrypt_decrypt(key, &nonce, &encrypted_mac_tag, &ciphertext);
+        let mut header = Vec::new();
+        header.extend(self.frame_control.to_abstract_bits().unwrap());
+        header.push(self.counter);
 
-        let mut auth_data = Vec::new();
-        auth_data.extend(self.frame_control.to_abstract_bits().unwrap());
-        auth_data.push(self.counter);
-        auth_data.extend(modified_aux_header.to_bytes());
+        let plaintext =
+            decrypt_aps_payload(key, &self.aux_header, source, &header, &self.ciphertext)?;
 
-        let mac_tag = crypto.compute_mac(&auth_data, key, &plaintext, &nonce);
-
-        if !constant_time_eq(&provided_mac_tag, &mac_tag) {
-            return Err("Invalid MAC tag");
-        }
-
-        let mut frame_bytes = Vec::new();
-        frame_bytes.extend(self.frame_control.to_abstract_bits().unwrap());
-        frame_bytes.push(self.counter);
+        let mut frame_bytes = header;
         frame_bytes.extend(plaintext);
 
         ApsCommandFrame::from_bytes(&frame_bytes)
     }
 }
 
+/// An APS-secured data frame (spec 4.4.1.1): the APS header is cleartext, the ASDU is
+/// encrypted.
+#[derive(Derivative)]
+#[derivative(Debug, Clone, PartialEq)]
+pub struct EncryptedApsDataFrame {
+    /// The cleartext APS header fields; its `asdu` is empty
+    pub header: ApsDataFrame,
+    pub aux_header: ApsAuxHeader,
+    #[derivative(Debug(format_with = "format_hex"))]
+    pub ciphertext: Vec<u8>,
+}
+
+impl ApsDataFrame {
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsDataFrame {
+        let header = Self {
+            asdu: Vec::new(),
+            ..self.clone()
+        };
+        let ciphertext = encrypt_aps_payload(key, aux_header, &header.to_bytes(), &self.asdu);
+
+        EncryptedApsDataFrame {
+            header,
+            aux_header: aux_header.clone(),
+            ciphertext,
+        }
+    }
+}
+
+impl EncryptedApsDataFrame {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        let mut header = ApsDataFrame::from_bytes(bytes)?;
+        let (aux_header, remaining) = ApsAuxHeader::deserialize(&header.asdu)?;
+        let ciphertext = remaining.to_vec();
+        header.asdu = Vec::new();
+
+        Ok(Self {
+            header,
+            aux_header,
+            ciphertext,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.header.to_bytes();
+        bytes.extend(self.aux_header.to_bytes());
+        bytes.extend(self.ciphertext.clone());
+
+        bytes
+    }
+
+    /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
+    /// carries no extended nonce.
+    pub fn decrypt(&self, key: &Key, source: Eui64) -> Result<ApsDataFrame, &'static str> {
+        let asdu = decrypt_aps_payload(
+            key,
+            &self.aux_header,
+            source,
+            &self.header.to_bytes(),
+            &self.ciphertext,
+        )?;
+
+        Ok(ApsDataFrame {
+            asdu,
+            ..self.header.clone()
+        })
+    }
+}
+
+/// An APS-secured acknowledgement frame. ACKs carry no payload, so the ciphertext is
+/// just the encrypted MIC authenticating the headers.
+#[derive(Derivative)]
+#[derivative(Debug, Clone, PartialEq)]
+pub struct EncryptedApsAckFrame {
+    pub header: ApsAckFrame,
+    pub aux_header: ApsAuxHeader,
+    #[derivative(Debug(format_with = "format_hex"))]
+    pub ciphertext: Vec<u8>,
+}
+
+impl ApsAckFrame {
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsAckFrame {
+        let ciphertext = encrypt_aps_payload(key, aux_header, &self.to_bytes(), &[]);
+
+        EncryptedApsAckFrame {
+            header: self.clone(),
+            aux_header: aux_header.clone(),
+            ciphertext,
+        }
+    }
+}
+
+impl EncryptedApsAckFrame {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        let header = ApsAckFrame::from_bytes(bytes)?;
+        // `ApsAckFrame::from_bytes` ignores trailing bytes; the aux header starts
+        // right after the fixed header fields
+        let (aux_header, remaining) = ApsAuxHeader::deserialize(&bytes[header.to_bytes().len()..])?;
+
+        Ok(Self {
+            header,
+            aux_header,
+            ciphertext: remaining.to_vec(),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.header.to_bytes();
+        bytes.extend(self.aux_header.to_bytes());
+        bytes.extend(self.ciphertext.clone());
+
+        bytes
+    }
+
+    /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
+    /// carries no extended nonce.
+    pub fn decrypt(&self, key: &Key, source: Eui64) -> Result<ApsAckFrame, &'static str> {
+        decrypt_aps_payload(
+            key,
+            &self.aux_header,
+            source,
+            &self.header.to_bytes(),
+            &self.ciphertext,
+        )?;
+
+        Ok(self.header.clone())
+    }
+}
+
 pub enum ApsFrame {
     Data(ApsDataFrame),
+    EncryptedData(EncryptedApsDataFrame),
     Ack(ApsAckFrame),
+    EncryptedAck(EncryptedApsAckFrame),
     Command(ApsCommandFrame),
     EncryptedCommand(EncryptedApsCommandFrame),
 }
@@ -786,9 +967,12 @@ pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, &'static str> {
         (ApsFrameType::Command, false) => {
             Ok(ApsFrame::Command(ApsCommandFrame::from_bytes(bytes)?))
         }
-        (ApsFrameType::Data | ApsFrameType::Ack, true) => {
-            Err("APS-secured data and ACK frames are not supported")
-        }
+        (ApsFrameType::Data, true) => Ok(ApsFrame::EncryptedData(
+            EncryptedApsDataFrame::from_bytes(bytes)?,
+        )),
+        (ApsFrameType::Ack, true) => Ok(ApsFrame::EncryptedAck(EncryptedApsAckFrame::from_bytes(
+            bytes,
+        )?)),
         (ApsFrameType::Data, false) => Ok(ApsFrame::Data(ApsDataFrame::from_bytes(bytes)?)),
         (ApsFrameType::Ack, false) => Ok(ApsFrame::Ack(ApsAckFrame::from_bytes(bytes)?)),
         (ApsFrameType::Interpan, _) => Err("Interpan not supported"),
@@ -930,6 +1114,96 @@ mod test {
 
         let wrong_key = Key::from_hex("00000000000000000000000000000000");
         assert!(reparsed.decrypt(&wrong_key).is_err());
+    }
+
+    fn test_aux_header(extended_source: Option<Eui64>) -> ApsAuxHeader {
+        ApsAuxHeader {
+            security_control: NwkSecurityHeaderControlField {
+                security_level: NwkSecurityLevel::NoSecurity,
+                key_id: NwkSecurityHeaderKeyId::DataKey,
+                extended_nonce: extended_source.is_some(),
+                require_verified_frame_counter: false,
+            },
+            frame_counter: 42,
+            extended_source,
+            key_sequence_number: None,
+        }
+    }
+
+    #[test]
+    fn test_aps_data_encryption_round_trip() {
+        let source = Eui64::from_hex("00:07:81:00:00:9a:8f:3b");
+
+        let data_frame = ApsDataFrame {
+            frame_control: ApsFrameControl {
+                frame_type: ApsFrameType::Data,
+                delivery_mode: ApsDeliveryMode::Unicast,
+                reserved1: 0b0,
+                security: true,
+                ack_request: true,
+                extended_header: false,
+            },
+            group_id: None,
+            destination_endpoint: Some(1),
+            cluster_id: 0x0101,
+            profile_id: 0x0104,
+            source_endpoint: 1,
+            counter: 77,
+            asdu: vec![0x01, 0x02, 0x03, 0x04, 0x05],
+        };
+
+        let key = Key::from_hex("5a6967426565416c6c69616e63653039");
+        let encrypted = data_frame.encrypt(&key, &test_aux_header(Some(source)));
+
+        let Ok(ApsFrame::EncryptedData(parsed)) = parse_aps_frame(&encrypted.to_bytes()) else {
+            panic!("Expected an encrypted data frame");
+        };
+        assert_eq!(parsed, encrypted);
+
+        // The extended nonce makes the passed-in source irrelevant
+        let other = Eui64::from_hex("ff:ff:ff:ff:ff:ff:ff:ff");
+        let decrypted = parsed.decrypt(&key, other).unwrap();
+        assert_eq!(decrypted, data_frame);
+
+        let wrong_key = Key::from_hex("00000000000000000000000000000000");
+        assert!(parsed.decrypt(&wrong_key, source).is_err());
+    }
+
+    #[test]
+    fn test_aps_ack_encryption_round_trip() {
+        let source = Eui64::from_hex("00:07:81:00:00:9a:8f:3b");
+
+        let ack_frame = ApsAckFrame {
+            frame_control: ApsAckFrameControl {
+                frame_type: ApsFrameType::Ack,
+                delivery_mode: ApsDeliveryMode::Unicast,
+                ack_format: false,
+                security: true,
+                ack_request: false,
+                extended_header: false,
+            },
+            destination_endpoint: Some(1),
+            cluster_id: Some(0x0101),
+            profile_id: Some(0x0104),
+            source_endpoint: Some(1),
+            counter: 77,
+        };
+
+        let key = Key::from_hex("5a6967426565416c6c69616e63653039");
+        let encrypted = ack_frame.encrypt(&key, &test_aux_header(Some(source)));
+
+        let Ok(ApsFrame::EncryptedAck(parsed)) = parse_aps_frame(&encrypted.to_bytes()) else {
+            panic!("Expected an encrypted ACK frame");
+        };
+        assert_eq!(parsed, encrypted);
+
+        let decrypted = parsed.decrypt(&key, source).unwrap();
+        assert_eq!(decrypted, ack_frame);
+
+        // The MIC covers the headers even though there is no payload
+        let mut tampered = parsed;
+        tampered.header.counter = 78;
+        assert!(tampered.decrypt(&key, source).is_err());
     }
 
     #[test]

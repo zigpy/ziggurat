@@ -34,7 +34,7 @@ mod route;
 pub mod routing;
 mod zdp;
 
-pub use aps_security::ApsSecurity;
+pub use aps_security::{ApsSecurity, TclkSeed};
 pub use neighbors::Neighbors;
 pub use routing::Routing;
 
@@ -73,6 +73,8 @@ pub enum ZigbeeStackError {
     SpinelTransmitFailure(SpinelStatus),
     #[error("aps ack timeout")]
     ApsAckTimeout,
+    #[error("aps security material unavailable or unusable")]
+    ApsSecurityFailed,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
     #[error("spinel error: {0}")]
@@ -298,6 +300,10 @@ pub struct Constants {
 
     /// For most joins, the network key is encrypted with the well-known global link key
     pub global_link_key: Key,
+
+    /// The TCLK seed of the stack the network was taken over from, if any: unique link
+    /// keys are derived from it instead of generated randomly
+    pub tclk_seed: Option<TclkSeed>,
 }
 
 impl Default for Constants {
@@ -341,6 +347,7 @@ impl Constants {
             parent_annce_base_timer: Duration::from_secs(10),
             parent_annce_jitter_max: Duration::from_secs(10),
             global_link_key: Key::from_hex("5a6967426565416c6c69616e63653039"),
+            tclk_seed: None,
         }
     }
 }
@@ -492,6 +499,7 @@ impl State {
         key_seq_number: u8,
         outgoing_frame_counter: u32,
         global_link_key: Key,
+        tclk_seed: Option<TclkSeed>,
         route_discovery_time: Duration,
         max_neighbor_age: Duration,
         source_routing: bool,
@@ -500,7 +508,7 @@ impl State {
             channel: Mutex::new(channel),
             ieee802154_sequence_number: Mutex::new(0),
             aps_counter: Mutex::new(0),
-            aps_security: Mutex::new(ApsSecurity::new(global_link_key, ieee_address)),
+            aps_security: Mutex::new(ApsSecurity::new(global_link_key, ieee_address, tclk_seed)),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
@@ -672,6 +680,7 @@ impl ZigbeeStack {
                 key_seq_number,
                 outgoing_frame_counter,
                 constants.global_link_key.clone(),
+                constants.tclk_seed.clone(),
                 constants.route_discovery_time,
                 u32::from(constants.router_age_limit) * constants.link_status_period,
                 source_routing,
@@ -731,23 +740,32 @@ impl ZigbeeStack {
                         continue;
                     }
 
-                    let aps_frame = match parse_aps_frame(&nwk_frame.payload) {
-                        Ok(ApsFrame::Data(data)) => data,
-                        Ok(ApsFrame::Ack(ack)) => {
-                            let ack_data =
-                                ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, &ack);
-                            log::debug!("Received APS ack: {ack_data:?}");
-
-                            let tx = self
-                                .state
-                                .pending_aps_acks
-                                .try_lock_for(MAX_LOCK_DURATION)
-                                .unwrap()
-                                .remove(&ack_data);
-                            if let Some(tx) = tx {
-                                let _ = tx.send(());
+                    let (aps_frame, aps_source_eui64) = match parse_aps_frame(&nwk_frame.payload) {
+                        Ok(ApsFrame::Data(data)) => (data, None),
+                        Ok(ApsFrame::EncryptedData(encrypted)) => {
+                            match self.decrypt_aps_data_frame(&nwk_frame, &encrypted) {
+                                Some((data, source_eui64)) => (data, Some(source_eui64)),
+                                None => {
+                                    log::warn!(
+                                        "Failed to decrypt APS data frame from {:?}",
+                                        nwk_frame.nwk_header.source
+                                    );
+                                    continue;
+                                }
                             }
-
+                        }
+                        Ok(ApsFrame::Ack(ack)) => {
+                            self.handle_aps_ack(&nwk_frame, &ack);
+                            continue;
+                        }
+                        Ok(ApsFrame::EncryptedAck(encrypted)) => {
+                            match self.decrypt_aps_ack_frame(&nwk_frame, &encrypted) {
+                                Some(ack) => self.handle_aps_ack(&nwk_frame, &ack),
+                                None => log::warn!(
+                                    "Failed to decrypt APS ACK from {:?}",
+                                    nwk_frame.nwk_header.source
+                                ),
+                            }
                             continue;
                         }
                         Ok(ApsFrame::Command(cmd)) => {
@@ -772,7 +790,7 @@ impl ZigbeeStack {
                     self.handle_zdp_frame(&nwk_frame, &aps_frame);
 
                     if aps_frame.frame_control.ack_request {
-                        self.handle_aps_ack_request(&aps_frame, &nwk_frame);
+                        self.handle_aps_ack_request(&aps_frame, &nwk_frame, aps_source_eui64);
                     }
 
                     let notification = ZigbeeNotification::ReceivedApsCommand {

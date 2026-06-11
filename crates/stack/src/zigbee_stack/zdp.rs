@@ -326,6 +326,7 @@ impl ZigbeeStack {
             2 * self.constants.max_depth,
             self.next_aps_counter(),
             command.serialize(tsn).unwrap(),
+            None,
         )
         .await
         .map(|_| ())
