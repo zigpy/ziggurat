@@ -150,6 +150,16 @@ struct SetProvisionalKeyRequest {
     key: Key,
 }
 
+#[derive(Deserialize, Debug)]
+struct SetChannelRequest {
+    channel: u8,
+}
+
+#[derive(Deserialize, Debug)]
+struct SetNwkUpdateIdRequest {
+    nwk_update_id: u8,
+}
+
 fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json::Value {
     match notification_event {
         ZigbeeNotification::ReceivedApsCommand {
@@ -380,6 +390,8 @@ impl ZigguratServer {
                 "energy_scan" => server.handle_energy_scan(id, params).await,
                 "permit_joins" => server.handle_permit_joins(id, params),
                 "set_provisional_key" => server.handle_set_provisional_key(id, params),
+                "set_nwk_update_id" => server.handle_set_nwk_update_id(id, params),
+                "set_channel" => server.handle_set_channel(id, params).await,
                 _ => error_response(id, "unknown_method", method),
             };
 
@@ -488,6 +500,41 @@ impl ZigguratServer {
 
         log::info!("Zigbee stack initialized and running.");
         response(id, json!({"status": "success"}))
+    }
+
+    /// Updates the `nwkUpdateId` advertised in beacons, the companion to
+    /// `set_channel` during a network-wide channel migration.
+    fn handle_set_nwk_update_id(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: SetNwkUpdateIdRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        stack.set_nwk_update_id(request.nwk_update_id);
+        response(id, json!({"status": "success"}))
+    }
+
+    /// Retunes the radio to a new channel, the coordinator's half of a network-wide
+    /// channel migration; broadcasting `Mgmt_NWK_Update_req` to the other devices is
+    /// the client's job.
+    async fn handle_set_channel(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: SetChannelRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        match stack.set_channel(request.channel).await {
+            Ok(()) => response(id, json!({"status": "success"})),
+            Err(e) => error_response(id, "set_channel_failed", e),
+        }
     }
 
     /// Reads back the running network's settings, the counterpart of `configure`.

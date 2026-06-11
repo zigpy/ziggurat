@@ -1167,6 +1167,50 @@ impl ZigbeeStack {
         results
     }
 
+    /// Retune the radio to a new channel, the coordinator's half of a network-wide
+    /// channel migration. Mesh state is untouched; subsequent resets and energy scans
+    /// return to the new channel.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn set_channel(&self, channel: u8) -> Result<(), ZigbeeStackError> {
+        // The lock keeps transmits and scans off the radio mid-retune; the state
+        // update happens under it so a concurrent reset recovery cannot reprogram
+        // the old channel
+        let _radio_lock = self.spinel.lock_radio().await;
+
+        let (rsp_property, rsp_value) = self
+            .spinel
+            .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
+            .await
+            .map_err(ZigbeeStackError::SpinelError)?;
+
+        // A rejected change (e.g. an out-of-range channel) is answered with a
+        // `LastStatus` instead of the property
+        if rsp_property != SpinelPropertyId::PhyChan {
+            return Err(ZigbeeStackError::SpinelError(
+                SpinelError::InvalidResponseError {
+                    reason: format!(
+                        "Channel change to {channel} was rejected: \
+                         {rsp_property:?}={rsp_value:02X?}"
+                    ),
+                },
+            ));
+        }
+
+        *self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap() = channel;
+
+        Ok(())
+    }
+
+    /// Update the `nwkUpdateId` advertised in our beacons, bumped alongside a channel
+    /// migration so devices comparing network instances pick the current one.
+    pub fn set_nwk_update_id(&self, update_id: u8) {
+        *self
+            .state
+            .update_id
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap() = update_id;
+    }
+
     /// Spawns a task tied to the stack's lifetime: it is aborted on `shutdown`.
     pub fn spawn_tracked<F>(&self, future: F)
     where
