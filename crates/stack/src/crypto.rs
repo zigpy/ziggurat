@@ -1,10 +1,15 @@
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use aes::Aes128;
 use aes::Block;
-use aes::cipher::BlockModeEncrypt;
+use aes::cipher::BlockCipherEncrypt;
 use aes::cipher::KeyInit;
-use aes::cipher::KeyIvInit;
-use cbc::Encryptor;
-use cbc::cipher::BlockCipherEncrypt;
+use ccm::Ccm;
+use ccm::aead::AeadInOut;
+use ccm::consts::{U4, U13};
+use parking_lot::Mutex;
+use thiserror::Error;
 
 use ieee_802154::types::{Eui64, Key};
 
@@ -93,118 +98,79 @@ pub fn ezsp_tclk(seed: &Key, eui64: Eui64) -> Key {
     Key(keyed_hash(seed, &eui64.to_bytes()))
 }
 
-fn right_pad_to_multiple_of_16(data: &[u8]) -> Vec<Block> {
-    // Pre-allocate enough blocks
-    let mut blocks = Vec::<Block>::with_capacity(data.len().div_ceil(16));
+/// Zigbee CCM* at security level 5 (spec annex A): AES-128 CCM with a 4-byte MIC and
+/// a 13-byte nonce. CCM* only differs from standard CCM at the unencrypted security
+/// levels, which are never used on the air.
+type ZigbeeCcm = Ccm<Aes128, U4, U13>;
 
-    // Push all full 16-byte chunks
-    for chunk in data.chunks_exact(16) {
-        blocks.push(Block::try_from(chunk).expect("16-byte chunk is always valid"));
-    }
+pub const MIC_LENGTH: usize = 4;
 
-    // If there's a remainder, copy it into a new block and pad the rest with zeros
-    let remainder = data.len() % 16;
-    if remainder != 0 {
-        let offset = data.len() - remainder;
-
-        let mut last_block = Block::default();
-        last_block[..remainder].copy_from_slice(&data[offset..]);
-        blocks.push(last_block);
-    }
-
-    blocks
+#[derive(Error, Debug)]
+pub enum DecryptionError {
+    #[error("Invalid MAC tag")]
+    InvalidMacTag,
+    #[error("Ciphertext too short to contain a MAC tag")]
+    CiphertextTooShort,
 }
 
-pub struct NwkCrypto<const L: usize, const M: usize>;
-
-impl<const L: usize, const M: usize> NwkCrypto<L, M> {
-    /// Returns `None` if the tagged ciphertext is too short to contain a MAC tag.
-    pub fn split_mac_tag(&self, tagged_ciphertext: &[u8]) -> Option<(Vec<u8>, [u8; M])> {
-        let ciphertext_len = tagged_ciphertext.len().checked_sub(M)?;
-        let ciphertext = tagged_ciphertext[..ciphertext_len].to_vec();
-
-        let mut mac_tag = [0; M];
-        mac_tag.copy_from_slice(&tagged_ciphertext[ciphertext_len..]);
-
-        Some((ciphertext, mac_tag))
-    }
-
-    #[allow(clippy::unusual_byte_groupings)]
-    pub fn compute_mac(
-        &self,
-        auth_data: &Vec<u8>,
-        key: &Key,
-        plaintext: &[u8],
-        nonce: &[u8; 13],
-    ) -> [u8; M] {
-        let encoded_auth_data_len = auth_data.len().to_be_bytes();
-        let mut added_auth_data = Vec::new();
-        added_auth_data.extend(&encoded_auth_data_len[encoded_auth_data_len.len() - L..]);
-        added_auth_data.extend(auth_data);
-
-        let encoded_plaintext_len = plaintext.len().to_be_bytes();
-        let mut b0 = Block::default();
-        b0[0] = 0b0_1_001_001; // Flags
-        b0[1..14].copy_from_slice(nonce);
-        b0[14..16].copy_from_slice(&encoded_plaintext_len[encoded_plaintext_len.len() - L..]);
-
-        let mut authed_plaintext = Vec::<Block>::new();
-        authed_plaintext.extend(right_pad_to_multiple_of_16(&added_auth_data));
-        authed_plaintext.extend(right_pad_to_multiple_of_16(plaintext));
-
-        let mut ciphertext_buffer = Vec::<Block>::new();
-        ciphertext_buffer.push(b0);
-        ciphertext_buffer.extend(&authed_plaintext);
-
-        let iv = [0x00; 16];
-        let mut encryptor = Encryptor::<Aes128>::new(&(key.0).into(), &iv.into());
-        encryptor.encrypt_blocks(&mut ciphertext_buffer);
-
-        let mut mac_tag = [0; M];
-        mac_tag.copy_from_slice(&ciphertext_buffer[ciphertext_buffer.len() - 1][..M]);
-
-        mac_tag
-    }
-
-    #[allow(clippy::unusual_byte_groupings)]
-    pub fn encrypt_decrypt(
-        &self,
-        key: &Key,
-        nonce: &[u8; 13],
-        mac_tag: &[u8; M],
-        plaintext: &[u8],
-    ) -> ([u8; M], Vec<u8>) {
-        let cipher = Aes128::new(&(key.0).into());
-
-        let mut tagged_plaintext_blocks = Vec::<Block>::new();
-        tagged_plaintext_blocks.extend(right_pad_to_multiple_of_16(mac_tag));
-        tagged_plaintext_blocks.extend(right_pad_to_multiple_of_16(plaintext));
-
-        let mut tagged_ciphertext_blocks = Vec::<Block>::new();
-        let mut buffer_block = Block::default();
-
-        for (block_num, plaintext_block) in tagged_plaintext_blocks.iter().enumerate() {
-            let encoded_block_num = block_num.to_be_bytes();
-            let mut counter_block = Block::default();
-            counter_block[0] = 0b0_0_000_001;
-            counter_block[1..14].copy_from_slice(nonce);
-            counter_block[14..16]
-                .copy_from_slice(&encoded_block_num[encoded_block_num.len() - L..]);
-
-            cipher.encrypt_block_b2b(&counter_block, &mut buffer_block);
-            tagged_ciphertext_blocks.push(Block::from_fn(|i| buffer_block[i] ^ plaintext_block[i]));
+impl From<DecryptionError> for &'static str {
+    fn from(err: DecryptionError) -> Self {
+        match err {
+            DecryptionError::InvalidMacTag => "Invalid MAC tag",
+            DecryptionError::CiphertextTooShort => "Ciphertext too short to contain a MAC tag",
         }
-
-        // The first M bytes of the first block is the "encrypted_mac_tag":
-        let mut encrypted_mac_tag = [0; M];
-        encrypted_mac_tag.copy_from_slice(&tagged_ciphertext_blocks[0][0..M]);
-
-        // The actual ciphertext portion starts at the second block
-        let ciphertext_vec = tagged_ciphertext_blocks[1..].concat();
-        let ciphertext = ciphertext_vec[..plaintext.len()].to_vec();
-
-        (encrypted_mac_tag, ciphertext)
     }
+}
+
+/// The AES key schedule costs more than encrypting an entire typical frame, so cipher
+/// instances are cached: there are only ever a handful of keys (the network key plus
+/// a link key per device) and they live for the lifetime of the process.
+static CIPHER_CACHE: LazyLock<Mutex<HashMap<[u8; 16], ZigbeeCcm>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cipher_for(key: &Key) -> ZigbeeCcm {
+    CIPHER_CACHE
+        .lock()
+        .entry(key.0)
+        .or_insert_with(|| ZigbeeCcm::new(&key.0.into()))
+        .clone()
+}
+
+/// CCM*-protect a payload: `auth_data` is authenticated, `plaintext` is encrypted, and
+/// the encrypted MIC ("MAC tag") is appended.
+pub fn encrypt_ccm(key: &Key, nonce: &[u8; 13], auth_data: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let mut buffer = plaintext.to_vec();
+    let mic = cipher_for(key)
+        .encrypt_inout_detached(&(*nonce).into(), auth_data, buffer.as_mut_slice().into())
+        .expect("frames are far below the CCM length limits");
+    buffer.extend_from_slice(&mic);
+    buffer
+}
+
+/// Reverse of [`encrypt_ccm`]: verify the MIC and return the decrypted payload.
+pub fn decrypt_ccm(
+    key: &Key,
+    nonce: &[u8; 13],
+    auth_data: &[u8],
+    tagged_ciphertext: &[u8],
+) -> Result<Vec<u8>, DecryptionError> {
+    let ciphertext_len = tagged_ciphertext
+        .len()
+        .checked_sub(MIC_LENGTH)
+        .ok_or(DecryptionError::CiphertextTooShort)?;
+    let (ciphertext, mic) = tagged_ciphertext.split_at(ciphertext_len);
+
+    let mut buffer = ciphertext.to_vec();
+    cipher_for(key)
+        .decrypt_inout_detached(
+            &(*nonce).into(),
+            auth_data,
+            buffer.as_mut_slice().into(),
+            mic.try_into().expect("the MIC is exactly MIC_LENGTH bytes"),
+        )
+        .map_err(|_| DecryptionError::InvalidMacTag)?;
+
+    Ok(buffer)
 }
 
 #[cfg(test)]

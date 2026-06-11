@@ -4,26 +4,16 @@ use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 
-use constant_time_eq::constant_time_eq;
 use num_enum::TryFromPrimitive;
 
 use derivative::Derivative;
-use thiserror::Error;
 
-use crate::crypto::NwkCrypto;
+use crate::crypto::{DecryptionError, decrypt_ccm, encrypt_ccm};
 
 pub const BROADCAST_ALL_DEVICES: Nwk = Nwk(0xFFFF);
 pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
 pub const BROADCAST_ALL_ROUTERS_AND_COORDINATOR: Nwk = Nwk(0xFFFC);
 pub const BROADCAST_LOW_POWER_ROUTERS: Nwk = Nwk(0xFFFB);
-
-#[derive(Error, Debug)]
-pub enum NwkDecryptionError {
-    #[error("Invalid MAC tag")]
-    InvalidMacTag,
-    #[error("Ciphertext too short to contain a MAC tag")]
-    CiphertextTooShort,
-}
 
 #[abstract_bits(bits = 2)]
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
@@ -383,12 +373,6 @@ impl EncryptedNwkFrame {
         nonce
     }
 
-    pub const fn get_crypto(&self) -> NwkCrypto<2, 4> {
-        // Only a single configuration is supported but to keep the cryptography code
-        // readable, it's useful to be generic here
-        NwkCrypto::<2, 4>
-    }
-
     #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         let mut remaining;
@@ -424,31 +408,20 @@ impl EncryptedNwkFrame {
         bytes
     }
 
-    pub fn decrypt(&self, key: &Key) -> Result<NwkFrame, NwkDecryptionError> {
-        let crypto = self.get_crypto();
-
+    pub fn decrypt(&self, key: &Key) -> Result<NwkFrame, DecryptionError> {
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
-        let (ciphertext, encrypted_mac_tag) = crypto
-            .split_mac_tag(&self.ciphertext)
-            .ok_or(NwkDecryptionError::CiphertextTooShort)?;
-        let (provided_mac_tag, plaintext) =
-            crypto.encrypt_decrypt(key, &nonce, &encrypted_mac_tag, &ciphertext);
 
         let mut auth_data = Vec::new();
         auth_data.extend(self.nwk_header.to_bytes());
         auth_data.extend(aux_header.to_bytes());
 
-        let mac_tag = crypto.compute_mac(&auth_data, key, &plaintext, &nonce);
-
-        if !constant_time_eq(&provided_mac_tag, &mac_tag) {
-            return Err(NwkDecryptionError::InvalidMacTag);
-        }
+        let payload = decrypt_ccm(key, &nonce, &auth_data, &self.ciphertext)?;
 
         Ok(NwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
-            payload: plaintext,
+            payload,
         })
     }
 }
@@ -486,34 +459,18 @@ impl NwkFrame {
         nonce
     }
 
-    pub const fn get_crypto(&self) -> NwkCrypto<2, 4> {
-        // Only a single configuration is supported but to keep the cryptography code
-        // readable, it's useful to be generic here
-        NwkCrypto::<2, 4>
-    }
-
     pub fn encrypt(&self, key: &Key) -> EncryptedNwkFrame {
-        let crypto = self.get_crypto();
-
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
-        let plaintext = &self.payload;
 
         let mut auth_data = Vec::new();
         auth_data.extend(self.nwk_header.to_bytes());
         auth_data.extend(aux_header.to_bytes());
 
-        let mac_tag = crypto.compute_mac(&auth_data, key, plaintext, &nonce);
-        let (encrypted_mac_tag, ciphertext) =
-            crypto.encrypt_decrypt(key, &nonce, &mac_tag, plaintext);
-
-        let mut ciphertext_with_tag = ciphertext;
-        ciphertext_with_tag.extend(encrypted_mac_tag);
-
         EncryptedNwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
-            ciphertext: ciphertext_with_tag,
+            ciphertext: encrypt_ccm(key, &nonce, &auth_data, &self.payload),
         }
     }
 }

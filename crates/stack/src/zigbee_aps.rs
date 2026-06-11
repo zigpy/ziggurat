@@ -1,10 +1,9 @@
 use abstract_bits::{AbstractBits, abstract_bits};
-use constant_time_eq::constant_time_eq;
 use derivative::Derivative;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 use num_enum::TryFromPrimitive;
 
-use crate::crypto::NwkCrypto;
+use crate::crypto::{decrypt_ccm, encrypt_ccm};
 use crate::zigbee_nwk::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
 #[abstract_bits(bits = 2)]
@@ -701,8 +700,6 @@ fn encrypt_aps_payload(
     header: &[u8],
     plaintext: &[u8],
 ) -> Vec<u8> {
-    let crypto = NwkCrypto::<2, 4>;
-
     let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
     let source = aux_header
         .extended_source
@@ -712,13 +709,7 @@ fn encrypt_aps_payload(
     let mut auth_data = header.to_vec();
     auth_data.extend(modified_aux_header.to_bytes());
 
-    let mac_tag = crypto.compute_mac(&auth_data, key, plaintext, &nonce);
-    let (encrypted_mac_tag, ciphertext) = crypto.encrypt_decrypt(key, &nonce, &mac_tag, plaintext);
-
-    let mut ciphertext_with_tag = ciphertext;
-    ciphertext_with_tag.extend(encrypted_mac_tag);
-
-    ciphertext_with_tag
+    encrypt_ccm(key, &nonce, &auth_data, plaintext)
 }
 
 /// Reverse of [`encrypt_aps_payload`]: verify the MIC and return the decrypted payload.
@@ -731,27 +722,13 @@ fn decrypt_aps_payload(
     header: &[u8],
     tagged_ciphertext: &[u8],
 ) -> Result<Vec<u8>, &'static str> {
-    let crypto = NwkCrypto::<2, 4>;
-
     let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
     let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
-
-    let (ciphertext, encrypted_mac_tag) = crypto
-        .split_mac_tag(tagged_ciphertext)
-        .ok_or("Ciphertext too short to contain a MAC tag")?;
-    let (provided_mac_tag, plaintext) =
-        crypto.encrypt_decrypt(key, &nonce, &encrypted_mac_tag, &ciphertext);
 
     let mut auth_data = header.to_vec();
     auth_data.extend(modified_aux_header.to_bytes());
 
-    let mac_tag = crypto.compute_mac(&auth_data, key, &plaintext, &nonce);
-
-    if !constant_time_eq(&provided_mac_tag, &mac_tag) {
-        return Err("Invalid MAC tag");
-    }
-
-    Ok(plaintext)
+    Ok(decrypt_ccm(key, &nonce, &auth_data, tagged_ciphertext)?)
 }
 
 #[derive(Derivative)]
