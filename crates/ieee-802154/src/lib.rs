@@ -152,8 +152,11 @@ pub struct Ieee802154CommandFrame {
     pub fcs: u16,
 }
 
+/// `aMaxPhyPacketSize`: a full 802.15.4 frame, FCS included, fits in 127 bytes
+pub const MAX_PHY_PACKET_SIZE: usize = 127;
+
 /// Maximum 802.15.4 MAC payload length
-const MAC_COMMAND_MAX_LEN: usize = 102; // 127 - 2 (FCS) - 23 (max header) = 102
+const MAC_COMMAND_MAX_LEN: usize = MAX_PHY_PACKET_SIZE - 2 - 23; // FCS and maximum header
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("Could not serialize {ty}")]
@@ -191,7 +194,7 @@ pub enum DeserializeError {
 /// scratch buffer fits anything that can go on the air (a full 802.15.4 frame is at
 /// most 127 bytes).
 pub fn extend_abstract_bits<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) {
-    let mut buffer = [0u8; 128];
+    let mut buffer = [0u8; MAX_PHY_PACKET_SIZE];
     let mut writer = abstract_bits::BitWriter::from(&mut buffer[..]);
     value.write_abstract_bits(&mut writer).unwrap();
     let written = writer.bytes_written();
@@ -264,9 +267,10 @@ impl Ieee802154Frame {
         }
 
         // Parse frame control
-        let frame_control = Ieee802154FrameControl::from_abstract_bits(remaining)
+        let mut reader = BitReader::from(remaining);
+        let frame_control = Ieee802154FrameControl::read_abstract_bits(&mut reader)
             .map_err(|_| "Failed to parse frame control")?;
-        remaining = &remaining[frame_control.to_abstract_bits().unwrap().len()..];
+        remaining = &remaining[reader.bytes_read()..];
 
         // Parse sequence number
         let sequence_number = if frame_control.sequence_number_suppression {
@@ -434,7 +438,7 @@ impl Ieee802154Frame {
     }
 
     pub fn to_bytes_without_fcs(&self) -> Vec<u8> {
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(MAX_PHY_PACKET_SIZE);
 
         let header = self.header();
 
@@ -451,10 +455,10 @@ impl Ieee802154Frame {
             data.extend(pan_id.to_bytes());
         }
         if let Some(address) = &header.dest_address {
-            data.extend(match address {
-                Ieee802154Address::Nwk(addr) => addr.to_bytes().to_vec(),
-                Ieee802154Address::Eui64(addr) => addr.to_bytes().to_vec(),
-            });
+            match address {
+                Ieee802154Address::Nwk(addr) => data.extend(addr.to_bytes()),
+                Ieee802154Address::Eui64(addr) => data.extend(addr.to_bytes()),
+            }
         }
 
         // Serialize source
@@ -465,10 +469,10 @@ impl Ieee802154Frame {
         }
 
         if let Some(address) = &header.src_address {
-            data.extend(match address {
-                Ieee802154Address::Nwk(addr) => addr.to_bytes().to_vec(),
-                Ieee802154Address::Eui64(addr) => addr.to_bytes().to_vec(),
-            });
+            match address {
+                Ieee802154Address::Nwk(addr) => data.extend(addr.to_bytes()),
+                Ieee802154Address::Eui64(addr) => data.extend(addr.to_bytes()),
+            }
         }
 
         // Add payload based on frame type

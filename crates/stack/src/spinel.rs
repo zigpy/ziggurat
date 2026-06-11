@@ -348,7 +348,7 @@ impl HdlcLiteFrame {
             });
         }
 
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(bytes.len());
         let mut unescaping = false;
 
         for byte in bytes.iter() {
@@ -398,19 +398,16 @@ impl HdlcLiteFrame {
             });
         }
 
-        Ok(Self {
-            data: data[..data.len() - 2].to_vec(),
-        })
+        data.truncate(data.len() - 2);
+        Ok(Self { data })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    fn escape_into(&self, result: &mut Vec<u8>) {
         let mut crc = 0x0000u16;
         CRC_KERMIT.init_crc(&mut crc);
         CRC_KERMIT.update_crc(&mut crc, &self.data);
         CRC_KERMIT.finish_crc(&crc);
         crc ^= 0xFFFF;
-
-        let mut result = Vec::new();
 
         for byte in self.data.iter().chain(&crc.to_le_bytes()) {
             let result_byte = *byte;
@@ -427,15 +424,19 @@ impl HdlcLiteFrame {
                 result.push(result_byte);
             }
         }
+    }
 
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(self.data.len() + 8);
+        self.escape_into(&mut result);
         result
     }
 
     pub fn to_bytes_with_flags(&self) -> Vec<u8> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.data.len() + 10);
 
         result.push(HdlcSpecial::Flag as u8);
-        result.extend(self.to_bytes());
+        self.escape_into(&mut result);
         result.push(HdlcSpecial::Flag as u8);
 
         result

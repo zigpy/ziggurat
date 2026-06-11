@@ -893,8 +893,14 @@ impl EncryptedApsAckFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         let header = ApsAckFrame::from_bytes(bytes)?;
         // `ApsAckFrame::from_bytes` ignores trailing bytes; the aux header starts
-        // right after the fixed header fields
-        let (aux_header, remaining) = ApsAuxHeader::deserialize(&bytes[header.to_bytes().len()..])?;
+        // right after the fixed header fields, whose length only the ACK format
+        // determines (see `ApsAckFrame::to_bytes`)
+        let header_len = if header.frame_control.ack_format {
+            2
+        } else {
+            8
+        };
+        let (aux_header, remaining) = ApsAuxHeader::deserialize(&bytes[header_len..])?;
 
         Ok(Self {
             header,

@@ -1,8 +1,8 @@
 #![allow(clippy::useless_conversion)]
 
 use abstract_bits::AbstractBits;
-use abstract_bits::BitWriter;
 use abstract_bits::abstract_bits;
+use abstract_bits::{BitReader, BitWriter};
 use ieee_802154::extend_abstract_bits;
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 
@@ -78,9 +78,10 @@ impl NwkHeader {
             return Err("Not enough data to parse NwkHeader");
         }
 
-        let frame_control = NwkFrameControl::from_abstract_bits(bytes)
+        let mut reader = BitReader::from(bytes);
+        let frame_control = NwkFrameControl::read_abstract_bits(&mut reader)
             .map_err(|_| "Failed to parse NwkFrameControl")?;
-        let mut remaining = &bytes[frame_control.to_abstract_bits().unwrap().len()..];
+        let mut remaining = &bytes[reader.bytes_read()..];
 
         let destination;
         (destination, remaining) = Nwk::deserialize(remaining)?;
@@ -127,9 +128,10 @@ impl NwkHeader {
 
         let source_route = match frame_control.source_route {
             true => {
-                let source_route = NwkSourceRoute::from_abstract_bits(remaining)
+                let mut reader = BitReader::from(remaining);
+                let source_route = NwkSourceRoute::read_abstract_bits(&mut reader)
                     .map_err(|_| "Failed to parse NwkSourceRoute")?;
-                remaining = &remaining[source_route.to_abstract_bits().unwrap().len()..];
+                remaining = &remaining[reader.bytes_read()..];
                 Some(source_route)
             }
             false => None,
@@ -242,9 +244,10 @@ impl NwkAuxHeader {
             return Err("Not enough data to parse NwkAuxHeader");
         }
 
-        let security_control = NwkSecurityHeaderControlField::from_abstract_bits(bytes)
+        let mut reader = BitReader::from(bytes);
+        let security_control = NwkSecurityHeaderControlField::read_abstract_bits(&mut reader)
             .map_err(|_| "Failed to parse NwkSecurityHeaderControlField")?;
-        let mut remaining = &bytes[security_control.to_abstract_bits().unwrap().len()..];
+        let mut remaining = &bytes[reader.bytes_read()..];
 
         let frame_counter =
             u32::from_le_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]);
