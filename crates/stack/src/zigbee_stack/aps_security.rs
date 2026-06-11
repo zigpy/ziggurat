@@ -151,6 +151,11 @@ impl ApsSecurity {
         self.device_keys.len()
     }
 
+    /// The unique trust center link keys on record, for the client to persist.
+    pub const fn device_keys(&self) -> &HashMap<Eui64, DeviceLinkKey> {
+        &self.device_keys
+    }
+
     /// Issue a fresh unique link key for a device, replacing any previous one. The key
     /// is unverified until the device proves possession via a Verify-Key exchange.
     pub fn issue_device_key(&mut self, eui64: Eui64) -> Key {

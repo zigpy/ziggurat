@@ -375,6 +375,7 @@ impl ZigguratServer {
             let message = match method.as_str() {
                 "configure" => server.handle_configure(id, params).await,
                 "get_hw_address" => server.handle_get_hw_address(id).await,
+                "get_network_info" => server.handle_get_network_info(id),
                 "send_aps" => server.handle_send_aps(id, params, &outbound).await,
                 "energy_scan" => server.handle_energy_scan(id, params).await,
                 "permit_joins" => server.handle_permit_joins(id, params),
@@ -487,6 +488,50 @@ impl ZigguratServer {
 
         log::info!("Zigbee stack initialized and running.");
         response(id, json!({"status": "success"}))
+    }
+
+    /// Reads back the running network's settings, the counterpart of `configure`.
+    /// While the stack runs, the server is the authoritative holder of the live state
+    /// (e.g. frame counters), not the client that configured it.
+    #[allow(clippy::significant_drop_tightening)]
+    fn handle_get_network_info(&self, id: u64) -> serde_json::Value {
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        let state = &stack.state;
+        let nwk_security = state.security_material_primary.lock();
+        let aps_security = state.aps_security.lock();
+        let tclk_seed = &stack.constants.tclk_seed;
+
+        response(
+            id,
+            json!({
+                "channel": *state.channel.lock(),
+                "nwk_update_id": *state.update_id.lock(),
+                "pan_id": format!("{:04x}", state.pan_id.lock().0),
+                "extended_pan_id": eui64_to_string(state.extended_pan_id),
+                "nwk_address": format!("{:04x}", state.network_address.as_u16()),
+                "ieee_address": eui64_to_string(state.ieee_address),
+                "network_key": key_to_string(&nwk_security.key),
+                "network_key_seq": nwk_security.key_seq_number,
+                "network_key_tx_counter": nwk_security.outgoing_frame_counter,
+                "tc_link_key": key_to_string(&stack.constants.global_link_key),
+                "tclk_seed": tclk_seed.as_ref().map(|tclk| hex::encode(tclk.seed.to_bytes())),
+                "tclk_flavor": tclk_seed.as_ref().map(|tclk| match tclk.flavor {
+                    TclkFlavor::ZStack => "zstack",
+                    TclkFlavor::Ezsp => "ezsp",
+                }),
+                "key_table": aps_security
+                    .device_keys()
+                    .iter()
+                    .map(|(partner_ieee, entry)| json!({
+                        "partner_ieee": eui64_to_string(*partner_ieee),
+                        "key": key_to_string(&entry.key),
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        )
     }
 
     /// Reads the radio's factory-programmed EUI64, which a client needs before it can
