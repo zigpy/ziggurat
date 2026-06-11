@@ -1,6 +1,6 @@
 use std::cmp;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, Instant, timeout};
+use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use ieee_802154::types::Nwk;
 
@@ -366,9 +366,29 @@ impl ZigbeeStack {
     }
 
     pub async fn periodic_many_to_one_route_request_task(&self) {
-        // Give link status exchanges a chance to establish neighbor link costs first:
-        // receivers drop route requests from senders with a zero outgoing cost
-        tokio::time::sleep(2 * self.constants.link_status_period).await;
+        // Receivers drop route requests from senders with a zero outgoing cost, so
+        // the first advertisement waits until link status exchanges establish a
+        // neighbor link, bounded by a fixed ceiling in case the network is silent
+        let startup_deadline = Instant::now() + 2 * self.constants.link_status_period;
+
+        loop {
+            if self
+                .state
+                .neighbors
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .any_live_router_link()
+            {
+                break;
+            }
+
+            if timeout_at(startup_deadline, self.link_status_received.notified())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
 
         loop {
             self.send_many_to_one_route_request().await;

@@ -152,6 +152,9 @@ impl ZigbeeStack {
             neighbor_entry.relationship = neighbors::Relationship::Child;
         }
 
+        // A new child deadline may precede everything the maintenance task knows
+        self.maintenance_wake.notify_one();
+
         self.queue_association_response(
             source_eui64,
             short_address,
@@ -1045,6 +1048,9 @@ impl ZigbeeStack {
             };
         }
 
+        // A new child deadline may precede everything the maintenance task knows
+        self.maintenance_wake.notify_one();
+
         self.send_rejoin_response(
             requested_nwk,
             source_ieee,
@@ -1204,6 +1210,10 @@ impl ZigbeeStack {
         }
 
         log::info!("Child {source:?} negotiated an end device timeout of {timeout:?}");
+
+        // A renegotiated timeout may move the child's deadline closer
+        self.maintenance_wake.notify_one();
+
         self.send_end_device_timeout_response(source, NwkEndDeviceTimeoutResponseStatus::Success);
     }
 

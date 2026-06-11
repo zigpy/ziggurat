@@ -9,7 +9,9 @@ use crate::zigbee_nwk::{
 };
 use ieee_802154::types::{Eui64, Nwk};
 use std::collections::HashSet;
-use tokio::time::Instant;
+use std::sync::Arc;
+use tokio::sync::Notify;
+use tokio::time::{Instant, timeout_at};
 use zigbee_parts::Command;
 use zigbee_parts::commands::{
     NwkCommandId, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
@@ -100,6 +102,7 @@ impl ZigbeeStack {
             // Spec 3.6.6: a neighbor relaying a broadcast we know about is its
             // passive acknowledgment of that broadcast
             transaction.heard_from.insert(sender_nwk);
+            transaction.acked_notify.notify_one();
             return true;
         }
 
@@ -112,10 +115,42 @@ impl ZigbeeStack {
                 expected_relayers,
                 // Whoever delivered the frame to us has already broadcast it
                 heard_from: HashSet::from([sender_nwk]),
+                acked_notify: Arc::new(Notify::new()),
             },
         );
 
         false
+    }
+
+    /// Wait until the broadcast is passively acknowledged or the ack collection
+    /// window closes, waking on every recorded ack. Returns whether the broadcast
+    /// is acknowledged.
+    async fn await_broadcast_passive_acks(&self, key: (Nwk, u8)) -> bool {
+        let acked_notify = self
+            .state
+            .broadcast_transaction_table
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .get(&key)
+            .map(|transaction| transaction.acked_notify.clone());
+
+        // An expired (absent) entry means the delivery window has already closed
+        let Some(acked_notify) = acked_notify else {
+            return true;
+        };
+
+        let deadline = Instant::now() + self.constants.passive_ack_timeout;
+
+        loop {
+            if self.broadcast_passively_acked(key) {
+                return true;
+            }
+
+            if timeout_at(deadline, acked_notify.notified()).await.is_err() {
+                // The window closed; an ack recorded at the boundary still counts
+                return self.broadcast_passively_acked(key);
+            }
+        }
     }
 
     /// Spec 3.6.6: a broadcast is fully delivered once every router that was in the
@@ -724,17 +759,32 @@ impl ZigbeeStack {
                     expiration_time: Instant::now() + self.constants.broadcast_delivery_time,
                     expected_relayers,
                     heard_from: HashSet::new(),
+                    acked_notify: Arc::new(Notify::new()),
                 },
             );
 
-        // Spec 3.6.6: retransmit only while some live router neighbor has not been
-        // heard relaying the frame within the passive ack timeout
+        // Spec 3.6.6: retransmit only while the passive ack quorum has not been
+        // heard within the ack collection window
         for attempt in 0..=self.constants.max_broadcast_retries {
             if attempt > 0 {
-                tokio::time::sleep(self.constants.passive_ack_timeout).await;
+                if self.await_broadcast_passive_acks(key).await {
+                    log::debug!("Broadcast {key:?} passively acknowledged");
+                    return Ok(());
+                }
 
+                // Fresh jitter decorrelates the retransmission wave: every router
+                // that missed its acks hits the same deadline together, preserving
+                // the relative timing (and collisions) of the original wave
+                tokio::time::sleep(
+                    self.constants
+                        .max_broadcast_jitter
+                        .mul_f32(rand::random::<f32>()),
+                )
+                .await;
+
+                // Acks may have trickled in during the jitter sleep
                 if self.broadcast_passively_acked(key) {
-                    log::debug!("Broadcast {key:?} passively acknowledged by all routers");
+                    log::debug!("Broadcast {key:?} passively acknowledged");
                     return Ok(());
                 }
 
@@ -1035,8 +1085,22 @@ impl ZigbeeStack {
             // broadcasts; the neighbor we heard the frame from is already counted
             for attempt in 0..=arc_self.constants.max_broadcast_retries {
                 if attempt > 0 {
-                    tokio::time::sleep(arc_self.constants.passive_ack_timeout).await;
+                    if arc_self.await_broadcast_passive_acks(key).await {
+                        log::debug!("Relayed broadcast {key:?} passively acknowledged");
+                        return;
+                    }
 
+                    // Fresh jitter decorrelates the retransmission wave, which is
+                    // synchronized by the shared ack deadline
+                    tokio::time::sleep(
+                        arc_self
+                            .constants
+                            .max_broadcast_jitter
+                            .mul_f32(rand::random::<f32>()),
+                    )
+                    .await;
+
+                    // Acks may have trickled in during the jitter sleep
                     if arc_self.broadcast_passively_acked(key) {
                         log::debug!("Relayed broadcast {key:?} passively acknowledged");
                         return;

@@ -215,6 +215,9 @@ pub struct NwkBroadcastTransaction {
     /// Neighbors heard relaying this broadcast: their passive acknowledgments
     /// (spec 3.6.6)
     pub heard_from: HashSet<Nwk>,
+    /// Signaled on every recorded passive ack, so retransmission loops can
+    /// re-evaluate completeness reactively instead of sleeping out the window
+    pub acked_notify: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,6 +616,13 @@ pub struct ZigbeeStack {
     /// Route-repair signals accumulated since the last many-to-one route request
     pub(crate) mtorr_triggers: Mutex<MtorrTriggers>,
 
+    /// Signaled whenever a link status command is digested; the MTORR startup wait
+    /// uses it to advertise as soon as a neighbor link is established
+    pub(crate) link_status_received: Notify,
+    /// Wakes the maintenance task when a new indirect transaction or child entry
+    /// could move the earliest expiry deadline closer
+    pub(crate) maintenance_wake: Notify,
+
     /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
     /// a leaked background task keeps the old serial port open and its reader steals
     /// responses from the new stack
@@ -673,6 +683,8 @@ impl ZigbeeStack {
             parent_annce_received: Mutex::new(None),
             mtorr_kick: Notify::new(),
             mtorr_triggers: Mutex::new(MtorrTriggers::default()),
+            link_status_received: Notify::new(),
+            maintenance_wake: Notify::new(),
             background_tasks: Mutex::new(JoinSet::new()),
         });
 

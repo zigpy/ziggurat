@@ -108,6 +108,8 @@ impl ZigbeeStack {
         if let Some(neighbor_nwk) = lost_link {
             self.invalidate_routes_via(neighbor_nwk);
         }
+
+        self.link_status_received.notify_one();
     }
 
     pub async fn send_link_status_broadcast(&self, empty: bool) {

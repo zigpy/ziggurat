@@ -412,6 +412,23 @@ impl Neighbors {
         self.table.remove(&eui64);
     }
 
+    /// Whether any router neighbor has established a bidirectional link with us,
+    /// i.e. a received link status lists us with a nonzero cost.
+    pub fn any_live_router_link(&self) -> bool {
+        self.table
+            .values()
+            .any(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
+    }
+
+    /// The earliest child keepalive deadline, for scheduling the eviction sweep.
+    pub fn next_child_timeout(&self) -> Option<Instant> {
+        self.table
+            .values()
+            .filter(|entry| entry.is_child())
+            .map(|entry| entry.timeout_at)
+            .min()
+    }
+
     /// Router neighbors with a live link, which are expected to relay our broadcasts
     /// (passive acknowledgment, spec 3.6.6). Aging zeroes the outgoing cost, so a
     /// non-zero cost means the router is still exchanging link statuses with us.

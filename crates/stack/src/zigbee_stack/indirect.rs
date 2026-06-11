@@ -4,7 +4,7 @@ use ieee_802154::types::{Eui64, Nwk};
 
 use std::collections::HashSet;
 use tokio::sync::oneshot;
-use tokio::time::{Duration, Instant};
+use tokio::time::{Duration, Instant, timeout_at};
 use zigbee_parts::Command;
 use zigbee_parts::commands::NwkLeaveCommand;
 
@@ -12,9 +12,6 @@ use super::{
     MAX_LOCK_DURATION, NwkSecurityMode, PendingIndirectTransaction, SrcMatchTable,
     ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
-
-/// How often expired indirect transactions and timed-out children are swept.
-const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 
 const fn set_frame_pending(frame: &mut Ieee802154Frame) {
     match frame {
@@ -50,6 +47,7 @@ impl ZigbeeStack {
             });
 
         self.src_match_sync.notify_one();
+        self.maintenance_wake.notify_one();
 
         // Every transaction is eventually resolved by delivery, the expiry sweep, or
         // child eviction; a dropped sender means the stack is shutting down
@@ -412,14 +410,46 @@ impl ZigbeeStack {
     }
 
     /// Expires undelivered indirect transactions and evicts children whose keepalive
-    /// deadline has lapsed (spec 3.6.10.1).
+    /// deadline has lapsed (spec 3.6.10.1). Sleeps until the earliest pending
+    /// deadline, woken early when a new transaction or child entry could move it
+    /// closer; keepalive refreshes only push deadlines out and need no wake.
     pub(super) async fn indirect_maintenance_task(&self) {
         loop {
-            tokio::time::sleep(MAINTENANCE_INTERVAL).await;
-
             self.expire_indirect_transactions();
             self.evict_timed_out_children();
+
+            match self.next_maintenance_deadline() {
+                Some(deadline) => {
+                    let _ = timeout_at(deadline, self.maintenance_wake.notified()).await;
+                }
+                None => self.maintenance_wake.notified().await,
+            }
         }
+    }
+
+    /// The earliest deadline the maintenance task has to act on: an indirect
+    /// transaction expiry or a child keepalive timeout.
+    fn next_maintenance_deadline(&self) -> Option<Instant> {
+        let next_expiry = self
+            .state
+            .indirect_queue
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .values()
+            // Transactions expire in arrival order, so each queue's front is its
+            // earliest deadline
+            .filter_map(|transactions| transactions.front())
+            .map(|transaction| transaction.expires_at)
+            .min();
+
+        let next_eviction = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .next_child_timeout();
+
+        [next_expiry, next_eviction].into_iter().flatten().min()
     }
 
     fn expire_indirect_transactions(&self) {
