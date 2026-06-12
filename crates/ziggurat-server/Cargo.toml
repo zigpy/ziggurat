@@ -1,0 +1,23 @@
+[package]
+name = "ziggurat-server"
+version = "0.0.1"
+authors = []
+edition = "2024"
+
+[dependencies]
+ziggurat = { path = "../stack" }
+zigbee = { path = "../zigbee" }
+
+env_logger = { version = "0.11.6", default-features = false, features = ["auto-color", "humantime"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+hex = "0.4.3"
+log = "0.4.26"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+tokio-serial = "5.4"
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+
+[[bin]]
+name = "ziggurat"
+path = "src/main.rs"

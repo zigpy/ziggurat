@@ -9,25 +9,15 @@ zigbee = { path = "../zigbee" }
 ieee-802154 = { path = "../ieee-802154" }
 
 abstract-bits = "0.2.0"
-hex = "0.4.3"
 crc_all = "0.2.2"
 tokio-serial = "5.4"
-tokio-tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 log = "0.4.26"
-env_logger = { version = "0.11.6", default-features = false, features = ["auto-color", "humantime"] }
-serde_json = "1.0.140"
-serde = { version = "1.0.219", features = ["derive"] }
 num_enum = "0.7.3"
 thiserror = "2.0.12"
 rand = "0.10.1"
 parking_lot = "0.12.4"
 arbitrary-int = "2.1.1"
-tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
-
-[[bin]]
-name = "ziggurat"
-path = "src/server.rs"
+tokio = { version = "1.43.0", features = ["rt", "macros", "time", "sync", "io-util"] }
 
 [dev-dependencies]
 hex-literal = "1.1.0"

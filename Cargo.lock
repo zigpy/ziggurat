@@ -1605,22 +1605,33 @@ dependencies = [
  "abstract-bits",
  "arbitrary-int 2.1.1",
  "crc_all",
- "env_logger",
- "futures-util",
- "hex",
  "hex-literal",
  "ieee-802154",
  "log",
  "num_enum",
  "parking_lot",
  "rand 0.10.1",
+ "thiserror",
+ "tokio",
+ "tokio-serial",
+ "zigbee",
+]
+
+[[package]]
+name = "ziggurat-server"
+version = "0.0.1"
+dependencies = [
+ "env_logger",
+ "futures-util",
+ "hex",
+ "log",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tokio-serial",
  "tokio-tungstenite",
  "zigbee",
+ "ziggurat",
 ]
 
 [[package]]
