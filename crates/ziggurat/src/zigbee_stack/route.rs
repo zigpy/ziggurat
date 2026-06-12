@@ -12,7 +12,7 @@ use zigbee::nwk::commands::{
 use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::routing::{RouteReplyDisposition, Status};
-use super::{MAX_LOCK_DURATION, MtorrTriggers, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
+use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     fn notify_routing_change(&self, nwk: &Nwk) {
@@ -394,8 +394,11 @@ impl ZigbeeStack {
         loop {
             self.send_many_to_one_route_request().await;
 
-            *self.mtorr_triggers.try_lock_for(MAX_LOCK_DURATION).unwrap() =
-                MtorrTriggers::default();
+            self.state
+                .routing
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap()
+                .reset_mtorr_triggers();
 
             let min_deadline = Instant::now() + self.constants.mtorr_min_interval;
             let max_deadline = Instant::now() + self.constants.mtorr_max_interval;
@@ -419,10 +422,14 @@ impl ZigbeeStack {
             return;
         }
 
-        let mut triggers = self.mtorr_triggers.try_lock_for(MAX_LOCK_DURATION).unwrap();
-        triggers.route_errors = triggers.route_errors.saturating_add(1);
+        let kick = self
+            .state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .note_route_error();
 
-        if triggers.route_errors >= self.constants.mtorr_route_error_threshold {
+        if kick {
             self.mtorr_kick.notify_one();
         }
     }
@@ -434,10 +441,14 @@ impl ZigbeeStack {
             return;
         }
 
-        let mut triggers = self.mtorr_triggers.try_lock_for(MAX_LOCK_DURATION).unwrap();
-        triggers.delivery_failures = triggers.delivery_failures.saturating_add(1);
+        let kick = self
+            .state
+            .routing
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .note_delivery_failure();
 
-        if triggers.delivery_failures >= self.constants.mtorr_delivery_failure_threshold {
+        if kick {
             self.mtorr_kick.notify_one();
         }
     }

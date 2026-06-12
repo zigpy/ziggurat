@@ -189,14 +189,6 @@ pub struct PendingIndirectTransaction {
     pub completion: oneshot::Sender<Result<(), ZigbeeStackError>>,
 }
 
-/// Route-repair signals counted between many-to-one route requests; crossing a
-/// threshold advances the next advertisement to the scheduler's min interval
-#[derive(Debug, Default)]
-pub struct MtorrTriggers {
-    pub route_errors: u8,
-    pub delivery_failures: u8,
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ApsAckData {
     pub src: Nwk,
@@ -350,6 +342,8 @@ impl State {
         max_neighbor_age: Duration,
         broadcast_delivery_time: Duration,
         broadcast_passive_ack_quorum: usize,
+        mtorr_route_error_threshold: u8,
+        mtorr_delivery_failure_threshold: u8,
         source_routing: bool,
     ) -> Self {
         Self {
@@ -370,7 +364,12 @@ impl State {
 
             sequence_number: Mutex::new(0),
             neighbors: Mutex::new(Neighbors::new(network_address, max_neighbor_age)),
-            routing: Mutex::new(Routing::new(network_address, route_discovery_time)),
+            routing: Mutex::new(Routing::new(
+                network_address,
+                route_discovery_time,
+                mtorr_route_error_threshold,
+                mtorr_delivery_failure_threshold,
+            )),
             broadcasts: Mutex::new(Broadcasts::new(
                 broadcast_delivery_time,
                 broadcast_passive_ack_quorum,
@@ -478,8 +477,6 @@ pub struct ZigbeeStack {
     /// Wakes the MTORR scheduler before its max interval when accumulated route
     /// errors or delivery failures cross their thresholds
     pub(crate) mtorr_kick: Notify,
-    /// Route-repair signals accumulated since the last many-to-one route request
-    pub(crate) mtorr_triggers: Mutex<MtorrTriggers>,
 
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
@@ -541,6 +538,8 @@ impl ZigbeeStack {
                 u32::from(constants.router_age_limit) * constants.link_status_period,
                 constants.broadcast_delivery_time,
                 constants.broadcast_passive_ack_quorum,
+                constants.mtorr_route_error_threshold,
+                constants.mtorr_delivery_failure_threshold,
                 source_routing,
             ),
             constants,
@@ -553,7 +552,6 @@ impl ZigbeeStack {
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
             mtorr_kick: Notify::new(),
-            mtorr_triggers: Mutex::new(MtorrTriggers::default()),
             link_status_received: Notify::new(),
             broadcast_acked: Notify::new(),
             maintenance_wake: Notify::new(),

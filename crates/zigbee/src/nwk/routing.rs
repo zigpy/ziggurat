@@ -149,6 +149,14 @@ pub struct Routing {
     network_address: Nwk,
     route_discovery_time: Duration,
 
+    /// Route-repair signals counted since the last many-to-one route request
+    /// (route-failure network statuses and locally failed unicast deliveries);
+    /// crossing a threshold warrants advertising the concentrator early
+    mtorr_route_errors: u8,
+    mtorr_delivery_failures: u8,
+    mtorr_route_error_threshold: u8,
+    mtorr_delivery_failure_threshold: u8,
+
     route_table: HashMap<Nwk, TableEntry>,
     discovery_table: HashMap<(Nwk, RequestId), DiscoveryEntry>,
     route_record_table: HashMap<Nwk, Vec<Nwk>>,
@@ -161,15 +169,45 @@ pub struct Routing {
 }
 
 impl Routing {
-    pub fn new(network_address: Nwk, route_discovery_time: Duration) -> Self {
+    pub fn new(
+        network_address: Nwk,
+        route_discovery_time: Duration,
+        mtorr_route_error_threshold: u8,
+        mtorr_delivery_failure_threshold: u8,
+    ) -> Self {
         Self {
             network_address,
             route_discovery_time,
+            mtorr_route_errors: 0,
+            mtorr_delivery_failures: 0,
+            mtorr_route_error_threshold,
+            mtorr_delivery_failure_threshold,
             route_table: HashMap::new(),
             discovery_table: HashMap::new(),
             route_record_table: HashMap::new(),
             request_sequence_number: 0,
         }
+    }
+
+    /// Count a received route-failure network status toward an early many-to-one
+    /// route request. Returns whether the accumulated signals warrant one.
+    pub const fn note_route_error(&mut self) -> bool {
+        self.mtorr_route_errors = self.mtorr_route_errors.saturating_add(1);
+        self.mtorr_route_errors >= self.mtorr_route_error_threshold
+    }
+
+    /// Count a locally failed unicast delivery toward an early many-to-one route
+    /// request. Returns whether the accumulated signals warrant one.
+    pub const fn note_delivery_failure(&mut self) -> bool {
+        self.mtorr_delivery_failures = self.mtorr_delivery_failures.saturating_add(1);
+        self.mtorr_delivery_failures >= self.mtorr_delivery_failure_threshold
+    }
+
+    /// A many-to-one route request went out: the accumulated route-repair signals
+    /// are spent.
+    pub const fn reset_mtorr_triggers(&mut self) {
+        self.mtorr_route_errors = 0;
+        self.mtorr_delivery_failures = 0;
     }
 
     pub fn route_status(&self, destination: Nwk) -> Option<Status> {
