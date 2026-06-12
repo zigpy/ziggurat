@@ -2,11 +2,11 @@ use crate::ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154CommandFrame, Ieee802154DataFrame,
     Ieee802154Frame, Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
-use crate::spinel::SpinelStatus;
-use crate::spinel_client::SpinelTxFrame;
 use abstract_bits::AbstractBits;
 use arbitrary_int::u24;
 use ieee_802154::types::Nwk;
+use spinel::SpinelStatus;
+use spinel::client::SpinelTxFrame;
 use zigbee::beacon::{RenamedU24, ZigbeeBeacon};
 use zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkSecurityHeaderKeyId,

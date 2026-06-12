@@ -1,4 +1,4 @@
-use crate::spinel::{
+use crate::{
     HdlcSpecial, SPINEL_FRAME_MAX_SIZE, SpinelCommandId, SpinelFrame, SpinelFrameParsingError,
     SpinelFramePropValueIs, SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelStatus,
     hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
@@ -483,17 +483,13 @@ impl SpinelClient {
     pub async fn get_hw_address(&self) -> Result<Eui64, SpinelError> {
         let rsp = self.prop_value_get(SpinelPropertyId::Hwaddr).await?;
 
-        let mut bytes: [u8; 8] =
+        let bytes: [u8; 8] =
             rsp.try_into()
                 .map_err(|rsp: Vec<u8>| SpinelError::InvalidResponseError {
                     reason: format!("Invalid hardware address: {rsp:02X?}"),
                 })?;
 
-        // Spinel EUI64 fields are byte-reversed relative to the over-the-air order
-        // that `Eui64` stores
-        bytes.reverse();
-
-        Ok(Eui64(bytes))
+        Ok(crate::eui64_from_spinel_bytes(bytes))
     }
 
     pub async fn transmit_frame(

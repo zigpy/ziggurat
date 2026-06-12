@@ -1,11 +1,11 @@
 use crate::ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
-use crate::spinel::{
+use ieee_802154::types::{Eui64, Key, Nwk, PanId};
+use spinel::client::{SpinelClient, SpinelError, SpinelRxFrame};
+use spinel::{
     SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelMacScanState, SpinelPropertyId,
     SpinelStatus,
 };
-use crate::spinel_client::{SpinelClient, SpinelError, SpinelRxFrame};
-use ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use tokio::time::{sleep, timeout};
 use zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
 use zigbee::nwk::frame::NwkFrameType;
@@ -112,15 +112,6 @@ pub enum NetworkKeyType {
 pub enum NwkSecurityCapability {
     NotCapable = 0,
     Capable = 1,
-}
-
-/// Spinel EUI64 fields are byte-reversed relative to the 802.15.4 over-the-air order
-/// that [`Eui64`] stores: OpenThread parses addresses out of frames with
-/// `kReverseByteOrder` and spinel carries that internal representation verbatim.
-pub(crate) const fn eui64_to_spinel_bytes(eui64: Eui64) -> [u8; 8] {
-    let mut bytes = eui64.to_bytes();
-    bytes.reverse();
-    bytes
 }
 
 /// `nwkParentInformation` (spec Table 3-62): the keepalive methods and features we
@@ -998,7 +989,7 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::Mac154Laddr,
-                eui64_to_spinel_bytes(self.state.ieee_address).to_vec(),
+                spinel::eui64_to_spinel_bytes(self.state.ieee_address).to_vec(),
             )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;

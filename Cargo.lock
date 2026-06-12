@@ -1087,6 +1087,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spinel"
+version = "0.1.0"
+dependencies = [
+ "crc_all",
+ "hex-literal",
+ "ieee-802154",
+ "log",
+ "num_enum",
+ "rand 0.10.1",
+ "thiserror",
+ "tokio",
+ "tokio-serial",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1604,16 +1619,13 @@ version = "0.0.1"
 dependencies = [
  "abstract-bits",
  "arbitrary-int 2.1.1",
- "crc_all",
- "hex-literal",
  "ieee-802154",
  "log",
- "num_enum",
  "parking_lot",
  "rand 0.10.1",
+ "spinel",
  "thiserror",
  "tokio",
- "tokio-serial",
  "zigbee",
 ]
 
@@ -1627,6 +1639,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "spinel",
  "tokio",
  "tokio-serial",
  "tokio-tungstenite",

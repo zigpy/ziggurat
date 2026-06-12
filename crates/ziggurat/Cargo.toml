@@ -5,19 +5,14 @@ authors = []
 edition = "2024"
 
 [dependencies]
-zigbee = { path = "../zigbee" }
 ieee-802154 = { path = "../ieee-802154" }
+spinel = { path = "../spinel" }
+zigbee = { path = "../zigbee" }
 
 abstract-bits = "0.2.0"
-crc_all = "0.2.2"
-tokio-serial = "5.4"
-log = "0.4.26"
-num_enum = "0.7.3"
-thiserror = "2.0.12"
-rand = "0.10.1"
-parking_lot = "0.12.4"
 arbitrary-int = "2.1.1"
+log = "0.4.26"
+parking_lot = "0.12.4"
+rand = "0.10.1"
+thiserror = "2.0.12"
 tokio = { version = "1.43.0", features = ["rt", "macros", "time", "sync", "io-util"] }
-
-[dev-dependencies]
-hex-literal = "1.1.0"

@@ -1,6 +1,6 @@
 use crate::ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
-use crate::spinel::SpinelPropertyId;
 use ieee_802154::types::{Eui64, Nwk};
+use spinel::SpinelPropertyId;
 
 use std::collections::HashSet;
 use tokio::sync::oneshot;
@@ -393,7 +393,7 @@ impl ZigbeeStack {
                 SpinelPropertyId::MacSrcMatchExtendedAddresses,
                 extended_addresses
                     .iter()
-                    .flat_map(|&eui64| super::eui64_to_spinel_bytes(eui64))
+                    .flat_map(|&eui64| spinel::eui64_to_spinel_bytes(eui64))
                     .collect(),
             )
             .await?;

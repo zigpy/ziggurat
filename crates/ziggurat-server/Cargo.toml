@@ -5,6 +5,7 @@ authors = []
 edition = "2024"
 
 [dependencies]
+spinel = { path = "../spinel" }
 ziggurat = { path = "../ziggurat" }
 zigbee = { path = "../zigbee" }
 
