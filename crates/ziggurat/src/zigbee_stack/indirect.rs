@@ -65,8 +65,7 @@ impl ZigbeeStack {
                     .address_map
                     .try_lock_for(MAX_LOCK_DURATION)
                     .unwrap()
-                    .get(&eui64)
-                    .copied();
+                    .nwk_for(eui64);
 
                 (Some(eui64), nwk)
             }
@@ -76,8 +75,7 @@ impl ZigbeeStack {
                     .address_map
                     .try_lock_for(MAX_LOCK_DURATION)
                     .unwrap()
-                    .iter()
-                    .find_map(|(&eui64, &mapped)| (mapped == nwk).then_some(eui64));
+                    .eui64_for(nwk);
 
                 (eui64, Some(nwk))
             }
@@ -305,7 +303,7 @@ impl ZigbeeStack {
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap();
 
-            queue.queued_addresses(&address_map)
+            queue.queued_addresses(address_map.map())
         };
 
         log::debug!(

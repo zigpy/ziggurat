@@ -20,38 +20,12 @@ use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let conflict = {
-            let mut address_map = self
-                .state
-                .address_map
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-
-            if address_map.get(&eui64) == Some(&nwk) {
-                return;
-            }
-
-            // Spec 3.6.1.10.2: a network address claimed by a second IEEE address is
-            // an address conflict; the mapping is not updated
-            let conflict = address_map
-                .iter()
-                .any(|(&other_eui64, &other_nwk)| other_nwk == nwk && other_eui64 != eui64);
-
-            if !conflict {
-                match address_map.insert(eui64, nwk) {
-                    None => {
-                        log::debug!("Added new address mapping: {eui64:?} -> {nwk:?}")
-                    }
-                    Some(old_nwk) => {
-                        log::warn!(
-                            "Updated address mapping: {eui64:?} -> {nwk:?} (was {old_nwk:?})",
-                        )
-                    }
-                }
-            }
-
-            conflict
-        };
+        let conflict = self
+            .state
+            .address_map
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .update_mapping(eui64, nwk);
 
         if conflict {
             self.handle_address_conflict(nwk, true);
@@ -616,14 +590,7 @@ impl ZigbeeStack {
                 .address_map
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
-                .iter()
-                .find_map(|(&eui64, &nwk)| {
-                    if nwk == next_hop_address {
-                        Some(eui64)
-                    } else {
-                        None
-                    }
-                });
+                .eui64_for(next_hop_address);
 
             if let Some(relaying_ieee) = relaying_ieee {
                 self.state
@@ -944,8 +911,7 @@ impl ZigbeeStack {
             .address_map
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .iter()
-            .find_map(|(&eui64, &nwk)| if nwk == source { Some(eui64) } else { None });
+            .eui64_for(source);
 
         // Spec 3.6.4.8.1: failures while relaying along a source route are reported
         // as such, so the concentrator can drop the stored route

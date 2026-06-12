@@ -615,7 +615,7 @@ impl ZigguratServer {
         let destination = match (request.destination_eui64, request.destination) {
             (_, Some(nwk)) => nwk,
             (Some(eui64), None) => {
-                let nwk = stack.state.address_map.lock().get(&eui64).copied();
+                let nwk = stack.state.address_map.lock().nwk_for(eui64);
 
                 match nwk {
                     Some(nwk) => nwk,

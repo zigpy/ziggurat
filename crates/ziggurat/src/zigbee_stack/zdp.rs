@@ -210,40 +210,31 @@ impl ZigbeeStack {
             }
         };
 
-        let mut address_map = self
-            .state
-            .address_map
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
-
-        // The announced network address under any other IEEE address no longer has "a
-        // known valid 16-bit NWK address"
-        address_map.retain(|&eui64, &mut nwk| {
-            let stale = nwk == annce.nwk_addr && eui64 != annce.ieee_addr;
-            if stale {
-                log::info!(
-                    "Forgetting stale address mapping {eui64:?} -> {nwk:?}, the address now belongs to {:?}",
-                    annce.ieee_addr
-                );
-            }
-
-            !stale
-        });
-
-        // The spec allows announcements with an unknown (all-ones) IEEE address
-        if annce.ieee_addr != Eui64([0xFF; 8]) {
-            address_map.insert(annce.ieee_addr, annce.nwk_addr);
-            drop(address_map);
-
-            // A child of ours confirming an address change (e.g. after conflict
-            // resolution) must keep its neighbor entry in sync, or its new address
-            // would bypass the indirect queue
+        // The spec allows announcements with an unknown (all-ones) IEEE address,
+        // which evict stale owners of the announced address without claiming it
+        if annce.ieee_addr == Eui64([0xFF; 8]) {
             self.state
-                .neighbors
+                .address_map
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
-                .update_network_address(annce.ieee_addr, annce.nwk_addr);
+                .forget_address(annce.nwk_addr);
+            return;
         }
+
+        self.state
+            .address_map
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .claim(annce.ieee_addr, annce.nwk_addr);
+
+        // A child of ours confirming an address change (e.g. after conflict
+        // resolution) must keep its neighbor entry in sync, or its new address
+        // would bypass the indirect queue
+        self.state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .update_network_address(annce.ieee_addr, annce.nwk_addr);
     }
 
     /// Spec 2.4.3.1.12: a router announces the end devices it believes are its

@@ -1,3 +1,4 @@
+pub mod addresses;
 pub mod broadcasts;
 pub mod commands;
 pub mod frame;

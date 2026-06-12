@@ -33,8 +33,7 @@ impl ZigbeeStack {
             .address_map
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .iter()
-            .find_map(|(eui64, nwk)| (*nwk == nwk_source).then_some(*eui64));
+            .eui64_for(nwk_source);
 
         if eui64.is_none() {
             log::warn!("Cannot resolve the EUI64 of {nwk_source:?} to decrypt an APS frame");

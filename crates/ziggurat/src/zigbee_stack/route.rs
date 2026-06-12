@@ -668,14 +668,7 @@ impl ZigbeeStack {
             .address_map
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .iter()
-            .find_map(|(&eui64, &nwk)| {
-                if nwk == destination {
-                    Some(eui64)
-                } else {
-                    None
-                }
-            });
+            .eui64_for(destination);
 
         let route_request_frame = self
             .nwk_command_frame(

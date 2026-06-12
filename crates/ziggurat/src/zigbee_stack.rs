@@ -35,6 +35,7 @@ pub use zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use zigbee::constants::Constants;
 pub use zigbee::indirect::{IndirectQueue, SrcMatchTable};
 pub use zigbee::nwk::NwkDeviceType;
+pub use zigbee::nwk::addresses::AddressMap;
 pub use zigbee::nwk::broadcasts::Broadcasts;
 pub use zigbee::nwk::neighbors::Neighbors;
 pub use zigbee::nwk::routing::Routing;
@@ -243,7 +244,8 @@ pub struct State {
     pub is_concentrator: bool,
     pub security_level: u8,
 
-    pub address_map: Mutex<HashMap<Eui64, Nwk>>,
+    /// The EUI64-to-network-address map, one owner per network address
+    pub address_map: Mutex<AddressMap>,
 
     /// A flag that determines if a timestamp indication is provided on incoming and
     /// outgoing packets.
@@ -352,7 +354,7 @@ impl State {
                 outgoing_frame_counter,
                 FRAME_COUNTER_NOTIFY_INTERVAL,
             )),
-            address_map: Mutex::new(HashMap::new()),
+            address_map: Mutex::new(AddressMap::new(network_address)),
             time_stamp: false,
             pan_id: Mutex::new(pan_id),
             tx_total: Mutex::new(0),

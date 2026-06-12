@@ -201,20 +201,24 @@ impl ZigbeeStack {
     /// Pick an unused random network address for a joining device, reusing the previous
     /// one if the device has joined before.
     fn allocate_network_address(&self, eui64: Eui64) -> Nwk {
-        if let Some(existing) = self
+        let address_map = self
             .state
             .address_map
             .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .get(&eui64)
-        {
-            return *existing;
-        }
+            .unwrap();
+        let neighbors = self
+            .state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap();
 
-        self.generate_unused_network_address()
+        address_map.allocate(
+            eui64,
+            &neighbors,
+            std::iter::repeat_with(|| Nwk(rand::random::<u16>())),
+        )
     }
 
-    #[allow(clippy::significant_drop_tightening)]
     fn generate_unused_network_address(&self) -> Nwk {
         let address_map = self
             .state
@@ -227,23 +231,10 @@ impl ZigbeeStack {
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap();
 
-        loop {
-            let candidate = Nwk(rand::random::<u16>());
-
-            // Assigned addresses lie within 0x0001-0xFFF7
-            if candidate.as_u16() == 0x0000 || candidate.as_u16() >= 0xFFF8 {
-                continue;
-            }
-
-            if candidate == self.state.network_address
-                || address_map.values().any(|&nwk| nwk == candidate)
-                || neighbors.has_network_address(candidate)
-            {
-                continue;
-            }
-
-            return candidate;
-        }
+        address_map.generate_unused(
+            &neighbors,
+            std::iter::repeat_with(|| Nwk(rand::random::<u16>())),
+        )
     }
 
     /// Spec 3.6.1.10.5: two devices use the same network address. The network is
@@ -303,7 +294,7 @@ impl ZigbeeStack {
             .address_map
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .retain(|_, &mut nwk| nwk != address);
+            .forget_address(address);
         self.state
             .routing
             .try_lock_for(MAX_LOCK_DURATION)
@@ -983,14 +974,12 @@ impl ZigbeeStack {
         }
 
         // The device keeps its requested address unless it collides with another device
-        let conflict = requested_nwk == self.state.network_address
-            || self
-                .state
-                .address_map
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .iter()
-                .any(|(&eui64, &nwk)| nwk == requested_nwk && eui64 != source_ieee);
+        let conflict = self
+            .state
+            .address_map
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .claimed_by_other(requested_nwk, source_ieee);
 
         let assigned_nwk = if conflict {
             self.allocate_network_address(source_ieee)
@@ -1149,8 +1138,7 @@ impl ZigbeeStack {
                 .address_map
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
-                .iter()
-                .find_map(|(&eui64, &nwk)| if nwk == source { Some(eui64) } else { None })
+                .eui64_for(source)
         });
 
         if let Some(source_ieee) = source_ieee {
