@@ -3,6 +3,7 @@ use nwk::commands::NwkCommandId;
 
 pub mod aps;
 pub mod beacon;
+pub mod constants;
 pub mod crypto;
 pub mod nwk;
 pub mod zdp;
