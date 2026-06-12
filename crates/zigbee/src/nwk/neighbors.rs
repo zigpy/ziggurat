@@ -134,6 +134,18 @@ pub enum Relationship {
     BackboneMeshSibling = 0x09,
 }
 
+/// The attachment-time identity of a joining or rejoining child, for
+/// [`Neighbors::upsert_child`].
+#[derive(Debug)]
+pub struct ChildDescriptor {
+    pub eui64: Eui64,
+    pub network_address: Nwk,
+    pub device_type: NwkDeviceType,
+    pub rx_on_when_idle: bool,
+    pub device_timeout: Duration,
+    pub relationship: Relationship,
+}
+
 /// A snapshot of the radio link to one neighbor, for routing cost computations.
 #[derive(Debug, Clone, Copy)]
 pub struct NeighborLink {
@@ -406,10 +418,44 @@ impl Neighbors {
         evicted
     }
 
-    /// Get-or-create an entry for a joining device, keeping any existing state so the
-    /// table stays stable across association retries.
-    pub fn upsert(&mut self, eui64: Eui64, create: impl FnOnce() -> TableEntry) -> &mut TableEntry {
-        self.table.entry(eui64).or_insert_with(create)
+    /// Get-or-create the entry for a joining or rejoining child, keeping any existing
+    /// state (e.g. LQI samples, keepalive confirmation) so the table stays stable
+    /// across attachment retries. The fields a device may change between attachments
+    /// are refreshed even on existing entries: a device may re-attach with different
+    /// capabilities (e.g. re-flashed from router to end device).
+    pub fn upsert_child(&mut self, child: ChildDescriptor, now: Instant) {
+        let entry = self.table.entry(child.eui64).or_insert_with(|| TableEntry {
+            extended_address: child.eui64,
+            network_address: child.network_address,
+            device_type: child.device_type,
+            rx_on_when_idle: child.rx_on_when_idle,
+            end_device_configuration: 0x0000,
+            timeout_at: now + child.device_timeout,
+            device_timeout: child.device_timeout,
+            relationship: Relationship::Child,
+            transmit_failure: 0,
+            lqas: VecDeque::new(),
+            outgoing_cost: 0,
+            last_link_status_timestamp: now,
+            incoming_beacon_timestamp: 0,
+            beacon_transmission_time_offset: 0,
+            keepalive_received: false,
+            mac_unicast_bytes_transmitted: 0,
+            mac_unicast_bytes_received: 0,
+            router_added_timestamp: now,
+            router_connectivity: 0,
+            router_neighbor_set_diversity: 0,
+            router_outbound_activity: 0,
+            router_inbound_activity: 0,
+            security_timer: 0,
+        });
+
+        entry.network_address = child.network_address;
+        entry.device_type = child.device_type;
+        entry.rx_on_when_idle = child.rx_on_when_idle;
+        entry.device_timeout = child.device_timeout;
+        entry.timeout_at = now + child.device_timeout;
+        entry.relationship = child.relationship;
     }
 
     pub fn remove(&mut self, eui64: Eui64) {

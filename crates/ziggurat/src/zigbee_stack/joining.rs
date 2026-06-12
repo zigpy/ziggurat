@@ -21,7 +21,6 @@ use zigbee::nwk::frame::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId,
 };
 
-use std::collections::VecDeque;
 use tokio::time::{Duration, Instant};
 use zigbee::Command;
 use zigbee::nwk::commands::{
@@ -106,48 +105,21 @@ impl ZigbeeStack {
             Duration::from_secs(0xFFFFFFFF)
         };
 
-        {
-            let mut neighbors = self
-                .state
-                .neighbors
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-
-            let neighbor_entry = neighbors.upsert(source_eui64, || neighbors::TableEntry {
-                extended_address: source_eui64,
-                network_address: short_address,
-                device_type,
-                rx_on_when_idle: request.receive_on_when_idle,
-                end_device_configuration: 0x0000,
-                timeout_at: Instant::now().into_std() + device_timeout,
-                device_timeout,
-                relationship: neighbors::Relationship::Child,
-                transmit_failure: 0,
-                lqas: VecDeque::new(),
-                outgoing_cost: 0,
-                last_link_status_timestamp: Instant::now().into_std(),
-                incoming_beacon_timestamp: 0,
-                beacon_transmission_time_offset: 0,
-                keepalive_received: false,
-                mac_unicast_bytes_transmitted: 0,
-                mac_unicast_bytes_received: 0,
-                router_added_timestamp: Instant::now().into_std(),
-                router_connectivity: 0,
-                router_neighbor_set_diversity: 0,
-                router_outbound_activity: 0,
-                router_inbound_activity: 0,
-                security_timer: 0,
-            });
-
-            // A device may re-associate with different capabilities (e.g. re-flashed
-            // from router to end device), so existing entries are refreshed too
-            neighbor_entry.network_address = short_address;
-            neighbor_entry.device_type = device_type;
-            neighbor_entry.rx_on_when_idle = request.receive_on_when_idle;
-            neighbor_entry.device_timeout = device_timeout;
-            neighbor_entry.timeout_at = Instant::now().into_std() + device_timeout;
-            neighbor_entry.relationship = neighbors::Relationship::Child;
-        }
+        self.state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .upsert_child(
+                neighbors::ChildDescriptor {
+                    eui64: source_eui64,
+                    network_address: short_address,
+                    device_type,
+                    rx_on_when_idle: request.receive_on_when_idle,
+                    device_timeout,
+                    relationship: neighbors::Relationship::Child,
+                },
+                Instant::now().into_std(),
+            );
 
         // A new child deadline may precede everything the maintenance task knows
         self.maintenance_wake.notify_one();
@@ -1004,52 +976,27 @@ impl ZigbeeStack {
             Duration::from_secs(0xFFFFFFFF)
         };
 
-        {
-            let mut neighbors = self
-                .state
-                .neighbors
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-
-            let neighbor_entry = neighbors.upsert(source_ieee, || neighbors::TableEntry {
-                extended_address: source_ieee,
-                network_address: assigned_nwk,
-                device_type,
-                rx_on_when_idle: capability.receiver_on_when_idle,
-                end_device_configuration: 0x0000,
-                timeout_at: Instant::now().into_std() + device_timeout,
-                device_timeout,
-                relationship: neighbors::Relationship::Child,
-                transmit_failure: 0,
-                lqas: VecDeque::new(),
-                outgoing_cost: 0,
-                last_link_status_timestamp: Instant::now().into_std(),
-                incoming_beacon_timestamp: 0,
-                beacon_transmission_time_offset: 0,
-                keepalive_received: false,
-                mac_unicast_bytes_transmitted: 0,
-                mac_unicast_bytes_received: 0,
-                router_added_timestamp: Instant::now().into_std(),
-                router_connectivity: 0,
-                router_neighbor_set_diversity: 0,
-                router_outbound_activity: 0,
-                router_inbound_activity: 0,
-                security_timer: 0,
-            });
-
-            // A device may rejoin with different capabilities, so existing entries
-            // are refreshed too
-            neighbor_entry.network_address = assigned_nwk;
-            neighbor_entry.device_type = device_type;
-            neighbor_entry.rx_on_when_idle = capability.receiver_on_when_idle;
-            neighbor_entry.device_timeout = device_timeout;
-            neighbor_entry.timeout_at = Instant::now().into_std() + device_timeout;
-            neighbor_entry.relationship = if secured {
-                neighbors::Relationship::Child
-            } else {
-                neighbors::Relationship::UnauthenticatedChild
-            };
-        }
+        self.state
+            .neighbors
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .upsert_child(
+                neighbors::ChildDescriptor {
+                    eui64: source_ieee,
+                    network_address: assigned_nwk,
+                    device_type,
+                    rx_on_when_idle: capability.receiver_on_when_idle,
+                    device_timeout,
+                    // An unsecured rejoin is unauthenticated until the network key
+                    // is delivered
+                    relationship: if secured {
+                        neighbors::Relationship::Child
+                    } else {
+                        neighbors::Relationship::UnauthenticatedChild
+                    },
+                },
+                Instant::now().into_std(),
+            );
 
         // A new child deadline may precede everything the maintenance task knows
         self.maintenance_wake.notify_one();
