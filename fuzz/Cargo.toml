@@ -82,3 +82,17 @@ path = "fuzz_targets/beacon_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "nwk_commands_roundtrip"
+path = "fuzz_targets/nwk_commands_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zdp_roundtrip"
+path = "fuzz_targets/zdp_roundtrip.rs"
+test = false
+doc = false
+bench = false
