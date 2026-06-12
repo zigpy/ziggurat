@@ -1,6 +1,6 @@
 #![allow(clippy::useless_conversion)]
 
-use crate::commands::NwkRejoinCapabilityInformation;
+use crate::nwk::commands::NwkRejoinCapabilityInformation;
 use crate::{DeserializeError, MAC_PAYLOAD_MAX_LEN, SerializeError};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
 use ieee_802154::types::{Eui64, Nwk};

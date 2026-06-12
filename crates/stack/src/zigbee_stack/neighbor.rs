@@ -1,8 +1,8 @@
 use ieee_802154::types::{Eui64, Nwk};
 
-use crate::zigbee_nwk::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
-use zigbee_parts::Command;
-use zigbee_parts::commands::NwkLinkStatusCommand;
+use zigbee::Command;
+use zigbee::nwk::commands::NwkLinkStatusCommand;
+use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack};
 

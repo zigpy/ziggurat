@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use ieee_802154::types::{Eui64, Nwk};
 use tokio::time::{Duration, Instant};
-use zigbee_parts::commands::{NwkLinkStatus, NwkLinkStatusCommand};
+use zigbee::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
 
 use super::NwkDeviceType;
 

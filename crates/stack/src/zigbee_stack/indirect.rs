@@ -5,8 +5,8 @@ use ieee_802154::types::{Eui64, Nwk};
 use std::collections::HashSet;
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
-use zigbee_parts::Command;
-use zigbee_parts::commands::NwkLeaveCommand;
+use zigbee::Command;
+use zigbee::nwk::commands::NwkLeaveCommand;
 
 use super::{
     MAX_LOCK_DURATION, NwkSecurityMode, PendingIndirectTransaction, SrcMatchTable,

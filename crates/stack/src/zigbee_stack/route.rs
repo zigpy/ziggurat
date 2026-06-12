@@ -4,12 +4,12 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use ieee_802154::types::Nwk;
 
-use crate::zigbee_nwk::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
-use zigbee_parts::Command;
-use zigbee_parts::commands::{
+use zigbee::Command;
+use zigbee::nwk::commands::{
     NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand, NwkRouteRequestCommand,
     NwkRouteRequestManyToOne,
 };
+use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::routing::{RouteReplyDisposition, Status};
 use super::{MAX_LOCK_DURATION, MtorrTriggers, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};

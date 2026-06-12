@@ -1,7 +1,10 @@
 use abstract_bits::{AbstractBits, BitReader};
-use commands::NwkCommandId;
+use nwk::commands::NwkCommandId;
 
-pub mod commands;
+pub mod aps;
+pub mod beacon;
+pub mod crypto;
+pub mod nwk;
 pub mod zdp;
 
 /// 802.15.4 mac layer has a maximum payload length of 104 bytes

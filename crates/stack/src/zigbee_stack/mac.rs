@@ -4,14 +4,14 @@ use crate::ieee_802154::{
 };
 use crate::spinel::SpinelStatus;
 use crate::spinel_client::SpinelTxFrame;
-use crate::types::{RenamedU24, ZigbeeBeacon};
-use crate::zigbee_nwk::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkSecurityHeaderKeyId,
-    NwkSecurityLevel,
-};
 use abstract_bits::AbstractBits;
 use arbitrary_int::u24;
 use ieee_802154::types::Nwk;
+use zigbee::beacon::{RenamedU24, ZigbeeBeacon};
+use zigbee::nwk::frame::{
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkSecurityHeaderKeyId,
+    NwkSecurityLevel,
+};
 
 use super::{MAX_LOCK_DURATION, ZigbeeStack, ZigbeeStackError};
 

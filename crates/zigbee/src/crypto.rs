@@ -8,7 +8,7 @@ use aes::cipher::KeyInit;
 use ccm::Ccm;
 use ccm::aead::AeadInOut;
 use ccm::consts::{U4, U13};
-use parking_lot::Mutex;
+use std::sync::Mutex;
 use thiserror::Error;
 
 use ieee_802154::FrameBytes;
@@ -132,6 +132,7 @@ static CIPHER_CACHE: LazyLock<Mutex<HashMap<[u8; 16], ZigbeeCcm>>> =
 fn cipher_for(key: &Key) -> ZigbeeCcm {
     CIPHER_CACHE
         .lock()
+        .unwrap()
         .entry(key.0)
         .or_insert_with(|| ZigbeeCcm::new(&key.0.into()))
         .clone()

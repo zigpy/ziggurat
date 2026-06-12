@@ -5,7 +5,7 @@ use ieee_802154::{FrameBytes, extend_abstract_bits};
 use num_enum::TryFromPrimitive;
 
 use crate::crypto::{decrypt_ccm, encrypt_ccm};
-use crate::zigbee_nwk::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
+use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
 #[abstract_bits(bits = 2)]
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]

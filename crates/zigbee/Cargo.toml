@@ -1,0 +1,23 @@
+[package]
+name = "zigbee"
+version = "0.1.0"
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ieee-802154 = { path = "../ieee-802154" }
+
+abstract-bits = "0.2.0"
+aes = "0.9.0-pre.2"
+arbitrary-int = "2.1.1"
+ccm = { version = "0.6.0-rc.3", default-features = false }
+educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
+hex = "0.4.3"
+num_enum = "0.7.3"
+serde = { version = "1.0.219", default-features = false, features = ["std", "derive"] }
+thiserror = "2.0.12"
+
+[dev-dependencies]
+hex-literal = "1.1.0"

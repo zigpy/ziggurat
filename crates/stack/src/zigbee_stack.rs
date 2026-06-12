@@ -5,10 +5,10 @@ use crate::spinel::{
     SpinelStatus,
 };
 use crate::spinel_client::{SpinelClient, SpinelError, SpinelRxFrame};
-use crate::zigbee_aps::{ApsAckFrame, ApsFrame, parse_aps_frame};
-use crate::zigbee_nwk::NwkFrameType;
 use ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use tokio::time::{sleep, timeout};
+use zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
+use zigbee::nwk::frame::NwkFrameType;
 
 use thiserror::Error;
 use tokio::time::error::Elapsed;
@@ -20,7 +20,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
-use zigbee_parts::commands::EndDeviceTimeout;
+use zigbee::nwk::commands::EndDeviceTimeout;
 
 mod aps;
 pub mod aps_security;

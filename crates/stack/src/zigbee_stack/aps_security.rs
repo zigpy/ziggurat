@@ -4,12 +4,12 @@ use ieee_802154::types::{Eui64, Key};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
-use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
-use crate::zigbee_aps::{
+use zigbee::aps::frame::{
     ApsAckFrame, ApsAuxHeader, ApsCommandFrame, ApsDataFrame, EncryptedApsAckFrame,
     EncryptedApsCommandFrame, EncryptedApsDataFrame,
 };
-use crate::zigbee_nwk::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
+use zigbee::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
+use zigbee::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
 /// Which stack's seed-to-key transformation a TCLK seed uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

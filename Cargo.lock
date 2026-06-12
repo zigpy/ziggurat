@@ -1580,12 +1580,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zigbee-parts"
+name = "zigbee"
 version = "0.1.0"
 dependencies = [
  "abstract-bits",
+ "aes",
+ "arbitrary-int 2.1.1",
+ "ccm",
+ "educe",
+ "hex",
+ "hex-literal",
  "ieee-802154",
  "num_enum",
+ "serde",
  "thiserror",
 ]
 
@@ -1615,7 +1622,7 @@ dependencies = [
  "tokio",
  "tokio-serial",
  "tokio-tungstenite",
- "zigbee-parts",
+ "zigbee",
 ]
 
 [[package]]
