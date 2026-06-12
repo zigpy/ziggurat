@@ -185,6 +185,13 @@ impl Key {
         Self::try_from_hex(text).unwrap()
     }
 
+    pub const fn from_string(text: &[u8; 16]) -> Self {
+        let mut key = [0; 16];
+        key.copy_from_slice(text);
+
+        Self(key)
+    }
+
     pub const fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
         if bytes.len() != 16 {
             return Err("Invalid key length");

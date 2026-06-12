@@ -92,7 +92,7 @@ impl Default for Constants {
 }
 
 impl Constants {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             passive_ack_timeout: Duration::from_millis(500),
             max_broadcast_retries: 2,
@@ -126,7 +126,7 @@ impl Constants {
             parent_annce_base_timer: Duration::from_secs(10),
             parent_annce_jitter_max: Duration::from_secs(10),
             tx_power: 8,
-            global_link_key: Key::from_hex("5a6967426565416c6c69616e63653039"),
+            global_link_key: Key::from_string(b"ZigBeeAlliance09"),
             tclk_seed: None,
         }
     }
