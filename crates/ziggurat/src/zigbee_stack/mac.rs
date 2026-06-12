@@ -13,7 +13,7 @@ use zigbee::nwk::frame::{
     NwkSecurityLevel,
 };
 
-use super::{MAX_LOCK_DURATION, ZigbeeStack, ZigbeeStackError};
+use super::{MAX_LOCK_DURATION, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
@@ -55,7 +55,7 @@ impl ZigbeeStack {
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
                 .child_count()
-        } < usize::from(self.constants.max_children);
+        } < usize::from(self.tunables.max_children);
 
         let beacon_frame = Ieee802154Frame::Beacon(ieee_802154::Ieee802154BeaconFrame {
             header: Ieee802154FrameHeader {
@@ -95,8 +95,8 @@ impl ZigbeeStack {
             },
             beacon_payload: ZigbeeBeacon {
                 protocol_id: 0,
-                stack_profile: 0x02,
-                protocol_version: 2,
+                stack_profile: STACK_PROFILE,
+                protocol_version: PROTOCOL_VERSION,
                 reserved1: 0b00,
                 router_capacity: true,
                 device_depth: 0,

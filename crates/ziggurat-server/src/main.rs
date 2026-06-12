@@ -17,7 +17,9 @@ use spinel::client::SpinelClient;
 use zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::aps_security::TclkFlavor;
-use ziggurat::zigbee_stack::{Constants, TclkSeed, ZigbeeNotification, ZigbeeStack};
+use ziggurat::zigbee_stack::{
+    NetworkConfig, TclkSeed, Tunables, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+};
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -29,6 +31,9 @@ const OUTBOUND_QUEUE_DEPTH: usize = 1024;
 /// The server-level notification hub buffers this many notifications for slow
 /// connection forwarders before they start lagging.
 const NOTIFICATION_HUB_DEPTH: usize = 1024;
+
+/// The radio transmit power (in dBm) used when `configure` does not specify one.
+const DEFAULT_TX_POWER: i8 = 8;
 
 /// Big-endian colon-separated hex, the format used by zigpy for EUI64 addresses
 fn eui64_to_string(eui64: Eui64) -> String {
@@ -410,18 +415,9 @@ impl ZigguratServer {
             Err(e) => return error_response(id, "invalid_request", e),
         };
 
-        let mut constants = Constants::new();
-        if let Some(tc_link_key) = request.tc_link_key {
-            constants.global_link_key = tc_link_key;
-        }
-
-        if let Some(tx_power) = request.tx_power {
-            constants.tx_power = tx_power;
-        }
-
-        match (request.tclk_seed, request.tclk_flavor) {
-            (Some(seed), Some(flavor)) => constants.tclk_seed = Some(TclkSeed { seed, flavor }),
-            (None, None) => {}
+        let tclk_seed = match (request.tclk_seed, request.tclk_flavor) {
+            (Some(seed), Some(flavor)) => Some(TclkSeed { seed, flavor }),
+            (None, None) => None,
             _ => {
                 return error_response(
                     id,
@@ -429,7 +425,7 @@ impl ZigguratServer {
                     "tclk_seed and tclk_flavor must be provided together",
                 );
             }
-        }
+        };
 
         // A replaced stack must be fully stopped before its successor registers its
         // own receivers with the shared Spinel client
@@ -452,17 +448,22 @@ impl ZigguratServer {
 
         let (stack, mut stack_notification_rx) = ZigbeeStack::new(
             spinel,
-            constants,
-            request.channel,
-            request.nwk_update_id,
-            request.pan_id,
-            request.extended_pan_id,
-            request.nwk_address,
-            request.ieee_address,
-            request.network_key,
-            request.network_key_seq,
-            request.network_key_tx_counter,
-            request.source_routing,
+            NetworkConfig {
+                channel: request.channel,
+                update_id: request.nwk_update_id,
+                pan_id: request.pan_id,
+                extended_pan_id: request.extended_pan_id,
+                network_address: request.nwk_address,
+                ieee_address: request.ieee_address,
+                network_key: request.network_key,
+                network_key_seq_number: request.network_key_seq,
+                network_key_tx_counter: request.network_key_tx_counter,
+                tc_link_key: request.tc_link_key.unwrap_or(WELL_KNOWN_LINK_KEY),
+                tclk_seed,
+                tx_power: request.tx_power.unwrap_or(DEFAULT_TX_POWER),
+                source_routing: request.source_routing,
+            },
+            Tunables::new(),
         );
 
         // Restore unique trust center link keys negotiated in earlier sessions
@@ -555,7 +556,7 @@ impl ZigguratServer {
         let state = &stack.state;
         let nwk_security = state.nwk_security.lock();
         let aps_security = state.aps_security.lock();
-        let tclk_seed = &stack.constants.tclk_seed;
+        let tclk_seed = &stack.config.tclk_seed;
 
         response(
             id,
@@ -569,8 +570,8 @@ impl ZigguratServer {
                 "network_key": key_to_string(&nwk_security.network_key()),
                 "network_key_seq": nwk_security.key_seq_number(),
                 "network_key_tx_counter": nwk_security.outgoing_frame_counter(),
-                "tc_link_key": key_to_string(&stack.constants.global_link_key),
-                "tx_power": stack.constants.tx_power,
+                "tc_link_key": key_to_string(&stack.config.tc_link_key),
+                "tx_power": stack.config.tx_power,
                 "tclk_seed": tclk_seed.as_ref().map(|tclk| hex::encode(tclk.seed.to_bytes())),
                 "tclk_flavor": tclk_seed.as_ref().map(|tclk| match tclk.flavor {
                     TclkFlavor::ZStack => "zstack",

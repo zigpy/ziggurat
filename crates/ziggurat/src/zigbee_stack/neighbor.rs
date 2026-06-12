@@ -199,7 +199,7 @@ impl ZigbeeStack {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            tokio::time::sleep(self.constants.link_status_period).await;
+            tokio::time::sleep(self.tunables.link_status_period).await;
 
             self.send_link_status_broadcast(false).await;
         }

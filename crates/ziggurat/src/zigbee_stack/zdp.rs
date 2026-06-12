@@ -9,7 +9,9 @@ use zigbee::zdp::{
     ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus,
 };
 
-use super::{MAX_LOCK_DURATION, NwkDeviceType, ZigbeeStack, ZigbeeStackError, neighbors, routing};
+use super::{
+    MAX_DEPTH, MAX_LOCK_DURATION, NwkDeviceType, ZigbeeStack, ZigbeeStackError, neighbors, routing,
+};
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
@@ -314,7 +316,7 @@ impl ZigbeeStack {
             0,
             0,
             false,
-            2 * self.constants.max_depth,
+            2 * MAX_DEPTH,
             self.next_aps_counter(),
             command.serialize(tsn).unwrap(),
             None,
@@ -356,11 +358,11 @@ impl ZigbeeStack {
 
         loop {
             let jitter = self
-                .constants
+                .tunables
                 .parent_annce_jitter_max
                 .mul_f32(rand::random::<f32>());
             let slept_at = Instant::now();
-            tokio::time::sleep(self.constants.parent_annce_base_timer + jitter).await;
+            tokio::time::sleep(self.tunables.parent_annce_base_timer + jitter).await;
 
             // Spec 2.4.3.1.12.2: an announcement from another router restarts the
             // countdown

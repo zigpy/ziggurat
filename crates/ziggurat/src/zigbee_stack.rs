@@ -32,7 +32,9 @@ mod zdp;
 
 pub use zigbee::aps::security as aps_security;
 pub use zigbee::aps::security::{ApsSecurity, TclkSeed};
-pub use zigbee::constants::Constants;
+pub use zigbee::constants::{
+    MAX_DEPTH, PROTOCOL_VERSION, STACK_PROFILE, Tunables, WELL_KNOWN_LINK_KEY,
+};
 pub use zigbee::indirect::{IndirectQueue, SrcMatchTable};
 pub use zigbee::nwk::NwkDeviceType;
 pub use zigbee::nwk::addresses::AddressMap;
@@ -133,6 +135,30 @@ pub struct NwkCapabilityInformation {
     pub reserved2: bool,
     pub security_capability: NwkSecurityCapability,
     pub allocate_address: bool, // = 1
+}
+
+/// The per-network parameters provided by the application through `configure`, in
+/// contrast to the spec-defaulted [`Tunables`].
+#[derive(Debug)]
+pub struct NetworkConfig {
+    pub channel: u8,
+    pub update_id: u8,
+    pub pan_id: PanId,
+    pub extended_pan_id: Eui64,
+    pub network_address: Nwk,
+    pub ieee_address: Eui64,
+    pub network_key: Key,
+    pub network_key_seq_number: u8,
+    pub network_key_tx_counter: u32,
+    /// The trust center link key: [`WELL_KNOWN_LINK_KEY`] unless the network uses a
+    /// custom one
+    pub tc_link_key: Key,
+    /// The TCLK seed of the stack the network was taken over from, if any: unique
+    /// link keys are derived from it instead of generated randomly
+    pub tclk_seed: Option<TclkSeed>,
+    /// The radio transmit power in dBm
+    pub tx_power: i8,
+    pub source_routing: bool,
 }
 
 /// Bookkeeping for a network address conflict (spec 3.6.1.10.5).
@@ -282,37 +308,20 @@ pub struct State {
 }
 
 impl State {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        channel: u8,
-        update_id: u8,
-        pan_id: PanId,
-        extended_pan_id: Eui64,
-        network_address: Nwk,
-        ieee_address: Eui64,
-        key: Key,
-        key_seq_number: u8,
-        outgoing_frame_counter: u32,
-        global_link_key: Key,
-        tclk_seed: Option<TclkSeed>,
-        route_discovery_time: Duration,
-        max_neighbor_age: Duration,
-        transaction_persistence_time: Duration,
-        broadcast_delivery_time: Duration,
-        broadcast_passive_ack_quorum: usize,
-        mtorr_route_error_threshold: u8,
-        mtorr_delivery_failure_threshold: u8,
-        source_routing: bool,
-    ) -> Self {
+    pub fn new(config: &NetworkConfig, tunables: &Tunables) -> Self {
         Self {
-            channel: Mutex::new(channel),
+            channel: Mutex::new(config.channel),
             ieee802154_sequence_number: Mutex::new(0),
             aps_counter: Mutex::new(0),
-            aps_security: Mutex::new(ApsSecurity::new(global_link_key, ieee_address, tclk_seed)),
+            aps_security: Mutex::new(ApsSecurity::new(
+                config.tc_link_key.clone(),
+                config.ieee_address,
+                config.tclk_seed.clone(),
+            )),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
-            indirect_queue: Mutex::new(IndirectQueue::new(transaction_persistence_time)),
+            indirect_queue: Mutex::new(IndirectQueue::new(tunables.transaction_persistence_time)),
             start_time: Instant::now(),
             permitting_joins_until: Mutex::new(None),
 
@@ -321,16 +330,19 @@ impl State {
             hack_force_route_discovery: false,
 
             sequence_number: Mutex::new(0),
-            neighbors: Mutex::new(Neighbors::new(network_address, max_neighbor_age)),
+            neighbors: Mutex::new(Neighbors::new(
+                config.network_address,
+                u32::from(tunables.router_age_limit) * tunables.link_status_period,
+            )),
             routing: Mutex::new(Routing::new(
-                network_address,
-                route_discovery_time,
-                mtorr_route_error_threshold,
-                mtorr_delivery_failure_threshold,
+                config.network_address,
+                tunables.route_discovery_time,
+                tunables.mtorr_route_error_threshold,
+                tunables.mtorr_delivery_failure_threshold,
             )),
             broadcasts: Mutex::new(Broadcasts::new(
-                broadcast_delivery_time,
-                broadcast_passive_ack_quorum,
+                tunables.broadcast_delivery_time,
+                tunables.broadcast_passive_ack_quorum,
             )),
             capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
@@ -343,20 +355,20 @@ impl State {
                 allocate_address: true,
             },
             nwk_manager_addr: Nwk(0x0000),
-            update_id: Mutex::new(update_id),
-            network_address,
-            extended_pan_id,
-            is_concentrator: source_routing,
+            update_id: Mutex::new(config.update_id),
+            network_address: config.network_address,
+            extended_pan_id: config.extended_pan_id,
+            is_concentrator: config.source_routing,
             security_level: 5,
             nwk_security: Mutex::new(NwkSecurity::new(
-                key,
-                key_seq_number,
-                outgoing_frame_counter,
+                config.network_key.clone(),
+                config.network_key_seq_number,
+                config.network_key_tx_counter,
                 FRAME_COUNTER_NOTIFY_INTERVAL,
             )),
-            address_map: Mutex::new(AddressMap::new(network_address)),
+            address_map: Mutex::new(AddressMap::new(config.network_address)),
             time_stamp: false,
-            pan_id: Mutex::new(pan_id),
+            pan_id: Mutex::new(config.pan_id),
             tx_total: Mutex::new(0),
             leave_request_allowed: false,
             parent_information: ParentInformation {
@@ -365,7 +377,7 @@ impl State {
                 power_negotiation: false,
             },
             leave_request_without_rejoin_allowed: false,
-            ieee_address,
+            ieee_address: config.ieee_address,
             hub_connectivity: true,
         }
     }
@@ -403,7 +415,8 @@ pub struct ZigbeeStack {
     self_weak: Weak<Self>,
 
     pub state: State,
-    pub constants: Constants,
+    pub config: NetworkConfig,
+    pub tunables: Tunables,
     /// Shared with the server, which owns the serial port for the process lifetime:
     /// a replaced stack only stops its tasks, the port is never reopened
     pub spinel: Arc<SpinelClient>,
@@ -443,20 +456,10 @@ pub struct ZigbeeStack {
 }
 
 impl ZigbeeStack {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         spinel: Arc<SpinelClient>,
-        constants: Constants,
-        channel: u8,
-        update_id: u8,
-        pan_id: PanId,
-        extended_pan_id: Eui64,
-        network_address: Nwk,
-        ieee_address: Eui64,
-        key: Key,
-        key_seq_number: u8,
-        outgoing_frame_counter: u32,
-        source_routing: bool,
+        config: NetworkConfig,
+        tunables: Tunables,
     ) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
         let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
@@ -470,28 +473,9 @@ impl ZigbeeStack {
 
         let arc_stack = Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
-            state: State::new(
-                channel,
-                update_id,
-                pan_id,
-                extended_pan_id,
-                network_address,
-                ieee_address,
-                key,
-                key_seq_number,
-                outgoing_frame_counter,
-                constants.global_link_key.clone(),
-                constants.tclk_seed.clone(),
-                constants.route_discovery_time,
-                u32::from(constants.router_age_limit) * constants.link_status_period,
-                constants.transaction_persistence_time,
-                constants.broadcast_delivery_time,
-                constants.broadcast_passive_ack_quorum,
-                constants.mtorr_route_error_threshold,
-                constants.mtorr_delivery_failure_threshold,
-                source_routing,
-            ),
-            constants,
+            state: State::new(&config, &tunables),
+            config,
+            tunables,
             spinel,
             notification_tx,
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
@@ -784,7 +768,7 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::PhyTxPower,
-                vec![self.constants.tx_power as u8],
+                vec![self.config.tx_power as u8],
             )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;

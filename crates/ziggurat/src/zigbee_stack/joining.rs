@@ -65,7 +65,7 @@ impl ZigbeeStack {
 
             (
                 neighbors.contains(source_eui64),
-                neighbors.child_count() >= usize::from(self.constants.max_children),
+                neighbors.child_count() >= usize::from(self.tunables.max_children),
             )
         };
 
@@ -100,7 +100,7 @@ impl ZigbeeStack {
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
         let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.constants.end_device_timeout_default.duration()
+            self.tunables.end_device_timeout_default.duration()
         } else {
             Duration::from_secs(0xFFFFFFFF)
         };
@@ -221,7 +221,7 @@ impl ZigbeeStack {
                 .unwrap();
 
             let now = Instant::now();
-            let window = self.constants.broadcast_delivery_time;
+            let window = self.tunables.broadcast_delivery_time;
 
             // Detection re-triggers on every frame from the conflicted devices, so a
             // conflict is handled once per delivery window
@@ -285,7 +285,7 @@ impl ZigbeeStack {
         self.spawn_tracked(async move {
             tokio::time::sleep(
                 arc_self
-                    .constants
+                    .tunables
                     .max_broadcast_jitter
                     .mul_f32(rand::random::<f32>()),
             )
@@ -929,7 +929,7 @@ impl ZigbeeStack {
 
             (
                 neighbors.contains(source_ieee),
-                neighbors.child_count() >= usize::from(self.constants.max_children),
+                neighbors.child_count() >= usize::from(self.tunables.max_children),
             )
         };
 
@@ -971,7 +971,7 @@ impl ZigbeeStack {
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
         let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.constants.end_device_timeout_default.duration()
+            self.tunables.end_device_timeout_default.duration()
         } else {
             Duration::from_secs(0xFFFFFFFF)
         };

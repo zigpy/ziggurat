@@ -16,7 +16,9 @@ use zigbee::nwk::frame::{
 };
 
 use super::routing::Route;
-use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
+use super::{
+    MAX_DEPTH, MAX_LOCK_DURATION, NwkSecurityMode, PROTOCOL_VERSION, ZigbeeStack, ZigbeeStackError,
+};
 
 impl ZigbeeStack {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
@@ -39,7 +41,7 @@ impl ZigbeeStack {
         // We cannot handle broadcasts until the network has been running for at least
         // the time it takes to deliver one broadcast
         if !self.state.hack_ignore_broadcast_startup_wait_period
-            && (self.state.start_time + self.constants.broadcast_delivery_time > now)
+            && (self.state.start_time + self.tunables.broadcast_delivery_time > now)
         {
             log::debug!("Filtering broadcast, network started too recently.");
             return true;
@@ -80,7 +82,7 @@ impl ZigbeeStack {
     /// window closes, waking on every recorded ack. Returns whether the broadcast
     /// is acknowledged.
     async fn await_broadcast_passive_acks(&self, key: (Nwk, u8)) -> bool {
-        let deadline = Instant::now() + self.constants.passive_ack_timeout;
+        let deadline = Instant::now() + self.tunables.passive_ack_timeout;
 
         loop {
             if self.broadcast_passively_acked(key) {
@@ -182,7 +184,7 @@ impl ZigbeeStack {
             // reach this point: the send path pre-fills the transaction table. The
             // frame is discarded instead of relayed (3.6.1.10).
             if nwk_frame.nwk_header.source == self.state.network_address {
-                if self.state.start_time + self.constants.broadcast_delivery_time < Instant::now() {
+                if self.state.start_time + self.tunables.broadcast_delivery_time < Instant::now() {
                     self.handle_address_conflict(self.state.network_address, true);
                 }
                 return;
@@ -252,7 +254,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Command,
-                    protocol_version: self.constants.protocol_version,
+                    protocol_version: PROTOCOL_VERSION,
                     discover_route: NwkRouteDiscovery::Suppress,
                     multicast: false,
                     security: true,
@@ -263,7 +265,7 @@ impl ZigbeeStack {
                 },
                 destination,
                 source: self.state.network_address,
-                radius: 2 * self.constants.max_depth,
+                radius: 2 * MAX_DEPTH,
                 sequence_number: 0, // Rewritten on send
                 destination_ieee: None,
                 source_ieee: Some(self.state.ieee_address),
@@ -282,7 +284,7 @@ impl ZigbeeStack {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
-                    protocol_version: self.constants.protocol_version,
+                    protocol_version: PROTOCOL_VERSION,
                     discover_route: NwkRouteDiscovery::Suppress,
                     multicast: false,
                     security: true,
@@ -293,7 +295,7 @@ impl ZigbeeStack {
                 },
                 destination,
                 source: self.state.network_address,
-                radius: 2 * self.constants.max_depth,
+                radius: 2 * MAX_DEPTH,
                 sequence_number: 0, // Rewritten on send
                 destination_ieee: None,
                 source_ieee: None,
@@ -433,7 +435,7 @@ impl ZigbeeStack {
             .routing
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .route_to(destination, self.constants.max_source_route)
+            .route_to(destination, self.tunables.max_source_route)
     }
 
     pub async fn send_unicast_nwk_frame(
@@ -576,7 +578,7 @@ impl ZigbeeStack {
 
         self.apply_nwk_aux_header(&mut nwk_frame, security);
 
-        for attempt in 0..=self.constants.unicast_retries {
+        for attempt in 0..=self.tunables.unicast_retries {
             let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
 
             let ieee802154_frame = self
@@ -616,17 +618,17 @@ impl ZigbeeStack {
                 Err(e) => {
                     log::warn!("Failed to send unicast frame: {e}");
 
-                    if attempt + 1 > self.constants.unicast_retries {
+                    if attempt + 1 > self.tunables.unicast_retries {
                         log::error!("Failed to send unicast frame after {attempt} attempts");
                         return Err(e);
                     }
                     log::debug!(
                         "Retrying unicast frame send, attempt {} of {}",
                         attempt,
-                        self.constants.unicast_retries
+                        self.tunables.unicast_retries
                     );
 
-                    tokio::time::sleep(self.constants.unicast_retry_delay).await;
+                    tokio::time::sleep(self.tunables.unicast_retry_delay).await;
                 }
             }
         }
@@ -663,7 +665,7 @@ impl ZigbeeStack {
 
         // Spec 3.6.6: retransmit only while the passive ack quorum has not been
         // heard within the ack collection window
-        for attempt in 0..=self.constants.max_broadcast_retries {
+        for attempt in 0..=self.tunables.max_broadcast_retries {
             if attempt > 0 {
                 if self.await_broadcast_passive_acks(key).await {
                     log::debug!("Broadcast {key:?} passively acknowledged");
@@ -674,7 +676,7 @@ impl ZigbeeStack {
                 // that missed its acks hits the same deadline together, preserving
                 // the relative timing (and collisions) of the original wave
                 tokio::time::sleep(
-                    self.constants
+                    self.tunables
                         .max_broadcast_jitter
                         .mul_f32(rand::random::<f32>()),
                 )
@@ -689,7 +691,7 @@ impl ZigbeeStack {
                 log::debug!(
                     "Broadcast {key:?} is missing passive acks, retransmitting \
                      (attempt {attempt} of {})",
-                    self.constants.max_broadcast_retries,
+                    self.tunables.max_broadcast_retries,
                 );
             }
 
@@ -973,7 +975,7 @@ impl ZigbeeStack {
             // The relay is jittered to avoid synchronized rebroadcasts (spec 3.6.6)
             tokio::time::sleep(
                 arc_self
-                    .constants
+                    .tunables
                     .max_broadcast_jitter
                     .mul_f32(rand::random::<f32>()),
             )
@@ -981,7 +983,7 @@ impl ZigbeeStack {
 
             // Retransmissions follow the same passive acknowledgment rule as our own
             // broadcasts; the neighbor we heard the frame from is already counted
-            for attempt in 0..=arc_self.constants.max_broadcast_retries {
+            for attempt in 0..=arc_self.tunables.max_broadcast_retries {
                 if attempt > 0 {
                     if arc_self.await_broadcast_passive_acks(key).await {
                         log::debug!("Relayed broadcast {key:?} passively acknowledged");
@@ -992,7 +994,7 @@ impl ZigbeeStack {
                     // synchronized by the shared ack deadline
                     tokio::time::sleep(
                         arc_self
-                            .constants
+                            .tunables
                             .max_broadcast_jitter
                             .mul_f32(rand::random::<f32>()),
                     )

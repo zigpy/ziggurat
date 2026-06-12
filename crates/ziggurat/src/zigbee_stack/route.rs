@@ -282,14 +282,14 @@ impl ZigbeeStack {
             .with_sequence_number(nwk_frame.nwk_header.sequence_number);
 
         // Spec 3.6.4.5.1.4: relayed route requests are jittered and retried
-        let jitter = (self.constants.min_rreq_jitter
-            + (self.constants.max_rreq_jitter - self.constants.min_rreq_jitter)
+        let jitter = (self.tunables.min_rreq_jitter
+            + (self.tunables.max_rreq_jitter - self.tunables.min_rreq_jitter)
                 .mul_f32(rand::random::<f32>()))
             * 2;
 
         self.background_broadcast_route_request(
             relayed_route_request_cmd,
-            self.constants.rreq_retries + 1,
+            self.tunables.rreq_retries + 1,
             jitter,
         );
     }
@@ -313,7 +313,7 @@ impl ZigbeeStack {
 
             for attempt in 0..attempts {
                 if attempt > 0 {
-                    tokio::time::sleep(arc_self.constants.rreq_retry_interval).await;
+                    tokio::time::sleep(arc_self.tunables.rreq_retry_interval).await;
                 }
 
                 if let Err(err) = arc_self
@@ -353,7 +353,7 @@ impl ZigbeeStack {
                 .serialize()
                 .unwrap(),
             )
-            .with_radius(self.constants.concentrator_radius)
+            .with_radius(self.tunables.concentrator_radius)
             // Sent via `transmit_*`, which does not assign sequence numbers
             .with_sequence_number(self.next_nwk_sequence_number());
 
@@ -370,7 +370,7 @@ impl ZigbeeStack {
         // Receivers drop route requests from senders with a zero outgoing cost, so
         // the first advertisement waits until link status exchanges establish a
         // neighbor link, bounded by a fixed ceiling in case the network is silent
-        let startup_deadline = Instant::now() + 2 * self.constants.link_status_period;
+        let startup_deadline = Instant::now() + 2 * self.tunables.link_status_period;
 
         loop {
             if self
@@ -400,8 +400,8 @@ impl ZigbeeStack {
                 .unwrap()
                 .reset_mtorr_triggers();
 
-            let min_deadline = Instant::now() + self.constants.mtorr_min_interval;
-            let max_deadline = Instant::now() + self.constants.mtorr_max_interval;
+            let min_deadline = Instant::now() + self.tunables.mtorr_min_interval;
+            let max_deadline = Instant::now() + self.tunables.mtorr_max_interval;
 
             // Avertise every max interval, sooner when accumulated route errors or
             // delivery failures signal that routes toward us have gone bad, but never
@@ -691,7 +691,7 @@ impl ZigbeeStack {
         // times, separated by the retry interval
         self.background_broadcast_route_request(
             route_request_frame,
-            self.constants.initial_rreq_retries + 1,
+            self.tunables.initial_rreq_retries + 1,
             Duration::ZERO,
         );
     }
