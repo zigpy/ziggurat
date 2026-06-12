@@ -366,7 +366,7 @@ impl State {
                 config.network_key_tx_counter,
                 FRAME_COUNTER_NOTIFY_INTERVAL,
             )),
-            address_map: Mutex::new(AddressMap::new(config.network_address)),
+            address_map: Mutex::new(AddressMap::new(config.network_address, config.ieee_address)),
             time_stamp: false,
             pan_id: Mutex::new(config.pan_id),
             tx_total: Mutex::new(0),

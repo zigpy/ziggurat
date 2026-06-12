@@ -13,10 +13,12 @@ pub struct AddressMap {
 }
 
 impl AddressMap {
-    pub fn new(own_address: Nwk) -> Self {
+    /// The map is seeded with our own mapping: relayed copies of our own frames
+    /// carry our extended source and must not read as address conflicts.
+    pub fn new(own_address: Nwk, own_eui64: Eui64) -> Self {
         Self {
             own_address,
-            map: HashMap::new(),
+            map: HashMap::from([(own_eui64, own_address)]),
         }
     }
 
