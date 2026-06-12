@@ -390,6 +390,7 @@ impl ZigguratServer {
             let Request { id, method, params } = request;
 
             let message = match method.as_str() {
+                "ping" => server.handle_ping(id).await,
                 "configure" => server.handle_configure(id, params).await,
                 "get_hw_address" => server.handle_get_hw_address(id).await,
                 "get_network_info" => server.handle_get_network_info(id),
@@ -404,6 +405,14 @@ impl ZigguratServer {
 
             let _ = outbound.send(message).await;
         });
+    }
+
+    /// Liveness probe. Yielding makes the reply round-trip through the runtime like
+    /// every real command, so a starved executor shows up in the latency.
+    async fn handle_ping(&self, id: u64) -> serde_json::Value {
+        tokio::task::yield_now().await;
+
+        response(id, json!({"status": "pong"}))
     }
 
     /// (Re)initializes the Zigbee stack. The stack deliberately outlives client
