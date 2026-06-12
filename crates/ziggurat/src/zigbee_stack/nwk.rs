@@ -146,11 +146,10 @@ impl ZigbeeStack {
             && let Some(relaying_eui64) = aux_header.extended_source
         {
             self.state
-                .security_material_primary
+                .nwk_security
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
-                .incoming_frame_counter_set
-                .insert(relaying_eui64, aux_header.frame_counter);
+                .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
 
             log::debug!(
                 "Incremented frame counter for {relaying_eui64:?} to {}",
@@ -388,7 +387,12 @@ impl ZigbeeStack {
                 },
                 frame_counter: 0, // This field is rewritten and is always up-to-date
                 extended_source: Some(self.state.ieee_address),
-                key_sequence_number: self.state.active_key_seq_number,
+                key_sequence_number: self
+                    .state
+                    .nwk_security
+                    .try_lock_for(MAX_LOCK_DURATION)
+                    .unwrap()
+                    .active_key_seq_number(),
             });
         }
     }
@@ -407,10 +411,10 @@ impl ZigbeeStack {
                 nwk_frame.encrypt(
                     &self
                         .state
-                        .security_material_primary
+                        .nwk_security
                         .try_lock_for(MAX_LOCK_DURATION)
                         .unwrap()
-                        .key,
+                        .network_key(),
                 )
             }
             NwkSecurityMode::Unsecured => EncryptedNwkFrame {
@@ -795,11 +799,10 @@ impl ZigbeeStack {
             && let Some(relaying_eui64) = aux_header.extended_source
         {
             self.state
-                .security_material_primary
+                .nwk_security
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
-                .incoming_frame_counter_set
-                .insert(relaying_eui64, aux_header.frame_counter);
+                .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
         }
 
         // Transit frames are link quality measurements for the transmitting neighbor

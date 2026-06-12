@@ -3,6 +3,7 @@ pub mod commands;
 pub mod frame;
 pub mod neighbors;
 pub mod routing;
+pub mod security;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NwkDeviceType {

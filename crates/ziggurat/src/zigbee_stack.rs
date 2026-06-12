@@ -37,6 +37,7 @@ pub use zigbee::nwk::NwkDeviceType;
 pub use zigbee::nwk::broadcasts::Broadcasts;
 pub use zigbee::nwk::neighbors::Neighbors;
 pub use zigbee::nwk::routing::Routing;
+pub use zigbee::nwk::security::NwkSecurity;
 pub use zigbee::nwk::{neighbors, routing};
 
 // TODO: remove this once all long locks have been found
@@ -105,11 +106,6 @@ pub enum NwkCapabilityInformationPowerSource {
 }
 
 #[derive(Debug)]
-pub enum NetworkKeyType {
-    Standard = 1,
-}
-
-#[derive(Debug)]
 pub enum NwkSecurityCapability {
     NotCapable = 0,
     Capable = 1,
@@ -135,15 +131,6 @@ pub struct NwkCapabilityInformation {
     pub reserved2: bool,
     pub security_capability: NwkSecurityCapability,
     pub allocate_address: bool, // = 1
-}
-
-#[derive(Debug)]
-pub struct NwkSecurityDescriptor {
-    pub key_seq_number: u8,
-    pub outgoing_frame_counter: u32,
-    pub incoming_frame_counter_set: HashMap<Eui64, u32>,
-    pub key: Key,
-    pub network_key_type: NetworkKeyType,
 }
 
 /// Bookkeeping for a network address conflict (spec 3.6.1.10.5).
@@ -278,16 +265,12 @@ pub struct State {
     pub pan_id: Mutex<PanId>,
     pub network_address: Nwk,
     pub extended_pan_id: Eui64,
-    pub security_material_primary: Mutex<NwkSecurityDescriptor>,
-    pub security_material_alternate: Mutex<NwkSecurityDescriptor>,
-    pub active_key_seq_number: u8,
+    /// The network key, its outgoing frame counter, and per-relayer replay protection
+    pub nwk_security: Mutex<NwkSecurity>,
 
     pub is_concentrator: bool,
     pub security_level: u8,
 
-    /// Indicates whether incoming NWK frames SHALL be all checked for freshness when
-    /// the memory for incoming frame counts is exceeded.
-    pub all_fresh: bool,
     pub address_map: Mutex<HashMap<Eui64, Nwk>>,
 
     /// A flag that determines if a timestamp indication is provided on incoming and
@@ -390,22 +373,12 @@ impl State {
             extended_pan_id,
             is_concentrator: source_routing,
             security_level: 5,
-            security_material_primary: Mutex::new(NwkSecurityDescriptor {
+            nwk_security: Mutex::new(NwkSecurity::new(
+                key,
                 key_seq_number,
                 outgoing_frame_counter,
-                incoming_frame_counter_set: HashMap::new(),
-                key,
-                network_key_type: NetworkKeyType::Standard,
-            }),
-            security_material_alternate: Mutex::new(NwkSecurityDescriptor {
-                key_seq_number: 0,
-                outgoing_frame_counter: 0,
-                incoming_frame_counter_set: HashMap::new(),
-                key: Key::from_hex("00000000000000000000000000000000"),
-                network_key_type: NetworkKeyType::Standard,
-            }),
-            active_key_seq_number: 0,
-            all_fresh: false,
+                FRAME_COUNTER_NOTIFY_INTERVAL,
+            )),
             address_map: Mutex::new(HashMap::new()),
             time_stamp: false,
             pan_id: Mutex::new(pan_id),
@@ -1102,31 +1075,21 @@ impl ZigbeeStack {
     }
 
     pub fn next_nwk_frame_counter(&self) -> u32 {
-        let frame_counter = {
-            let mut security_material_primary = self
-                .state
-                .security_material_primary
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-            // Security frame counters must never wrap: that would reuse a CCM* nonce.
-            // The spec's remedy near the end of the counter space is key rotation,
-            // which is not yet implemented.
-            security_material_primary.outgoing_frame_counter = security_material_primary
-                .outgoing_frame_counter
-                .checked_add(1)
-                .unwrap();
+        let advance = self
+            .state
+            .nwk_security
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .next_outgoing_frame_counter();
 
-            security_material_primary.outgoing_frame_counter
-        };
-
-        // Keep the client's persisted copy of the counter fresh: a rollback after a
-        // restart would make every device silently reject our frames
-        if frame_counter % FRAME_COUNTER_NOTIFY_INTERVAL == 0 {
+        if advance.should_persist {
             let _ = self
                 .notification_tx
-                .send(ZigbeeNotification::FrameCounterUpdate { frame_counter });
+                .send(ZigbeeNotification::FrameCounterUpdate {
+                    frame_counter: advance.value,
+                });
         }
 
-        frame_counter
+        advance.value
     }
 }

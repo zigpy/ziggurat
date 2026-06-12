@@ -472,6 +472,16 @@ impl ZigbeeStack {
         destination_eui64: Eui64,
         fresh_join: bool,
     ) -> EncryptedApsCommandFrame {
+        let (network_key, key_seq_number) = {
+            let nwk_security = self
+                .state
+                .nwk_security
+                .try_lock_for(MAX_LOCK_DURATION)
+                .unwrap();
+
+            (nwk_security.network_key(), nwk_security.key_seq_number())
+        };
+
         let transport_key_command = ApsCommandFrame {
             frame_control: ApsFrameControl {
                 frame_type: ApsFrameType::Command,
@@ -486,14 +496,8 @@ impl ZigbeeStack {
             command: ApsCommandFrameCommand::TransportKey(ApsTransportKeyCommandFrame {
                 standard_key_type: ApsStandardKeyType::StandardNetworkKey,
                 key_descriptor: ApsTransportKeyDescriptor::NetworkKey(ApsNetworkKeyDescriptor {
-                    key: self
-                        .state
-                        .security_material_primary
-                        .try_lock_for(MAX_LOCK_DURATION)
-                        .unwrap()
-                        .key
-                        .clone(),
-                    sequence_number: self.state.active_key_seq_number,
+                    key: network_key,
+                    sequence_number: key_seq_number,
                     destination_address: destination_eui64,
                     source_address: self.state.ieee_address,
                 }),
@@ -551,11 +555,10 @@ impl ZigbeeStack {
 
         let network_key = self
             .state
-            .security_material_primary
+            .nwk_security
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .key
-            .clone();
+            .network_key();
 
         let decrypted = self
             .state

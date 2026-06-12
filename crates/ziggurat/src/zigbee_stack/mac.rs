@@ -205,13 +205,6 @@ impl ZigbeeStack {
             return None;
         }
 
-        // Validate the network key sequence number
-        if aux_header.key_sequence_number != self.state.active_key_seq_number {
-            log::debug!("Ignoring frame, key sequence number is unknown");
-            return None;
-        }
-
-        // Validate the security header frame counter for the relaying EUI64
         let src_eui64 = match aux_header.extended_source {
             None => {
                 log::debug!("Ignoring frame, extended source is missing");
@@ -220,49 +213,26 @@ impl ZigbeeStack {
             Some(eui64) => eui64,
         };
 
-        match self
+        // Validate the key sequence number and the relayer's frame counter, and
+        // fetch the decryption key
+        let key = self
             .state
-            .security_material_primary
+            .nwk_security
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .incoming_frame_counter_set
-            .get(&src_eui64)
-        {
-            None => {
-                log::debug!("Unknown sender, not validating frame counter");
-            }
-            Some(last_stored_frame_counter) => {
-                if aux_header.frame_counter <= *last_stored_frame_counter {
-                    log::debug!(
-                        "Ignoring frame, frame counter has rolled backward from {last_stored_frame_counter} to {}",
-                        aux_header.frame_counter
-                    );
-                    return None;
-                }
-            }
-        };
+            .inbound_network_key(
+                src_eui64,
+                aux_header.key_sequence_number,
+                aux_header.frame_counter,
+            )?;
 
-        log::debug!(
-            "Attempting to decrypt {:?} with {:?}",
-            nwk_frame,
-            self.state.security_material_primary
-        );
+        log::debug!("Attempting to decrypt {nwk_frame:?}");
 
-        let decrypted_nwk_frame = {
-            // Finally, attempt decryption
-            let key = &self
-                .state
-                .security_material_primary
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .key;
-
-            match nwk_frame.decrypt(key) {
-                Ok(decrypted_frame) => decrypted_frame,
-                Err(err) => {
-                    log::warn!("Ignoring frame, decryption failed: {err:?}");
-                    return None;
-                }
+        let decrypted_nwk_frame = match nwk_frame.decrypt(&key) {
+            Ok(decrypted_frame) => decrypted_frame,
+            Err(err) => {
+                log::warn!("Ignoring frame, decryption failed: {err:?}");
+                return None;
             }
         };
 

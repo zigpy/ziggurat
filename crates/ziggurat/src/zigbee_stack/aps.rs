@@ -54,11 +54,10 @@ impl ZigbeeStack {
 
         let network_key = self
             .state
-            .security_material_primary
+            .nwk_security
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .key
-            .clone();
+            .network_key();
 
         self.state
             .aps_security
@@ -78,11 +77,10 @@ impl ZigbeeStack {
 
         let network_key = self
             .state
-            .security_material_primary
+            .nwk_security
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .key
-            .clone();
+            .network_key();
 
         self.state
             .aps_security

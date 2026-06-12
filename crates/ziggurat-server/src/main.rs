@@ -547,7 +547,7 @@ impl ZigguratServer {
         };
 
         let state = &stack.state;
-        let nwk_security = state.security_material_primary.lock();
+        let nwk_security = state.nwk_security.lock();
         let aps_security = state.aps_security.lock();
         let tclk_seed = &stack.constants.tclk_seed;
 
@@ -560,9 +560,9 @@ impl ZigguratServer {
                 "extended_pan_id": eui64_to_string(state.extended_pan_id),
                 "nwk_address": format!("{:04x}", state.network_address.as_u16()),
                 "ieee_address": eui64_to_string(state.ieee_address),
-                "network_key": key_to_string(&nwk_security.key),
-                "network_key_seq": nwk_security.key_seq_number,
-                "network_key_tx_counter": nwk_security.outgoing_frame_counter,
+                "network_key": key_to_string(&nwk_security.network_key()),
+                "network_key_seq": nwk_security.key_seq_number(),
+                "network_key_tx_counter": nwk_security.outgoing_frame_counter(),
                 "tc_link_key": key_to_string(&stack.constants.global_link_key),
                 "tclk_seed": tclk_seed.as_ref().map(|tclk| hex::encode(tclk.seed.to_bytes())),
                 "tclk_flavor": tclk_seed.as_ref().map(|tclk| match tclk.flavor {
