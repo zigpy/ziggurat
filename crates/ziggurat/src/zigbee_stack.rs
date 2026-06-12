@@ -34,6 +34,7 @@ mod zdp;
 pub use zigbee::aps::security as aps_security;
 pub use zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use zigbee::nwk::NwkDeviceType;
+pub use zigbee::nwk::broadcasts::Broadcasts;
 pub use zigbee::nwk::neighbors::Neighbors;
 pub use zigbee::nwk::routing::Routing;
 pub use zigbee::nwk::{neighbors, routing};
@@ -194,25 +195,6 @@ pub struct PendingIndirectTransaction {
 pub struct MtorrTriggers {
     pub route_errors: u8,
     pub delivery_failures: u8,
-}
-
-#[derive(Debug)]
-pub struct NwkBroadcastTransaction {
-    pub source_nwk: Nwk,
-    pub sequence_number: u8,
-    pub expiration_time: Instant,
-    /// The router neighbors that were the transmission's audience, snapshotted when
-    /// the transaction is created. A passive acknowledgment is expected only from
-    /// audience members that are still live neighbors: routers that became
-    /// neighbors later owe no ack, and routers that ceased being neighbors can
-    /// never give one
-    pub expected_relayers: Vec<Nwk>,
-    /// Neighbors heard relaying this broadcast: their passive acknowledgments
-    /// (spec 3.6.6)
-    pub heard_from: HashSet<Nwk>,
-    /// Signaled on every recorded passive ack, so retransmission loops can
-    /// re-evaluate completeness reactively instead of sleeping out the window
-    pub acked_notify: Arc<Notify>,
 }
 
 #[derive(Debug)]
@@ -416,7 +398,8 @@ pub struct State {
     pub neighbors: Mutex<Neighbors>,
     /// NWK routing state and decision logic (route/discovery/record tables)
     pub routing: Mutex<Routing>,
-    pub broadcast_transaction_table: Mutex<HashMap<(Nwk, u8), NwkBroadcastTransaction>>,
+    /// Broadcast deduplication and passive acknowledgment accounting
+    pub broadcasts: Mutex<Broadcasts>,
 
     pub capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
@@ -488,6 +471,8 @@ impl State {
         tclk_seed: Option<TclkSeed>,
         route_discovery_time: Duration,
         max_neighbor_age: Duration,
+        broadcast_delivery_time: Duration,
+        broadcast_passive_ack_quorum: usize,
         source_routing: bool,
     ) -> Self {
         Self {
@@ -509,6 +494,10 @@ impl State {
             sequence_number: Mutex::new(0),
             neighbors: Mutex::new(Neighbors::new(network_address, max_neighbor_age)),
             routing: Mutex::new(Routing::new(network_address, route_discovery_time)),
+            broadcasts: Mutex::new(Broadcasts::new(
+                broadcast_delivery_time,
+                broadcast_passive_ack_quorum,
+            )),
             capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
                 device_type: NwkCapabilityInformationDeviceType::EndDevice,
@@ -522,7 +511,6 @@ impl State {
             nwk_manager_addr: Nwk(0x0000),
             update_id: Mutex::new(update_id),
             network_address,
-            broadcast_transaction_table: Mutex::new(HashMap::new()),
             extended_pan_id,
             is_concentrator: source_routing,
             security_level: 5,
@@ -619,6 +607,9 @@ pub struct ZigbeeStack {
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
     pub(crate) link_status_received: Notify,
+    /// Signaled on every recorded broadcast passive ack, so retransmission loops can
+    /// re-evaluate completeness reactively instead of sleeping out the window
+    pub(crate) broadcast_acked: Notify,
     /// Wakes the maintenance task when a new indirect transaction or child entry
     /// could move the earliest expiry deadline closer
     pub(crate) maintenance_wake: Notify,
@@ -671,6 +662,8 @@ impl ZigbeeStack {
                 constants.tclk_seed.clone(),
                 constants.route_discovery_time,
                 u32::from(constants.router_age_limit) * constants.link_status_period,
+                constants.broadcast_delivery_time,
+                constants.broadcast_passive_ack_quorum,
                 source_routing,
             ),
             constants,
@@ -685,6 +678,7 @@ impl ZigbeeStack {
             mtorr_kick: Notify::new(),
             mtorr_triggers: Mutex::new(MtorrTriggers::default()),
             link_status_received: Notify::new(),
+            broadcast_acked: Notify::new(),
             maintenance_wake: Notify::new(),
             background_tasks: Mutex::new(JoinSet::new()),
         });

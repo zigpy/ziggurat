@@ -8,8 +8,6 @@ pub mod nwk;
 pub mod zdp;
 
 /// 802.15.4 mac layer has a maximum payload length of 104 bytes
-/// see the introduction of this paper for a good overview:
-/// https://www.researchgate.net/publication/305365904_Dissecting_Customized_Protocols_Automatic_Analysis_for_Customized_Protocols_based_on_IEEE_802154
 const MAC_PAYLOAD_MAX_LEN: usize = 104;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
