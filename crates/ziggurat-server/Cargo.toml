@@ -9,6 +9,7 @@ spinel = { path = "../spinel" }
 ziggurat = { path = "../ziggurat" }
 zigbee = { path = "../zigbee" }
 
+clap = { version = "4.5", features = ["derive"] }
 env_logger = { version = "0.11.6", default-features = false, features = ["auto-color", "humantime"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 hex = "0.4.3"

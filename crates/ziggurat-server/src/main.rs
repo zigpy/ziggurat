@@ -1,9 +1,9 @@
+use clap::{Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use log::LevelFilter;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
-use std::env;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -214,7 +214,7 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
 }
 
 pub struct ZigguratServer {
-    serial_path: String,
+    serial: SerialConfig,
     /// The Spinel client owns the serial port for the lifetime of the process: it is
     /// opened lazily by the first command that needs it and never reopened, so stack
     /// replacement cannot race a straggling port handle (`EBUSY`)
@@ -229,11 +229,11 @@ pub struct ZigguratServer {
 impl ZigguratServer {
     /// The serial port is not opened and the Zigbee stack is not created until a
     /// client sends a command that needs them.
-    pub fn new(serial_path: &str) -> Self {
+    pub fn new(serial: SerialConfig) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_HUB_DEPTH);
 
         Self {
-            serial_path: serial_path.to_string(),
+            serial,
             spinel: Mutex::new(None),
             stack: Mutex::new(None),
             notification_tx,
@@ -273,8 +273,8 @@ impl ZigguratServer {
 
         // Without flow control the RCP's UART drops bytes under load, corrupting
         // host->RCP frames ("Framing error" + command timeout)
-        let port = tokio_serial::new(&self.serial_path, 460_800)
-            .flow_control(FlowControl::Hardware)
+        let port = tokio_serial::new(&self.serial.device, self.serial.baudrate)
+            .flow_control(self.serial.flow_control.into())
             .open_native_async()?;
 
         let client = Arc::new(SpinelClient::new(port));
@@ -744,30 +744,75 @@ impl ZigguratServer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FlowControlMode {
+    Hardware,
+    Software,
+    None,
+}
+
+impl From<FlowControlMode> for FlowControl {
+    fn from(mode: FlowControlMode) -> Self {
+        match mode {
+            FlowControlMode::Hardware => Self::Hardware,
+            FlowControlMode::Software => Self::Software,
+            FlowControlMode::None => Self::None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SerialConfig {
+    device: String,
+    baudrate: u32,
+    flow_control: FlowControlMode,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    version,
+    about = "Host-side Zigbee stack speaking Spinel to an 802.15.4 RCP"
+)]
+struct Args {
+    /// Serial device of the 802.15.4 RCP
+    #[arg(long)]
+    device: String,
+
+    /// Serial baudrate
+    #[arg(long, default_value_t = 460_800)]
+    baudrate: u32,
+
+    /// Serial flow control; the RCP UART drops bytes under load without it
+    #[arg(long, value_enum, default_value_t = FlowControlMode::Hardware)]
+    flow_control: FlowControlMode,
+
+    /// WebSocket listen address
+    #[arg(long, default_value = "0.0.0.0:9999")]
+    listen: String,
+
+    /// Log level (RUST_LOG still overrides, with per-module filters)
+    #[arg(long, default_value_t = LevelFilter::Debug)]
+    log_level: LevelFilter,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        // Debug by default, overridable through RUST_LOG
         env_logger::builder()
             .format_timestamp_micros()
-            .filter(None, LevelFilter::Debug)
+            .filter(None, args.log_level)
             .parse_default_env()
             .init();
 
-        let args: Vec<String> = env::args().collect();
-        if args.len() < 2 {
-            eprintln!("Usage: {} <serial_path> [ws_listen_addr]", args[0]);
-            return Ok(());
-        }
-        let serial_path = &args[1];
-        let listen_addr = args
-            .get(2)
-            .cloned()
-            .unwrap_or_else(|| "0.0.0.0:9999".to_string());
+        let server = Arc::new(ZigguratServer::new(SerialConfig {
+            device: args.device,
+            baudrate: args.baudrate,
+            flow_control: args.flow_control,
+        }));
 
-        let server = Arc::new(ZigguratServer::new(serial_path));
-
-        server.run(&listen_addr).await?;
+        server.run(&args.listen).await?;
 
         Ok(())
     })
