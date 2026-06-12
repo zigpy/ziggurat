@@ -1,0 +1,56 @@
+[package]
+name = "ziggurat-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+abstract-bits = "0.2.0"
+ieee-802154 = { path = "../crates/ieee-802154" }
+zigbee = { path = "../crates/zigbee" }
+
+[[bin]]
+name = "ieee802154_frame"
+path = "fuzz_targets/ieee802154_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nwk_frame"
+path = "fuzz_targets/nwk_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nwk_commands"
+path = "fuzz_targets/nwk_commands.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aps_frame"
+path = "fuzz_targets/aps_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zdp"
+path = "fuzz_targets/zdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "beacon"
+path = "fuzz_targets/beacon.rs"
+test = false
+doc = false
+bench = false

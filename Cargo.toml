@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+exclude = ["fuzz"]
 
 [workspace.package]
 rust-version = "1.96" # latest as of creating this
