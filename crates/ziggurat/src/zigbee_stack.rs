@@ -1005,10 +1005,23 @@ impl ZigbeeStack {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.background_tasks
+        let mut tasks = self
+            .background_tasks
             .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .spawn(future);
+            .unwrap();
+
+        // A completed task's entire cell is retained until it is reaped from the
+        // set: drain here so the set tracks live tasks instead of growing by one
+        // dead entry per spawn
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(e) = result
+                && e.is_panic()
+            {
+                log::error!("Background task panicked: {e}");
+            }
+        }
+
+        tasks.spawn(future);
     }
 
     /// Stops all of the stack's tasks and waits for them to terminate, so that a
