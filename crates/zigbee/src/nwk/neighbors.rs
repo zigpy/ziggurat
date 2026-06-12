@@ -145,11 +145,6 @@ pub struct NeighborLink {
 }
 
 /// The neighbor table: link quality accounting, link status digestion, and aging.
-///
-/// IO-free by design: pure state and computation — no locks, no async, no radio. The
-/// async shell parses frames and acts on the returned values (e.g. invalidating routes
-/// through neighbors this manager reports as lost). Child management (keepalives, end
-/// device timeouts) will land here.
 #[derive(Debug)]
 pub struct Neighbors {
     network_address: Nwk,

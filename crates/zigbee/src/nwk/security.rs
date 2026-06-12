@@ -28,9 +28,6 @@ pub struct CounterAdvance {
 
 /// The NWK security material: the network key, its outgoing frame counter, and the
 /// per-relayer incoming frame counters used for replay protection (spec 4.3.1.2).
-///
-/// IO-free by design: pure state and computation — no locks, no async, no radio. The
-/// async shell decrypts frames with the returned key and persists counter advances.
 #[derive(Debug)]
 pub struct NwkSecurity {
     primary: NwkSecurityDescriptor,

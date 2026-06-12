@@ -19,10 +19,6 @@ struct Transaction {
 
 /// The NWK broadcast transaction table: deduplication of received broadcasts and
 /// passive acknowledgment accounting (spec 3.6.6).
-///
-/// IO-free by design: pure state and computation — no locks, no async, no radio. The
-/// async shell snapshots the neighbor audience, transmits, and sleeps out the ack
-/// collection windows.
 #[derive(Debug)]
 pub struct Broadcasts {
     /// How long a transaction stays in the table (`nwkNetworkBroadcastDeliveryTime`)

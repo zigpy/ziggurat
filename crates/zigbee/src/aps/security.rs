@@ -64,10 +64,6 @@ pub struct DeviceLinkKey {
 
 /// The APS security layer: the spec's `apsDeviceKeyPairSet`, link-key derivation, and
 /// APS frame encryption/decryption (commands, data, and ACKs).
-///
-/// IO-free by design: pure state and computation — no locks, no async, no radio — so
-/// every key exchange is testable without hardware. R23 dynamic link keys will land
-/// here.
 #[derive(Debug)]
 pub struct ApsSecurity {
     /// The well-known key devices join with (usually "ZigBeeAlliance09")

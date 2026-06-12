@@ -140,10 +140,6 @@ pub enum RouteReplyDisposition {
 
 /// The NWK routing layer: route table, route discovery table, and route record table,
 /// with the decision logic for route request/reply processing.
-///
-/// IO-free by design: pure state and computation — no locks, no async, no radio — so
-/// routing scenarios are testable without hardware. The async shell parses frames,
-/// resolves neighbor costs, and executes the returned decisions.
 #[derive(Debug)]
 pub struct Routing {
     network_address: Nwk,
