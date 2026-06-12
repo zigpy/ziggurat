@@ -5,6 +5,7 @@ pub mod aps;
 pub mod beacon;
 pub mod constants;
 pub mod crypto;
+pub mod indirect;
 pub mod nwk;
 pub mod zdp;
 

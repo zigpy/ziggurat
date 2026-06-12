@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::time::error::Elapsed;
 
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
@@ -33,6 +33,7 @@ mod zdp;
 pub use zigbee::aps::security as aps_security;
 pub use zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use zigbee::constants::Constants;
+pub use zigbee::indirect::{IndirectQueue, SrcMatchTable};
 pub use zigbee::nwk::NwkDeviceType;
 pub use zigbee::nwk::broadcasts::Broadcasts;
 pub use zigbee::nwk::neighbors::Neighbors;
@@ -144,38 +145,6 @@ pub struct AddressConflict {
     pub heard_from_network: bool,
 }
 
-/// The source address match table contents most recently written to the RCP, used to
-/// tell whether the auto-ACK of a given poll advertised frame-pending=1.
-#[derive(Debug, Default)]
-pub struct SrcMatchTable {
-    pub short_addresses: HashSet<Nwk>,
-    pub extended_addresses: HashSet<Eui64>,
-}
-
-impl SrcMatchTable {
-    pub fn contains(&self, address: Ieee802154Address) -> bool {
-        match address {
-            Ieee802154Address::Nwk(nwk) => self.short_addresses.contains(&nwk),
-            Ieee802154Address::Eui64(eui64) => self.extended_addresses.contains(&eui64),
-        }
-    }
-}
-
-/// A finished 802.15.4 frame awaiting indirect delivery (802.15.4 spec 6.7.3).
-///
-/// The destination extracts it by polling with a MAC Data Request; the radio's
-/// automatic ACK of that poll has its frame pending bit set (via the source address
-/// match table), telling the device to keep listening.
-#[derive(Debug)]
-pub struct PendingIndirectTransaction {
-    /// The frame as queued; the frame pending bit is applied to a copy at delivery
-    /// time, based on whether more transactions remain.
-    pub frame: Ieee802154Frame,
-    pub expires_at: Instant,
-    /// Resolved with the transmit result on extraction, or an error on expiry.
-    pub completion: oneshot::Sender<Result<(), ZigbeeStackError>>,
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ApsAckData {
     pub src: Nwk,
@@ -199,6 +168,10 @@ impl ApsAckData {
     }
 }
 
+/// Resolves an indirect transaction with its transmit result on extraction, or an
+/// error on expiry or drop.
+pub type IndirectCompletion = oneshot::Sender<Result<(), ZigbeeStackError>>;
+
 /// The end-to-end delivery confirmation of a transmitted APS frame, pending until the
 /// destination's APS ack arrives. Resolved via [`ZigbeeStack::wait_aps_ack`].
 #[derive(Debug)]
@@ -221,10 +194,9 @@ pub struct State {
     pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
     pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
     pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
-    /// Frames awaiting extraction by a polling device, in arrival order. Keys are
-    /// whichever address form the frame was queued under; a poll is matched against
-    /// both its extended and short source address.
-    pub indirect_queue: Mutex<HashMap<Ieee802154Address, VecDeque<PendingIndirectTransaction>>>,
+    /// Frames awaiting extraction by a polling device. Completions are resolved
+    /// with the transmit result on extraction, or an error on expiry or drop.
+    pub indirect_queue: Mutex<IndirectQueue<IndirectCompletion>>,
     pub start_time: Instant,
     /// The deadline until which joins are permitted; `None` or a past deadline
     /// means joins are denied. A deadline instead of a flag-plus-disable-timer
@@ -323,6 +295,7 @@ impl State {
         tclk_seed: Option<TclkSeed>,
         route_discovery_time: Duration,
         max_neighbor_age: Duration,
+        transaction_persistence_time: Duration,
         broadcast_delivery_time: Duration,
         broadcast_passive_ack_quorum: usize,
         mtorr_route_error_threshold: u8,
@@ -337,7 +310,7 @@ impl State {
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
-            indirect_queue: Mutex::new(HashMap::new()),
+            indirect_queue: Mutex::new(IndirectQueue::new(transaction_persistence_time)),
             start_time: Instant::now(),
             permitting_joins_until: Mutex::new(None),
 
@@ -509,6 +482,7 @@ impl ZigbeeStack {
                 constants.tclk_seed.clone(),
                 constants.route_discovery_time,
                 u32::from(constants.router_age_limit) * constants.link_status_period,
+                constants.transaction_persistence_time,
                 constants.broadcast_delivery_time,
                 constants.broadcast_passive_ack_quorum,
                 constants.mtorr_route_error_threshold,

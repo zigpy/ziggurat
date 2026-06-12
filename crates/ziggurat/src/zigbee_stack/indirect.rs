@@ -2,15 +2,16 @@ use crate::ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Fr
 use ieee_802154::types::{Eui64, Nwk};
 use spinel::SpinelPropertyId;
 
-use std::collections::HashSet;
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
 use zigbee::Command;
 use zigbee::nwk::commands::NwkLeaveCommand;
 
+use zigbee::indirect::Delivery;
+
 use super::{
-    MAX_LOCK_DURATION, NwkSecurityMode, PendingIndirectTransaction, SrcMatchTable,
-    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    IndirectCompletion, MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeNotification, ZigbeeStack,
+    ZigbeeStackError,
 };
 
 const fn set_frame_pending(frame: &mut Ieee802154Frame) {
@@ -38,13 +39,7 @@ impl ZigbeeStack {
             .indirect_queue
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .entry(destination)
-            .or_default()
-            .push_back(PendingIndirectTransaction {
-                frame,
-                expires_at: Instant::now() + self.constants.transaction_persistence_time,
-                completion,
-            });
+            .push(destination, frame, completion, Instant::now().into_std());
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
@@ -130,51 +125,27 @@ impl ZigbeeStack {
         source_eui64: Option<Eui64>,
         source_nwk: Option<Nwk>,
     ) -> bool {
-        let keys = source_eui64
-            .map(Ieee802154Address::Eui64)
-            .into_iter()
-            .chain(source_nwk.map(Ieee802154Address::Nwk));
+        let outcome = self
+            .state
+            .indirect_queue
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .extract(source_eui64, source_nwk, Instant::now().into_std());
 
-        let extracted = {
-            let mut queue = self
-                .state
-                .indirect_queue
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-            let now = Instant::now();
-            let mut extracted = None;
+        for (destination, transaction) in outcome.expired {
+            let _ = transaction
+                .completion
+                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
+        }
 
-            'keys: for key in keys {
-                let Some(transactions) = queue.get_mut(&key) else {
-                    continue;
-                };
-
-                while let Some(transaction) = transactions.pop_front() {
-                    if transaction.expires_at <= now {
-                        let _ = transaction
-                            .completion
-                            .send(Err(ZigbeeStackError::IndirectExpired { destination: key }));
-                        continue;
-                    }
-
-                    // Further pending transactions are signaled in the delivered
-                    // frame so the device keeps polling (802.15.4 spec 6.7.3)
-                    let more_pending = !transactions.is_empty();
-                    extracted = Some((key, transaction, more_pending));
-                    break 'keys;
-                }
-
-                queue.remove(&key);
-            }
-
-            extracted
-        };
-
-        let Some((destination, transaction, more_pending)) = extracted else {
+        let Some(delivery) = outcome.delivery else {
             return false;
         };
 
-        log::debug!("Delivering queued indirect frame to {destination:?}");
+        log::debug!(
+            "Delivering queued indirect frame to {:?}",
+            delivery.destination
+        );
 
         let arc_self = self
             .self_weak
@@ -182,20 +153,19 @@ impl ZigbeeStack {
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            arc_self
-                .transmit_indirect_transaction(destination, transaction, more_pending)
-                .await;
+            arc_self.transmit_indirect_transaction(delivery).await;
         });
 
         true
     }
 
-    async fn transmit_indirect_transaction(
-        &self,
-        destination: Ieee802154Address,
-        transaction: PendingIndirectTransaction,
-        more_pending: bool,
-    ) {
+    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectCompletion>) {
+        let Delivery {
+            destination,
+            transaction,
+            more_pending,
+        } = delivery;
+
         let mut frame = transaction.frame.clone();
         if more_pending {
             set_frame_pending(&mut frame);
@@ -208,15 +178,13 @@ impl ZigbeeStack {
             }
             // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
             // so a failed transmit goes back to the head of the queue for the next poll
-            Err(err) if Instant::now() < transaction.expires_at => {
+            Err(err) if Instant::now().into_std() < transaction.expires_at => {
                 log::warn!("Indirect transmit to {destination:?} failed ({err}), requeueing");
                 self.state
                     .indirect_queue
                     .try_lock_for(MAX_LOCK_DURATION)
                     .unwrap()
-                    .entry(destination)
-                    .or_default()
-                    .push_front(transaction);
+                    .requeue(destination, transaction);
             }
             Err(err) => {
                 let _ = transaction.completion.send(Err(err));
@@ -226,52 +194,35 @@ impl ZigbeeStack {
     }
 
     fn remove_indirect_queue_if_empty(&self, destination: Ieee802154Address) {
-        {
-            let mut queue = self
-                .state
-                .indirect_queue
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-
-            if queue.get(&destination).is_some_and(|t| t.is_empty()) {
-                queue.remove(&destination);
-            }
-        }
+        self.state
+            .indirect_queue
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .remove_if_empty(destination);
 
         self.src_match_sync.notify_one();
     }
 
     /// Drop every transaction queued for a device that is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
-        let keys = eui64
-            .map(Ieee802154Address::Eui64)
-            .into_iter()
-            .chain([Ieee802154Address::Nwk(nwk)]);
+        let dropped = self
+            .state
+            .indirect_queue
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .drop_for(eui64, nwk);
 
-        let mut dropped = false;
-        {
-            let mut queue = self
-                .state
-                .indirect_queue
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-
-            for key in keys {
-                if let Some(transactions) = queue.remove(&key) {
-                    dropped = true;
-
-                    for transaction in transactions {
-                        let _ = transaction
-                            .completion
-                            .send(Err(ZigbeeStackError::IndirectExpired { destination: key }));
-                    }
-                }
-            }
+        if dropped.is_empty() {
+            return;
         }
 
-        if dropped {
-            self.src_match_sync.notify_one();
+        for (destination, transaction) in dropped {
+            let _ = transaction
+                .completion
+                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
         }
+
+        self.src_match_sync.notify_one();
     }
 
     /// Spec 3.6.10.4: a poll from a device with no neighbor table entry is answered
@@ -286,7 +237,7 @@ impl ZigbeeStack {
             .indirect_queue
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .contains_key(&destination)
+            .has_queued(destination)
         {
             return;
         }
@@ -342,10 +293,7 @@ impl ZigbeeStack {
     /// Replace the RCP source address match table with the addresses of every device
     /// that has queued indirect transactions.
     pub(super) async fn write_src_match_table(&self) -> Result<(), ZigbeeStackError> {
-        let mut short_addresses: HashSet<Nwk> = HashSet::new();
-        let mut extended_addresses: HashSet<Eui64> = HashSet::new();
-
-        {
+        let table = {
             let queue = self
                 .state
                 .indirect_queue
@@ -357,31 +305,20 @@ impl ZigbeeStack {
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap();
 
-            for key in queue.keys() {
-                match key {
-                    Ieee802154Address::Eui64(eui64) => {
-                        extended_addresses.insert(*eui64);
-
-                        // The device may poll with either of its addresses
-                        if let Some(nwk) = address_map.get(eui64) {
-                            short_addresses.insert(*nwk);
-                        }
-                    }
-                    Ieee802154Address::Nwk(nwk) => {
-                        short_addresses.insert(*nwk);
-                    }
-                }
-            }
-        }
+            queue.queued_addresses(&address_map)
+        };
 
         log::debug!(
-            "Writing source address match table: {short_addresses:?} {extended_addresses:?}"
+            "Writing source address match table: {:?} {:?}",
+            table.short_addresses,
+            table.extended_addresses
         );
 
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::MacSrcMatchShortAddresses,
-                short_addresses
+                table
+                    .short_addresses
                     .iter()
                     .flat_map(|nwk| nwk.to_bytes())
                     .collect(),
@@ -391,7 +328,8 @@ impl ZigbeeStack {
         self.spinel
             .prop_value_set(
                 SpinelPropertyId::MacSrcMatchExtendedAddresses,
-                extended_addresses
+                table
+                    .extended_addresses
                     .iter()
                     .flat_map(|&eui64| spinel::eui64_to_spinel_bytes(eui64))
                     .collect(),
@@ -401,10 +339,7 @@ impl ZigbeeStack {
         *self
             .src_match_written
             .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap() = SrcMatchTable {
-            short_addresses,
-            extended_addresses,
-        };
+            .unwrap() = table;
 
         Ok(())
     }
@@ -435,12 +370,8 @@ impl ZigbeeStack {
             .indirect_queue
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .values()
-            // Transactions expire in arrival order, so each queue's front is its
-            // earliest deadline
-            .filter_map(|transactions| transactions.front())
-            .map(|transaction| transaction.expires_at)
-            .min();
+            .next_expiry()
+            .map(Instant::from_std);
 
         let next_eviction = self
             .state
@@ -454,40 +385,25 @@ impl ZigbeeStack {
     }
 
     fn expire_indirect_transactions(&self) {
-        let now = Instant::now();
-        let mut changed = false;
+        let expired = self
+            .state
+            .indirect_queue
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .expire(Instant::now().into_std());
 
-        {
-            let mut queue = self
-                .state
-                .indirect_queue
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-
-            queue.retain(|destination, transactions| {
-                // Transactions expire in arrival order: they are queued with a uniform
-                // persistence time and requeued transmit failures keep their deadline
-                while transactions
-                    .front()
-                    .is_some_and(|transaction| transaction.expires_at <= now)
-                {
-                    let transaction = transactions.pop_front().unwrap();
-                    log::warn!("Indirect transaction to {destination:?} expired without a poll");
-                    let _ = transaction
-                        .completion
-                        .send(Err(ZigbeeStackError::IndirectExpired {
-                            destination: *destination,
-                        }));
-                    changed = true;
-                }
-
-                !transactions.is_empty()
-            });
+        if expired.is_empty() {
+            return;
         }
 
-        if changed {
-            self.src_match_sync.notify_one();
+        for (destination, transaction) in expired {
+            log::warn!("Indirect transaction to {destination:?} expired without a poll");
+            let _ = transaction
+                .completion
+                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
         }
+
+        self.src_match_sync.notify_one();
     }
 
     fn evict_timed_out_children(&self) {
