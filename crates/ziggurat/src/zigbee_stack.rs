@@ -782,7 +782,10 @@ impl ZigbeeStack {
             .map_err(ZigbeeStackError::SpinelError)?;
 
         self.spinel
-            .prop_value_set(SpinelPropertyId::PhyTxPower, vec![8])
+            .prop_value_set(
+                SpinelPropertyId::PhyTxPower,
+                vec![self.constants.tx_power as u8],
+            )
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 

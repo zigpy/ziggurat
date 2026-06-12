@@ -109,6 +109,8 @@ struct ConfigureRequest {
     key_table: Vec<KeyTableEntry>,
     #[serde(default)]
     source_routing: bool,
+    /// Radio transmit power in dBm
+    tx_power: Option<i8>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -413,6 +415,10 @@ impl ZigguratServer {
             constants.global_link_key = tc_link_key;
         }
 
+        if let Some(tx_power) = request.tx_power {
+            constants.tx_power = tx_power;
+        }
+
         match (request.tclk_seed, request.tclk_flavor) {
             (Some(seed), Some(flavor)) => constants.tclk_seed = Some(TclkSeed { seed, flavor }),
             (None, None) => {}
@@ -564,6 +570,7 @@ impl ZigguratServer {
                 "network_key_seq": nwk_security.key_seq_number(),
                 "network_key_tx_counter": nwk_security.outgoing_frame_counter(),
                 "tc_link_key": key_to_string(&stack.constants.global_link_key),
+                "tx_power": stack.constants.tx_power,
                 "tclk_seed": tclk_seed.as_ref().map(|tclk| hex::encode(tclk.seed.to_bytes())),
                 "tclk_flavor": tclk_seed.as_ref().map(|tclk| match tclk.flavor {
                     TclkFlavor::ZStack => "zstack",

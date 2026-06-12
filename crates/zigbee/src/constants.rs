@@ -74,6 +74,9 @@ pub struct Constants {
     /// [`Self::parent_annce_base_timer`].
     pub parent_annce_jitter_max: Duration,
 
+    /// The radio transmit power in dBm.
+    pub tx_power: i8,
+
     /// For most joins, the network key is encrypted with the well-known global link key
     pub global_link_key: Key,
 
@@ -122,6 +125,7 @@ impl Constants {
             end_device_timeout_default: EndDeviceTimeout::Minutes256,
             parent_annce_base_timer: Duration::from_secs(10),
             parent_annce_jitter_max: Duration::from_secs(10),
+            tx_power: 8,
             global_link_key: Key::from_hex("5a6967426565416c6c69616e63653039"),
             tclk_seed: None,
         }
