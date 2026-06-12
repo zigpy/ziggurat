@@ -4,10 +4,10 @@ use log::LevelFilter;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_serial::{FlowControl, SerialPortBuilderExt};
@@ -249,21 +249,54 @@ impl ZigguratServer {
     }
 
     pub async fn run(self: Arc<Self>, listen_addr: &str) -> std::io::Result<()> {
+        match listen_addr.strip_prefix("unix:") {
+            Some(path) => self.run_unix(path).await,
+            None => self.run_tcp(listen_addr).await,
+        }
+    }
+
+    async fn run_tcp(self: Arc<Self>, listen_addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(listen_addr).await?;
         log::info!("Listening for WebSocket clients on {listen_addr}");
 
         loop {
             let (socket, addr) = listener.accept().await?;
-            let server = self.clone();
-
-            tokio::spawn(async move {
-                if let Err(e) = server.handle_connection(socket, addr).await {
-                    log::warn!("Connection {addr} ended with error: {e}");
-                }
-
-                log::info!("Client {addr} disconnected");
-            });
+            self.spawn_connection(socket, addr.to_string());
         }
+    }
+
+    async fn run_unix(self: Arc<Self>, path: &str) -> std::io::Result<()> {
+        // A previous run's socket file would make the bind fail with AddrInUse
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+
+        let listener = UnixListener::bind(path)?;
+        log::info!("Listening for WebSocket clients on unix:{path}");
+
+        // Peer addresses of UNIX sockets are unnamed: number the clients instead
+        for client in 0u64.. {
+            let (socket, _) = listener.accept().await?;
+            self.spawn_connection(socket, format!("unix#{client}"));
+        }
+
+        unreachable!()
+    }
+
+    fn spawn_connection<S>(self: &Arc<Self>, socket: S, addr: String)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let server = self.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = server.handle_connection(socket, &addr).await {
+                log::warn!("Connection {addr} ended with error: {e}");
+            }
+
+            log::info!("Client {addr} disconnected");
+        });
     }
 
     fn current_stack(&self) -> Option<Arc<ZigbeeStack>> {
@@ -292,11 +325,14 @@ impl ZigguratServer {
         Ok(client)
     }
 
-    async fn handle_connection(
+    async fn handle_connection<S>(
         self: &Arc<Self>,
-        socket: TcpStream,
-        addr: SocketAddr,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        socket: S,
+        addr: &str,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let websocket = tokio_tungstenite::accept_async(socket).await?;
         let (mut sink, mut stream) = websocket.split();
 
@@ -329,6 +365,7 @@ impl ZigguratServer {
         // Forward hub notifications to this connection
         let mut notification_rx = self.notification_tx.subscribe();
         let notification_outbound = outbound_tx.clone();
+        let forwarder_addr = addr.to_owned();
         let notification_forwarder = tokio::spawn(async move {
             loop {
                 match notification_rx.recv().await {
@@ -340,7 +377,7 @@ impl ZigguratServer {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
-                        log::warn!("Client {addr} lagged {count} notifications");
+                        log::warn!("Client {forwarder_addr} lagged {count} notifications");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -803,7 +840,8 @@ struct Args {
     #[arg(long, value_enum, default_value_t = FlowControlMode::Hardware)]
     flow_control: FlowControlMode,
 
-    /// WebSocket listen address
+    /// WebSocket listen address: `host:port` for TCP, `unix:/path/to.sock` for a
+    /// UNIX socket
     #[arg(long, default_value = "0.0.0.0:9999")]
     listen: String,
 
