@@ -1,9 +1,9 @@
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
 use ieee_802154::types::{Eui64, Nwk};
-use tokio::time::{Duration, Instant};
-use zigbee::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
+use std::time::{Duration, Instant};
 
 use super::NwkDeviceType;
 
@@ -246,11 +246,16 @@ impl Neighbors {
 
     /// Spec 3.6.10.4: a MAC data poll from a known device refreshes its keepalive
     /// deadline. Returns whether the device has a neighbor table entry at all.
-    pub fn refresh_child_timeout(&mut self, eui64: Option<Eui64>, nwk: Option<Nwk>) -> bool {
+    pub fn refresh_child_timeout(
+        &mut self,
+        eui64: Option<Eui64>,
+        nwk: Option<Nwk>,
+        now: Instant,
+    ) -> bool {
         if let Some(eui64) = eui64
             && let Some(entry) = self.table.get_mut(&eui64)
         {
-            entry.timeout_at = Instant::now() + entry.device_timeout;
+            entry.timeout_at = now + entry.device_timeout;
             entry.keepalive_received = true;
             return true;
         }
@@ -261,7 +266,7 @@ impl Neighbors {
                 .values_mut()
                 .find(|entry| entry.network_address == nwk)
         {
-            entry.timeout_at = Instant::now() + entry.device_timeout;
+            entry.timeout_at = now + entry.device_timeout;
             entry.keepalive_received = true;
             return true;
         }
@@ -271,7 +276,13 @@ impl Neighbors {
 
     /// Spec 3.6.10.2 steps 2, 4 and 5: store the keepalive timeout an end device
     /// child requested. Returns false if the device is not an end device child.
-    pub fn set_child_timeout(&mut self, nwk: Nwk, timeout: Duration, configuration: u16) -> bool {
+    pub fn set_child_timeout(
+        &mut self,
+        nwk: Nwk,
+        timeout: Duration,
+        configuration: u16,
+        now: Instant,
+    ) -> bool {
         let Some(entry) = self.table.values_mut().find(|entry| {
             entry.network_address == nwk
                 && entry.is_child()
@@ -281,7 +292,7 @@ impl Neighbors {
         };
 
         entry.device_timeout = timeout;
-        entry.timeout_at = Instant::now() + timeout;
+        entry.timeout_at = now + timeout;
         entry.end_device_configuration = configuration;
         entry.keepalive_received = true;
 
@@ -385,9 +396,7 @@ impl Neighbors {
 
     /// Remove children whose keepalive deadline has passed (spec 3.6.10.1), returning
     /// their addresses for cleanup.
-    pub fn evict_timed_out_children(&mut self) -> Vec<(Eui64, Nwk)> {
-        let now = Instant::now();
-
+    pub fn evict_timed_out_children(&mut self, now: Instant) -> Vec<(Eui64, Nwk)> {
         let evicted: Vec<(Eui64, Nwk)> = self
             .table
             .values()
@@ -442,9 +451,7 @@ impl Neighbors {
 
     /// Reset link costs of neighbors that have stopped sending link status frames,
     /// returning their addresses so routes through them can be invalidated.
-    pub fn age(&mut self) -> Vec<Nwk> {
-        let now = Instant::now();
-
+    pub fn age(&mut self, now: Instant) -> Vec<Nwk> {
         let mut stale_neighbors = Vec::new();
 
         for neighbor in self.table.values_mut() {
@@ -522,6 +529,7 @@ impl Neighbors {
         source_nwk: Nwk,
         lqi: u8,
         link_status_cmd: &NwkLinkStatusCommand,
+        now: Instant,
     ) -> Option<Nwk> {
         // Collect the set of already-connected neighbors before mutating the state, for
         // the neighbor set diversity computation
@@ -546,19 +554,19 @@ impl Neighbors {
                 device_type: NwkDeviceType::Router,
                 rx_on_when_idle: true,
                 end_device_configuration: 0x0000,
-                timeout_at: Instant::now() + Duration::from_secs(0xFFFFFFFF),
+                timeout_at: now + Duration::from_secs(0xFFFFFFFF),
                 device_timeout: Duration::from_secs(0xFFFFFFFF),
                 relationship: Relationship::Sibling,
                 transmit_failure: 0,
                 lqas: VecDeque::new(),
                 outgoing_cost: 0,
-                last_link_status_timestamp: Instant::now(),
+                last_link_status_timestamp: now,
                 incoming_beacon_timestamp: 0,
                 beacon_transmission_time_offset: 0,
                 keepalive_received: true,
                 mac_unicast_bytes_transmitted: 0,
                 mac_unicast_bytes_received: 0,
-                router_added_timestamp: Instant::now(),
+                router_added_timestamp: now,
                 router_connectivity: 0,
                 router_neighbor_set_diversity: 0,
                 router_outbound_activity: 0,
@@ -575,7 +583,7 @@ impl Neighbors {
 
         let previous_outgoing_cost = neighbor_entry.outgoing_cost;
 
-        neighbor_entry.last_link_status_timestamp = Instant::now();
+        neighbor_entry.last_link_status_timestamp = now;
 
         if link_status_cmd.is_first_frame {
             neighbor_entry.router_connectivity = 0;

@@ -95,7 +95,7 @@ impl ZigbeeStack {
             .neighbors
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .refresh_child_timeout(source_eui64, source_nwk);
+            .refresh_child_timeout(source_eui64, source_nwk, Instant::now().into_std());
 
         // The RCP only told the device to keep listening (frame-pending=1 in the
         // poll's auto-ACK) if the poll's source address was already written to the
@@ -447,7 +447,8 @@ impl ZigbeeStack {
             .neighbors
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .next_child_timeout();
+            .next_child_timeout()
+            .map(Instant::from_std);
 
         [next_expiry, next_eviction].into_iter().flatten().min()
     }
@@ -495,7 +496,7 @@ impl ZigbeeStack {
             .neighbors
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .evict_timed_out_children();
+            .evict_timed_out_children(Instant::now().into_std());
 
         for (eui64, nwk) in evicted {
             log::warn!("Child {eui64:?} ({nwk:?}) timed out without a keepalive, evicting");

@@ -9,8 +9,6 @@ zigbee = { path = "../zigbee" }
 ieee-802154 = { path = "../ieee-802154" }
 
 abstract-bits = "0.2.0"
-aes = "0.9.0-pre.2"
-ccm = { version = "0.6.0-rc.3", default-features = false }
 hex = "0.4.3"
 crc_all = "0.2.2"
 tokio-serial = "5.4"
@@ -25,8 +23,6 @@ thiserror = "2.0.12"
 rand = "0.10.1"
 parking_lot = "0.12.4"
 arbitrary-int = "2.1.1"
-subtle = "2"
-educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 
 [[bin]]

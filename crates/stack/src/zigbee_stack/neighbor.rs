@@ -1,4 +1,5 @@
 use ieee_802154::types::{Eui64, Nwk};
+use tokio::time::Instant;
 
 use zigbee::Command;
 use zigbee::nwk::commands::NwkLinkStatusCommand;
@@ -66,7 +67,7 @@ impl ZigbeeStack {
             .neighbors
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .age();
+            .age(Instant::now().into_std());
 
         for neighbor_nwk in stale_neighbors {
             self.invalidate_routes_via(neighbor_nwk);
@@ -101,6 +102,7 @@ impl ZigbeeStack {
                 nwk_frame.nwk_header.source,
                 lqi,
                 &link_status_cmd,
+                Instant::now().into_std(),
             );
 
         // Spec 3.6.4.4.2: when the outgoing cost collapses to zero the link is

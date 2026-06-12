@@ -23,20 +23,20 @@ use tokio::time::{Duration, Instant};
 use zigbee::nwk::commands::EndDeviceTimeout;
 
 mod aps;
-pub mod aps_security;
 mod indirect;
 mod joining;
 mod mac;
 mod neighbor;
-pub mod neighbors;
 mod nwk;
 mod route;
-pub mod routing;
 mod zdp;
 
-pub use aps_security::{ApsSecurity, TclkSeed};
-pub use neighbors::Neighbors;
-pub use routing::Routing;
+pub use zigbee::aps::security as aps_security;
+pub use zigbee::aps::security::{ApsSecurity, TclkSeed};
+pub use zigbee::nwk::NwkDeviceType;
+pub use zigbee::nwk::neighbors::Neighbors;
+pub use zigbee::nwk::routing::Routing;
+pub use zigbee::nwk::{neighbors, routing};
 
 // TODO: remove this once all long locks have been found
 const MAX_LOCK_DURATION: Duration = Duration::from_millis(10);
@@ -222,13 +222,6 @@ pub struct NwkBroadcastTransaction {
     /// Signaled on every recorded passive ack, so retransmission loops can
     /// re-evaluate completeness reactively instead of sleeping out the window
     pub acked_notify: Arc<Notify>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NwkDeviceType {
-    Coordinator = 0x00,
-    Router = 0x01,
-    EndDevice = 0x02,
 }
 
 #[derive(Debug)]

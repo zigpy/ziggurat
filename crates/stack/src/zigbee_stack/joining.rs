@@ -119,19 +119,19 @@ impl ZigbeeStack {
                 device_type,
                 rx_on_when_idle: request.receive_on_when_idle,
                 end_device_configuration: 0x0000,
-                timeout_at: Instant::now() + device_timeout,
+                timeout_at: Instant::now().into_std() + device_timeout,
                 device_timeout,
                 relationship: neighbors::Relationship::Child,
                 transmit_failure: 0,
                 lqas: VecDeque::new(),
                 outgoing_cost: 0,
-                last_link_status_timestamp: Instant::now(),
+                last_link_status_timestamp: Instant::now().into_std(),
                 incoming_beacon_timestamp: 0,
                 beacon_transmission_time_offset: 0,
                 keepalive_received: false,
                 mac_unicast_bytes_transmitted: 0,
                 mac_unicast_bytes_received: 0,
-                router_added_timestamp: Instant::now(),
+                router_added_timestamp: Instant::now().into_std(),
                 router_connectivity: 0,
                 router_neighbor_set_diversity: 0,
                 router_outbound_activity: 0,
@@ -145,7 +145,7 @@ impl ZigbeeStack {
             neighbor_entry.device_type = device_type;
             neighbor_entry.rx_on_when_idle = request.receive_on_when_idle;
             neighbor_entry.device_timeout = device_timeout;
-            neighbor_entry.timeout_at = Instant::now() + device_timeout;
+            neighbor_entry.timeout_at = Instant::now().into_std() + device_timeout;
             neighbor_entry.relationship = neighbors::Relationship::Child;
         }
 
@@ -664,7 +664,7 @@ impl ZigbeeStack {
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap();
         let current_key = aps_security.device_link_key(source_ieee);
-        let new_key = aps_security.issue_device_key(source_ieee);
+        let new_key = aps_security.issue_device_key(source_ieee, Key(rand::random()));
         drop(aps_security);
 
         // The key must be persisted by the client: a device that completed a key
@@ -1025,19 +1025,19 @@ impl ZigbeeStack {
                 device_type,
                 rx_on_when_idle: capability.receiver_on_when_idle,
                 end_device_configuration: 0x0000,
-                timeout_at: Instant::now() + device_timeout,
+                timeout_at: Instant::now().into_std() + device_timeout,
                 device_timeout,
                 relationship: neighbors::Relationship::Child,
                 transmit_failure: 0,
                 lqas: VecDeque::new(),
                 outgoing_cost: 0,
-                last_link_status_timestamp: Instant::now(),
+                last_link_status_timestamp: Instant::now().into_std(),
                 incoming_beacon_timestamp: 0,
                 beacon_transmission_time_offset: 0,
                 keepalive_received: false,
                 mac_unicast_bytes_transmitted: 0,
                 mac_unicast_bytes_received: 0,
-                router_added_timestamp: Instant::now(),
+                router_added_timestamp: Instant::now().into_std(),
                 router_connectivity: 0,
                 router_neighbor_set_diversity: 0,
                 router_outbound_activity: 0,
@@ -1051,7 +1051,7 @@ impl ZigbeeStack {
             neighbor_entry.device_type = device_type;
             neighbor_entry.rx_on_when_idle = capability.receiver_on_when_idle;
             neighbor_entry.device_timeout = device_timeout;
-            neighbor_entry.timeout_at = Instant::now() + device_timeout;
+            neighbor_entry.timeout_at = Instant::now().into_std() + device_timeout;
             neighbor_entry.relationship = if secured {
                 neighbors::Relationship::Child
             } else {
@@ -1212,7 +1212,12 @@ impl ZigbeeStack {
             .neighbors
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .set_child_timeout(source, timeout, u16::from(request.end_device_configuration));
+            .set_child_timeout(
+                source,
+                timeout,
+                u16::from(request.end_device_configuration),
+                Instant::now().into_std(),
+            );
 
         // Requests from devices that are not our end device children are dropped
         if !updated {

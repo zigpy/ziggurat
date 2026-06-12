@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
+use crate::nwk::commands::NwkRouteRequestManyToOne;
 use ieee_802154::types::Nwk;
-use tokio::time::{Duration, Instant};
-use zigbee::nwk::commands::NwkRouteRequestManyToOne;
+use std::time::{Duration, Instant};
 
-use zigbee::nwk::frame::BROADCAST_ALL_ROUTERS_AND_COORDINATOR;
+use crate::nwk::frame::BROADCAST_ALL_ROUTERS_AND_COORDINATOR;
 
 pub type RequestId = u8;
 
@@ -282,7 +282,7 @@ impl Routing {
     /// Prepare table state for a route discovery we originate: the routing entry enters
     /// `DiscoveryUnderway` and a discovery entry keyed by our own address is created.
     /// Returns the request identifier to put in the route request command.
-    pub fn begin_discovery(&mut self, destination: Nwk) -> RequestId {
+    pub fn begin_discovery(&mut self, destination: Nwk, now: Instant) -> RequestId {
         let route_table_entry = self
             .route_table
             .entry(destination)
@@ -292,7 +292,7 @@ impl Routing {
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
         let request_id = self.request_sequence_number;
 
-        self.expire_discoveries();
+        self.expire_discoveries(now);
 
         let key = (self.network_address, request_id);
         let discovery_entry = self
@@ -304,7 +304,7 @@ impl Routing {
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
                 residual_cost: 0,
-                expiration_time: Instant::now() + self.route_discovery_time,
+                expiration_time: now + self.route_discovery_time,
                 destination_address: destination,
             });
 
@@ -315,11 +315,11 @@ impl Routing {
 
     /// Register the discovery entry backing a many-to-one route advertisement, which
     /// is addressed to a broadcast address and never answered with a reply.
-    pub fn begin_many_to_one_advertisement(&mut self) -> RequestId {
+    pub fn begin_many_to_one_advertisement(&mut self, now: Instant) -> RequestId {
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
         let request_id = self.request_sequence_number;
 
-        self.expire_discoveries();
+        self.expire_discoveries(now);
 
         // The discovery entry exists purely for loop detection: relayed copies of our
         // own request will compare against the zero forward cost and be dropped
@@ -331,7 +331,7 @@ impl Routing {
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
                 residual_cost: 0,
-                expiration_time: Instant::now() + self.route_discovery_time,
+                expiration_time: now + self.route_discovery_time,
                 destination_address: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
             },
         );
@@ -340,9 +340,7 @@ impl Routing {
     }
 
     /// The expiration time of the live discovery toward a destination, if any.
-    pub fn discovery_deadline(&self, destination: Nwk) -> Option<Instant> {
-        let now = Instant::now();
-
+    pub fn discovery_deadline(&self, destination: Nwk, now: Instant) -> Option<Instant> {
         self.discovery_table.values().find_map(|entry| {
             if entry.expiration_time >= now && entry.destination_address == destination {
                 Some(entry.expiration_time)
@@ -357,6 +355,7 @@ impl Routing {
     /// cost (which also stops our own requests from echoing back at us); an accepted
     /// request establishes the route back to the originator through the sending
     /// device (spec 3.6.4.5.1.2).
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_route_request(
         &mut self,
         originator: Nwk,
@@ -365,8 +364,9 @@ impl Routing {
         sender: Nwk,
         updated_path_cost: u8,
         many_to_one: NwkRouteRequestManyToOne,
+        now: Instant,
     ) -> bool {
-        self.expire_discoveries();
+        self.expire_discoveries(now);
 
         match self.discovery_table.get_mut(&(originator, request_id)) {
             Some(discovery_entry) => {
@@ -387,7 +387,7 @@ impl Routing {
                         sender_address: sender,
                         forward_cost: updated_path_cost,
                         residual_cost: 0,
-                        expiration_time: Instant::now() + self.route_discovery_time,
+                        expiration_time: now + self.route_discovery_time,
                         destination_address: destination,
                     },
                 );
@@ -509,9 +509,7 @@ impl Routing {
     /// Clean expired entries from the route discovery table. Their lifetime is ~10s.
     /// Spec 3.6.4.5.1.7: a discovery that never completed must not leave the routing
     /// entry stuck in DISCOVERY_UNDERWAY, which would block future discoveries.
-    fn expire_discoveries(&mut self) {
-        let now = Instant::now();
-
+    fn expire_discoveries(&mut self, now: Instant) {
         let mut expired_destinations = Vec::new();
 
         self.discovery_table.retain(|_, entry| {

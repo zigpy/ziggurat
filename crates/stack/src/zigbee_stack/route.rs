@@ -193,6 +193,7 @@ impl ZigbeeStack {
                 sender_nwk,
                 updated_path_cost,
                 route_request_cmd.many_to_one,
+                Instant::now().into_std(),
             );
 
         if !accepted {
@@ -335,7 +336,7 @@ impl ZigbeeStack {
             .routing
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .begin_many_to_one_advertisement();
+            .begin_many_to_one_advertisement(Instant::now().into_std());
 
         log::debug!("Sending many-to-one route request {route_request_identifier}");
 
@@ -594,11 +595,11 @@ impl ZigbeeStack {
                 .routing
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
-                .discovery_deadline(destination);
+                .discovery_deadline(destination, Instant::now().into_std());
 
             // One should exist
             match deadline {
-                Some(deadline) => deadline - Instant::now(),
+                Some(deadline) => deadline - Instant::now().into_std(),
                 None => {
                     log::warn!("No route discovery entry found for {destination:?}");
                     return Err(ZigbeeStackError::RouteDiscoveryFailure(
@@ -648,7 +649,7 @@ impl ZigbeeStack {
             .routing
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
-            .begin_discovery(destination);
+            .begin_discovery(destination, Instant::now().into_std());
 
         // If we know the EUI64 corresponding to the NWK, use it
         let destination_eui64 = self

@@ -4,12 +4,12 @@ use ieee_802154::types::{Eui64, Key};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
-use zigbee::aps::frame::{
+use crate::aps::frame::{
     ApsAckFrame, ApsAuxHeader, ApsCommandFrame, ApsDataFrame, EncryptedApsAckFrame,
     EncryptedApsCommandFrame, EncryptedApsDataFrame,
 };
-use zigbee::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
-use zigbee::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
+use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
+use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
 /// Which stack's seed-to-key transformation a TCLK seed uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -158,11 +158,13 @@ impl ApsSecurity {
 
     /// Issue a fresh unique link key for a device, replacing any previous one. The key
     /// is unverified until the device proves possession via a Verify-Key exchange.
-    pub fn issue_device_key(&mut self, eui64: Eui64) -> Key {
+    /// `fresh_key` is caller-generated randomness, used only when no TCLK seed is
+    /// configured.
+    pub fn issue_device_key(&mut self, eui64: Eui64, fresh_key: Key) -> Key {
         let key = self
             .tclk_seed
             .as_ref()
-            .map_or_else(|| Key(rand::random()), |seed| seed.derive(eui64));
+            .map_or(fresh_key, |seed| seed.derive(eui64));
 
         self.device_keys.insert(
             eui64,

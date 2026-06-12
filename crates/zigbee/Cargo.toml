@@ -15,8 +15,10 @@ arbitrary-int = "2.1.1"
 ccm = { version = "0.6.0-rc.3", default-features = false }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 hex = "0.4.3"
+log = "0.4.26"
 num_enum = "0.7.3"
 serde = { version = "1.0.219", default-features = false, features = ["std", "derive"] }
+subtle = "2"
 thiserror = "2.0.12"
 
 [dev-dependencies]
