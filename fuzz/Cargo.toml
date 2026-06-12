@@ -54,3 +54,31 @@ path = "fuzz_targets/beacon.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ieee802154_frame_roundtrip"
+path = "fuzz_targets/ieee802154_frame_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nwk_frame_roundtrip"
+path = "fuzz_targets/nwk_frame_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aps_frame_roundtrip"
+path = "fuzz_targets/aps_frame_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "beacon_roundtrip"
+path = "fuzz_targets/beacon_roundtrip.rs"
+test = false
+doc = false
+bench = false

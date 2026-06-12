@@ -62,7 +62,7 @@ pub struct ApsAckFrame {
 impl ApsAckFrame {
     #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        if bytes.len() < 8 {
+        if bytes.is_empty() {
             return Err("Not enough data to parse ApsAckFrame");
         }
 
@@ -80,13 +80,21 @@ impl ApsAckFrame {
         let source_endpoint;
         let counter;
 
+        // An ack-format ack (for an APS command) carries only frame control and a
+        // counter; a data ack additionally carries the addressing fields
         if frame_control.ack_format {
+            if remaining.is_empty() {
+                return Err("Not enough data to parse ApsAckFrame");
+            }
             destination_endpoint = None;
             cluster_id = None;
             profile_id = None;
             source_endpoint = None;
             counter = u8::from_le_bytes([remaining[0]]);
         } else {
+            if remaining.len() < 7 {
+                return Err("Not enough data to parse ApsAckFrame");
+            }
             destination_endpoint = Some(u8::from_le_bytes([remaining[0]]));
             cluster_id = Some(u16::from_le_bytes([remaining[1], remaining[2]]));
             profile_id = Some(u16::from_le_bytes([remaining[3], remaining[4]]));

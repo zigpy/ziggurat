@@ -4,7 +4,7 @@ use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use abstract_bits::{BitReader, BitWriter};
 use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
-use ieee_802154::{FrameBytes, extend_abstract_bits};
+use ieee_802154::{FrameBytes, MAX_PHY_PACKET_SIZE, extend_abstract_bits};
 
 use num_enum::TryFromPrimitive;
 
@@ -395,6 +395,12 @@ impl EncryptedNwkFrame {
 
     #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        // A NWK frame rides inside a MAC frame, so it cannot exceed the PHY packet
+        // size; a longer input parses into a frame too large to re-serialize
+        if bytes.len() > MAX_PHY_PACKET_SIZE {
+            return Err("Frame exceeds the maximum PHY packet size");
+        }
+
         let mut remaining;
         let nwk_header;
         (nwk_header, remaining) = NwkHeader::deserialize(bytes)?;

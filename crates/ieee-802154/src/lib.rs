@@ -265,6 +265,12 @@ impl Ieee802154Frame {
             return Err("Data too short to contain a frame");
         }
 
+        // No 802.15.4 frame exceeds the PHY packet size; a longer input parses
+        // into a frame that cannot be re-serialized into the fixed scratch buffer
+        if data.len() > MAX_PHY_PACKET_SIZE {
+            return Err("Frame exceeds the maximum PHY packet size");
+        }
+
         let fcs = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
         let mut remaining = &data[..data.len() - 2];
 
