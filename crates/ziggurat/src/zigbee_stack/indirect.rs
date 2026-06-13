@@ -1,6 +1,7 @@
 use crate::ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
 use ieee_802154::types::{Eui64, Nwk};
 use spinel::SpinelPropertyId;
+use spinel::client::TxPriority;
 
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
@@ -169,7 +170,12 @@ impl ZigbeeStack {
             set_frame_pending(&mut frame);
         }
 
-        match self.send_802154_frame(frame).await {
+        // Indirect delivery answers a sleepy child's poll within macResponseWaitTime — a
+        // deadline-bound path, so it takes the radio ahead of the baseline backlog.
+        match self
+            .send_802154_frame(frame, TxPriority::STACK_CRITICAL)
+            .await
+        {
             Ok(()) => {
                 let _ = transaction.completion.send(Ok(()));
                 self.remove_indirect_queue_if_empty(destination);

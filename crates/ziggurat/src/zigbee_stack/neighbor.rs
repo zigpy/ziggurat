@@ -1,4 +1,5 @@
 use ieee_802154::types::{Eui64, Nwk};
+use spinel::client::TxPriority;
 use tokio::time::Instant;
 
 use zigbee::Command;
@@ -185,7 +186,11 @@ impl ZigbeeStack {
             // retries. Nobody relays a radius-1 frame, so the passive ack machinery
             // of the regular broadcast path could never complete for them anyway.
             if let Err(err) = self
-                .transmit_broadcast_nwk_frame(link_status_frame, NwkSecurityMode::NetworkKey)
+                .transmit_broadcast_nwk_frame(
+                    link_status_frame,
+                    NwkSecurityMode::NetworkKey,
+                    TxPriority::BACKGROUND,
+                )
                 .await
             {
                 tracing::warn!("Failed to broadcast link status: {err}");

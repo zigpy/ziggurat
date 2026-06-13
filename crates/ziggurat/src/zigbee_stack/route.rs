@@ -3,6 +3,7 @@ use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use ieee_802154::types::Nwk;
+use spinel::client::TxPriority;
 
 use zigbee::Command;
 use zigbee::nwk::commands::{
@@ -319,7 +320,11 @@ impl ZigbeeStack {
                 }
 
                 if let Err(err) = arc_self
-                    .transmit_broadcast_nwk_frame(nwk_frame.clone(), NwkSecurityMode::NetworkKey)
+                    .transmit_broadcast_nwk_frame(
+                        nwk_frame.clone(),
+                        NwkSecurityMode::NetworkKey,
+                        TxPriority::USER_NORMAL,
+                    )
                     .await
                 {
                     tracing::warn!("Failed to broadcast route request: {err}");
@@ -361,7 +366,11 @@ impl ZigbeeStack {
 
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
         if let Err(err) = self
-            .transmit_broadcast_nwk_frame(many_to_one_request_frame, NwkSecurityMode::NetworkKey)
+            .transmit_broadcast_nwk_frame(
+                many_to_one_request_frame,
+                NwkSecurityMode::NetworkKey,
+                TxPriority::BACKGROUND,
+            )
             .await
         {
             tracing::warn!("Failed to broadcast many-to-one route request: {err}");

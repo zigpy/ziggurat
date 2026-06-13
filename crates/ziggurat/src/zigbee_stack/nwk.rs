@@ -4,6 +4,7 @@ use crate::ieee_802154::{
 };
 use ieee_802154::FrameBytes;
 use ieee_802154::types::{Eui64, Nwk};
+use spinel::client::TxPriority;
 use tokio::time::{Instant, timeout_at};
 use zigbee::Command;
 use zigbee::nwk::commands::{
@@ -320,7 +321,7 @@ impl ZigbeeStack {
 
         self.spawn_tracked(async move {
             arc_self
-                .send_nwk_frame(nwk_frame, security, route_directly)
+                .send_nwk_frame(nwk_frame, security, route_directly, TxPriority::USER_NORMAL)
                 .await
                 .unwrap_or_else(|err| {
                     tracing::error!("Failed to send NWK frame: {err}");
@@ -333,11 +334,13 @@ impl ZigbeeStack {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         route_directly: bool,
+        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-            self.send_broadcast_nwk_frame(nwk_frame, security).await
+            self.send_broadcast_nwk_frame(nwk_frame, security, priority)
+                .await
         } else {
-            self.send_unicast_nwk_frame(nwk_frame, security, route_directly)
+            self.send_unicast_nwk_frame(nwk_frame, security, route_directly, priority)
                 .await
         }
     }
@@ -443,6 +446,7 @@ impl ZigbeeStack {
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         route_directly: bool,
+        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         let destination = nwk_frame.nwk_header.destination;
 
@@ -472,7 +476,7 @@ impl ZigbeeStack {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
         let result = self
-            .transmit_unicast_nwk_frame(nwk_frame, next_hop_address, security)
+            .transmit_unicast_nwk_frame(nwk_frame, next_hop_address, security, priority)
             .await;
 
         // A dead next hop invalidates every route through it and any stored source
@@ -562,6 +566,7 @@ impl ZigbeeStack {
         mut nwk_frame: NwkFrame,
         next_hop_address: Nwk,
         security: NwkSecurityMode,
+        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         // Sleepy children cannot hear direct transmissions: the finished frame waits
         // in the indirect queue until the child polls for it. No retry loop applies;
@@ -611,7 +616,7 @@ impl ZigbeeStack {
 
             self.increment_tx_total();
 
-            match self.send_802154_frame(ieee802154_frame).await {
+            match self.send_802154_frame(ieee802154_frame, priority).await {
                 Ok(_) => {
                     break;
                 }
@@ -640,6 +645,7 @@ impl ZigbeeStack {
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
+        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
@@ -696,7 +702,7 @@ impl ZigbeeStack {
             }
 
             let _ = self
-                .transmit_broadcast_nwk_frame(nwk_frame.clone(), security)
+                .transmit_broadcast_nwk_frame(nwk_frame.clone(), security, priority)
                 .await;
         }
 
@@ -710,6 +716,7 @@ impl ZigbeeStack {
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
+        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
 
@@ -751,7 +758,7 @@ impl ZigbeeStack {
 
         self.increment_tx_total();
 
-        self.send_802154_frame(ieee802154_frame).await
+        self.send_802154_frame(ieee802154_frame, priority).await
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.
@@ -890,6 +897,7 @@ impl ZigbeeStack {
                     nwk_frame.clone(),
                     next_hop_address,
                     NwkSecurityMode::NetworkKey,
+                    TxPriority::USER_NORMAL,
                 )
                 .await
             {
@@ -1011,6 +1019,7 @@ impl ZigbeeStack {
                     .transmit_broadcast_nwk_frame(
                         relayed_frame.clone(),
                         NwkSecurityMode::NetworkKey,
+                        TxPriority::USER_NORMAL,
                     )
                     .await
                 {

@@ -9,6 +9,7 @@ use std::string::String;
 use thiserror::Error;
 use tokio_serial::SerialStream;
 
+use crate::priority_lock::{PriorityGuard, PriorityLock};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -198,6 +199,25 @@ struct SpinelWriter {
     hdlc_scratch: Vec<u8>,
 }
 
+/// Radio transmit priority
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TxPriority(pub i8);
+
+impl TxPriority {
+    pub const BACKGROUND: Self = Self(-2);
+    pub const USER_LOW: Self = Self(-1);
+    pub const USER_NORMAL: Self = Self(0);
+    pub const USER_HIGH: Self = Self(1);
+    pub const USER_CRITICAL: Self = Self(2);
+    pub const STACK_CRITICAL: Self = Self(3);
+}
+
+impl Default for TxPriority {
+    fn default() -> Self {
+        Self::USER_NORMAL
+    }
+}
+
 #[derive(Debug)]
 pub struct SpinelClient {
     /// The reader half of the port, owned by the task spawned in `spawn_reader`.
@@ -209,7 +229,7 @@ pub struct SpinelClient {
     /// The RCP has a single radio (and a single TX buffer): transmit transactions are
     /// serialized end to end, and energy scans hold the lock per scanned channel via
     /// [`Self::lock_radio`].
-    radio_lock: AsyncMutex<()>,
+    radio_lock: PriorityLock<TxPriority>,
     consecutive_timeouts: AtomicU32,
 }
 
@@ -226,7 +246,7 @@ impl SpinelClient {
                 hdlc_scratch: Vec::with_capacity(2 * SPINEL_FRAME_MAX_SIZE + 2),
             }),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
-            radio_lock: AsyncMutex::new(()),
+            radio_lock: PriorityLock::new(),
             consecutive_timeouts: AtomicU32::new(0),
         }
     }
@@ -461,8 +481,10 @@ impl SpinelClient {
     /// with `INVALID_STATE` while a frame is in flight — holding this lock around a
     /// scan makes that race impossible, since a transmit holds it until its frame is
     /// off the air.
-    pub async fn lock_radio(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.radio_lock.lock().await
+    pub async fn lock_radio(&self) -> PriorityGuard<TxPriority> {
+        // Exclusive operations (scans, reset recovery) take the radio at top priority so a
+        // transmit backlog cannot starve them.
+        self.radio_lock.acquire(TxPriority::STACK_CRITICAL).await
     }
 
     // Convenience method wrapping broad functionality are below
@@ -495,8 +517,9 @@ impl SpinelClient {
     pub async fn transmit_frame(
         &self,
         tx_frame: &SpinelTxFrame,
+        priority: TxPriority,
     ) -> Result<SpinelStatus, SpinelError> {
-        let _radio_lock = self.radio_lock.lock().await;
+        let _radio_lock = self.radio_lock.acquire(priority).await;
 
         // No retry on timeout: a duplicate transmit is worse than a failed one, and the
         // NWK retry paths handle the failure

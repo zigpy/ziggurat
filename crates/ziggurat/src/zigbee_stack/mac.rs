@@ -6,7 +6,7 @@ use abstract_bits::AbstractBits;
 use arbitrary_int::u24;
 use ieee_802154::types::Nwk;
 use spinel::SpinelStatus;
-use spinel::client::SpinelTxFrame;
+use spinel::client::{SpinelTxFrame, TxPriority};
 use zigbee::beacon::{RenamedU24, ZigbeeBeacon};
 use zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkSecurityHeaderKeyId,
@@ -116,7 +116,7 @@ impl ZigbeeStack {
             fcs: 0x0000,
         });
 
-        self.background_send_802154_frame(beacon_frame);
+        self.background_send_802154_frame(beacon_frame, TxPriority::USER_NORMAL);
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -266,6 +266,7 @@ impl ZigbeeStack {
     pub(super) async fn send_802154_frame(
         &self,
         frame: Ieee802154Frame,
+        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         // Increment the 802.15.4 sequence number
         let final_frame = if !frame.header().frame_control.sequence_number_suppression {
@@ -315,21 +316,24 @@ impl ZigbeeStack {
 
         let status = self
             .spinel
-            .transmit_frame(&SpinelTxFrame {
-                psdu: final_frame.to_bytes(),
-                channel: { Some(*self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap()) },
-                max_csma_backoffs: Some(1),
-                max_frame_retries: Some(5),
-                enable_csma_ca: Some(true),
-                is_header_updated: Some(true),
-                is_a_retransmit: Some(false),
-                is_security_processed: Some(true),
-                // Omit subsequent fields to reduce serial traffic
-                tx_delay: None,            // Some(0 as u32),
-                tx_delay_base_time: None,  // Some(0 as u32),
-                rx_channel_after_tx: None, // Some(channel),
-                tx_power: None,            // Some(8),
-            })
+            .transmit_frame(
+                &SpinelTxFrame {
+                    psdu: final_frame.to_bytes(),
+                    channel: { Some(*self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap()) },
+                    max_csma_backoffs: Some(2),
+                    max_frame_retries: Some(5),
+                    enable_csma_ca: Some(true),
+                    is_header_updated: Some(true),
+                    is_a_retransmit: Some(false),
+                    is_security_processed: Some(true),
+                    // Omit subsequent fields to reduce serial traffic
+                    tx_delay: None,            // Some(0 as u32),
+                    tx_delay_base_time: None,  // Some(0 as u32),
+                    rx_channel_after_tx: None, // Some(channel),
+                    tx_power: None,            // Some(8),
+                },
+                priority,
+            )
             .await?;
 
         if status == SpinelStatus::Ok {
@@ -345,7 +349,7 @@ impl ZigbeeStack {
         }
     }
 
-    pub fn background_send_802154_frame(&self, frame: Ieee802154Frame) {
+    pub fn background_send_802154_frame(&self, frame: Ieee802154Frame, priority: TxPriority) {
         let arc_self = self
             .self_weak
             .upgrade()
@@ -353,7 +357,7 @@ impl ZigbeeStack {
 
         self.spawn_tracked(async move {
             arc_self
-                .send_802154_frame(frame)
+                .send_802154_frame(frame, priority)
                 .await
                 .unwrap_or_else(|err| {
                     tracing::error!("Failed to send 802.15.4 frame: {err}");

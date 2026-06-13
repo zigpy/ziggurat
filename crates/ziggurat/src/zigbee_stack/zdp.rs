@@ -1,4 +1,5 @@
 use ieee_802154::types::{Eui64, Nwk};
+use spinel::client::TxPriority;
 use zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
 use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -322,6 +323,7 @@ impl ZigbeeStack {
             self.next_aps_counter(),
             command.serialize(tsn).unwrap(),
             None,
+            TxPriority::USER_NORMAL,
         )
         .await
         .map(|_| ())

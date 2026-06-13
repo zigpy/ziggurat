@@ -15,7 +15,7 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use spinel::client::SpinelClient;
+use spinel::client::{SpinelClient, TxPriority};
 use zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::aps_security::TclkFlavor;
@@ -139,6 +139,8 @@ struct SendApsRequest {
     /// `destination_eui64`
     #[serde(default)]
     aps_encryption: bool,
+    #[serde(default)]
+    priority: i8,
 }
 
 #[derive(Deserialize, Debug)]
@@ -723,6 +725,7 @@ impl ZigguratServer {
                 request.aps_seq,
                 asdu,
                 aps_security,
+                TxPriority(request.priority),
             )
             .await
         {

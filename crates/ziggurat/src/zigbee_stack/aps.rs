@@ -6,6 +6,7 @@ use zigbee::aps::frame::{
 };
 use zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
+use spinel::client::TxPriority;
 use std::cmp;
 use tokio::sync::oneshot;
 
@@ -184,6 +185,7 @@ impl ZigbeeStack {
         aps_seq: u8,
         data: Vec<u8>,
         aps_security: Option<Eui64>,
+        priority: TxPriority,
     ) -> Result<Option<ApsAckWaiter>, ZigbeeStackError> {
         let asdu = FrameBytes::from_slice(&data).map_err(|_| ZigbeeStackError::PayloadTooLong)?;
 
@@ -273,7 +275,7 @@ impl ZigbeeStack {
             .with_radius(cmp::max(radius, 1));
 
         if !aps_ack {
-            self.send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false)
+            self.send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false, priority)
                 .await?;
             return Ok(None);
         }
@@ -299,7 +301,7 @@ impl ZigbeeStack {
         }
 
         if let Err(err) = self
-            .send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false)
+            .send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false, priority)
             .await
         {
             self.state

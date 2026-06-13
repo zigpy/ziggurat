@@ -1,4 +1,5 @@
 pub mod client;
+pub mod priority_lock;
 
 use crc_all::CrcAlgo;
 use ieee_802154::types::Eui64;
