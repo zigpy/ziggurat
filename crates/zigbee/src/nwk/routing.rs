@@ -317,6 +317,11 @@ impl Routing {
     /// `DiscoveryUnderway` and a discovery entry keyed by our own address is created.
     /// Returns the request identifier to put in the route request command.
     pub fn begin_discovery(&mut self, destination: Nwk, now: Instant) -> RequestId {
+        // Expire stale discoveries before establishing the new one. A just-expired
+        // discovery toward this same destination would otherwise tear down the
+        // `DiscoveryUnderway` route entry created below.
+        self.expire_discoveries(now);
+
         let route_table_entry = self
             .route_table
             .entry(destination)
@@ -325,8 +330,6 @@ impl Routing {
 
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
         let request_id = self.request_sequence_number;
-
-        self.expire_discoveries(now);
 
         let key = (self.network_address, request_id);
         let discovery_entry = self
