@@ -44,7 +44,7 @@ impl ZigbeeStack {
         let source_eui64 = match command_frame.header.src_address {
             Some(Ieee802154Address::Eui64(eui64)) => eui64,
             _ => {
-                log::warn!(
+                tracing::warn!(
                     "Received association request with unexpected source address: {:?}",
                     command_frame.header.src_address
                 );
@@ -78,13 +78,13 @@ impl ZigbeeStack {
         };
 
         if let Some(status) = denial_status {
-            log::info!("Denying association request from {source_eui64:?}: {status:?}");
+            tracing::info!("Denying association request from {source_eui64:?}: {status:?}");
             self.queue_association_response(source_eui64, Nwk(0xFFFF), status);
             return;
         }
 
         let short_address = self.allocate_network_address(source_eui64);
-        log::info!("Device {source_eui64:?} is joining as {short_address:?}");
+        tracing::info!("Device {source_eui64:?} is joining as {short_address:?}");
 
         self.begin_join(source_eui64);
 
@@ -164,7 +164,7 @@ impl ZigbeeStack {
                     }
                 }
                 Err(err) => {
-                    log::warn!("Association response to {eui64:?} was not extracted: {err}");
+                    tracing::warn!("Association response to {eui64:?} was not extracted: {err}");
                 }
             }
         });
@@ -242,7 +242,7 @@ impl ZigbeeStack {
             );
         }
 
-        log::warn!("Address conflict detected on {address:?}");
+        tracing::warn!("Address conflict detected on {address:?}");
 
         if detected_locally {
             self.broadcast_address_conflict(address);
@@ -251,7 +251,7 @@ impl ZigbeeStack {
         if address == self.state.network_address {
             // A coordinator never changes its address (spec 3.6.1.10.5); the
             // notification tells the conflicting device to move
-            log::error!("Another device is using our own network address");
+            tracing::error!("Another device is using our own network address");
             return;
         }
 
@@ -300,7 +300,7 @@ impl ZigbeeStack {
                 .is_some_and(|conflict| conflict.heard_from_network);
 
             if heard_from_network {
-                log::debug!(
+                tracing::debug!(
                     "Address conflict on {address:?} was already reported, not rebroadcasting"
                 );
                 return;
@@ -328,7 +328,7 @@ impl ZigbeeStack {
     fn reassign_child_address(&self, eui64: Eui64, old_address: Nwk) {
         let new_address = self.generate_unused_network_address();
 
-        log::warn!(
+        tracing::warn!(
             "Moving end device child {eui64:?} away from conflicted {old_address:?} to {new_address:?}"
         );
 
@@ -397,7 +397,7 @@ impl ZigbeeStack {
     /// an `apsDeviceKeyPairSet` entry with `PROVISIONAL_KEY` attributes that
     /// replaces the well-known key for that device's network key delivery.
     pub fn set_provisional_key(&self, ieee: Eui64, key: Key) {
-        log::info!("Registered provisional link key for {ieee:?}");
+        tracing::info!("Registered provisional link key for {ieee:?}");
 
         self.state
             .aps_security
@@ -417,7 +417,7 @@ impl ZigbeeStack {
             .begin_join(ieee);
 
         if let Some(key) = provisional_key {
-            log::info!("Device {ieee:?} is joining with its provisional link key");
+            tracing::info!("Device {ieee:?} is joining with its provisional link key");
 
             let _ = self
                 .notification_tx
@@ -512,7 +512,7 @@ impl ZigbeeStack {
         encrypted_command_frame: &EncryptedApsCommandFrame,
     ) {
         let Some(extended_source) = encrypted_command_frame.aux_header.extended_source else {
-            log::warn!("APS command frames without an extended nonce are not supported");
+            tracing::warn!("APS command frames without an extended nonce are not supported");
             return;
         };
 
@@ -532,11 +532,11 @@ impl ZigbeeStack {
 
         match decrypted {
             Some(command_frame) => {
-                log::debug!("Decrypted APS command frame: {command_frame:?}");
+                tracing::debug!("Decrypted APS command frame: {command_frame:?}");
                 self.handle_aps_command_frame(nwk_frame, &command_frame, Some(extended_source));
             }
             None => {
-                log::warn!(
+                tracing::warn!(
                     "Failed to decrypt APS command frame from {:?}",
                     nwk_frame.nwk_header.source
                 );
@@ -554,28 +554,28 @@ impl ZigbeeStack {
 
         match &command_frame.command {
             ApsCommandFrameCommand::TransportKey(cmd) => {
-                log::warn!("Ignoring transport key from {source:?}: {cmd:?}");
+                tracing::warn!("Ignoring transport key from {source:?}: {cmd:?}");
             }
             ApsCommandFrameCommand::UpdateDevice(cmd) => {
                 self.handle_update_device(nwk_frame, cmd);
             }
             ApsCommandFrameCommand::RemoveDevice(cmd) => {
-                log::warn!("Remove device from {source:?} is not yet handled: {cmd:?}");
+                tracing::warn!("Remove device from {source:?} is not yet handled: {cmd:?}");
             }
             ApsCommandFrameCommand::RequestKey(cmd) => {
                 self.handle_request_key(nwk_frame, command_frame, cmd, aps_source_ieee);
             }
             ApsCommandFrameCommand::SwitchKey(cmd) => {
-                log::warn!("Ignoring switch key from {source:?}: {cmd:?}");
+                tracing::warn!("Ignoring switch key from {source:?}: {cmd:?}");
             }
             ApsCommandFrameCommand::Tunnel(cmd) => {
-                log::warn!("Tunnel command from {source:?} is not yet handled: {cmd:?}");
+                tracing::warn!("Tunnel command from {source:?} is not yet handled: {cmd:?}");
             }
             ApsCommandFrameCommand::VerifyKey(cmd) => {
                 self.handle_verify_key(nwk_frame, cmd);
             }
             ApsCommandFrameCommand::ConfirmKey(cmd) => {
-                log::warn!("Ignoring confirm key from {source:?}: {cmd:?}");
+                tracing::warn!("Ignoring confirm key from {source:?}: {cmd:?}");
             }
         }
     }
@@ -603,13 +603,15 @@ impl ZigbeeStack {
         aps_source_ieee: Option<Eui64>,
     ) {
         if request.key_type != ApsRequestKeyType::TrustCenterLinkKey {
-            log::warn!("Application link keys are not supported, ignoring request: {request:?}");
+            tracing::warn!(
+                "Application link keys are not supported, ignoring request: {request:?}"
+            );
             return;
         }
 
         // The spec mandates that request key commands be APS encrypted
         if !command_frame.frame_control.security {
-            log::warn!(
+            tracing::warn!(
                 "Ignoring unencrypted request key command from {:?}",
                 nwk_frame.nwk_header.source
             );
@@ -617,11 +619,11 @@ impl ZigbeeStack {
         }
 
         let Some(source_ieee) = aps_source_ieee else {
-            log::warn!("Request key command has no extended source, ignoring");
+            tracing::warn!("Request key command has no extended source, ignoring");
             return;
         };
 
-        log::info!("Sending a new trust center link key to {source_ieee:?}");
+        tracing::info!("Sending a new trust center link key to {source_ieee:?}");
 
         // The new key is delivered encrypted with the key it replaces
         let mut aps_security = self
@@ -683,7 +685,7 @@ impl ZigbeeStack {
     /// keyed hash of it, which we acknowledge with a Confirm-Key command.
     fn handle_verify_key(&self, nwk_frame: &NwkFrame, verify: &ApsVerifyKeyCommandFrame) {
         if verify.standard_key_type != ApsStandardKeyType::TrustCenterLinkKey {
-            log::warn!("Ignoring verify key for unsupported key type: {verify:?}");
+            tracing::warn!("Ignoring verify key for unsupported key type: {verify:?}");
             return;
         }
 
@@ -698,7 +700,7 @@ impl ZigbeeStack {
 
         let status = match verified {
             None => {
-                log::warn!("Verify key from {source_ieee:?} without a stored link key");
+                tracing::warn!("Verify key from {source_ieee:?} without a stored link key");
                 // Spec 4.4.8.1.3: failures for unknown devices are sent unencrypted
                 self.send_confirm_key(
                     nwk_frame.nwk_header.source,
@@ -709,11 +711,11 @@ impl ZigbeeStack {
                 return;
             }
             Some(true) => {
-                log::info!("Device {source_ieee:?} verified its trust center link key");
+                tracing::info!("Device {source_ieee:?} verified its trust center link key");
                 APS_STATUS_SUCCESS
             }
             Some(false) => {
-                log::warn!("Verify key hash mismatch for {source_ieee:?}");
+                tracing::warn!("Verify key hash mismatch for {source_ieee:?}");
                 APS_STATUS_SECURITY_FAIL
             }
         };
@@ -772,7 +774,7 @@ impl ZigbeeStack {
     fn handle_update_device(&self, nwk_frame: &NwkFrame, update: &ApsUpdateDeviceCommandFrame) {
         let router_nwk = nwk_frame.nwk_header.source;
 
-        log::info!(
+        tracing::info!(
             "Device {:?} ({:?}) update from router {router_nwk:?}: {:?}",
             update.device_address,
             update.device_short_address,
@@ -810,7 +812,7 @@ impl ZigbeeStack {
                     .unwrap()
                     .has_unique_link_key(update.device_address)
                 {
-                    log::warn!(
+                    tracing::warn!(
                         "Trust center rejoin from {:?} without a unique link key",
                         update.device_address
                     );
@@ -877,12 +879,12 @@ impl ZigbeeStack {
     /// accept is a trust center rejoin request from a device that lost the network key.
     pub(super) fn handle_unsecured_nwk_frame(&self, nwk_frame: &NwkFrame) {
         if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Command {
-            log::debug!("Ignoring unencrypted non-command NWK frame");
+            tracing::debug!("Ignoring unencrypted non-command NWK frame");
             return;
         }
 
         if nwk_frame.payload.is_empty() {
-            log::warn!("Ignoring unencrypted NWK command frame with an empty payload");
+            tracing::warn!("Ignoring unencrypted NWK command frame with an empty payload");
             return;
         }
 
@@ -891,7 +893,7 @@ impl ZigbeeStack {
                 self.handle_rejoin_request(nwk_frame, false);
             }
             _ => {
-                log::debug!("Ignoring unencrypted NWK command: {}", nwk_frame.payload[0]);
+                tracing::debug!("Ignoring unencrypted NWK command: {}", nwk_frame.payload[0]);
             }
         }
     }
@@ -903,15 +905,15 @@ impl ZigbeeStack {
         let rejoin_request = match NwkRejoinRequestCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing rejoin request command: {e:?}");
+                tracing::warn!("Error parsing rejoin request command: {e:?}");
                 return;
             }
         };
 
-        log::info!("Rejoin request (secured: {secured}): {rejoin_request:#?}");
+        tracing::info!("Rejoin request (secured: {secured}): {rejoin_request:#?}");
 
         let Some(source_ieee) = nwk_frame.nwk_header.source_ieee else {
-            log::warn!("Rejoin request source EUI64 is missing");
+            tracing::warn!("Rejoin request source EUI64 is missing");
             return;
         };
 
@@ -934,7 +936,7 @@ impl ZigbeeStack {
         };
 
         if !already_known && at_capacity {
-            log::info!("Denying rejoin request from {source_ieee:?}, no child capacity left");
+            tracing::info!("Denying rejoin request from {source_ieee:?}, no child capacity left");
             self.send_rejoin_response(
                 requested_nwk,
                 source_ieee,
@@ -959,7 +961,7 @@ impl ZigbeeStack {
             requested_nwk
         };
 
-        log::info!("Device {source_ieee:?} is rejoining as {assigned_nwk:?}");
+        tracing::info!("Device {source_ieee:?} is rejoining as {assigned_nwk:?}");
 
         self.update_nwk_eui64_mapping(assigned_nwk, source_ieee);
 
@@ -1062,7 +1064,7 @@ impl ZigbeeStack {
         let leave_cmd = match NwkLeaveCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing leave command: {e:?}");
+                tracing::warn!("Error parsing leave command: {e:?}");
                 return;
             }
         };
@@ -1071,11 +1073,11 @@ impl ZigbeeStack {
 
         if leave_cmd.request {
             // Spec 3.6.1.10.3.1: coordinators drop leave requests
-            log::warn!("Ignoring leave request from {source:?}: {leave_cmd:?}");
+            tracing::warn!("Ignoring leave request from {source:?}: {leave_cmd:?}");
             return;
         }
 
-        log::info!(
+        tracing::info!(
             "Device {source:?} is leaving the network (rejoin: {})",
             leave_cmd.rejoin
         );
@@ -1120,7 +1122,7 @@ impl ZigbeeStack {
             Ok(request) => request,
             Err(e) => {
                 // An out-of-range timeout enumeration fails deserialization
-                log::warn!("Invalid end device timeout request from {source:?}: {e:?}");
+                tracing::warn!("Invalid end device timeout request from {source:?}: {e:?}");
                 self.send_end_device_timeout_response(
                     source,
                     NwkEndDeviceTimeoutResponseStatus::IncorrectValue,
@@ -1132,7 +1134,7 @@ impl ZigbeeStack {
         // No end device configuration bits are defined yet, so any requested feature
         // is unknown and rejected
         if request.end_device_configuration != 0 {
-            log::warn!(
+            tracing::warn!(
                 "End device timeout request from {source:?} with unsupported configuration: {:#04x}",
                 request.end_device_configuration
             );
@@ -1159,11 +1161,11 @@ impl ZigbeeStack {
 
         // Requests from devices that are not our end device children are dropped
         if !updated {
-            log::warn!("Ignoring end device timeout request from non-child {source:?}");
+            tracing::warn!("Ignoring end device timeout request from non-child {source:?}");
             return;
         }
 
-        log::debug!("Child {source:?} negotiated an end device timeout of {timeout:?}");
+        tracing::debug!("Child {source:?} negotiated an end device timeout of {timeout:?}");
 
         // A renegotiated timeout may move the child's deadline closer
         self.maintenance_wake.notify_one();
@@ -1200,10 +1202,10 @@ impl ZigbeeStack {
 
     pub fn permit_joins(&self, duration: u64) {
         let deadline = if duration == 0 {
-            log::info!("Permitting joins disabled");
+            tracing::info!("Permitting joins disabled");
             None
         } else {
-            log::info!("Permitting joins for {duration} seconds");
+            tracing::info!("Permitting joins for {duration} seconds");
             Some(Instant::now() + Duration::from_secs(duration))
         };
 

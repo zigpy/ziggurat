@@ -504,7 +504,7 @@ impl ZigbeeStack {
             if ieee802154_frame.header().src_address
                 == Some(Ieee802154Address::Nwk(self.state.network_address))
             {
-                log::debug!("Ignoring our own packet");
+                tracing::debug!("Ignoring our own packet");
                 continue;
             }
 
@@ -532,7 +532,7 @@ impl ZigbeeStack {
                             match self.decrypt_aps_data_frame(&nwk_frame, &encrypted) {
                                 Some((data, source_eui64)) => (data, Some(source_eui64)),
                                 None => {
-                                    log::warn!(
+                                    tracing::warn!(
                                         "Failed to decrypt APS data frame from {:?}",
                                         nwk_frame.nwk_header.source
                                     );
@@ -547,7 +547,7 @@ impl ZigbeeStack {
                         Ok(ApsFrame::EncryptedAck(encrypted)) => {
                             match self.decrypt_aps_ack_frame(&nwk_frame, &encrypted) {
                                 Some(ack) => self.handle_aps_ack(&nwk_frame, &ack),
-                                None => log::warn!(
+                                None => tracing::warn!(
                                     "Failed to decrypt APS ACK from {:?}",
                                     nwk_frame.nwk_header.source
                                 ),
@@ -563,12 +563,12 @@ impl ZigbeeStack {
                             continue;
                         }
                         Err(e) => {
-                            log::warn!("Error parsing APS frame: {e:?}");
+                            tracing::warn!("Error parsing APS frame: {e:?}");
                             continue;
                         }
                     };
 
-                    log::debug!("Received APS data frame: {aps_frame:?}");
+                    tracing::debug!("Received APS data frame: {aps_frame:?}");
 
                     // The ZDP commands that maintain stack state (the neighbor and
                     // address tables live here, not in the client) are consumed by
@@ -621,13 +621,13 @@ impl ZigbeeStack {
             let packet = match SpinelRxFrame::from_bytes(&spinel_frame.value) {
                 Ok(p) => p,
                 Err(e) => {
-                    log::warn!("Error parsing spinel frame: {e:?}");
+                    tracing::warn!("Error parsing spinel frame: {e:?}");
                     continue;
                 }
             };
 
             if packet.psdu.len() < 2 {
-                log::warn!("Packet too short to contain FCS");
+                tracing::warn!("Packet too short to contain FCS");
                 continue;
             }
 
@@ -635,11 +635,11 @@ impl ZigbeeStack {
 
             match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
                 Ok(frame) => {
-                    log::debug!("Received 802.15.4 frame: {frame:?}");
+                    tracing::debug!("Received 802.15.4 frame: {frame:?}");
                     return (packet, frame);
                 }
                 Err(e) => {
-                    log::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");
+                    tracing::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");
                     continue;
                 }
             };
@@ -660,7 +660,7 @@ impl ZigbeeStack {
         // To kick things off, send a link status broadcast. Silicon Labs routers will
         // "respond" to empty link status broadcasts proactively, independent of the
         // link status period
-        log::info!("Sending initial link status broadcast");
+        tracing::info!("Sending initial link status broadcast");
         self.send_link_status_broadcast(true).await;
 
         let arc_self = self
@@ -738,12 +738,12 @@ impl ZigbeeStack {
 
             match timeout(RESET_NOTIFICATION_TIMEOUT, reset_rx.recv()).await {
                 Ok(Some(status)) => {
-                    log::info!("RCP reset complete: {status:?}");
+                    tracing::info!("RCP reset complete: {status:?}");
                     return Ok(());
                 }
                 Ok(None) => panic!("Spinel reset notification sender hung up"),
                 Err(_) => {
-                    log::warn!("No reset notification, attempt {attempt}/{RESET_ATTEMPTS}");
+                    tracing::warn!("No reset notification, attempt {attempt}/{RESET_ATTEMPTS}");
                 }
             }
         }
@@ -848,7 +848,7 @@ impl ZigbeeStack {
                 panic!("Spinel reset notification sender hung up");
             };
 
-            log::error!("RCP reset detected ({status:?}), reprogramming the radio");
+            tracing::error!("RCP reset detected ({status:?}), reprogramming the radio");
 
             // The reset failed every in-flight command, so current lock holders
             // release promptly; holding the lock keeps new transmits and scans off
@@ -856,11 +856,11 @@ impl ZigbeeStack {
             let _radio_lock = self.spinel.lock_radio().await;
 
             while let Err(err) = self.apply_radio_configuration().await {
-                log::error!("Failed to reprogram the radio: {err}, retrying");
+                tracing::error!("Failed to reprogram the radio: {err}, retrying");
                 sleep(RADIO_RECOVERY_RETRY_INTERVAL).await;
             }
 
-            log::info!("Radio reprogrammed, resuming normal operation");
+            tracing::info!("Radio reprogrammed, resuming normal operation");
         }
     }
 
@@ -1017,7 +1017,7 @@ impl ZigbeeStack {
             if let Err(e) = result
                 && e.is_panic()
             {
-                log::error!("Background task panicked: {e}");
+                tracing::error!("Background task panicked: {e}");
             }
         }
 

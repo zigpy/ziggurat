@@ -56,7 +56,7 @@ impl ZigbeeStack {
         let (tsn, request) = match MgmtLqiReq::deserialize(&aps_frame.asdu) {
             Ok(parsed) => parsed,
             Err(err) => {
-                log::warn!("Malformed neighbor table request from {source:?}: {err}");
+                tracing::warn!("Malformed neighbor table request from {source:?}: {err}");
                 return;
             }
         };
@@ -125,7 +125,7 @@ impl ZigbeeStack {
                 .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
                 .await
             {
-                log::warn!("Failed to send a neighbor table response to {source:?}: {err}");
+                tracing::warn!("Failed to send a neighbor table response to {source:?}: {err}");
             }
         });
     }
@@ -142,7 +142,7 @@ impl ZigbeeStack {
         let (tsn, request) = match MgmtRtgReq::deserialize(&aps_frame.asdu) {
             Ok(parsed) => parsed,
             Err(err) => {
-                log::warn!("Malformed routing table request from {source:?}: {err}");
+                tracing::warn!("Malformed routing table request from {source:?}: {err}");
                 return;
             }
         };
@@ -192,7 +192,7 @@ impl ZigbeeStack {
                 .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
                 .await
             {
-                log::warn!("Failed to send a routing table response to {source:?}: {err}");
+                tracing::warn!("Failed to send a routing table response to {source:?}: {err}");
             }
         });
     }
@@ -207,7 +207,7 @@ impl ZigbeeStack {
         let (_tsn, annce) = match DeviceAnnce::deserialize(&aps_frame.asdu) {
             Ok(parsed) => parsed,
             Err(err) => {
-                log::warn!("Malformed device announcement from {source:?}: {err}");
+                tracing::warn!("Malformed device announcement from {source:?}: {err}");
                 return;
             }
         };
@@ -249,7 +249,7 @@ impl ZigbeeStack {
         let (tsn, annce) = match ParentAnnce::deserialize(&aps_frame.asdu) {
             Ok(parsed) => parsed,
             Err(err) => {
-                log::warn!("Malformed parent announcement from {source:?}: {err}");
+                tracing::warn!("Malformed parent announcement from {source:?}: {err}");
                 return;
             }
         };
@@ -276,7 +276,7 @@ impl ZigbeeStack {
             return;
         }
 
-        log::info!(
+        tracing::info!(
             "Claiming {} children back from the parent announcement of {source:?}",
             claimed.len()
         );
@@ -296,7 +296,9 @@ impl ZigbeeStack {
                 .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
                 .await
             {
-                log::warn!("Failed to send a parent announcement response to {source:?}: {err}");
+                tracing::warn!(
+                    "Failed to send a parent announcement response to {source:?}: {err}"
+                );
             }
         });
     }
@@ -333,7 +335,7 @@ impl ZigbeeStack {
         let (_tsn, response) = match ParentAnnceRsp::deserialize(&aps_frame.asdu) {
             Ok(parsed) => parsed,
             Err(err) => {
-                log::warn!("Malformed parent announcement response from {source:?}: {err}");
+                tracing::warn!("Malformed parent announcement response from {source:?}: {err}");
                 return;
             }
         };
@@ -401,7 +403,7 @@ impl ZigbeeStack {
                 return;
             }
 
-            log::info!(
+            tracing::info!(
                 "Announcing {} end device children to the network",
                 chunk.len()
             );
@@ -418,7 +420,7 @@ impl ZigbeeStack {
                 )
                 .await
             {
-                log::warn!("Failed to broadcast a parent announcement: {err}");
+                tracing::warn!("Failed to broadcast a parent announcement: {err}");
             }
 
             if remaining.as_ref().is_some_and(Vec::is_empty) {

@@ -670,7 +670,7 @@ impl SpinelProtocol {
                 .position(|&x| x == HdlcSpecial::Flag as u8)
             else {
                 if self.buffer.len() > MAX_HDLC_BUFFER_SIZE {
-                    log::warn!(
+                    tracing::warn!(
                         "Discarding {} buffered bytes without an HDLC flag, resyncing",
                         self.buffer.len()
                     );
@@ -713,7 +713,7 @@ impl SpinelProtocol {
     }
 
     pub fn handle_inbound_bytes(&mut self, bytes: &[u8]) {
-        log::trace!("RX bytes: {bytes:?}");
+        tracing::trace!("RX bytes: {bytes:?}");
         self.buffer.extend(bytes);
 
         // The scratch is moved out of `self` so the routing below can borrow the
@@ -726,7 +726,7 @@ impl SpinelProtocol {
                     self.handle_inbound_frame(header, command_id, payload);
                 }
                 Err(err) => {
-                    log::warn!("Failed to parse Spinel frame: {err:?}");
+                    tracing::warn!("Failed to parse Spinel frame: {err:?}");
                 }
             }
         }
@@ -742,7 +742,7 @@ impl SpinelProtocol {
         command_id: SpinelCommandId,
         payload: &[u8],
     ) {
-        log::debug!("RX: {header:?} {command_id:?} {payload:02X?}");
+        tracing::debug!("RX: {header:?} {command_id:?} {payload:02X?}");
         let tid = header.transaction_id;
 
         if tid == 0 {
@@ -769,16 +769,16 @@ impl SpinelProtocol {
                             None => {
                                 // Expected for e.g. the MacScanState=IDLE update at
                                 // the end of each scanned channel
-                                log::debug!("No receiver for property update: {property_id:?}");
+                                tracing::debug!("No receiver for property update: {property_id:?}");
                             }
                         }
                     }
                     None => {
-                        log::warn!("Failed to parse PropValueIs frame: {payload:02X?}");
+                        tracing::warn!("Failed to parse PropValueIs frame: {payload:02X?}");
                     }
                 }
             } else {
-                log::warn!("Unhandled unsolicited frame: {command_id:?} {payload:02X?}");
+                tracing::warn!("Unhandled unsolicited frame: {command_id:?} {payload:02X?}");
             }
         } else if let Some(sender) = self.pending_frames.remove(&tid) {
             let _ = sender.send(SpinelFrame {
@@ -787,7 +787,7 @@ impl SpinelProtocol {
                 payload: payload.to_vec(),
             });
         } else {
-            log::warn!("Unsolicited or unmatched frame: {command_id:?} {payload:02X?}");
+            tracing::warn!("Unsolicited or unmatched frame: {command_id:?} {payload:02X?}");
         }
     }
 
@@ -804,22 +804,22 @@ impl SpinelProtocol {
                 {
                     Some(status) => status,
                     None => {
-                        log::warn!("Unknown unsolicited status: {status_int}");
+                        tracing::warn!("Unknown unsolicited status: {status_int}");
                         return;
                     }
                 }
             }
             Err(err) => {
-                log::warn!("Failed to parse unsolicited status: {err:?}");
+                tracing::warn!("Failed to parse unsolicited status: {err:?}");
                 return;
             }
         };
 
         if status.is_reset() {
-            log::error!("RCP announced a reset: {status:?}");
+            tracing::error!("RCP announced a reset: {status:?}");
             self.notify_reset(status);
         } else {
-            log::warn!("Unsolicited status notification: {status:?}");
+            tracing::warn!("Unsolicited status notification: {status:?}");
         }
     }
 

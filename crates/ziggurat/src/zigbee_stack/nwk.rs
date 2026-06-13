@@ -43,7 +43,7 @@ impl ZigbeeStack {
         if !self.state.hack_ignore_broadcast_startup_wait_period
             && (self.state.start_time + self.tunables.broadcast_delivery_time > now)
         {
-            log::debug!("Filtering broadcast, network started too recently.");
+            tracing::debug!("Filtering broadcast, network started too recently.");
             return true;
         }
 
@@ -127,7 +127,7 @@ impl ZigbeeStack {
                 .unwrap()
                 .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
 
-            log::debug!(
+            tracing::debug!(
                 "Incremented frame counter for {relaying_eui64:?} to {}",
                 aux_header.frame_counter
             );
@@ -156,7 +156,7 @@ impl ZigbeeStack {
         if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command
             && nwk_frame.payload.is_empty()
         {
-            log::warn!("Ignoring NWK command frame with an empty payload");
+            tracing::warn!("Ignoring NWK command frame with an empty payload");
             return;
         }
 
@@ -175,7 +175,7 @@ impl ZigbeeStack {
             && !bypasses_transaction_table
         {
             if self.filter_broadcast(nwk_frame, sender_nwk) {
-                log::debug!("Filtering broadcast, stopping further processing");
+                tracing::debug!("Filtering broadcast, stopping further processing");
                 return;
             }
 
@@ -210,11 +210,11 @@ impl ZigbeeStack {
                         match NwkRouteRecordCommand::deserialize(&nwk_frame.payload) {
                             Ok(cmd) => cmd,
                             Err(err) => {
-                                log::warn!("Failed to parse route record command: {err:?}");
+                                tracing::warn!("Failed to parse route record command: {err:?}");
                                 return;
                             }
                         };
-                    log::debug!("Route record command frame received: {route_record_cmd:?}");
+                    tracing::debug!("Route record command frame received: {route_record_cmd:?}");
                     self.state
                         .routing
                         .try_lock_for(MAX_LOCK_DURATION)
@@ -237,10 +237,10 @@ impl ZigbeeStack {
                     self.handle_end_device_timeout_request(nwk_frame);
                 }
                 Err(_) => {
-                    log::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
+                    tracing::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
                 }
                 _ => {
-                    log::warn!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
+                    tracing::warn!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
                 }
             }
         }
@@ -323,7 +323,7 @@ impl ZigbeeStack {
                 .send_nwk_frame(nwk_frame, security, route_directly)
                 .await
                 .unwrap_or_else(|err| {
-                    log::error!("Failed to send NWK frame: {err}");
+                    tracing::error!("Failed to send NWK frame: {err}");
                 });
         });
     }
@@ -487,7 +487,7 @@ impl ZigbeeStack {
                 .unwrap()
                 .remove_route_record(destination)
             {
-                log::info!("Removed source route to {destination:?} after delivery failure");
+                tracing::info!("Removed source route to {destination:?} after delivery failure");
             }
 
             // Failed deliveries push the MTORR scheduler toward an early
@@ -616,13 +616,13 @@ impl ZigbeeStack {
                     break;
                 }
                 Err(e) => {
-                    log::warn!("Failed to send unicast frame: {e}");
+                    tracing::warn!("Failed to send unicast frame: {e}");
 
                     if attempt + 1 > self.tunables.unicast_retries {
-                        log::error!("Failed to send unicast frame after {attempt} attempts");
+                        tracing::error!("Failed to send unicast frame after {attempt} attempts");
                         return Err(e);
                     }
-                    log::debug!(
+                    tracing::debug!(
                         "Retrying unicast frame send, attempt {} of {}",
                         attempt,
                         self.tunables.unicast_retries
@@ -668,7 +668,7 @@ impl ZigbeeStack {
         for attempt in 0..=self.tunables.max_broadcast_retries {
             if attempt > 0 {
                 if self.await_broadcast_passive_acks(key).await {
-                    log::debug!("Broadcast {key:?} passively acknowledged");
+                    tracing::debug!("Broadcast {key:?} passively acknowledged");
                     return Ok(());
                 }
 
@@ -684,11 +684,11 @@ impl ZigbeeStack {
 
                 // Acks may have trickled in during the jitter sleep
                 if self.broadcast_passively_acked(key) {
-                    log::debug!("Broadcast {key:?} passively acknowledged");
+                    tracing::debug!("Broadcast {key:?} passively acknowledged");
                     return Ok(());
                 }
 
-                log::debug!(
+                tracing::debug!(
                     "Broadcast {key:?} is missing passive acks, retransmitting \
                      (attempt {attempt} of {})",
                     self.tunables.max_broadcast_retries,
@@ -789,7 +789,7 @@ impl ZigbeeStack {
         // zero is never retransmitted
         nwk_frame.nwk_header.radius = nwk_frame.nwk_header.radius.saturating_sub(1);
         if nwk_frame.nwk_header.radius == 0 {
-            log::debug!("Not relaying frame, radius is exhausted");
+            tracing::debug!("Not relaying frame, radius is exhausted");
             return;
         }
 
@@ -810,7 +810,7 @@ impl ZigbeeStack {
             {
                 Ok(cmd) => cmd,
                 Err(err) => {
-                    log::warn!("Dropping malformed transiting route record: {err:?}");
+                    tracing::warn!("Dropping malformed transiting route record: {err:?}");
                     return;
                 }
             };
@@ -830,7 +830,7 @@ impl ZigbeeStack {
                 destination
             } else {
                 if source_route.relays.get(index) != Some(&self.state.network_address) {
-                    log::debug!("Dropping source routed frame not addressed through us");
+                    tracing::debug!("Dropping source routed frame not addressed through us");
                     return;
                 }
 
@@ -867,13 +867,13 @@ impl ZigbeeStack {
             match next_hop {
                 Some(next_hop) => next_hop,
                 None => {
-                    log::debug!("No active route to relay frame to {destination:?}, dropping");
+                    tracing::debug!("No active route to relay frame to {destination:?}, dropping");
                     return;
                 }
             }
         };
 
-        log::debug!(
+        tracing::debug!(
             "Relaying frame from {:?} to {destination:?} via {next_hop_address:?}",
             nwk_frame.nwk_header.source
         );
@@ -893,7 +893,7 @@ impl ZigbeeStack {
                 )
                 .await
             {
-                log::warn!(
+                tracing::warn!(
                     "Failed to relay frame to {destination:?} via {next_hop_address:?}: {err}"
                 );
                 arc_self.handle_relay_failure(&nwk_frame, next_hop_address);
@@ -957,7 +957,7 @@ impl ZigbeeStack {
 
         relayed_frame.nwk_header.radius = relayed_frame.nwk_header.radius.saturating_sub(1);
         if relayed_frame.nwk_header.radius == 0 {
-            log::debug!("Not relaying broadcast, radius is exhausted");
+            tracing::debug!("Not relaying broadcast, radius is exhausted");
             return;
         }
 
@@ -986,7 +986,7 @@ impl ZigbeeStack {
             for attempt in 0..=arc_self.tunables.max_broadcast_retries {
                 if attempt > 0 {
                     if arc_self.await_broadcast_passive_acks(key).await {
-                        log::debug!("Relayed broadcast {key:?} passively acknowledged");
+                        tracing::debug!("Relayed broadcast {key:?} passively acknowledged");
                         return;
                     }
 
@@ -1002,7 +1002,7 @@ impl ZigbeeStack {
 
                     // Acks may have trickled in during the jitter sleep
                     if arc_self.broadcast_passively_acked(key) {
-                        log::debug!("Relayed broadcast {key:?} passively acknowledged");
+                        tracing::debug!("Relayed broadcast {key:?} passively acknowledged");
                         return;
                     }
                 }
@@ -1014,7 +1014,7 @@ impl ZigbeeStack {
                     )
                     .await
                 {
-                    log::warn!("Failed to relay broadcast: {err}");
+                    tracing::warn!("Failed to relay broadcast: {err}");
                 }
             }
         });

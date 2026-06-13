@@ -37,12 +37,12 @@ impl ZigbeeStack {
         let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing route reply command: {e:?}");
+                tracing::warn!("Error parsing route reply command: {e:?}");
                 return;
             }
         };
 
-        log::debug!("Route reply command frame: {route_reply_cmd:?}");
+        tracing::debug!("Route reply command frame: {route_reply_cmd:?}");
 
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
@@ -55,12 +55,12 @@ impl ZigbeeStack {
             .link(nwk_frame.nwk_header.source);
 
         let Some(sender_link) = sender_link else {
-            log::debug!("Ignoring route reply from unknown neighbor");
+            tracing::debug!("Ignoring route reply from unknown neighbor");
             return;
         };
 
         if sender_link.outgoing_cost == 0 {
-            log::debug!("Ignoring route reply from neighbor with zero outgoing cost");
+            tracing::debug!("Ignoring route reply from neighbor with zero outgoing cost");
             return;
         }
 
@@ -103,7 +103,7 @@ impl ZigbeeStack {
             .link(next_hop_nwk);
 
         let Some(next_hop_link) = next_hop_link else {
-            log::warn!("Next hop neighbor not found in neighbor table");
+            tracing::warn!("Next hop neighbor not found in neighbor table");
             return;
         };
 
@@ -140,12 +140,14 @@ impl ZigbeeStack {
         let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing route request command: {e:?}");
+                tracing::warn!("Error parsing route request command: {e:?}");
                 return;
             }
         };
 
-        log::debug!("Route request command frame (sender {sender_nwk:?}): {route_request_cmd:?}");
+        tracing::debug!(
+            "Route request command frame (sender {sender_nwk:?}): {route_request_cmd:?}"
+        );
 
         let network_address = self.state.network_address;
         let many_to_one = route_request_cmd.many_to_one != NwkRouteRequestManyToOne::NotManyToOne;
@@ -160,12 +162,12 @@ impl ZigbeeStack {
 
         let Some(sender_link) = sender_link else {
             // Can we do anything here? Broadcast an unsolicited link status?
-            log::debug!("Route request relayer {sender_nwk:?} not found in neighbor table");
+            tracing::debug!("Route request relayer {sender_nwk:?} not found in neighbor table");
             return;
         };
 
         if sender_link.outgoing_cost == 0 {
-            log::warn!("Path cost to neighbor is 0, not sending route reply");
+            tracing::warn!("Path cost to neighbor is 0, not sending route reply");
             return;
         }
 
@@ -257,7 +259,7 @@ impl ZigbeeStack {
         let rebroadcast_radius = nwk_frame.nwk_header.radius.saturating_sub(1);
 
         if rebroadcast_radius == 0 {
-            log::debug!("Not relaying route request, re-broadcast radius is 0");
+            tracing::debug!("Not relaying route request, re-broadcast radius is 0");
             return;
         }
 
@@ -320,7 +322,7 @@ impl ZigbeeStack {
                     .transmit_broadcast_nwk_frame(nwk_frame.clone(), NwkSecurityMode::NetworkKey)
                     .await
                 {
-                    log::warn!("Failed to broadcast route request: {err}");
+                    tracing::warn!("Failed to broadcast route request: {err}");
                 }
             }
         });
@@ -338,7 +340,7 @@ impl ZigbeeStack {
             .unwrap()
             .begin_many_to_one_advertisement(Instant::now().into_std());
 
-        log::debug!("Sending many-to-one route request {route_request_identifier}");
+        tracing::debug!("Sending many-to-one route request {route_request_identifier}");
 
         let many_to_one_request_frame = self
             .nwk_command_frame(
@@ -362,7 +364,7 @@ impl ZigbeeStack {
             .transmit_broadcast_nwk_frame(many_to_one_request_frame, NwkSecurityMode::NetworkKey)
             .await
         {
-            log::warn!("Failed to broadcast many-to-one route request: {err}");
+            tracing::warn!("Failed to broadcast many-to-one route request: {err}");
         }
     }
 
@@ -467,12 +469,12 @@ impl ZigbeeStack {
         let network_status_cmd = match NwkNetworkStatusCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing network status command: {e:?}");
+                tracing::warn!("Error parsing network status command: {e:?}");
                 return;
             }
         };
 
-        log::info!(
+        tracing::info!(
             "Network status from {:?}: {network_status_cmd:?}",
             nwk_frame.nwk_header.source
         );
@@ -495,13 +497,13 @@ impl ZigbeeStack {
                 drop(routing);
 
                 if removed_route {
-                    log::info!(
+                    tracing::info!(
                         "Removed failed route to {:?}",
                         network_status_cmd.network_address
                     );
                 }
                 if removed_record {
-                    log::info!(
+                    tracing::info!(
                         "Removed failed source route to {:?}",
                         network_status_cmd.network_address
                     );
@@ -518,7 +520,7 @@ impl ZigbeeStack {
                 self.handle_address_conflict(network_status_cmd.network_address, false);
             }
             _ => {
-                log::warn!("Unhandled network status: {network_status_cmd:?}");
+                tracing::warn!("Unhandled network status: {network_status_cmd:?}");
             }
         }
     }
@@ -540,7 +542,7 @@ impl ZigbeeStack {
                 .route_status(destination)
                 .is_none()
         {
-            log::debug!("Starting route discovery for NWK {destination:?}");
+            tracing::debug!("Starting route discovery for NWK {destination:?}");
             self.send_route_discovery(destination).await;
         }
 
@@ -555,7 +557,7 @@ impl ZigbeeStack {
             .route_status(destination)
             .unwrap_or(Status::Inactive);
 
-        log::debug!("Routing table status for {destination:?}: {route_entry_status:?}");
+        tracing::debug!("Routing table status for {destination:?}: {route_entry_status:?}");
 
         match route_entry_status {
             Status::Active => {
@@ -568,7 +570,9 @@ impl ZigbeeStack {
 
                 // The same concurrent teardown can strike between the two reads
                 if let Some(next_hop) = next_hop {
-                    log::debug!("Using existing next hop for NWK {destination:?}: {next_hop:?}");
+                    tracing::debug!(
+                        "Using existing next hop for NWK {destination:?}: {next_hop:?}"
+                    );
                     return Ok(next_hop);
                 }
 
@@ -612,7 +616,7 @@ impl ZigbeeStack {
             match deadline {
                 Some(deadline) => deadline - Instant::now().into_std(),
                 None => {
-                    log::warn!("No route discovery entry found for {destination:?}");
+                    tracing::warn!("No route discovery entry found for {destination:?}");
                     return Err(ZigbeeStackError::RouteDiscoveryFailure(
                         "No discovery entry found".to_string(),
                     ));
@@ -620,16 +624,16 @@ impl ZigbeeStack {
             }
         };
 
-        log::debug!(
+        tracing::debug!(
             "Waiting for route discovery notification for NWK {destination:?} with timeout {discovery_timeout:?}"
         );
 
         match timeout(discovery_timeout, rx.recv()).await {
             Ok(_) => {
-                log::debug!("Route discovery completed for NWK {destination:#?}");
+                tracing::debug!("Route discovery completed for NWK {destination:#?}");
             }
             Err(err) => {
-                log::debug!("Route discovery timed out");
+                tracing::debug!("Route discovery timed out");
                 self.state
                     .routing
                     .try_lock_for(MAX_LOCK_DURATION)
@@ -653,7 +657,7 @@ impl ZigbeeStack {
 
     #[allow(clippy::significant_drop_tightening)]
     pub async fn send_route_discovery(&self, destination: Nwk) {
-        log::debug!("Sending route discovery for NWK {destination:?}");
+        tracing::debug!("Sending route discovery for NWK {destination:?}");
 
         let route_request_identifier = self
             .state

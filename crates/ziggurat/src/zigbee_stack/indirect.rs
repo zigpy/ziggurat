@@ -140,7 +140,7 @@ impl ZigbeeStack {
             return false;
         };
 
-        log::debug!(
+        tracing::debug!(
             "Delivering queued indirect frame to {:?}",
             delivery.destination
         );
@@ -177,7 +177,7 @@ impl ZigbeeStack {
             // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
             // so a failed transmit goes back to the head of the queue for the next poll
             Err(err) if Instant::now().into_std() < transaction.expires_at => {
-                log::warn!("Indirect transmit to {destination:?} failed ({err}), requeueing");
+                tracing::warn!("Indirect transmit to {destination:?} failed ({err}), requeueing");
                 self.state
                     .indirect_queue
                     .try_lock_for(MAX_LOCK_DURATION)
@@ -240,7 +240,7 @@ impl ZigbeeStack {
             return;
         }
 
-        log::info!("Poll from unknown device {nwk:?}, queueing a leave request");
+        tracing::info!("Poll from unknown device {nwk:?}, queueing a leave request");
 
         // Spec 3.6.10.4.1: no destination IEEE address is included
         let mut nwk_frame = self
@@ -267,7 +267,7 @@ impl ZigbeeStack {
                 arc_self.finish_unicast_nwk_frame(nwk_frame, nwk, NwkSecurityMode::NetworkKey);
 
             if let Err(err) = arc_self.queue_indirect_frame(destination, frame).await {
-                log::debug!("Queued leave to {nwk:?} was not extracted: {err}");
+                tracing::debug!("Queued leave to {nwk:?} was not extracted: {err}");
             }
         });
     }
@@ -283,7 +283,7 @@ impl ZigbeeStack {
             // reset recovery path, which rewrites the table with the rest of the
             // radio configuration
             if let Err(err) = self.write_src_match_table().await {
-                log::error!("Failed to write the source address match table: {err}");
+                tracing::error!("Failed to write the source address match table: {err}");
             }
         }
     }
@@ -306,7 +306,7 @@ impl ZigbeeStack {
             queue.queued_addresses(address_map.map())
         };
 
-        log::debug!(
+        tracing::debug!(
             "Writing source address match table: {:?} {:?}",
             table.short_addresses,
             table.extended_addresses
@@ -395,7 +395,7 @@ impl ZigbeeStack {
         }
 
         for (destination, transaction) in expired {
-            log::warn!("Indirect transaction to {destination:?} expired without a poll");
+            tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
             let _ = transaction
                 .completion
                 .send(Err(ZigbeeStackError::IndirectExpired { destination }));
@@ -413,7 +413,7 @@ impl ZigbeeStack {
             .evict_timed_out_children(Instant::now().into_std());
 
         for (eui64, nwk) in evicted {
-            log::warn!("Child {eui64:?} ({nwk:?}) timed out without a keepalive, evicting");
+            tracing::warn!("Child {eui64:?} ({nwk:?}) timed out without a keepalive, evicting");
 
             // The address map entry and any negotiated link key are kept so that the
             // device can rejoin later (mirrors `handle_leave`)

@@ -356,7 +356,7 @@ impl ApsSecurity {
             if let Some(&minimum) = self.incoming_frame_counters.get(&source)
                 && aux_header.frame_counter < minimum
             {
-                log::warn!(
+                tracing::warn!(
                     "Rejecting replayed APS frame counter {} from {source:?}",
                     aux_header.frame_counter
                 );

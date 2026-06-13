@@ -36,7 +36,7 @@ impl ZigbeeStack {
             .eui64_for(nwk_source);
 
         if eui64.is_none() {
-            log::warn!("Cannot resolve the EUI64 of {nwk_source:?} to decrypt an APS frame");
+            tracing::warn!("Cannot resolve the EUI64 of {nwk_source:?} to decrypt an APS frame");
         }
 
         eui64
@@ -91,7 +91,7 @@ impl ZigbeeStack {
     /// Resolve an inbound APS ACK against the pending transmissions waiting for it.
     pub(super) fn handle_aps_ack(&self, nwk_frame: &NwkFrame, ack: &ApsAckFrame) {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
-        log::debug!("Received APS ack: {ack_data:?}");
+        tracing::debug!("Received APS ack: {ack_data:?}");
 
         let tx = self
             .state
@@ -110,7 +110,7 @@ impl ZigbeeStack {
         nwk_frame: &NwkFrame,
         source_eui64: Option<Eui64>,
     ) {
-        log::debug!("Sending back an APS ACK");
+        tracing::debug!("Sending back an APS ACK");
 
         // An ACK mirrors the security of the frame it acknowledges
         let secured = aps_frame.frame_control.security;
@@ -133,7 +133,7 @@ impl ZigbeeStack {
 
         let payload = if secured {
             let Some(source_eui64) = source_eui64 else {
-                log::warn!("Cannot send a secured APS ACK without the originator's EUI64");
+                tracing::warn!("Cannot send a secured APS ACK without the originator's EUI64");
                 return;
             };
 
@@ -145,7 +145,7 @@ impl ZigbeeStack {
                 .encrypt_ack(source_eui64, &ack_frame);
 
             let Some(encrypted) = encrypted else {
-                log::warn!("No usable link key to secure an APS ACK for {source_eui64:?}");
+                tracing::warn!("No usable link key to secure an APS ACK for {source_eui64:?}");
                 return;
             };
 
@@ -241,7 +241,7 @@ impl ZigbeeStack {
             },
         };
 
-        log::debug!("Prepared APS frame: {aps_frame:?}");
+        tracing::debug!("Prepared APS frame: {aps_frame:?}");
 
         let aps_payload = if let Some(destination_eui64) = aps_security {
             let encrypted = self
@@ -289,7 +289,7 @@ impl ZigbeeStack {
 
         let (ack_tx, ack_rx) = oneshot::channel();
 
-        log::debug!("APS ACK requested, waiting for {ack_data:?}");
+        tracing::debug!("APS ACK requested, waiting for {ack_data:?}");
         {
             self.state
                 .pending_aps_acks
@@ -328,11 +328,11 @@ impl ZigbeeStack {
     pub async fn wait_aps_ack(&self, waiter: ApsAckWaiter) -> Result<(), ZigbeeStackError> {
         match tokio::time::timeout(waiter.timeout, waiter.receiver).await {
             Ok(Ok(())) => {
-                log::debug!("APS ACK received");
+                tracing::debug!("APS ACK received");
                 Ok(())
             }
             Ok(Err(_)) | Err(_) => {
-                log::warn!("APS ACK timed out for {:?}", waiter.ack_data);
+                tracing::warn!("APS ACK timed out for {:?}", waiter.ack_data);
                 self.state
                     .pending_aps_acks
                     .try_lock_for(MAX_LOCK_DURATION)

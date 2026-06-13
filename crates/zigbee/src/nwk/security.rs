@@ -113,17 +113,17 @@ impl NwkSecurity {
         frame_counter: u32,
     ) -> Option<Key> {
         if key_sequence_number != self.active_key_seq_number {
-            log::debug!("Ignoring frame, key sequence number is unknown");
+            tracing::debug!("Ignoring frame, key sequence number is unknown");
             return None;
         }
 
         match self.primary.incoming_frame_counter_set.get(&sender) {
             None => {
-                log::debug!("Unknown sender, not validating frame counter");
+                tracing::debug!("Unknown sender, not validating frame counter");
             }
             Some(&last_stored_frame_counter) => {
                 if frame_counter <= last_stored_frame_counter {
-                    log::debug!(
+                    tracing::debug!(
                         "Ignoring frame, frame counter has rolled backward from \
                          {last_stored_frame_counter} to {frame_counter}"
                     );

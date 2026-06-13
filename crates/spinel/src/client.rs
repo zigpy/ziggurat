@@ -273,11 +273,11 @@ impl SpinelClient {
                         protocol.handle_inbound_bytes(&buffer[..n])
                     }
                     Ok(_) => {
-                        log::error!("Serial port EOF, exiting");
+                        tracing::error!("Serial port EOF, exiting");
                         std::process::exit(1);
                     }
                     Err(e) => {
-                        log::error!("Serial port read failed ({e}), exiting");
+                        tracing::error!("Serial port read failed ({e}), exiting");
                         std::process::exit(1);
                     }
                 }
@@ -306,7 +306,7 @@ impl SpinelClient {
         hdlc_escape_into(frame_scratch, hdlc_scratch);
         hdlc_scratch.push(HdlcSpecial::Flag as u8);
 
-        log::trace!("Writing {hdlc_scratch:02X?}");
+        tracing::trace!("Writing {hdlc_scratch:02X?}");
 
         port.write_all(hdlc_scratch)
             .await
@@ -343,7 +343,7 @@ impl SpinelClient {
                 .prepare_request(command_id, payload)
         };
 
-        log::debug!("Sending frame {frame:?}");
+        tracing::debug!("Sending frame {frame:?}");
 
         self.send_frame(&frame).await?;
 
@@ -369,7 +369,7 @@ impl SpinelClient {
                 let timeouts = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
                 if timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
                     self.consecutive_timeouts.store(0, Ordering::Relaxed);
-                    log::error!(
+                    tracing::error!(
                         "RCP unresponsive after {timeouts} consecutive command timeouts, triggering reset recovery"
                     );
                     self.protocol
@@ -448,7 +448,7 @@ impl SpinelClient {
             }
         })?;
 
-        log::debug!(
+        tracing::debug!(
             "Setting property {property_id:?}={value:02X?}, result {rsp_property_id:?}={payload:02X?}"
         );
 

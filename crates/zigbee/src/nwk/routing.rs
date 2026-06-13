@@ -254,7 +254,7 @@ impl Routing {
     pub fn invalidate_via(&mut self, next_hop: Nwk) {
         for entry in self.route_table.values_mut() {
             if entry.status == Status::Active && entry.next_hop_address == next_hop {
-                log::info!(
+                tracing::info!(
                     "Invalidating route to {:?} via unreachable next hop {next_hop:?}",
                     entry.destination
                 );
@@ -342,7 +342,7 @@ impl Routing {
                 destination_address: destination,
             });
 
-        log::debug!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
+        tracing::debug!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
 
         request_id
     }
@@ -405,7 +405,7 @@ impl Routing {
         match self.discovery_table.get_mut(&(originator, request_id)) {
             Some(discovery_entry) => {
                 if updated_path_cost >= discovery_entry.forward_cost {
-                    log::debug!("Ignoring route request without a better cost");
+                    tracing::debug!("Ignoring route request without a better cost");
                     return false;
                 }
 
@@ -474,12 +474,12 @@ impl Routing {
         updated_path_cost: u8,
     ) -> RouteReplyDisposition {
         let Some(discovery_entry) = self.discovery_table.get_mut(&(originator, request_id)) else {
-            log::debug!("Route reply for unknown route discovery, ignoring");
+            tracing::debug!("Route reply for unknown route discovery, ignoring");
             return RouteReplyDisposition::Drop;
         };
 
         let Some(routing_entry) = self.route_table.get_mut(&responder) else {
-            log::debug!("Route reply with unknown responder, ignoring");
+            tracing::debug!("Route reply with unknown responder, ignoring");
             return RouteReplyDisposition::Drop;
         };
 
@@ -488,7 +488,7 @@ impl Routing {
             if routing_entry.status == Status::Active
                 && updated_path_cost >= discovery_entry.residual_cost
             {
-                log::debug!(
+                tracing::debug!(
                     "Ignoring route reply for us with higher cost ({} > {})",
                     updated_path_cost,
                     discovery_entry.residual_cost
@@ -496,7 +496,7 @@ impl Routing {
                 return RouteReplyDisposition::Drop;
             }
 
-            log::debug!(
+            tracing::debug!(
                 "Updating routing entry for NWK {responder:?} ({:?}) to next hop {sender:?} (residual cost {updated_path_cost})",
                 routing_entry.status,
             );
@@ -511,7 +511,7 @@ impl Routing {
         // Otherwise, we need to decide if we need to update our own routes and possibly
         // relay the frame
         if updated_path_cost >= discovery_entry.residual_cost {
-            log::debug!(
+            tracing::debug!(
                 "Ignoring unsolicited route reply with higher cost ({} > {})",
                 updated_path_cost,
                 discovery_entry.residual_cost
@@ -548,7 +548,7 @@ impl Routing {
 
         self.discovery_table.retain(|_, entry| {
             if entry.expiration_time <= now {
-                log::debug!("Removing expired route discovery entry: {entry:?}");
+                tracing::debug!("Removing expired route discovery entry: {entry:?}");
                 expired_destinations.push(entry.destination_address);
                 false
             } else {
@@ -570,7 +570,9 @@ impl Routing {
                 .get(&destination)
                 .is_some_and(|entry| entry.status == Status::DiscoveryUnderway)
             {
-                log::debug!("Removing routing entry for expired route discovery: {destination:?}");
+                tracing::debug!(
+                    "Removing routing entry for expired route discovery: {destination:?}"
+                );
                 self.route_table.remove(&destination);
             }
         }

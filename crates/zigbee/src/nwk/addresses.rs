@@ -45,9 +45,9 @@ impl AddressMap {
         }
 
         match self.map.insert(eui64, nwk) {
-            None => log::debug!("Added new address mapping: {eui64:?} -> {nwk:?}"),
+            None => tracing::debug!("Added new address mapping: {eui64:?} -> {nwk:?}"),
             Some(old_nwk) => {
-                log::warn!("Updated address mapping: {eui64:?} -> {nwk:?} (was {old_nwk:?})")
+                tracing::warn!("Updated address mapping: {eui64:?} -> {nwk:?} (was {old_nwk:?})")
             }
         }
 
@@ -113,7 +113,7 @@ impl AddressMap {
         self.map.retain(|&eui64, &mut mapped| {
             let stale = mapped == nwk && eui64 != owner;
             if stale {
-                log::info!(
+                tracing::info!(
                     "Forgetting stale address mapping {eui64:?} -> {nwk:?}, \
                      the address now belongs to {owner:?}"
                 );

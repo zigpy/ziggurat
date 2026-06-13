@@ -17,7 +17,7 @@ use super::{MAX_LOCK_DURATION, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, Zig
 
 impl ZigbeeStack {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
-        log::debug!(
+        tracing::debug!(
             "Received 802.15.4 command frame: {:?}",
             command_frame.command_id
         );
@@ -47,7 +47,7 @@ impl ZigbeeStack {
 
     pub fn send_802154_beacon(&self) {
         let permitting_joins = self.permitting_joins();
-        log::debug!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
+        tracing::debug!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
 
         let end_device_capacity = {
             self.state
@@ -128,7 +128,7 @@ impl ZigbeeStack {
     ) -> Option<NwkFrame> {
         // 802.15.4 encrypted frames can't be Zigbee NWK
         if data_frame.header.frame_control.security_enabled {
-            log::debug!("Ignoring frame, 802.15.4 security bit is enabled");
+            tracing::debug!("Ignoring frame, 802.15.4 security bit is enabled");
             return None;
         }
 
@@ -137,11 +137,13 @@ impl ZigbeeStack {
 
         match data_frame.header.dest_pan_id {
             None => {
-                log::debug!("Ignoring frame, destination PAN ID is not present");
+                tracing::debug!("Ignoring frame, destination PAN ID is not present");
                 return None;
             }
             Some(dest_pan_id) if dest_pan_id != pan_id => {
-                log::debug!("Ignoring frame, PAN ID does not match {dest_pan_id:?} != {pan_id:?}");
+                tracing::debug!(
+                    "Ignoring frame, PAN ID does not match {dest_pan_id:?} != {pan_id:?}"
+                );
                 return None;
             }
             Some(_) => (),
@@ -155,7 +157,7 @@ impl ZigbeeStack {
                     if nwk == self.state.network_address || nwk == Nwk(0xFFFF) => {}
                 Some(Ieee802154Address::Eui64(eui64)) if eui64 == self.state.ieee_address => {}
                 _ => {
-                    log::debug!("Ignoring frame, not addressed to us at the MAC layer");
+                    tracing::debug!("Ignoring frame, not addressed to us at the MAC layer");
                     return None;
                 }
             }
@@ -165,7 +167,7 @@ impl ZigbeeStack {
         let nwk_frame = match EncryptedNwkFrame::from_bytes(&data_frame.payload) {
             Ok(nwk_frame) => nwk_frame,
             Err(_) => {
-                log::debug!("Ignoring frame, not a NWK frame");
+                tracing::debug!("Ignoring frame, not a NWK frame");
                 return None;
             }
         };
@@ -187,7 +189,7 @@ impl ZigbeeStack {
 
         let aux_header = match nwk_frame.aux_header {
             None => {
-                log::debug!("Ignoring frame, auxiliary header is missing");
+                tracing::debug!("Ignoring frame, auxiliary header is missing");
                 return None;
             }
             Some(ref header) => header,
@@ -195,19 +197,19 @@ impl ZigbeeStack {
 
         // The frame security level is fixed for a given network and transmitted frames will use "0"
         if aux_header.security_control.security_level != NwkSecurityLevel::NoSecurity {
-            log::debug!("Ignoring frame, security level is not 0");
+            tracing::debug!("Ignoring frame, security level is not 0");
             return None;
         }
 
         // Only the network key is supported for now
         if aux_header.security_control.key_id != NwkSecurityHeaderKeyId::NetworkKey {
-            log::debug!("Ignoring frame, key ID is not NetworkKey");
+            tracing::debug!("Ignoring frame, key ID is not NetworkKey");
             return None;
         }
 
         let src_eui64 = match aux_header.extended_source {
             None => {
-                log::debug!("Ignoring frame, extended source is missing");
+                tracing::debug!("Ignoring frame, extended source is missing");
                 return None;
             }
             Some(eui64) => eui64,
@@ -226,24 +228,24 @@ impl ZigbeeStack {
                 aux_header.frame_counter,
             )?;
 
-        log::debug!("Attempting to decrypt {nwk_frame:?}");
+        tracing::debug!("Attempting to decrypt {nwk_frame:?}");
 
         let decrypted_nwk_frame = match nwk_frame.decrypt(&key) {
             Ok(decrypted_frame) => decrypted_frame,
             Err(err) => {
-                log::warn!("Ignoring frame, decryption failed: {err:?}");
+                tracing::warn!("Ignoring frame, decryption failed: {err:?}");
                 return None;
             }
         };
 
-        log::debug!("Decrypted frame: {decrypted_nwk_frame:?}");
+        tracing::debug!("Decrypted frame: {decrypted_nwk_frame:?}");
 
         // NWK frames are always relayed with 16-bit MAC addressing; anything else is
         // malformed and dropped rather than panicking on remote input
         let source_nwk = match data_frame.header.src_address {
             Some(Ieee802154Address::Nwk(nwk)) => nwk,
             _ => {
-                log::warn!(
+                tracing::warn!(
                     "Ignoring NWK frame without a 16-bit MAC source address: {:?}",
                     data_frame.header.src_address
                 );
@@ -300,14 +302,14 @@ impl ZigbeeStack {
             frame
         };
 
-        log::debug!("Sending 802.15.4 frame: {final_frame:?}");
-        log::trace!(
+        tracing::debug!("Sending 802.15.4 frame: {final_frame:?}");
+        tracing::trace!(
             "Sending 802.15.4 frame bytes: {:02X?}",
             final_frame.to_bytes()
         );
 
         if self.state.hack_disable_tx {
-            log::debug!("Not transmitting the frame, TX is disabled");
+            tracing::debug!("Not transmitting the frame, TX is disabled");
             return Ok(());
         }
 
@@ -354,7 +356,7 @@ impl ZigbeeStack {
                 .send_802154_frame(frame)
                 .await
                 .unwrap_or_else(|err| {
-                    log::error!("Failed to send 802.15.4 frame: {err}");
+                    tracing::error!("Failed to send 802.15.4 frame: {err}");
                 });
         });
     }

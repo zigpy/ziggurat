@@ -10,7 +10,7 @@ authors.workspace = true
 ieee-802154 = { path = "../ieee-802154" }
 
 crc_all = "0.2.2"
-log = "0.4.26"
+tracing = "0.1"
 num_enum = "0.7.3"
 thiserror = "2.0.12"
 tokio = { version = "1.43.0", features = ["rt", "time", "sync", "io-util"] }

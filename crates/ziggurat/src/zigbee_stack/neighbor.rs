@@ -36,7 +36,7 @@ impl ZigbeeStack {
     /// keep hijacking its unicasts into our indirect queue. The address map entry and
     /// any negotiated link key are kept, exactly as for a leave.
     pub(super) fn cleanup_moved_child(&self, eui64: Eui64, nwk: Nwk, new_parent: Nwk) {
-        log::info!("Child {eui64:?} ({nwk:?}) is now parented by {new_parent:?}");
+        tracing::info!("Child {eui64:?} ({nwk:?}) is now parented by {new_parent:?}");
 
         self.drop_indirect_transactions(Some(eui64), nwk);
         self.state
@@ -78,17 +78,17 @@ impl ZigbeeStack {
         let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
             Err(e) => {
-                log::warn!("Error parsing link status command: {e:?}");
+                tracing::warn!("Error parsing link status command: {e:?}");
                 return;
             }
         };
 
-        log::debug!("Link status command frame: {link_status_cmd:?}");
+        tracing::debug!("Link status command frame: {link_status_cmd:?}");
 
         self.maybe_age_neighbors();
 
         let Some(source_ieee) = nwk_frame.nwk_header.source_ieee else {
-            log::warn!("Link status command source EUI64 is missing");
+            tracing::warn!("Link status command source EUI64 is missing");
             return;
         };
 
@@ -115,10 +115,10 @@ impl ZigbeeStack {
     }
 
     pub async fn send_link_status_broadcast(&self, empty: bool) {
-        log::debug!("Sending periodic link status broadcast");
+        tracing::debug!("Sending periodic link status broadcast");
 
         if self.state.network_address == Nwk(0xFFFF) {
-            log::debug!("Skipping, stack has not been initialized yet");
+            tracing::debug!("Skipping, stack has not been initialized yet");
             return;
         }
 
@@ -188,7 +188,7 @@ impl ZigbeeStack {
                 .transmit_broadcast_nwk_frame(link_status_frame, NwkSecurityMode::NetworkKey)
                 .await
             {
-                log::warn!("Failed to broadcast link status: {err}");
+                tracing::warn!("Failed to broadcast link status: {err}");
             }
 
             if remaining_link_statuses.is_empty() {

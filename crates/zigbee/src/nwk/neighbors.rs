@@ -312,7 +312,7 @@ impl Neighbors {
         if let Some(entry) = self.table.get_mut(&eui64)
             && entry.network_address != nwk
         {
-            log::info!(
+            tracing::info!(
                 "Neighbor {eui64:?} changed its network address from {:?} to {nwk:?}",
                 entry.network_address
             );
@@ -503,7 +503,9 @@ impl Neighbors {
                 neighbor.outgoing_cost = 0;
                 stale_neighbors.push(neighbor.network_address);
 
-                log::warn!("Neighbor {neighbor:?} has ceased communicating, resetting link costs")
+                tracing::warn!(
+                    "Neighbor {neighbor:?} has ceased communicating, resetting link costs"
+                )
             }
         }
 
@@ -587,7 +589,7 @@ impl Neighbors {
             .collect::<HashSet<Nwk>>();
 
         let neighbor_entry = self.table.entry(source_ieee).or_insert_with(|| {
-            log::info!("Creating new neighbor entry for {source_ieee:?}");
+            tracing::info!("Creating new neighbor entry for {source_ieee:?}");
 
             let mut entry = TableEntry {
                 extended_address: source_ieee,
@@ -658,7 +660,7 @@ impl Neighbors {
             // nwkcMinRouterBootstrapJitter < nwkcMaxRouterBootstrapJitter
         }
 
-        log::debug!("Updated neighbor table entry: {neighbor_entry:?}");
+        tracing::debug!("Updated neighbor table entry: {neighbor_entry:?}");
 
         let lost_link = previous_outgoing_cost > 0 && neighbor_entry.outgoing_cost == 0;
 

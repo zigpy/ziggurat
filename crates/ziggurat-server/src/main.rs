@@ -1,6 +1,5 @@
 use clap::{Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
-use log::LevelFilter;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -12,6 +11,9 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_serial::{FlowControl, SerialPortBuilderExt};
 use tokio_tungstenite::tungstenite::Message;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
 
 use spinel::client::SpinelClient;
 use zigbee::aps::frame::ApsDeliveryMode;
@@ -257,7 +259,7 @@ impl ZigguratServer {
 
     async fn run_tcp(self: Arc<Self>, listen_addr: &str) -> std::io::Result<()> {
         let listener = TcpListener::bind(listen_addr).await?;
-        log::info!("Listening for WebSocket clients on {listen_addr}");
+        tracing::info!("Listening for WebSocket clients on {listen_addr}");
 
         loop {
             let (socket, addr) = listener.accept().await?;
@@ -273,7 +275,7 @@ impl ZigguratServer {
         }
 
         let listener = UnixListener::bind(path)?;
-        log::info!("Listening for WebSocket clients on unix:{path}");
+        tracing::info!("Listening for WebSocket clients on unix:{path}");
 
         // Peer addresses of UNIX sockets are unnamed: number the clients instead
         for client in 0u64.. {
@@ -292,10 +294,10 @@ impl ZigguratServer {
 
         tokio::spawn(async move {
             if let Err(e) = server.handle_connection(socket, &addr).await {
-                log::warn!("Connection {addr} ended with error: {e}");
+                tracing::warn!("Connection {addr} ended with error: {e}");
             }
 
-            log::info!("Client {addr} disconnected");
+            tracing::info!("Client {addr} disconnected");
         });
     }
 
@@ -336,7 +338,7 @@ impl ZigguratServer {
         let websocket = tokio_tungstenite::accept_async(socket).await?;
         let (mut sink, mut stream) = websocket.split();
 
-        log::info!("Client {addr} connected");
+        tracing::info!("Client {addr} connected");
 
         let (outbound_tx, mut outbound_rx) =
             mpsc::channel::<serde_json::Value>(OUTBOUND_QUEUE_DEPTH);
@@ -377,7 +379,7 @@ impl ZigguratServer {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
-                        log::warn!("Client {forwarder_addr} lagged {count} notifications");
+                        tracing::warn!("Client {forwarder_addr} lagged {count} notifications");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -390,7 +392,7 @@ impl ZigguratServer {
                     let request = match serde_json::from_str::<Request>(&text) {
                         Ok(request) => request,
                         Err(e) => {
-                            log::warn!("Invalid request from {addr}: {e}");
+                            tracing::warn!("Invalid request from {addr}: {e}");
                             let _ = outbound_tx
                                 .send(error_response(0, "invalid_request", e))
                                 .await;
@@ -398,14 +400,14 @@ impl ZigguratServer {
                         }
                     };
 
-                    log::debug!("Request from {addr}: {request:?}");
+                    tracing::debug!("Request from {addr}: {request:?}");
                     outbound_tx.send(event(request.id, "accepted")).await?;
                     self.dispatch(request, outbound_tx.clone());
                 }
                 Ok(Message::Close(_)) => break,
                 Ok(_) => {} // Pings and pongs are handled by tungstenite itself
                 Err(e) => {
-                    log::warn!("WebSocket error from {addr}: {e}");
+                    tracing::warn!("WebSocket error from {addr}: {e}");
                     break;
                 }
             }
@@ -477,7 +479,7 @@ impl ZigguratServer {
         // own receivers with the shared Spinel client
         let old_stack = self.stack.lock().unwrap().take();
         if let Some(old_stack) = old_stack {
-            log::info!("Replacing the running Zigbee stack");
+            tracing::info!("Replacing the running Zigbee stack");
             old_stack.shutdown().await;
         }
 
@@ -486,7 +488,7 @@ impl ZigguratServer {
             old_forwarder.abort();
         }
 
-        log::info!("Initializing Zigbee stack with new settings...");
+        tracing::info!("Initializing Zigbee stack with new settings...");
         let spinel = match self.spinel_client() {
             Ok(s) => s,
             Err(e) => return error_response(id, "serial_port_error", e),
@@ -520,7 +522,7 @@ impl ZigguratServer {
                 aps_security.restore_device_key(entry.partner_ieee, entry.key);
             }
 
-            log::info!(
+            tracing::info!(
                 "Restored {} trust center link keys",
                 aps_security.device_key_count()
             );
@@ -551,7 +553,7 @@ impl ZigguratServer {
         *self.stack.lock().unwrap() = Some(stack);
         *self.notification_forwarder.lock().unwrap() = Some(forwarder);
 
-        log::info!("Zigbee stack initialized and running.");
+        tracing::info!("Zigbee stack initialized and running.");
         response(id, json!({"status": "success"}))
     }
 
@@ -846,7 +848,7 @@ struct Args {
     listen: String,
 
     /// Log level (RUST_LOG still overrides, with per-module filters)
-    #[arg(long, default_value_t = LevelFilter::Debug)]
+    #[arg(long, default_value_t = LevelFilter::DEBUG)]
     log_level: LevelFilter,
 }
 
@@ -855,10 +857,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        env_logger::builder()
-            .format_timestamp_micros()
-            .filter(None, args.log_level)
-            .parse_default_env()
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(args.log_level.to_string()));
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_filter(filter))
             .init();
 
         let server = Arc::new(ZigguratServer::new(SerialConfig {
