@@ -9,6 +9,7 @@ use zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery}
 use spinel::client::TxPriority;
 use std::cmp;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use super::{
     ApsAckData, ApsAckWaiter, MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
@@ -186,6 +187,7 @@ impl ZigbeeStack {
         aps_security: Option<Eui64>,
         priority: TxPriority,
     ) -> Result<Option<ApsAckWaiter>, ZigbeeStackError> {
+        let build_started = Instant::now();
         let asdu = FrameBytes::from_slice(&data).map_err(|_| ZigbeeStackError::PayloadTooLong)?;
 
         let aps_frame = match delivery_mode {
@@ -272,6 +274,16 @@ impl ZigbeeStack {
             .nwk_data_frame(nwk_destination, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
+
+        // Host-side portion only: APS build + encrypt + NWK prep, before any radio
+        // await. The gap to the request's total latency is radio/protocol time.
+        tracing::info!(
+            target: "metrics",
+            path = "send_aps_build",
+            latency_us = build_started.elapsed().as_micros() as u64,
+            destination = ?destination,
+            "send_aps host-build latency",
+        );
 
         if !aps_ack {
             self.send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false, priority)

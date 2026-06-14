@@ -218,7 +218,7 @@ pub struct NwkRejoinCapabilityInformation {
     /// specification.
     reserved2: u1,
     /// This field SHALL have a value of 0. Note that this overrides the default meaning
-    /// specified in [B1] (802.15.4-2020, IEEE Standard for Local and metropolitan area
+    /// specified in \[B1\] (802.15.4-2020, IEEE Standard for Local and metropolitan area
     /// networks--Part 15.4: Low-Rate Wireless Personal Area Networks (LR-WPANs))
     pub security_capability: bool,
     /// This field will have a value of 1 in implementations of this specification.

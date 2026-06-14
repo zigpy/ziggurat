@@ -8,6 +8,7 @@ rust-version = "1.96" # latest as of creating this
 edition = "2024"
 license = "Apache-2.0"
 authors = []
+repository = "https://github.com/zigpy/ziggurat"
 
 [profile.release-with-debug]
 inherits = "release"

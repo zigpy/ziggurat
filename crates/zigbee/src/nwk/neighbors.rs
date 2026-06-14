@@ -56,9 +56,9 @@ pub struct TableEntry {
     /// listing this device has been received.
     pub outgoing_cost: u8,
 
-    /// The number of [`nwkLinkStatusPeriod`] intervals that have passed since
+    /// The number of `nwkLinkStatusPeriod` intervals that have passed since
     /// the last link status command frame was received, up to a maximum value
-    /// of [`nwkRouterAgeLimit`]
+    /// of `nwkRouterAgeLimit`
     // Spec-expected field: `pub age: u8`, we instead keep track of a timestamp
     pub last_link_status_timestamp: Instant,
 
@@ -72,7 +72,7 @@ pub struct TableEntry {
     pub mac_unicast_bytes_transmitted: u32,
     pub mac_unicast_bytes_received: u32,
 
-    /// The number of [`nwkLinkStatusPeriod`] intervals, which elapsed since this router
+    /// The number of `nwkLinkStatusPeriod` intervals, which elapsed since this router
     /// neighbor was added to the neighbor table. This value is only maintained on
     /// routers and the coordinator and is only valid for entries with a relationship
     /// of ‘parent’, ‘sibling’ or ‘backbone mesh sibling’. This is a saturating

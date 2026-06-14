@@ -1,13 +1,15 @@
 [package]
-name = "spinel"
+name = "ziggurat-spinel"
 version = "0.1.0"
+description = "OpenThread Spinel protocol codec and RCP client for the Ziggurat Zigbee stack"
 rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 
 [dependencies]
-ieee-802154 = { path = "../ieee-802154" }
+ieee-802154 = { package = "ziggurat-ieee-802154", path = "../ieee-802154", version = "0.1.0" }
 
 crc_all = "0.2.2"
 tracing = "0.1"
@@ -19,3 +21,4 @@ tokio-serial = "5.4"
 [dev-dependencies]
 hex-literal = "1.1.0"
 rand = "0.10.1"
+tokio = { version = "1.43.0", features = ["macros", "rt", "time", "sync"] }

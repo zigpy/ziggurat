@@ -10,8 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 abstract-bits = "0.2.0"
-ieee-802154 = { path = "../crates/ieee-802154" }
-zigbee = { path = "../crates/zigbee" }
+ieee-802154 = { package = "ziggurat-ieee-802154", path = "../crates/ieee-802154" }
+zigbee = { package = "ziggurat-zigbee", path = "../crates/zigbee" }
 
 [[bin]]
 name = "ieee802154_frame"

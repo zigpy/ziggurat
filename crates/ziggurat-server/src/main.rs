@@ -4,14 +4,14 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_serial::{FlowControl, SerialPortBuilderExt};
 use tokio_tungstenite::tungstenite::Message;
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -659,6 +659,7 @@ impl ZigguratServer {
         params: serde_json::Value,
         outbound: &mpsc::Sender<serde_json::Value>,
     ) -> serde_json::Value {
+        let received_at = Instant::now();
         let request: SendApsRequest = match serde_json::from_value(params) {
             Ok(request) => request,
             Err(e) => return error_response(id, "invalid_request", e),
@@ -732,6 +733,14 @@ impl ZigguratServer {
             Ok(ack_waiter) => ack_waiter,
             Err(e) => return error_response(id, "transmit_failed", e),
         };
+
+        tracing::info!(
+            target: "metrics",
+            path = "send_aps",
+            latency_us = received_at.elapsed().as_micros() as u64,
+            destination = ?destination,
+            "send_aps host latency",
+        );
 
         // The frame is on the air (or extracted from the indirect queue); the
         // terminal response then reports end-to-end delivery when an ack was requested
@@ -855,16 +864,55 @@ struct Args {
     log_level: LevelFilter,
 }
 
+/// Sample the tokio runtime each interval and emit a JSON line on the `metrics`
+/// target: the programmatic equivalent of the tokio-console runtime view (worker
+/// busy ratio, steal counts, mean poll time), for automated latency analysis.
+fn spawn_runtime_metrics() {
+    let handle = tokio::runtime::Handle::current();
+    let monitor = tokio_metrics::RuntimeMonitor::new(&handle);
+    tokio::spawn(async move {
+        let mut intervals = monitor.intervals();
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            let Some(m) = intervals.next() else { continue };
+            tracing::info!(
+                target: "metrics",
+                path = "runtime",
+                workers = m.workers_count,
+                busy_ratio = m.busy_ratio(),
+                total_busy_us = m.total_busy_duration.as_micros() as u64,
+                total_polls = m.total_polls_count,
+                mean_poll_us = m.mean_poll_duration.as_micros() as u64,
+                steal_count = m.total_steal_count,
+                park_count = m.total_park_count,
+                "runtime metrics",
+            );
+        }
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
+        // Human-readable logs on every target except `metrics`, which is emitted as
+        // JSON lines on its own layer for `jq`-friendly automated analysis.
         let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(args.log_level.to_string()));
+            .unwrap_or_else(|_| EnvFilter::new(args.log_level.to_string()))
+            .add_directive("metrics=off".parse().unwrap());
+        let metrics_layer = fmt::layer()
+            .json()
+            .flatten_event(true)
+            .with_filter(Targets::new().with_target("metrics", LevelFilter::INFO));
         tracing_subscriber::registry()
+            .with(console_subscriber::spawn())
             .with(fmt::layer().with_filter(filter))
+            .with(metrics_layer)
             .init();
+
+        spawn_runtime_metrics();
 
         let server = Arc::new(ZigguratServer::new(SerialConfig {
             device: args.device,

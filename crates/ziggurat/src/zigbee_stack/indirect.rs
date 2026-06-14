@@ -55,6 +55,7 @@ impl ZigbeeStack {
     /// 802.15.4 spec 6.7.3: a MAC Data Request extracts the oldest transaction queued
     /// for the polling device. The poll doubles as the child keepalive (spec 3.6.10.4).
     pub(super) fn handle_data_request(&self, command_frame: &Ieee802154CommandFrame) {
+        let poll_received_at = Instant::now();
         // Polls during association use extended addressing (the device has no short
         // address yet); joined children poll with their short address
         let poll_source = command_frame.header.src_address;
@@ -103,8 +104,8 @@ impl ZigbeeStack {
                 .contains(address)
         });
 
-        let delivered =
-            fp_advertised && self.deliver_indirect_transaction(source_eui64, source_nwk);
+        let delivered = fp_advertised
+            && self.deliver_indirect_transaction(source_eui64, source_nwk, poll_received_at);
 
         // Spec 3.6.10.4: polls from devices without a neighbor table entry are
         // answered with an indirectly delivered leave, steering the stale child
@@ -123,6 +124,7 @@ impl ZigbeeStack {
         &self,
         source_eui64: Option<Eui64>,
         source_nwk: Option<Nwk>,
+        poll_received_at: Instant,
     ) -> bool {
         let outcome = self
             .state
@@ -152,13 +154,19 @@ impl ZigbeeStack {
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            arc_self.transmit_indirect_transaction(delivery).await;
+            arc_self
+                .transmit_indirect_transaction(delivery, poll_received_at)
+                .await;
         });
 
         true
     }
 
-    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectCompletion>) {
+    async fn transmit_indirect_transaction(
+        &self,
+        delivery: Delivery<IndirectCompletion>,
+        poll_received_at: Instant,
+    ) {
         let Delivery {
             destination,
             transaction,
@@ -169,6 +177,16 @@ impl ZigbeeStack {
         if more_pending {
             set_frame_pending(&mut frame);
         }
+
+        // Poll-received to frame-handed-to-radio: the host-side turnaround that lock
+        // contention or scheduling delay would inflate, against `macResponseWaitTime`.
+        tracing::info!(
+            target: "metrics",
+            path = "rx_to_indirect_tx",
+            latency_us = poll_received_at.elapsed().as_micros() as u64,
+            destination = ?destination,
+            "indirect delivery turnaround",
+        );
 
         // Indirect delivery answers a sleepy child's poll within macResponseWaitTime — a
         // deadline-bound path, so it takes the radio ahead of the baseline backlog.
