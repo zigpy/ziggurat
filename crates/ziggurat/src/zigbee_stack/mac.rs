@@ -263,9 +263,9 @@ impl ZigbeeStack {
         Some(decrypted_nwk_frame)
     }
 
-    pub(super) async fn send_802154_frame(
+    pub(super) async fn send_802154_frame<P: ieee_802154::FramePayload>(
         &self,
-        frame: Ieee802154Frame,
+        frame: Ieee802154Frame<P>,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         // Increment the 802.15.4 sequence number

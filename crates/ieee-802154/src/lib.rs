@@ -6,8 +6,6 @@ use crate::types::{Eui64, Nwk, PanId, format_hex};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
 use num_enum::TryFromPrimitive;
 
-use educe::Educe;
-
 #[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
 pub enum Ieee802154Address {
     Nwk(Nwk),
@@ -99,12 +97,23 @@ pub struct Ieee802154FrameHeader {
     pub src_address: Option<Ieee802154Address>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum Ieee802154Frame {
+#[derive(Clone, Eq, PartialEq)]
+pub enum Ieee802154Frame<P = FrameBytes> {
     Beacon(Ieee802154BeaconFrame),
-    Data(Ieee802154DataFrame),
+    Data(Ieee802154DataFrame<P>),
     Ack(Ieee802154AckFrame),
     Command(Ieee802154CommandFrame),
+}
+
+impl<P: FramePayload> core::fmt::Debug for Ieee802154Frame<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Beacon(frame) => f.debug_tuple("Beacon").field(frame).finish(),
+            Self::Data(frame) => f.debug_tuple("Data").field(frame).finish(),
+            Self::Ack(frame) => f.debug_tuple("Ack").field(frame).finish(),
+            Self::Command(frame) => f.debug_tuple("Command").field(frame).finish(),
+        }
+    }
 }
 
 #[abstract_bits]
@@ -129,13 +138,21 @@ pub struct Ieee802154BeaconFrame {
     pub fcs: u16,
 }
 
-#[derive(Educe, Clone, Eq, PartialEq)]
-#[educe(Debug)]
-pub struct Ieee802154DataFrame {
+#[derive(Clone, Eq, PartialEq)]
+pub struct Ieee802154DataFrame<P = FrameBytes> {
     pub header: Ieee802154FrameHeader,
-    #[educe(Debug(method(format_hex)))]
-    pub payload: FrameBytes,
+    pub payload: P,
     pub fcs: u16,
+}
+
+impl<P: FramePayload> core::fmt::Debug for Ieee802154DataFrame<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Ieee802154DataFrame")
+            .field("header", &self.header)
+            .field("payload", &PayloadDebug(&self.payload))
+            .field("fcs", &self.fcs)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -160,6 +177,33 @@ pub const MAX_PHY_PACKET_SIZE: usize = 127;
 /// Nothing carried within a single 802.15.4 frame can exceed its capacity, and APS
 /// fragmentation does not exist in practice.
 pub type FrameBytes = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
+
+/// A payload carried inside an 802.15.4 data frame.
+pub trait FramePayload {
+    /// Append the serialized payload to `bytes`.
+    fn extend_frame_bytes(&self, bytes: &mut Vec<u8>);
+    /// Render the payload for `Debug`: hex for raw bytes, structured for frames.
+    fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result;
+}
+
+impl FramePayload for FrameBytes {
+    fn extend_frame_bytes(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(self);
+    }
+
+    fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        format_hex(self.as_slice(), f)
+    }
+}
+
+/// `Debug` adapter that routes a frame payload through [`FramePayload::fmt_payload`].
+struct PayloadDebug<'a, P>(&'a P);
+
+impl<P: FramePayload> core::fmt::Debug for PayloadDebug<'_, P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt_payload(f)
+    }
+}
 
 /// Maximum 802.15.4 MAC payload length
 const MAC_COMMAND_MAX_LEN: usize = MAX_PHY_PACKET_SIZE - 2 - 23; // FCS and maximum header
@@ -259,7 +303,7 @@ pub enum Ieee802154CommandPayload {
     Unknown(Vec<u8>),
 }
 
-impl Ieee802154Frame {
+impl Ieee802154Frame<FrameBytes> {
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
         if data.len() < 2 + 2 {
             return Err("Data too short to contain a frame");
@@ -448,7 +492,9 @@ impl Ieee802154Frame {
 
         Self::from_bytes(&data_with_fcs)
     }
+}
 
+impl<P: FramePayload> Ieee802154Frame<P> {
     pub fn to_bytes_without_fcs(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(MAX_PHY_PACKET_SIZE);
 
@@ -496,7 +542,7 @@ impl Ieee802154Frame {
                 data.extend(&frame.beacon_payload);
             }
             Self::Data(frame) => {
-                data.extend(&frame.payload);
+                frame.payload.extend_frame_bytes(&mut data);
             }
             Self::Ack(_) => {
                 // ACK frames have no payload
@@ -708,7 +754,7 @@ mod test {
 
             assert_eq!(ack_frame.fcs, 0x72BC);
 
-            let frame_again = Ieee802154Frame::Ack(ack_frame);
+            let frame_again: Ieee802154Frame = Ieee802154Frame::Ack(ack_frame);
             assert_eq!(frame_again.to_bytes(), bytes);
         } else {
             panic!("Expected Ack frame");

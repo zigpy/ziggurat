@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 use ieee_802154::types::{Eui64, Nwk};
 use ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
+use crate::nwk::frame::EncryptedNwkFrame;
+
 /// A finished 802.15.4 frame awaiting indirect delivery (802.15.4 spec 6.7.3).
 ///
 /// The destination extracts it by polling with a MAC Data Request; the radio's
@@ -13,7 +15,7 @@ use ieee_802154::{Ieee802154Address, Ieee802154Frame};
 pub struct Transaction<C> {
     /// The frame as queued; the frame pending bit is applied to a copy at delivery
     /// time, based on whether more transactions remain.
-    pub frame: Ieee802154Frame,
+    pub frame: Ieee802154Frame<EncryptedNwkFrame>,
     pub expires_at: Instant,
     /// The driver's completion token, resolved on delivery, expiry, or drop.
     pub completion: C,
@@ -79,7 +81,7 @@ impl<C> IndirectQueue<C> {
     pub fn push(
         &mut self,
         destination: Ieee802154Address,
-        frame: Ieee802154Frame,
+        frame: Ieee802154Frame<EncryptedNwkFrame>,
         completion: C,
         now: Instant,
     ) {

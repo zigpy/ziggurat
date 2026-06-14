@@ -341,12 +341,12 @@ impl ZigbeeStack {
         );
     }
 
-    fn build_802154_association_response(
+    fn build_802154_association_response<P>(
         &self,
         destination_eui64: Eui64,
         short_address: Nwk,
         association_status: Ieee802154AssociationStatus,
-    ) -> Ieee802154Frame {
+    ) -> Ieee802154Frame<P> {
         Ieee802154Frame::Command(Ieee802154CommandFrame {
             header: Ieee802154FrameHeader {
                 frame_control: Ieee802154FrameControl {

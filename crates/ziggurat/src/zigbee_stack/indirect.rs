@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
 use zigbee::Command;
 use zigbee::nwk::commands::NwkLeaveCommand;
+use zigbee::nwk::frame::EncryptedNwkFrame;
 
 use zigbee::indirect::Delivery;
 
@@ -15,7 +16,7 @@ use super::{
     ZigbeeStackError,
 };
 
-const fn set_frame_pending(frame: &mut Ieee802154Frame) {
+const fn set_frame_pending(frame: &mut Ieee802154Frame<EncryptedNwkFrame>) {
     match frame {
         Ieee802154Frame::Data(f) => f.header.frame_control.frame_pending = true,
         Ieee802154Frame::Ack(f) => f.header.frame_control.frame_pending = true,
@@ -32,7 +33,7 @@ impl ZigbeeStack {
     pub(super) async fn queue_indirect_frame(
         &self,
         destination: Ieee802154Address,
-        frame: Ieee802154Frame,
+        frame: Ieee802154Frame<EncryptedNwkFrame>,
     ) -> Result<(), ZigbeeStackError> {
         let (completion, result_rx) = oneshot::channel();
 

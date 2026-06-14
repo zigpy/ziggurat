@@ -507,11 +507,11 @@ impl ZigbeeStack {
 
     /// Wrap an encrypted NWK payload in a unicast 802.15.4 data frame. The sequence
     /// number is assigned at transmit time.
-    fn build_unicast_802154_data_frame(
+    fn build_unicast_802154_data_frame<P>(
         &self,
         next_hop_address: Nwk,
-        payload: Vec<u8>,
-    ) -> Ieee802154Frame {
+        payload: P,
+    ) -> Ieee802154Frame<P> {
         Ieee802154Frame::Data(Ieee802154DataFrame {
             header: Ieee802154FrameHeader {
                 frame_control: Ieee802154FrameControl {
@@ -539,7 +539,7 @@ impl ZigbeeStack {
                 src_pan_id: None,
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
             },
-            payload: FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
+            payload,
             fcs: 0x0000, // It'll be replaced
         })
     }
@@ -551,11 +551,11 @@ impl ZigbeeStack {
         mut nwk_frame: NwkFrame,
         next_hop_address: Nwk,
         security: NwkSecurityMode,
-    ) -> Ieee802154Frame {
+    ) -> Ieee802154Frame<EncryptedNwkFrame> {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
         let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
 
-        self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame.to_bytes())
+        self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame)
     }
 
     /// Encrypt a fully-formed NWK frame and unicast it to the given next hop, with
@@ -585,9 +585,8 @@ impl ZigbeeStack {
 
         for attempt in 0..=self.tunables.unicast_retries {
             let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
-
-            let ieee802154_frame = self
-                .build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame.to_bytes());
+            let ieee802154_frame =
+                self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame);
 
             // When forwarding packets to another node, update the counters for the neighbor
             // TODO: maybe wrap the send state into some sort of struct to avoid
@@ -751,8 +750,7 @@ impl ZigbeeStack {
                 src_pan_id: None,
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
             },
-            payload: FrameBytes::from_slice(&encrypted_nwk_frame.to_bytes())
-                .expect("an encrypted NWK frame is frame-bounded"),
+            payload: encrypted_nwk_frame,
             fcs: 0x0000, // It'll be replaced
         });
 

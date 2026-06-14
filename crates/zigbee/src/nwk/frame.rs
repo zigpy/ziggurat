@@ -422,15 +422,7 @@ impl EncryptedNwkFrame {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-
-        self.nwk_header.serialize_into(&mut bytes);
-
-        if let Some(aux_header) = &self.aux_header {
-            aux_header.serialize_into(&mut bytes);
-        }
-
-        bytes.extend_from_slice(&self.ciphertext);
-
+        ieee_802154::FramePayload::extend_frame_bytes(self, &mut bytes);
         bytes
     }
 
@@ -451,6 +443,22 @@ impl EncryptedNwkFrame {
             aux_header: self.aux_header,
             payload,
         })
+    }
+}
+
+impl ieee_802154::FramePayload for EncryptedNwkFrame {
+    fn extend_frame_bytes(&self, bytes: &mut Vec<u8>) {
+        self.nwk_header.serialize_into(bytes);
+
+        if let Some(aux_header) = &self.aux_header {
+            aux_header.serialize_into(bytes);
+        }
+
+        bytes.extend_from_slice(&self.ciphertext);
+    }
+
+    fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
     }
 }
 
