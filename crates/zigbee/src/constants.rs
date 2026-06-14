@@ -82,6 +82,13 @@ pub struct Tunables {
     /// `apsParentAnnounceJitterMax`: the maximum random addition to
     /// [`Self::parent_annce_base_timer`].
     pub parent_annce_jitter_max: Duration,
+
+    pub aps_ack_timeout: Duration,
+
+    /// APS acks from a sleepy child arrive only after it polls for the frame, so the
+    /// wait must cover a full indirect transaction lifetime (7.68s) plus the ack's trip
+    /// back.
+    pub aps_ack_timeout_indirect: Duration,
 }
 
 impl Default for Tunables {
@@ -119,6 +126,8 @@ impl Tunables {
             end_device_timeout_default: EndDeviceTimeout::Minutes256,
             parent_annce_base_timer: Duration::from_secs(10),
             parent_annce_jitter_max: Duration::from_secs(10),
+            aps_ack_timeout: Duration::from_millis(5000),
+            aps_ack_timeout_indirect: Duration::from_millis(10000),
         }
     }
 }

@@ -11,8 +11,7 @@ use std::cmp;
 use tokio::sync::oneshot;
 
 use super::{
-    APS_ACK_TIMEOUT, APS_ACK_TIMEOUT_INDIRECT, ApsAckData, ApsAckWaiter, MAX_LOCK_DURATION,
-    NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
+    ApsAckData, ApsAckWaiter, MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
 };
 
 impl ZigbeeStack {
@@ -314,9 +313,9 @@ impl ZigbeeStack {
 
         // A sleepy child only sees the frame (and acks it) after polling
         let timeout = if self.sleepy_child_eui64(destination).is_some() {
-            APS_ACK_TIMEOUT_INDIRECT
+            self.tunables.aps_ack_timeout_indirect
         } else {
-            APS_ACK_TIMEOUT
+            self.tunables.aps_ack_timeout
         };
 
         Ok(Some(ApsAckWaiter {

@@ -46,12 +46,6 @@ pub use zigbee::nwk::{neighbors, routing};
 
 // TODO: remove this once all long locks have been found
 const MAX_LOCK_DURATION: Duration = Duration::from_millis(10);
-const APS_ACK_TIMEOUT: Duration = Duration::from_millis(5000);
-
-/// APS acks from a sleepy child arrive only after it polls for the frame, so the
-/// wait must cover a full indirect transaction lifetime (7.68s) plus the ack's trip
-/// back.
-const APS_ACK_TIMEOUT_INDIRECT: Duration = Duration::from_millis(10000);
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
 const RESET_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(2);
