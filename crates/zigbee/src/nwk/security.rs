@@ -137,9 +137,9 @@ impl NwkSecurity {
 
     /// Store the security frame counter of a successfully decrypted frame for its
     /// relaying device, the baseline for future replay checks.
-    pub fn note_inbound_frame_counter(&mut self, sender: Eui64, frame_counter: u32) {
+    pub fn note_inbound_frame_counter(&mut self, sender: Eui64, frame_counter: u32) -> Option<u32> {
         self.primary
             .incoming_frame_counter_set
-            .insert(sender, frame_counter);
+            .insert(sender, frame_counter)
     }
 }

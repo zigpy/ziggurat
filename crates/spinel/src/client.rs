@@ -363,7 +363,7 @@ impl SpinelClient {
                 .prepare_request(command_id, payload)
         };
 
-        tracing::debug!("Sending frame {frame:?}");
+        tracing::trace!("Sending frame {frame:?}");
 
         self.send_frame(&frame).await?;
 
@@ -468,7 +468,7 @@ impl SpinelClient {
             }
         })?;
 
-        tracing::debug!(
+        tracing::trace!(
             "Setting property {property_id:?}={value:02X?}, result {rsp_property_id:?}={payload:02X?}"
         );
 

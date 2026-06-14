@@ -228,12 +228,10 @@ impl ZigbeeStack {
                 aux_header.frame_counter,
             )?;
 
-        tracing::debug!("Attempting to decrypt {nwk_frame:?}");
-
         let decrypted_nwk_frame = match nwk_frame.decrypt(&key) {
             Ok(decrypted_frame) => decrypted_frame,
             Err(err) => {
-                tracing::warn!("Ignoring frame, decryption failed: {err:?}");
+                tracing::warn!("Ignoring frame from {src_eui64:?}: decryption failed: {err:?}");
                 return None;
             }
         };

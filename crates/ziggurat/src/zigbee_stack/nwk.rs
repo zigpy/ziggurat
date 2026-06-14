@@ -122,14 +122,16 @@ impl ZigbeeStack {
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
         {
-            self.state
+            let old_frame_counter = self
+                .state
                 .nwk_security
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
                 .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
 
             tracing::debug!(
-                "Incremented frame counter for {relaying_eui64:?} to {}",
+                "Incremented frame counter for {relaying_eui64:?} from {:?} to {}",
+                old_frame_counter,
                 aux_header.frame_counter
             );
         }

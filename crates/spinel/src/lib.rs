@@ -743,7 +743,7 @@ impl SpinelProtocol {
         command_id: SpinelCommandId,
         payload: &[u8],
     ) {
-        tracing::debug!("RX: {header:?} {command_id:?} {payload:02X?}");
+        tracing::trace!("RX: {header:?} {command_id:?} {payload:02X?}");
         let tid = header.transaction_id;
 
         if tid == 0 {

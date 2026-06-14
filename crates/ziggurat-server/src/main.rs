@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_serial::{FlowControl, SerialPortBuilderExt};
 use tokio_tungstenite::tungstenite::Message;
+use tracing::Instrument;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -427,25 +428,32 @@ impl ZigguratServer {
     fn dispatch(self: &Arc<Self>, request: Request, outbound: mpsc::Sender<serde_json::Value>) {
         let server = self.clone();
 
-        tokio::spawn(async move {
-            let Request { id, method, params } = request;
+        // One span per request so the handler work nests under it and the close line
+        // reports the full request-to-response latency.
+        let span = tracing::info_span!("request", id = request.id, method = %request.method);
 
-            let message = match method.as_str() {
-                "ping" => server.handle_ping(id).await,
-                "configure" => server.handle_configure(id, params).await,
-                "get_hw_address" => server.handle_get_hw_address(id).await,
-                "get_network_info" => server.handle_get_network_info(id),
-                "send_aps" => server.handle_send_aps(id, params, &outbound).await,
-                "energy_scan" => server.handle_energy_scan(id, params).await,
-                "permit_joins" => server.handle_permit_joins(id, params),
-                "set_provisional_key" => server.handle_set_provisional_key(id, params),
-                "set_nwk_update_id" => server.handle_set_nwk_update_id(id, params),
-                "set_channel" => server.handle_set_channel(id, params).await,
-                _ => error_response(id, "unknown_method", method),
-            };
+        tokio::spawn(
+            async move {
+                let Request { id, method, params } = request;
 
-            let _ = outbound.send(message).await;
-        });
+                let message = match method.as_str() {
+                    "ping" => server.handle_ping(id).await,
+                    "configure" => server.handle_configure(id, params).await,
+                    "get_hw_address" => server.handle_get_hw_address(id).await,
+                    "get_network_info" => server.handle_get_network_info(id),
+                    "send_aps" => server.handle_send_aps(id, params, &outbound).await,
+                    "energy_scan" => server.handle_energy_scan(id, params).await,
+                    "permit_joins" => server.handle_permit_joins(id, params),
+                    "set_provisional_key" => server.handle_set_provisional_key(id, params),
+                    "set_nwk_update_id" => server.handle_set_nwk_update_id(id, params),
+                    "set_channel" => server.handle_set_channel(id, params).await,
+                    _ => error_response(id, "unknown_method", method),
+                };
+
+                let _ = outbound.send(message).await;
+            }
+            .instrument(span),
+        );
     }
 
     /// Liveness probe. Yielding makes the reply round-trip through the runtime like
