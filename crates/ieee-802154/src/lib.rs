@@ -6,6 +6,18 @@ use crate::types::{Eui64, Nwk, PanId, format_hex};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
 use num_enum::TryFromPrimitive;
 
+/// `aMaxPhyPacketSize`: a full 802.15.4 frame, FCS included, fits in 127 bytes
+pub const MAX_PHY_PACKET_SIZE: usize = 127;
+
+/// Maximum 802.15.4 MAC payload length
+const MAC_COMMAND_MAX_LEN: usize = MAX_PHY_PACKET_SIZE - 2 - 23; // FCS and maximum header
+
+/// Frame-bounded byte storage: an owned, inline buffer for payloads and ciphertexts.
+///
+/// Nothing carried within a single 802.15.4 frame can exceed its capacity. Fragmentation
+/// is ignored for now.
+pub type FrameBytes = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
+
 #[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
 pub enum Ieee802154Address {
     Nwk(Nwk),
@@ -169,15 +181,6 @@ pub struct Ieee802154CommandFrame {
     pub fcs: u16,
 }
 
-/// `aMaxPhyPacketSize`: a full 802.15.4 frame, FCS included, fits in 127 bytes
-pub const MAX_PHY_PACKET_SIZE: usize = 127;
-
-/// Frame-bounded byte storage: an owned, inline buffer for payloads and ciphertexts.
-///
-/// Nothing carried within a single 802.15.4 frame can exceed its capacity, and APS
-/// fragmentation does not exist in practice.
-pub type FrameBytes = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
-
 /// A payload carried inside an 802.15.4 data frame.
 pub trait FramePayload {
     /// Append the serialized payload to `bytes`.
@@ -204,9 +207,6 @@ impl<P: FramePayload> core::fmt::Debug for PayloadDebug<'_, P> {
         self.0.fmt_payload(f)
     }
 }
-
-/// Maximum 802.15.4 MAC payload length
-const MAC_COMMAND_MAX_LEN: usize = MAX_PHY_PACKET_SIZE - 2 - 23; // FCS and maximum header
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("Could not serialize {ty}")]
