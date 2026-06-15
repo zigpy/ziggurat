@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::LazyLock;
-
 use aes::Aes128;
 use aes::Block;
 use aes::cipher::BlockCipherEncrypt;
@@ -8,7 +5,6 @@ use aes::cipher::KeyInit;
 use ccm::Ccm;
 use ccm::aead::AeadInOut;
 use ccm::consts::{U4, U13};
-use std::sync::Mutex;
 use thiserror::Error;
 
 use ieee_802154::FrameBytes;
@@ -123,21 +119,6 @@ impl From<DecryptionError> for &'static str {
     }
 }
 
-/// The AES key schedule costs more than encrypting an entire typical frame, so cipher
-/// instances are cached: there are only ever a handful of keys (the network key plus
-/// a link key per device) and they live for the lifetime of the process.
-static CIPHER_CACHE: LazyLock<Mutex<HashMap<[u8; 16], ZigbeeCcm>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn cipher_for(key: &Key) -> ZigbeeCcm {
-    CIPHER_CACHE
-        .lock()
-        .unwrap()
-        .entry(key.0)
-        .or_insert_with(|| ZigbeeCcm::new(&key.0.into()))
-        .clone()
-}
-
 /// CCM*-protect a payload in place: `auth_data` is authenticated, the buffer is
 /// encrypted, and the encrypted MIC ("MAC tag") is appended to it.
 pub fn encrypt_ccm(
@@ -146,7 +127,7 @@ pub fn encrypt_ccm(
     auth_data: &[u8],
     mut buffer: FrameBytes,
 ) -> FrameBytes {
-    let mic = cipher_for(key)
+    let mic = ZigbeeCcm::new(&key.0.into())
         .encrypt_inout_detached(&(*nonce).into(), auth_data, buffer.as_mut_slice().into())
         .expect("frames are far below the CCM length limits");
     buffer
@@ -169,7 +150,7 @@ pub fn decrypt_ccm(
         .ok_or(DecryptionError::CiphertextTooShort)?;
     let (ciphertext, mic) = tagged_ciphertext.split_at_mut(ciphertext_len);
 
-    cipher_for(key)
+    ZigbeeCcm::new(&key.0.into())
         .decrypt_inout_detached(
             &(*nonce).into(),
             auth_data,
