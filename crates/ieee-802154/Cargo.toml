@@ -13,7 +13,7 @@ abstract-bits = "0.2.0"
 num_enum = "0.7.3"
 hex = "0.4.3"
 thiserror = "2.0.12"
-serde = { version = "1.0.219", default-features = false, features = ["std"] }
+serde = { version = "1.0.219", default-features = false, features = ["alloc"] }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 heapless = "0.9.3"
 
