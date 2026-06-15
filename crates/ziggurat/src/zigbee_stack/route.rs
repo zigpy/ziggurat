@@ -13,7 +13,10 @@ use zigbee::nwk::commands::{
 use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::routing::{RouteReplyDisposition, Status};
-use super::{LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
+use super::{
+    AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, ZigbeeStack,
+    ZigbeeStackError,
+};
 
 impl ZigbeeStack {
     fn notify_routing_change(&self, nwk: &Nwk) {
@@ -117,7 +120,7 @@ impl ZigbeeStack {
         self.background_send_nwk_frame(
             relayed_route_reply_frame,
             NwkSecurityMode::NetworkKey,
-            true,
+            SendMode::Direct,
         );
     }
 
@@ -217,7 +220,11 @@ impl ZigbeeStack {
                 .with_destination_ieee(Some(sender_ieee));
 
             // The next hop toward the originator is a direct radio neighbor
-            self.background_send_nwk_frame(route_reply_frame, NwkSecurityMode::NetworkKey, true);
+            self.background_send_nwk_frame(
+                route_reply_frame,
+                NwkSecurityMode::NetworkKey,
+                SendMode::Direct,
+            );
             return;
         }
 
@@ -481,7 +488,10 @@ impl ZigbeeStack {
                 self.note_route_error();
             }
             NwkNetworkStatus::AddressConflict => {
-                self.handle_address_conflict(network_status_cmd.network_address, false);
+                self.handle_address_conflict(
+                    network_status_cmd.network_address,
+                    AddrConflictSource::Network,
+                );
             }
             _ => {
                 tracing::warn!("Unhandled network status: {network_status_cmd:?}");

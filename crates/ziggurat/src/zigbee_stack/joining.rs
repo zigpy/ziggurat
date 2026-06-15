@@ -31,8 +31,8 @@ use zigbee::nwk::commands::{
 };
 
 use super::{
-    LOCK_ACQUIRE_TIMEOUT, NwkDeviceType, NwkSecurityMode, ZigbeeNotification, ZigbeeStack,
-    neighbors,
+    AddrConflictSource, JoinKind, LOCK_ACQUIRE_TIMEOUT, NwkDeviceType, NwkSecurityMode, SendMode,
+    ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl ZigbeeStack {
@@ -153,7 +153,7 @@ impl ZigbeeStack {
                     // Zigbee spec 4.6.3.2: the network key is delivered once the
                     // device has confirmed receipt of its short address
                     if matches!(status, Ieee802154AssociationStatus::AssociationSuccessful) {
-                        arc_self.send_network_key(short_address, eui64, true);
+                        arc_self.send_network_key(short_address, eui64, JoinKind::New);
                     }
                 }
                 Err(err) => {
@@ -187,7 +187,7 @@ impl ZigbeeStack {
     /// Spec 3.6.1.10.5: two devices use the same network address. The network is
     /// notified unless we learned of the conflict from such a notification; end
     /// device children are moved to a fresh address; routers resolve on their own.
-    pub(super) fn handle_address_conflict(&self, address: Nwk, detected_locally: bool) {
+    pub(super) fn handle_address_conflict(&self, address: Nwk, source: AddrConflictSource) {
         {
             let mut conflicts = self
                 .state
@@ -203,7 +203,7 @@ impl ZigbeeStack {
             if let Some(conflict) = conflicts.get_mut(&address)
                 && now < conflict.handled_at + window
             {
-                conflict.heard_from_network |= !detected_locally;
+                conflict.heard_from_network |= source == AddrConflictSource::Network;
                 return;
             }
 
@@ -212,14 +212,14 @@ impl ZigbeeStack {
                 address,
                 super::AddressConflict {
                     handled_at: now,
-                    heard_from_network: !detected_locally,
+                    heard_from_network: source == AddrConflictSource::Network,
                 },
             );
         }
 
         tracing::warn!("Address conflict detected on {address:?}");
 
-        if detected_locally {
+        if source == AddrConflictSource::Local {
             self.broadcast_address_conflict(address);
         }
 
@@ -284,7 +284,11 @@ impl ZigbeeStack {
                 .unwrap(),
             );
 
-            arc_self.background_send_nwk_frame(conflict_frame, NwkSecurityMode::NetworkKey, false);
+            arc_self.background_send_nwk_frame(
+                conflict_frame,
+                NwkSecurityMode::NetworkKey,
+                SendMode::Route,
+            );
         });
     }
 
@@ -387,7 +391,7 @@ impl ZigbeeStack {
     fn build_encrypted_network_key_transport(
         &self,
         destination_eui64: Eui64,
-        fresh_join: bool,
+        join_kind: JoinKind,
     ) -> EncryptedApsCommandFrame {
         let (network_key, key_seq_number) = {
             let core = self.core();
@@ -422,7 +426,7 @@ impl ZigbeeStack {
 
         let mut core = self.core();
 
-        let link_key = if fresh_join {
+        let link_key = if join_kind == JoinKind::New {
             core.aib.aps_security.join_link_key(destination_eui64)
         } else {
             core.aib.aps_security.device_link_key(destination_eui64)
@@ -438,15 +442,15 @@ impl ZigbeeStack {
     /// Zigbee spec 4.6.3.2: deliver the network key to a joining device. The NWK frame
     /// is unsecured; the APS command is encrypted with the key-transport key derived
     /// from the joiner's link key.
-    fn send_network_key(&self, destination: Nwk, destination_eui64: Eui64, fresh_join: bool) {
+    fn send_network_key(&self, destination: Nwk, destination_eui64: Eui64, join_kind: JoinKind) {
         let encrypted_command =
-            self.build_encrypted_network_key_transport(destination_eui64, fresh_join);
+            self.build_encrypted_network_key_transport(destination_eui64, join_kind);
 
         let nwk_frame = self
             .nwk_data_frame(destination, encrypted_command.to_bytes())
             .unsecured();
 
-        self.background_send_nwk_frame(nwk_frame, NwkSecurityMode::Unsecured, true);
+        self.background_send_nwk_frame(nwk_frame, NwkSecurityMode::Unsecured, SendMode::Direct);
 
         let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
             nwk: destination,
@@ -545,7 +549,11 @@ impl ZigbeeStack {
         self.background_send_nwk_frame(
             nwk_frame,
             NwkSecurityMode::NetworkKey,
-            self.is_neighbor(destination),
+            if self.is_neighbor(destination) {
+                SendMode::Direct
+            } else {
+                SendMode::Route
+            },
         );
     }
 
@@ -742,7 +750,7 @@ impl ZigbeeStack {
                 self.begin_join(update.device_address);
 
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
-                self.send_tunneled_network_key(router_nwk, update.device_address, true);
+                self.send_tunneled_network_key(router_nwk, update.device_address, JoinKind::New);
 
                 let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
                     nwk: update.device_short_address,
@@ -767,7 +775,7 @@ impl ZigbeeStack {
                 }
 
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
-                self.send_tunneled_network_key(router_nwk, update.device_address, false);
+                self.send_tunneled_network_key(router_nwk, update.device_address, JoinKind::Rejoin);
 
                 let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
                     nwk: update.device_short_address,
@@ -797,9 +805,9 @@ impl ZigbeeStack {
 
     /// Zigbee spec 4.6.3.7: wrap an APS-encrypted Transport Key command in a Tunnel
     /// command so a parent router can forward it to a joiner we cannot reach directly.
-    fn send_tunneled_network_key(&self, router_nwk: Nwk, device_eui64: Eui64, fresh_join: bool) {
+    fn send_tunneled_network_key(&self, router_nwk: Nwk, device_eui64: Eui64, join_kind: JoinKind) {
         let encrypted_transport_key =
-            self.build_encrypted_network_key_transport(device_eui64, fresh_join);
+            self.build_encrypted_network_key_transport(device_eui64, join_kind);
 
         let tunnel_command = ApsCommandFrame {
             frame_control: ApsFrameControl {
@@ -953,7 +961,7 @@ impl ZigbeeStack {
         // A trust center rejoin means the device no longer has the network key
         if !secured {
             // `send_network_key` also emits the join notification
-            self.send_network_key(assigned_nwk, source_ieee, false);
+            self.send_network_key(assigned_nwk, source_ieee, JoinKind::Rejoin);
         } else {
             let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
                 nwk: assigned_nwk,
@@ -994,7 +1002,7 @@ impl ZigbeeStack {
         };
 
         // The rejoining device is within radio range
-        self.background_send_nwk_frame(response_frame, security, true);
+        self.background_send_nwk_frame(response_frame, security, SendMode::Direct);
     }
 
     /// Zigbee spec 3.6.1.10.3: a device announces that it is leaving the network, or
@@ -1120,7 +1128,11 @@ impl ZigbeeStack {
 
         // The child is a direct neighbor; responses to sleepy children go through the
         // indirect queue via the NWK unicast fork
-        self.background_send_nwk_frame(response_frame, NwkSecurityMode::NetworkKey, true);
+        self.background_send_nwk_frame(
+            response_frame,
+            NwkSecurityMode::NetworkKey,
+            SendMode::Direct,
+        );
     }
 
     pub fn permit_joins(&self, duration: u64) {

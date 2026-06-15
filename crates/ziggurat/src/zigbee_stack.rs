@@ -92,6 +92,45 @@ pub enum NwkSecurityMode {
     Unsecured,
 }
 
+/// How the MAC next hop for an outgoing unicast is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendMode {
+    /// The destination is its own next hop: transmit straight to it with no routing
+    /// lookup (and route discovery suppressed). Used for frames to a one-hop neighbor,
+    /// e.g. delivering the network key to a joining device.
+    Direct,
+    /// Resolve the next hop through the routing layer — the route table or an applicable
+    /// source route, discovering a route first if none is known.
+    Route,
+}
+
+/// Whether a unicast APS data frame requests an end-to-end acknowledgement. When it
+/// does, [`ZigbeeStack::send_aps_command`] returns an [`ApsAckWaiter`] to await it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApsAck {
+    Request,
+    None,
+}
+
+/// Whether a device is attaching fresh or rejoining.
+///
+/// Selects the link key that protects the transported network key: a fresh joiner only
+/// holds the well-known (or install-code) key, while a rejoining device holds the key it
+/// was last issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    New,
+    Rejoin,
+}
+
+/// How an address conflict (spec 3.6.1.10.5) came to our attention: detected locally
+/// from a received frame, or reported by another device's network status command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddrConflictSource {
+    Local,
+    Network,
+}
+
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
     EndDevice = 0,

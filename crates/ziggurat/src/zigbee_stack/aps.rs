@@ -11,7 +11,8 @@ use std::cmp;
 use tokio::sync::oneshot;
 
 use super::{
-    ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
+    ApsAck, ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, ZigbeeStack,
+    ZigbeeStackError,
 };
 
 impl ZigbeeStack {
@@ -141,7 +142,7 @@ impl ZigbeeStack {
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.background_send_nwk_frame(aps_ack_frame, NwkSecurityMode::NetworkKey, false);
+        self.background_send_nwk_frame(aps_ack_frame, NwkSecurityMode::NetworkKey, SendMode::Route);
     }
 
     /// Send an APS data frame, returning once it has been transmitted (including
@@ -161,7 +162,7 @@ impl ZigbeeStack {
         cluster_id: u16,
         src_ep: u8,
         dst_ep: u8,
-        aps_ack: bool,
+        aps_ack: ApsAck,
         radius: u8,
         aps_seq: u8,
         data: Vec<u8>,
@@ -177,7 +178,7 @@ impl ZigbeeStack {
                     delivery_mode: ApsDeliveryMode::Unicast,
                     reserved1: 0b0,
                     security: aps_security.is_some(),
-                    ack_request: aps_ack,
+                    ack_request: aps_ack == ApsAck::Request,
                     extended_header: false,
                 },
                 group_id: None,
@@ -254,9 +255,14 @@ impl ZigbeeStack {
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 
-        if !aps_ack {
-            self.send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false, priority)
-                .await?;
+        if aps_ack == ApsAck::None {
+            self.send_nwk_frame(
+                nwk_frame,
+                NwkSecurityMode::NetworkKey,
+                SendMode::Route,
+                priority,
+            )
+            .await?;
             return Ok(None);
         }
 
@@ -281,7 +287,12 @@ impl ZigbeeStack {
         }
 
         if let Err(err) = self
-            .send_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, false, priority)
+            .send_nwk_frame(
+                nwk_frame,
+                NwkSecurityMode::NetworkKey,
+                SendMode::Route,
+                priority,
+            )
             .await
         {
             self.state

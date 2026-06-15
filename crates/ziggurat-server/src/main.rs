@@ -21,7 +21,7 @@ use zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat::zigbee_stack::{
-    NetworkConfig, TclkSeed, Tunables, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, NetworkConfig, TclkSeed, Tunables, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -744,7 +744,11 @@ impl ZigguratServer {
                 request.cluster_id,
                 request.src_ep,
                 request.dst_ep,
-                request.aps_ack,
+                if request.aps_ack {
+                    ApsAck::Request
+                } else {
+                    ApsAck::None
+                },
                 request.radius,
                 request.aps_seq,
                 asdu,

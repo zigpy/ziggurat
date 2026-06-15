@@ -11,8 +11,8 @@ use zigbee::zdp::{
 };
 
 use super::{
-    LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkDeviceType, ZigbeeStack, ZigbeeStackError, neighbors,
-    routing,
+    ApsAck, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkDeviceType, ZigbeeStack, ZigbeeStackError,
+    neighbors, routing,
 };
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
@@ -308,7 +308,7 @@ impl ZigbeeStack {
             T::CLUSTER_ID as u16,
             0,
             0,
-            false,
+            ApsAck::None,
             2 * MAX_DEPTH,
             self.next_aps_counter(),
             command.serialize(tsn).unwrap(),

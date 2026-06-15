@@ -17,14 +17,17 @@ use zigbee::nwk::frame::{
 };
 
 use super::routing::Route;
-use super::{MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, ZigbeeStack, ZigbeeStackError};
+use super::{
+    AddrConflictSource, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, SendMode, ZigbeeStack,
+    ZigbeeStackError,
+};
 
 impl ZigbeeStack {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
         let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
 
         if conflict {
-            self.handle_address_conflict(nwk, true);
+            self.handle_address_conflict(nwk, AddrConflictSource::Local);
         }
     }
 
@@ -125,7 +128,7 @@ impl ZigbeeStack {
             && let Some(destination_ieee) = nwk_frame.nwk_header.destination_ieee
             && destination_ieee != self.state.ieee_address
         {
-            self.handle_address_conflict(self.state.network_address, true);
+            self.handle_address_conflict(self.state.network_address, AddrConflictSource::Local);
         }
 
         // Handle LQA calculation
@@ -166,7 +169,10 @@ impl ZigbeeStack {
             // frame is discarded instead of relayed (3.6.1.10).
             if nwk_frame.nwk_header.source == self.state.network_address {
                 if self.state.start_time + self.tunables.broadcast_delivery_time < Instant::now() {
-                    self.handle_address_conflict(self.state.network_address, true);
+                    self.handle_address_conflict(
+                        self.state.network_address,
+                        AddrConflictSource::Local,
+                    );
                 }
                 return;
             }
@@ -291,7 +297,7 @@ impl ZigbeeStack {
         &self,
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        route_directly: bool,
+        route_directly: SendMode,
     ) {
         let arc_self = self
             .self_weak
@@ -312,7 +318,7 @@ impl ZigbeeStack {
         &self,
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        route_directly: bool,
+        route_directly: SendMode,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
@@ -403,13 +409,13 @@ impl ZigbeeStack {
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        route_directly: bool,
+        route_directly: SendMode,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         let destination = nwk_frame.nwk_header.destination;
 
         // Compute a next-hop address
-        let next_hop_address = if route_directly {
+        let next_hop_address = if route_directly == SendMode::Direct {
             destination
         } else {
             match self.outbound_route(destination) {
@@ -868,7 +874,11 @@ impl ZigbeeStack {
             )
             .with_destination_ieee(destination_ieee);
 
-        self.background_send_nwk_frame(network_status_frame, NwkSecurityMode::NetworkKey, false);
+        self.background_send_nwk_frame(
+            network_status_frame,
+            NwkSecurityMode::NetworkKey,
+            SendMode::Route,
+        );
     }
 
     /// Zigbee spec 3.6.6: re-broadcast a newly seen broadcast frame after a random
