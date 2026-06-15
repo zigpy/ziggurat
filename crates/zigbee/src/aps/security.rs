@@ -106,6 +106,19 @@ impl ApsSecurity {
         }
     }
 
+    /// The unique link key on record for a device, if any.
+    fn device_key(&self, eui64: Eui64) -> Option<&DeviceLinkKey> {
+        self.devices.get(&eui64).and_then(|e| e.key.as_ref())
+    }
+
+    /// The key a device with no unique link key on record shares with us: the one a
+    /// configured TCLK seed issues to it, otherwise the well-known global key.
+    fn unkeyed_link_key(&self, eui64: Eui64) -> Key {
+        self.tclk_seed
+            .as_ref()
+            .map_or_else(|| self.global_link_key.clone(), |seed| seed.derive(eui64))
+    }
+
     /// Drop an entry that no longer holds either a key or a replay counter.
     fn prune_if_empty(&mut self, eui64: Eui64) {
         if let Some(entry) = self.devices.get(&eui64)
@@ -156,7 +169,7 @@ impl ApsSecurity {
     /// Whether a device shares a key with us other than the well-known one. With a
     /// TCLK seed configured every device implicitly does.
     pub fn has_unique_link_key(&self, eui64: Eui64) -> bool {
-        self.devices.get(&eui64).is_some_and(|e| e.key.is_some()) || self.tclk_seed.is_some()
+        self.device_key(eui64).is_some() || self.tclk_seed.is_some()
     }
 
     pub fn device_key_count(&self) -> usize {
@@ -196,28 +209,20 @@ impl ApsSecurity {
     /// Only joining devices share the well-known key: fresh joins use
     /// [`Self::join_link_key`] instead.
     pub fn device_link_key(&self, eui64: Eui64) -> Key {
-        if let Some(link_key) = self.devices.get(&eui64).and_then(|e| e.key.as_ref()) {
-            return link_key.key.clone();
-        }
-
-        if let Some(seed) = &self.tclk_seed {
-            return seed.derive(eui64);
-        }
-
-        self.global_link_key.clone()
+        self.device_key(eui64).map_or_else(
+            || self.unkeyed_link_key(eui64),
+            |link_key| link_key.key.clone(),
+        )
     }
 
     /// The key a factory-new joiner shares with us before any key exchange: its
     /// provisional install-code key if one was registered, otherwise the well-known
     /// key. A joiner never holds a seed-derived key yet.
     pub fn join_link_key(&self, eui64: Eui64) -> Key {
-        self.devices
-            .get(&eui64)
-            .and_then(|e| e.key.as_ref())
-            .map_or_else(
-                || self.global_link_key.clone(),
-                |link_key| link_key.key.clone(),
-            )
+        self.device_key(eui64).map_or_else(
+            || self.global_link_key.clone(),
+            |link_key| link_key.key.clone(),
+        )
     }
 
     /// Zigbee spec 4.4.8.1: check a device's keyed hash proving possession of its link
@@ -282,14 +287,10 @@ impl ApsSecurity {
     /// Spec 4.4.1.1 step 1a: only provisional or verified `apsDeviceKeyPairSet`
     /// entries may encrypt; a key issued to a device but not yet verified may not.
     fn data_link_key(&self, eui64: Eui64) -> Option<Key> {
-        match self.devices.get(&eui64).and_then(|e| e.key.as_ref()) {
+        match self.device_key(eui64) {
             Some(entry) if entry.attributes == KeyAttributes::Unverified => None,
             Some(entry) => Some(entry.key.clone()),
-            None => Some(
-                self.tclk_seed
-                    .as_ref()
-                    .map_or_else(|| self.global_link_key.clone(), |seed| seed.derive(eui64)),
-            ),
+            None => Some(self.unkeyed_link_key(eui64)),
         }
     }
 
