@@ -540,15 +540,17 @@ impl ZigguratServer {
 
         // Restore unique trust center link keys negotiated in earlier sessions
         if !request.key_table.is_empty() {
-            let mut aps_security = stack.state.aps_security.lock();
+            let mut core = stack.state.core.lock();
 
             for entry in request.key_table {
-                aps_security.restore_device_key(entry.partner_ieee, entry.key);
+                core.aib
+                    .aps_security
+                    .restore_device_key(entry.partner_ieee, entry.key);
             }
 
             tracing::info!(
                 "Restored {} trust center link keys",
-                aps_security.device_key_count()
+                core.aib.aps_security.device_key_count()
             );
         }
 
@@ -626,16 +628,17 @@ impl ZigguratServer {
         };
 
         let state = &stack.state;
-        let nwk_security = state.nwk_security.lock();
-        let aps_security = state.aps_security.lock();
+        let core = state.core.lock();
+        let nwk_security = &core.nib.nwk_security;
+        let aps_security = &core.aib.aps_security;
         let tclk_seed = &stack.config.tclk_seed;
 
         response(
             id,
             json!({
-                "channel": *state.channel.lock(),
-                "nwk_update_id": *state.update_id.lock(),
-                "pan_id": format!("{:04x}", state.pan_id.lock().0),
+                "channel": core.mac.channel,
+                "nwk_update_id": core.nib.update_id,
+                "pan_id": format!("{:04x}", core.mac.pan_id.0),
                 "extended_pan_id": eui64_to_string(state.extended_pan_id),
                 "nwk_address": format!("{:04x}", state.network_address.as_u16()),
                 "ieee_address": eui64_to_string(state.ieee_address),
@@ -694,7 +697,7 @@ impl ZigguratServer {
         let destination = match (request.destination_eui64, request.destination) {
             (_, Some(nwk)) => nwk,
             (Some(eui64), None) => {
-                let nwk = stack.state.address_map.lock().nwk_for(eui64);
+                let nwk = stack.state.core.lock().nib.address_map.nwk_for(eui64);
 
                 match nwk {
                     Some(nwk) => nwk,

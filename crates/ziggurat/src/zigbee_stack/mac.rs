@@ -51,11 +51,22 @@ impl ZigbeeStack {
 
         let end_device_capacity = {
             self.state
-                .neighbors
+                .core
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
+                .nib
+                .neighbors
                 .child_count()
         } < usize::from(self.tunables.max_children);
+
+        let (ieee802154_sequence_number, pan_id, update_id) = {
+            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            (
+                core.mac.ieee802154_sequence_number,
+                core.mac.pan_id,
+                core.nib.update_id,
+            )
+        };
 
         let beacon_frame = Ieee802154Frame::Beacon(ieee_802154::Ieee802154BeaconFrame {
             header: Ieee802154FrameHeader {
@@ -72,16 +83,10 @@ impl ZigbeeStack {
                     frame_version: 0,
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
-                sequence_number: Some(
-                    *self
-                        .state
-                        .ieee802154_sequence_number
-                        .try_lock_for(MAX_LOCK_DURATION)
-                        .unwrap(),
-                ),
+                sequence_number: Some(ieee802154_sequence_number),
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
                 dest_address: None,
-                src_pan_id: Some(*self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap()),
+                src_pan_id: Some(pan_id),
                 dest_pan_id: None,
             },
             superframe_specification: ieee_802154::SuperframeSpecification {
@@ -103,11 +108,7 @@ impl ZigbeeStack {
                 end_device_capacity,
                 extended_pan_id: self.state.extended_pan_id,
                 tx_offset: RenamedU24(u24::new(0xFFFFFF)),
-                update_id: *self
-                    .state
-                    .update_id
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap(),
+                update_id,
             }
             .to_abstract_bits()
             .unwrap(),
@@ -133,7 +134,13 @@ impl ZigbeeStack {
         }
 
         // Only process packets destined for our PAN ID
-        let pan_id = *self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let pan_id = self
+            .state
+            .core
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .mac
+            .pan_id;
 
         match data_frame.header.dest_pan_id {
             None => {
@@ -219,9 +226,11 @@ impl ZigbeeStack {
         // fetch the decryption key
         let key = self
             .state
-            .nwk_security
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .nwk_security
             .inbound_network_key(
                 src_eui64,
                 aux_header.key_sequence_number,
@@ -270,13 +279,10 @@ impl ZigbeeStack {
         let final_frame = if !frame.header().frame_control.sequence_number_suppression {
             // Hold the lock for the shortest time possible
             let ieee802154_sequence_number = {
-                let mut ieee802154_sequence_number = self
-                    .state
-                    .ieee802154_sequence_number
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap();
-                *ieee802154_sequence_number = ieee802154_sequence_number.wrapping_add(1);
-                *ieee802154_sequence_number
+                let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+                core.mac.ieee802154_sequence_number =
+                    core.mac.ieee802154_sequence_number.wrapping_add(1);
+                core.mac.ieee802154_sequence_number
             };
 
             match frame {
@@ -317,7 +323,16 @@ impl ZigbeeStack {
             .transmit_frame(
                 &SpinelTxFrame {
                     psdu: final_frame.to_bytes(),
-                    channel: { Some(*self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap()) },
+                    channel: {
+                        Some(
+                            self.state
+                                .core
+                                .try_lock_for(MAX_LOCK_DURATION)
+                                .unwrap()
+                                .mac
+                                .channel,
+                        )
+                    },
                     max_csma_backoffs: Some(2),
                     max_frame_retries: Some(5),
                     enable_csma_ca: Some(true),

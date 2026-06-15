@@ -63,13 +63,9 @@ impl ZigbeeStack {
         };
 
         let (total, descriptors) = {
-            let neighbors = self
-                .state
-                .neighbors
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
+            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
-            let mut entries: Vec<&neighbors::TableEntry> = neighbors.entries().collect();
+            let mut entries: Vec<&neighbors::TableEntry> = core.nib.neighbors.entries().collect();
             entries.sort_by_key(|entry| entry.network_address.as_u16());
 
             let descriptors: Vec<NeighborDescriptor> = entries
@@ -149,9 +145,9 @@ impl ZigbeeStack {
         };
 
         let (total, descriptors) = {
-            let routing = self.state.routing.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
-            let mut entries: Vec<&routing::TableEntry> = routing.entries().collect();
+            let mut entries: Vec<&routing::TableEntry> = core.nib.routing.entries().collect();
             entries.sort_by_key(|entry| entry.destination.as_u16());
 
             let descriptors: Vec<RoutingDescriptor> = entries
@@ -217,26 +213,32 @@ impl ZigbeeStack {
         // which evict stale owners of the announced address without claiming it
         if annce.ieee_addr == Eui64([0xFF; 8]) {
             self.state
-                .address_map
+                .core
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
+                .nib
+                .address_map
                 .forget_address(annce.nwk_addr);
             return;
         }
 
         self.state
-            .address_map
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .address_map
             .claim(annce.ieee_addr, annce.nwk_addr);
 
         // A child of ours confirming an address change (e.g. after conflict
         // resolution) must keep its neighbor entry in sync, or its new address
         // would bypass the indirect queue
         self.state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .update_network_address(annce.ieee_addr, annce.nwk_addr);
     }
 
@@ -264,9 +266,11 @@ impl ZigbeeStack {
 
         let (claimed, removed) = self
             .state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .process_parent_annce(&annce.children);
 
         for &(eui64, nwk) in &removed {
@@ -344,9 +348,11 @@ impl ZigbeeStack {
 
         let removed = self
             .state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .remove_claimed_children(&response.children);
 
         for (eui64, nwk) in removed {
@@ -380,20 +386,17 @@ impl ZigbeeStack {
             }
 
             {
-                let neighbors = self
-                    .state
-                    .neighbors
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap();
+                let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
                 if let Some(remaining) = &mut remaining {
                     // Children that confirmed themselves with a keepalive since the
                     // previous chunk no longer need announcing
-                    remaining.retain(|&eui64| neighbors.is_unconfirmed_end_device_child(eui64));
+                    remaining
+                        .retain(|&eui64| core.nib.neighbors.is_unconfirmed_end_device_child(eui64));
                 } else {
                     // Keepalive state is intentionally not considered for the
                     // initial snapshot (spec 2.4.3.1.12.1 note 3)
-                    remaining = Some(neighbors.end_device_children());
+                    remaining = Some(core.nib.neighbors.end_device_children());
                 }
             }
 

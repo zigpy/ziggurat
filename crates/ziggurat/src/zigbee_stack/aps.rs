@@ -30,9 +30,11 @@ impl ZigbeeStack {
         let nwk_source = nwk_frame.nwk_header.source;
         let eui64 = self
             .state
-            .address_map
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .address_map
             .eui64_for(nwk_source);
 
         if eui64.is_none() {
@@ -51,17 +53,11 @@ impl ZigbeeStack {
     ) -> Option<(ApsDataFrame, Eui64)> {
         let source = self.aps_frame_source(nwk_frame, frame.aux_header.extended_source)?;
 
-        let network_key = self
-            .state
-            .nwk_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .network_key();
+        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let network_key = core.nib.nwk_security.network_key();
 
-        self.state
+        core.aib
             .aps_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
             .decrypt_data(source, frame, &network_key)
             .map(|data| (data, source))
     }
@@ -74,17 +70,11 @@ impl ZigbeeStack {
     ) -> Option<ApsAckFrame> {
         let source = self.aps_frame_source(nwk_frame, frame.aux_header.extended_source)?;
 
-        let network_key = self
-            .state
-            .nwk_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .network_key();
+        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let network_key = core.nib.nwk_security.network_key();
 
-        self.state
+        core.aib
             .aps_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
             .decrypt_ack(source, frame, &network_key)
     }
 
@@ -139,9 +129,11 @@ impl ZigbeeStack {
 
             let encrypted = self
                 .state
-                .aps_security
+                .core
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
+                .aib
+                .aps_security
                 .encrypt_ack(source_eui64, &ack_frame);
 
             let Some(encrypted) = encrypted else {
@@ -247,9 +239,11 @@ impl ZigbeeStack {
         let aps_payload = if let Some(destination_eui64) = aps_security {
             let encrypted = self
                 .state
-                .aps_security
+                .core
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
+                .aib
+                .aps_security
                 .encrypt_data(destination_eui64, &aps_frame);
 
             match encrypted {

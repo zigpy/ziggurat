@@ -11,25 +11,31 @@ use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack};
 impl ZigbeeStack {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
         self.state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .record_lqa(sender_nwk, lqi);
     }
 
     pub(super) fn end_device_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
         self.state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .end_device_child_eui64(nwk)
     }
 
     pub(super) fn sleepy_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
         self.state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .sleepy_child_eui64(nwk)
     }
 
@@ -41,9 +47,11 @@ impl ZigbeeStack {
 
         self.drop_indirect_transactions(Some(eui64), nwk);
         self.state
-            .routing
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .routing
             .remove_route(nwk);
     }
 
@@ -51,9 +59,11 @@ impl ZigbeeStack {
     pub(super) fn forget_moved_child(&self, eui64: Eui64, new_parent: Nwk) {
         let removed = self
             .state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .take_child(eui64);
 
         if let Some(nwk) = removed {
@@ -65,9 +75,11 @@ impl ZigbeeStack {
         // TODO: this function should be replaced by real timers
         let stale_neighbors = self
             .state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .age(Instant::now().into_std());
 
         for neighbor_nwk in stale_neighbors {
@@ -95,9 +107,11 @@ impl ZigbeeStack {
 
         let lost_link = self
             .state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .on_link_status(
                 source_ieee,
                 nwk_frame.nwk_header.source,
@@ -125,26 +139,24 @@ impl ZigbeeStack {
 
         // Decrement the `recent_activity` field of every active routing table entry
         self.state
-            .routing
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .routing
             .decay_activity();
 
         self.maybe_age_neighbors();
 
         // Decrement the inbound and outbound activity fields for neighbors
         let mut link_statuses = {
-            let mut neighbors = self
-                .state
-                .neighbors
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
-            neighbors.decay_activity();
+            let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            core.nib.neighbors.decay_activity();
 
             if empty {
                 Vec::new()
             } else {
-                neighbors.link_status_entries()
+                core.nib.neighbors.link_status_entries()
             }
         };
 

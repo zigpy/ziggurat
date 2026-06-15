@@ -202,28 +202,90 @@ pub struct ApsAckWaiter {
     pub(crate) ack_data: ApsAckData,
 }
 
+/// The NWK Information Base (spec Table 3-66): the network layer's mutable attributes
+/// and decision tables.
 #[derive(Debug)]
-pub struct State {
-    pub channel: Mutex<u8>,
-    pub ieee802154_sequence_number: Mutex<u8>,
-    pub aps_counter: Mutex<u8>,
+pub struct Nib {
+    pub sequence_number: u8,
+    pub update_id: u8,
 
+    /// A count of Unicast transmissions made by the NWK layer on this device.
+    /// Each time the NWK layer transmits a Unicast frame, by invoking the
+    /// MCPS-state.request primitive of the MAC sub-layer, it SHALL increment
+    /// this counter. When either the NHL performs an NLME-SET.request on this
+    /// attribute or if the value of `tx_total` rolls over past 0xffff the
+    /// NWK layer SHALL reset to 0x00 each Transmit Failure field contained in
+    /// the neighbor table.
+    pub tx_total: u16,
+
+    /// The neighbor table: link quality accounting, link status digestion, aging
+    pub neighbors: Neighbors,
+    /// NWK routing state and decision logic (route/discovery/record tables)
+    pub routing: Routing,
+    /// Broadcast deduplication and passive acknowledgment accounting
+    pub broadcasts: Broadcasts,
+    /// The network key, its outgoing frame counter, and per-relayer replay protection
+    pub nwk_security: NwkSecurity,
+    /// The EUI64-to-network-address map, one owner per network address
+    pub address_map: AddressMap,
+}
+
+/// The APS sub-layer Information Base (spec Table 4-35 and §4.4): the trust-center
+/// link-key store and APS-layer counter.
+#[derive(Debug)]
+pub struct Aib {
+    pub aps_counter: u8,
     /// APS-layer security material and operations (`apsDeviceKeyPairSet`, link-key
-    /// derivation, command encryption)
-    pub aps_security: Mutex<ApsSecurity>,
+    /// derivation, command encryption). Holds the non-spec TCLK seed used to derive
+    /// keys when the network was taken over from a microcontroller stack.
+    pub aps_security: ApsSecurity,
+}
 
-    pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
-    pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
-    pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
+/// Host-side mirror of the MAC PIB attributes we drive on the RCP. The MAC sub-layer
+/// physically lives on the radio coprocessor; these are our authoritative copies.
+#[derive(Debug)]
+pub struct MacState {
+    pub channel: u8,
+    pub ieee802154_sequence_number: u8,
+    pub pan_id: PanId,
     /// Frames awaiting extraction by a polling device. Completions are resolved
     /// with the transmit result on extraction, or an error on expiry or drop.
-    pub indirect_queue: Mutex<IndirectQueue<IndirectCompletion>>,
-    pub start_time: Instant,
+    pub indirect_queue: IndirectQueue<IndirectCompletion>,
+}
+
+/// The driver's unified mutable protocol state, behind a single lock.
+///
+/// An operation spanning several layers takes one guard instead of juggling a lock per
+/// field (and can never deadlock against itself on lock ordering). This is also the
+/// shape the eventual no_std core will own directly — there with no lock, here behind
+/// one `Mutex` for the threaded driver. Spec attributes are grouped by their
+/// information base ([`Nib`],[`Aib`], [`MacState`]); a field directly on the core is,
+/// by that absence, one of our own constructs with no spec information-base home.
+#[derive(Debug)]
+pub struct ZigbeeCore {
+    pub nib: Nib,
+    pub aib: Aib,
+    pub mac: MacState,
+
     /// The deadline until which joins are permitted; `None` or a past deadline
     /// means joins are denied. A deadline instead of a flag-plus-disable-timer
     /// makes renewals extend the window instead of being cut short by the
-    /// earlier request's timer.
-    pub permitting_joins_until: Mutex<Option<Instant>>,
+    /// earlier request's timer. Not a spec information-base attribute.
+    pub permitting_joins_until: Option<Instant>,
+}
+
+#[derive(Debug)]
+pub struct State {
+    /// All mutable protocol state, behind one lock
+    pub core: Mutex<ZigbeeCore>,
+
+    /// Async I/O bookkeeping, kept out of the core so transmit completions and client
+    /// notifications never contend with protocol work:
+    pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
+    pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
+    pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
+
+    pub start_time: Instant,
 
     // We intentionally violate the spec with these options
     //
@@ -240,45 +302,19 @@ pub struct State {
     /// much slower but ensures that routing logic is always followed.
     pub hack_force_route_discovery: bool,
 
-    // NIB
-    pub sequence_number: Mutex<u8>,
-
-    /// The neighbor table: link quality accounting, link status digestion, aging
-    pub neighbors: Mutex<Neighbors>,
-    /// NWK routing state and decision logic (route/discovery/record tables)
-    pub routing: Mutex<Routing>,
-    /// Broadcast deduplication and passive acknowledgment accounting
-    pub broadcasts: Mutex<Broadcasts>,
-
     pub capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
 
     pub ieee_address: Eui64,
-    pub update_id: Mutex<u8>,
-    pub pan_id: Mutex<PanId>,
     pub network_address: Nwk,
     pub extended_pan_id: Eui64,
-    /// The network key, its outgoing frame counter, and per-relayer replay protection
-    pub nwk_security: Mutex<NwkSecurity>,
 
     pub is_concentrator: bool,
     pub security_level: u8,
 
-    /// The EUI64-to-network-address map, one owner per network address
-    pub address_map: Mutex<AddressMap>,
-
     /// A flag that determines if a timestamp indication is provided on incoming and
     /// outgoing packets.
     pub time_stamp: bool,
-
-    /// A count of Unicast transmissions made by the NNK layer on this device.
-    /// Each time the NWK layer transmits a Unicast frame, by invoking the
-    /// MCPS-state.request primitive of the MAC sub-layer, it SHALL increment
-    /// this counter. When either the NHL performs an NLME-SET.request on this
-    /// attribute or if the value of `tx_total` rolls over past 0xffff the
-    /// NWK layer SHALL reset to 0x00 each Transmit Failure field contained in
-    /// the neighbor table.
-    pub tx_total: Mutex<u16>,
 
     /// This policy determines whether or not a remote NWK leave request command frame
     /// received by the local device is accepted.
@@ -290,11 +326,6 @@ pub struct State {
     /// bit in the message is set to FALSE
     pub leave_request_without_rejoin_allowed: bool,
 
-    // A strictly increasing sequence number included in all route request and route
-    // reply command frames to allow other routers to determine the chronological order
-    // of such route discovery messages.
-    // pub nwk_routing_sequence_number: u16,  // Only needed for R23 TLVs
-    //
     /// This indicates whether the router has Hub Connectivity as defined by a higher
     /// level application. The higher level application sets this value and the stack
     /// advertises it.
@@ -304,40 +335,58 @@ pub struct State {
 impl State {
     pub fn new(config: &NetworkConfig, tunables: &Tunables) -> Self {
         Self {
-            channel: Mutex::new(config.channel),
-            ieee802154_sequence_number: Mutex::new(0),
-            aps_counter: Mutex::new(0),
-            aps_security: Mutex::new(ApsSecurity::new(
-                config.tc_link_key.clone(),
-                config.ieee_address,
-                config.tclk_seed.clone(),
-            )),
+            core: Mutex::new(ZigbeeCore {
+                nib: Nib {
+                    sequence_number: 0,
+                    update_id: config.update_id,
+                    tx_total: 0,
+                    neighbors: Neighbors::new(
+                        config.network_address,
+                        u32::from(tunables.router_age_limit) * tunables.link_status_period,
+                    ),
+                    routing: Routing::new(
+                        config.network_address,
+                        tunables.route_discovery_time,
+                        tunables.mtorr_route_error_threshold,
+                        tunables.mtorr_delivery_failure_threshold,
+                    ),
+                    broadcasts: Broadcasts::new(
+                        tunables.broadcast_delivery_time,
+                        tunables.broadcast_passive_ack_quorum,
+                    ),
+                    nwk_security: NwkSecurity::new(
+                        config.network_key.clone(),
+                        config.network_key_seq_number,
+                        config.network_key_tx_counter,
+                        FRAME_COUNTER_NOTIFY_INTERVAL,
+                    ),
+                    address_map: AddressMap::new(config.network_address, config.ieee_address),
+                },
+                aib: Aib {
+                    aps_counter: 0,
+                    aps_security: ApsSecurity::new(
+                        config.tc_link_key.clone(),
+                        config.ieee_address,
+                        config.tclk_seed.clone(),
+                    ),
+                },
+                mac: MacState {
+                    channel: config.channel,
+                    ieee802154_sequence_number: 0,
+                    pan_id: config.pan_id,
+                    indirect_queue: IndirectQueue::new(tunables.transaction_persistence_time),
+                },
+                permitting_joins_until: None,
+            }),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
-            indirect_queue: Mutex::new(IndirectQueue::new(tunables.transaction_persistence_time)),
             start_time: Instant::now(),
-            permitting_joins_until: Mutex::new(None),
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
             hack_force_route_discovery: false,
 
-            sequence_number: Mutex::new(0),
-            neighbors: Mutex::new(Neighbors::new(
-                config.network_address,
-                u32::from(tunables.router_age_limit) * tunables.link_status_period,
-            )),
-            routing: Mutex::new(Routing::new(
-                config.network_address,
-                tunables.route_discovery_time,
-                tunables.mtorr_route_error_threshold,
-                tunables.mtorr_delivery_failure_threshold,
-            )),
-            broadcasts: Mutex::new(Broadcasts::new(
-                tunables.broadcast_delivery_time,
-                tunables.broadcast_passive_ack_quorum,
-            )),
             capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
                 device_type: NwkCapabilityInformationDeviceType::EndDevice,
@@ -349,21 +398,11 @@ impl State {
                 allocate_address: true,
             },
             nwk_manager_addr: Nwk(0x0000),
-            update_id: Mutex::new(config.update_id),
             network_address: config.network_address,
             extended_pan_id: config.extended_pan_id,
             is_concentrator: config.source_routing,
             security_level: 5,
-            nwk_security: Mutex::new(NwkSecurity::new(
-                config.network_key.clone(),
-                config.network_key_seq_number,
-                config.network_key_tx_counter,
-                FRAME_COUNTER_NOTIFY_INTERVAL,
-            )),
-            address_map: Mutex::new(AddressMap::new(config.network_address, config.ieee_address)),
             time_stamp: false,
-            pan_id: Mutex::new(config.pan_id),
-            tx_total: Mutex::new(0),
             leave_request_allowed: false,
             parent_information: ParentInformation {
                 mac_data_poll_keepalive: true,
@@ -764,7 +803,13 @@ impl ZigbeeStack {
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
-        let channel = *self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let channel = self
+            .state
+            .core
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .mac
+            .channel;
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
             .await
@@ -812,7 +857,13 @@ impl ZigbeeStack {
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
-        let pan_id = *self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let pan_id = self
+            .state
+            .core
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .mac
+            .pan_id;
         self.spinel
             .prop_value_set(SpinelPropertyId::Mac154Panid, pan_id.to_bytes().to_vec())
             .await
@@ -953,7 +1004,13 @@ impl ZigbeeStack {
         let results = scan.await;
 
         // The scan leaves the radio tuned to the last scanned channel, even on failure
-        let network_channel = *self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let network_channel = self
+            .state
+            .core
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .mac
+            .channel;
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan, vec![network_channel])
             .await?;
@@ -990,7 +1047,12 @@ impl ZigbeeStack {
             ));
         }
 
-        *self.state.channel.try_lock_for(MAX_LOCK_DURATION).unwrap() = channel;
+        self.state
+            .core
+            .try_lock_for(MAX_LOCK_DURATION)
+            .unwrap()
+            .mac
+            .channel = channel;
 
         Ok(())
     }
@@ -998,11 +1060,12 @@ impl ZigbeeStack {
     /// Update the `nwkUpdateId` advertised in our beacons, bumped alongside a channel
     /// migration so devices comparing network instances pick the current one.
     pub fn set_nwk_update_id(&self, update_id: u8) {
-        *self
-            .state
-            .update_id
+        self.state
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap() = update_id;
+            .unwrap()
+            .nib
+            .update_id = update_id;
     }
 
     /// Spawns a task tied to the stack's lifetime: it is aborted on `shutdown`.
@@ -1045,22 +1108,20 @@ impl ZigbeeStack {
     }
 
     pub fn next_aps_counter(&self) -> u8 {
-        let mut aps_counter = self
-            .state
-            .aps_counter
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
-        *aps_counter = aps_counter.wrapping_add(1);
+        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        core.aib.aps_counter = core.aib.aps_counter.wrapping_add(1);
 
-        *aps_counter
+        core.aib.aps_counter
     }
 
     pub fn next_nwk_frame_counter(&self) -> u32 {
         let advance = self
             .state
-            .nwk_security
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .nwk_security
             .next_outgoing_frame_counter();
 
         if advance.should_persist {

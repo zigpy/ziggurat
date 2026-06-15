@@ -57,15 +57,11 @@ impl ZigbeeStack {
         // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
         // admitted only while capacity remains
         let (already_known, at_capacity) = {
-            let neighbors = self
-                .state
-                .neighbors
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
+            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
             (
-                neighbors.contains(source_eui64),
-                neighbors.child_count() >= usize::from(self.tunables.max_children),
+                core.nib.neighbors.contains(source_eui64),
+                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children),
             )
         };
 
@@ -106,9 +102,11 @@ impl ZigbeeStack {
         };
 
         self.state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .upsert_child(
                 neighbors::ChildDescriptor {
                     eui64: source_eui64,
@@ -173,38 +171,20 @@ impl ZigbeeStack {
     /// Pick an unused random network address for a joining device, reusing the previous
     /// one if the device has joined before.
     fn allocate_network_address(&self, eui64: Eui64) -> Nwk {
-        let address_map = self
-            .state
-            .address_map
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
-        let neighbors = self
-            .state
-            .neighbors
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
+        let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
-        address_map.allocate(
+        core.nib.address_map.allocate(
             eui64,
-            &neighbors,
+            &core.nib.neighbors,
             std::iter::repeat_with(|| Nwk(rand::random::<u16>())),
         )
     }
 
     fn generate_unused_network_address(&self) -> Nwk {
-        let address_map = self
-            .state
-            .address_map
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
-        let neighbors = self
-            .state
-            .neighbors
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
+        let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
-        address_map.generate_unused(
-            &neighbors,
+        core.nib.address_map.generate_unused(
+            &core.nib.neighbors,
             std::iter::repeat_with(|| Nwk(rand::random::<u16>())),
         )
     }
@@ -262,16 +242,9 @@ impl ZigbeeStack {
 
         // Routers resolve their own conflicts after hearing the notification; our
         // mapping for the address is ambiguous until the keeper re-announces
-        self.state
-            .address_map
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .forget_address(address);
-        self.state
-            .routing
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .remove_route(address);
+        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        core.nib.address_map.forget_address(address);
+        core.nib.routing.remove_route(address);
     }
 
     /// Spec 3.6.1.10.5: notify the network of an address conflict with a jittered
@@ -347,6 +320,11 @@ impl ZigbeeStack {
         short_address: Nwk,
         association_status: Ieee802154AssociationStatus,
     ) -> Ieee802154Frame<P> {
+        let (sequence_number, pan_id) = {
+            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            (core.mac.ieee802154_sequence_number, core.mac.pan_id)
+        };
+
         Ieee802154Frame::Command(Ieee802154CommandFrame {
             header: Ieee802154FrameHeader {
                 frame_control: Ieee802154FrameControl {
@@ -362,17 +340,11 @@ impl ZigbeeStack {
                     frame_version: 0,
                     src_addr_mode: Ieee802154AddressingMode::Long,
                 },
-                sequence_number: Some(
-                    *self
-                        .state
-                        .ieee802154_sequence_number
-                        .try_lock_for(MAX_LOCK_DURATION)
-                        .unwrap(),
-                ),
+                sequence_number: Some(sequence_number),
                 src_address: Some(Ieee802154Address::Eui64(self.state.ieee_address)),
                 dest_address: Some(Ieee802154Address::Eui64(destination_eui64)),
                 src_pan_id: None,
-                dest_pan_id: Some(*self.state.pan_id.try_lock_for(MAX_LOCK_DURATION).unwrap()),
+                dest_pan_id: Some(pan_id),
             },
             command_id: Ieee802154CommandId::AssociationResponse,
             command_payload: Ieee802154CommandPayload::AssociationResponse(
@@ -387,9 +359,11 @@ impl ZigbeeStack {
 
     pub(super) fn is_neighbor(&self, nwk: Nwk) -> bool {
         self.state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .has_network_address(nwk)
     }
 
@@ -400,9 +374,11 @@ impl ZigbeeStack {
         tracing::info!("Registered provisional link key for {ieee:?}");
 
         self.state
-            .aps_security
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .aib
+            .aps_security
             .set_provisional_key(ieee, key);
     }
 
@@ -411,9 +387,11 @@ impl ZigbeeStack {
     fn begin_join(&self, ieee: Eui64) {
         let provisional_key = self
             .state
-            .aps_security
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .aib
+            .aps_security
             .begin_join(ieee);
 
         if let Some(key) = provisional_key {
@@ -436,13 +414,12 @@ impl ZigbeeStack {
         fresh_join: bool,
     ) -> EncryptedApsCommandFrame {
         let (network_key, key_seq_number) = {
-            let nwk_security = self
-                .state
-                .nwk_security
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
+            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
-            (nwk_security.network_key(), nwk_security.key_seq_number())
+            (
+                core.nib.nwk_security.network_key(),
+                core.nib.nwk_security.key_seq_number(),
+            )
         };
 
         let transport_key_command = ApsCommandFrame {
@@ -467,19 +444,15 @@ impl ZigbeeStack {
             }),
         };
 
-        let mut aps_security = self
-            .state
-            .aps_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
+        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
         let link_key = if fresh_join {
-            aps_security.join_link_key(destination_eui64)
+            core.aib.aps_security.join_link_key(destination_eui64)
         } else {
-            aps_security.device_link_key(destination_eui64)
+            core.aib.aps_security.device_link_key(destination_eui64)
         };
 
-        aps_security.encrypt_command_with_link_key(
+        core.aib.aps_security.encrypt_command_with_link_key(
             &link_key,
             NwkSecurityHeaderKeyId::KeyTransportKey,
             &transport_key_command,
@@ -516,19 +489,15 @@ impl ZigbeeStack {
             return;
         };
 
-        let network_key = self
-            .state
-            .nwk_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .network_key();
+        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let network_key = core.nib.nwk_security.network_key();
 
-        let decrypted = self
-            .state
-            .aps_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .decrypt_command(extended_source, encrypted_command_frame, &network_key);
+        let decrypted = core.aib.aps_security.decrypt_command(
+            extended_source,
+            encrypted_command_frame,
+            &network_key,
+        );
+        drop(core);
 
         match decrypted {
             Some(command_frame) => {
@@ -638,14 +607,13 @@ impl ZigbeeStack {
         tracing::info!("Sending a new trust center link key to {source_ieee:?}");
 
         // The new key is delivered encrypted with the key it replaces
-        let mut aps_security = self
-            .state
+        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let current_key = core.aib.aps_security.device_link_key(source_ieee);
+        let new_key = core
+            .aib
             .aps_security
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap();
-        let current_key = aps_security.device_link_key(source_ieee);
-        let new_key = aps_security.issue_device_key(source_ieee, Key(rand::random()));
-        drop(aps_security);
+            .issue_device_key(source_ieee, Key(rand::random()));
+        drop(core);
 
         // The key must be persisted by the client: a device that completed a key
         // exchange expects its unique key even after we restart
@@ -681,9 +649,11 @@ impl ZigbeeStack {
 
         let encrypted_command = self
             .state
-            .aps_security
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .aib
+            .aps_security
             .encrypt_command_with_link_key(
                 &current_key,
                 NwkSecurityHeaderKeyId::KeyLoadKey,
@@ -705,9 +675,11 @@ impl ZigbeeStack {
 
         let verified = self
             .state
-            .aps_security
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .aib
+            .aps_security
             .verify_device_key(source_ieee, &verify.initiator_verify_key_hash.0);
 
         let status = match verified {
@@ -764,9 +736,11 @@ impl ZigbeeStack {
             // Confirm key commands are APS encrypted with the link key itself, i.e. the
             // "data key" (spec 4.4.1.3)
             self.state
-                .aps_security
+                .core
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
+                .aib
+                .aps_security
                 .encrypt_command(
                     destination_eui64,
                     NwkSecurityHeaderKeyId::DataKey,
@@ -819,9 +793,11 @@ impl ZigbeeStack {
                 // well-known key for compatibility
                 if !self
                     .state
-                    .aps_security
+                    .core
                     .try_lock_for(MAX_LOCK_DURATION)
                     .unwrap()
+                    .aib
+                    .aps_security
                     .has_unique_link_key(update.device_address)
                 {
                     tracing::warn!(
@@ -935,15 +911,11 @@ impl ZigbeeStack {
         // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
         // admitted only while capacity remains
         let (already_known, at_capacity) = {
-            let neighbors = self
-                .state
-                .neighbors
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap();
+            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
 
             (
-                neighbors.contains(source_ieee),
-                neighbors.child_count() >= usize::from(self.tunables.max_children),
+                core.nib.neighbors.contains(source_ieee),
+                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children),
             )
         };
 
@@ -962,9 +934,11 @@ impl ZigbeeStack {
         // The device keeps its requested address unless it collides with another device
         let conflict = self
             .state
-            .address_map
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .address_map
             .claimed_by_other(requested_nwk, source_ieee);
 
         let assigned_nwk = if conflict {
@@ -991,9 +965,11 @@ impl ZigbeeStack {
         };
 
         self.state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .upsert_child(
                 neighbors::ChildDescriptor {
                     eui64: source_ieee,
@@ -1096,17 +1072,21 @@ impl ZigbeeStack {
 
         let source_ieee = nwk_frame.nwk_header.source_ieee.or_else(|| {
             self.state
-                .address_map
+                .core
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
+                .nib
+                .address_map
                 .eui64_for(source)
         });
 
         if let Some(source_ieee) = source_ieee {
             self.state
-                .neighbors
+                .core
                 .try_lock_for(MAX_LOCK_DURATION)
                 .unwrap()
+                .nib
+                .neighbors
                 .remove(source_ieee);
         }
 
@@ -1114,9 +1094,11 @@ impl ZigbeeStack {
         // device can rejoin later
         self.drop_indirect_transactions(source_ieee, source);
         self.state
-            .routing
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .routing
             .remove_route(source);
 
         let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
@@ -1161,9 +1143,11 @@ impl ZigbeeStack {
 
         let updated = self
             .state
-            .neighbors
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .nib
+            .neighbors
             .set_child_timeout(
                 source,
                 timeout,
@@ -1221,19 +1205,20 @@ impl ZigbeeStack {
             Some(Instant::now() + Duration::from_secs(duration))
         };
 
-        *self
-            .state
-            .permitting_joins_until
+        self.state
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap() = deadline;
+            .unwrap()
+            .permitting_joins_until = deadline;
     }
 
     /// Whether joins are permitted right now.
     pub(super) fn permitting_joins(&self) -> bool {
         self.state
-            .permitting_joins_until
+            .core
             .try_lock_for(MAX_LOCK_DURATION)
             .unwrap()
+            .permitting_joins_until
             .is_some_and(|deadline| deadline > Instant::now())
     }
 }
