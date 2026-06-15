@@ -17,20 +17,11 @@ use zigbee::nwk::frame::{
 };
 
 use super::routing::Route;
-use super::{
-    MAX_DEPTH, MAX_LOCK_DURATION, NwkSecurityMode, PROTOCOL_VERSION, ZigbeeStack, ZigbeeStackError,
-};
+use super::{MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let conflict = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .address_map
-            .update_mapping(eui64, nwk);
+        let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
 
         if conflict {
             self.handle_address_conflict(nwk, true);
@@ -52,7 +43,7 @@ impl ZigbeeStack {
 
         // The passive ack contract is formed when the transaction is created: only
         // routers that were neighbors at that point are expected to relay
-        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let mut core = self.core();
         let audience = core.nib.neighbors.expected_broadcast_relayers();
 
         let duplicate = core.nib.broadcasts.filter_received(
@@ -97,7 +88,7 @@ impl ZigbeeStack {
     /// Whether the broadcast's passive ack quorum has been heard from the audience
     /// members that are still live neighbors.
     fn broadcast_passively_acked(&self, key: (Nwk, u8)) -> bool {
-        let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let core = self.core();
         let live_relayers = core.nib.neighbors.expected_broadcast_relayers();
 
         core.nib
@@ -111,10 +102,7 @@ impl ZigbeeStack {
             && let Some(relaying_eui64) = aux_header.extended_source
         {
             let old_frame_counter = self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
+                .core()
                 .nib
                 .nwk_security
                 .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
@@ -208,10 +196,7 @@ impl ZigbeeStack {
                             }
                         };
                     tracing::debug!("Route record command frame received: {route_record_cmd:?}");
-                    self.state
-                        .core
-                        .try_lock_for(MAX_LOCK_DURATION)
-                        .unwrap()
+                    self.core()
                         .nib
                         .routing
                         .store_route_record(nwk_frame.nwk_header.source, route_record_cmd.relays);
@@ -340,7 +325,7 @@ impl ZigbeeStack {
     }
 
     pub(super) fn next_nwk_sequence_number(&self) -> u8 {
-        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let mut core = self.core();
         core.nib.sequence_number = core.nib.sequence_number.wrapping_add(1);
         core.nib.sequence_number
     }
@@ -356,14 +341,7 @@ impl ZigbeeStack {
                 },
                 frame_counter: 0, // This field is rewritten and is always up-to-date
                 extended_source: Some(self.state.ieee_address),
-                key_sequence_number: self
-                    .state
-                    .core
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .nib
-                    .nwk_security
-                    .active_key_seq_number(),
+                key_sequence_number: self.core().nib.nwk_security.active_key_seq_number(),
             });
         }
     }
@@ -379,16 +357,7 @@ impl ZigbeeStack {
                 nwk_frame.aux_header.as_mut().unwrap().frame_counter =
                     self.next_nwk_frame_counter();
 
-                nwk_frame.encrypt(
-                    &self
-                        .state
-                        .core
-                        .try_lock_for(MAX_LOCK_DURATION)
-                        .unwrap()
-                        .nib
-                        .nwk_security
-                        .network_key(),
-                )
+                nwk_frame.encrypt(&self.core().nib.nwk_security.network_key())
             }
             NwkSecurityMode::Unsecured => EncryptedNwkFrame {
                 nwk_header: nwk_frame.nwk_header.clone(),
@@ -400,20 +369,14 @@ impl ZigbeeStack {
 
     fn increment_tx_total(&self) {
         let tx_total = {
-            let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let mut core = self.core();
             core.nib.tx_total = core.nib.tx_total.wrapping_add(1);
             core.nib.tx_total
         };
 
         // Handle `tx_total` wrapping
         if tx_total == 0x0000 {
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .neighbors
-                .reset_transmit_failures();
+            self.core().nib.neighbors.reset_transmit_failures();
         }
     }
 
@@ -430,10 +393,7 @@ impl ZigbeeStack {
             return None;
         }
 
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+        self.core()
             .nib
             .routing
             .route_to(destination, self.tunables.max_source_route)
@@ -482,15 +442,7 @@ impl ZigbeeStack {
         if result.is_err() {
             self.invalidate_routes_via(next_hop_address);
 
-            if self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .routing
-                .remove_route_record(destination)
-            {
+            if self.core().nib.routing.remove_route_record(destination) {
                 tracing::info!("Removed source route to {destination:?} after delivery failure");
             }
 
@@ -513,7 +465,7 @@ impl ZigbeeStack {
         payload: P,
     ) -> Ieee802154Frame<P> {
         let (ieee802154_sequence_number, pan_id) = {
-            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let core = self.core();
             (core.mac.ieee802154_sequence_number, core.mac.pan_id)
         };
         Ieee802154Frame::Data(Ieee802154DataFrame {
@@ -590,7 +542,7 @@ impl ZigbeeStack {
             // TODO: maybe wrap the send state into some sort of struct to avoid
             // needing to do this?
             {
-                let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+                let mut core = self.core();
                 let relaying_ieee = core.nib.address_map.eui64_for(next_hop_address);
 
                 if let Some(relaying_ieee) = relaying_ieee {
@@ -646,7 +598,7 @@ impl ZigbeeStack {
         // The passive ack contract is formed at transmission time: only routers that
         // are neighbors right now are expected to relay
         {
-            let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let mut core = self.core();
             let audience = core.nib.neighbors.expected_broadcast_relayers();
 
             core.nib.broadcasts.record_transmission(
@@ -711,7 +663,7 @@ impl ZigbeeStack {
         let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
 
         let (ieee802154_sequence_number, pan_id) = {
-            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let core = self.core();
             (core.mac.ieee802154_sequence_number, core.mac.pan_id)
         };
 
@@ -760,10 +712,7 @@ impl ZigbeeStack {
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
         {
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
+            self.core()
                 .nib
                 .nwk_security
                 .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
@@ -774,10 +723,7 @@ impl ZigbeeStack {
         self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
 
         // Receiving a unicast from a neighbor counts as inbound activity
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+        self.core()
             .nib
             .neighbors
             .record_inbound_activity(sender_nwk);
@@ -842,10 +788,7 @@ impl ZigbeeStack {
                 next_hop
             };
 
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
+            self.core()
                 .nib
                 .routing
                 .note_source_routed_frame(nwk_frame.nwk_header.source);
@@ -856,14 +799,7 @@ impl ZigbeeStack {
             // goes through the routing table
             destination
         } else {
-            let next_hop = self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .routing
-                .next_hop(destination);
+            let next_hop = self.core().nib.routing.next_hop(destination);
 
             match next_hop {
                 Some(next_hop) => next_hop,
@@ -910,14 +846,7 @@ impl ZigbeeStack {
 
         let source = nwk_frame.nwk_header.source;
 
-        let destination_ieee = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .address_map
-            .eui64_for(source);
+        let destination_ieee = self.core().nib.address_map.eui64_for(source);
 
         // Spec 3.6.4.8.1: failures while relaying along a source route are reported
         // as such, so the concentrator can drop the stored route

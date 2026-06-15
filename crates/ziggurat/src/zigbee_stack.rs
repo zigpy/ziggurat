@@ -13,9 +13,10 @@ use zigbee::nwk::frame::NwkFrameType;
 use thiserror::Error;
 use tokio::time::error::Elapsed;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -44,8 +45,8 @@ pub use zigbee::nwk::routing::Routing;
 pub use zigbee::nwk::security::NwkSecurity;
 pub use zigbee::nwk::{neighbors, routing};
 
-// TODO: remove this once all long locks have been found
-const MAX_LOCK_DURATION: Duration = Duration::from_millis(10);
+/// Hard deadline for acquiring a lock. Anything exceeding this is an error.
+const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(10);
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
 const RESET_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -274,6 +275,27 @@ pub struct ZigbeeCore {
     pub permitting_joins_until: Option<Instant>,
 }
 
+/// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It exists
+/// to encode the single-lock discipline in one place:
+///
+/// - It is `!Send` so holding it across an `.await` is a compile-time error.
+/// - It is acquired with a [`LOCK_ACQUIRE_TIMEOUT`] so we fail at runtime if this lapses.
+pub struct CoreGuard<'a>(MutexGuard<'a, ZigbeeCore>);
+
+impl Deref for CoreGuard<'_> {
+    type Target = ZigbeeCore;
+
+    fn deref(&self) -> &ZigbeeCore {
+        &self.0
+    }
+}
+
+impl DerefMut for CoreGuard<'_> {
+    fn deref_mut(&mut self) -> &mut ZigbeeCore {
+        &mut self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct State {
     /// All mutable protocol state, behind one lock
@@ -500,6 +522,12 @@ pub struct ZigbeeStack {
 }
 
 impl ZigbeeStack {
+    /// Briefly lock the protocol core. See [`CoreGuard`] for the locking discipline the
+    /// returned guard encodes.
+    fn core(&self) -> CoreGuard<'_> {
+        CoreGuard(self.state.core.try_lock_for(LOCK_ACQUIRE_TIMEOUT).unwrap())
+    }
+
     pub fn new(
         spinel: Arc<SpinelClient>,
         config: NetworkConfig,
@@ -803,13 +831,7 @@ impl ZigbeeStack {
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
-        let channel = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .channel;
+        let channel = self.core().mac.channel;
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
             .await
@@ -857,13 +879,7 @@ impl ZigbeeStack {
             .await
             .map_err(ZigbeeStackError::SpinelError)?;
 
-        let pan_id = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .pan_id;
+        let pan_id = self.core().mac.pan_id;
         self.spinel
             .prop_value_set(SpinelPropertyId::Mac154Panid, pan_id.to_bytes().to_vec())
             .await
@@ -1004,13 +1020,7 @@ impl ZigbeeStack {
         let results = scan.await;
 
         // The scan leaves the radio tuned to the last scanned channel, even on failure
-        let network_channel = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .channel;
+        let network_channel = self.core().mac.channel;
         self.spinel
             .prop_value_set(SpinelPropertyId::PhyChan, vec![network_channel])
             .await?;
@@ -1047,12 +1057,7 @@ impl ZigbeeStack {
             ));
         }
 
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .channel = channel;
+        self.core().mac.channel = channel;
 
         Ok(())
     }
@@ -1060,12 +1065,7 @@ impl ZigbeeStack {
     /// Update the `nwkUpdateId` advertised in our beacons, bumped alongside a channel
     /// migration so devices comparing network instances pick the current one.
     pub fn set_nwk_update_id(&self, update_id: u8) {
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .update_id = update_id;
+        self.core().nib.update_id = update_id;
     }
 
     /// Spawns a task tied to the stack's lifetime: it is aborted on `shutdown`.
@@ -1075,7 +1075,7 @@ impl ZigbeeStack {
     {
         let mut tasks = self
             .background_tasks
-            .try_lock_for(MAX_LOCK_DURATION)
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
             .unwrap();
 
         // A completed task's entire cell is retained until it is reaped from the
@@ -1099,7 +1099,7 @@ impl ZigbeeStack {
         let mut tasks = std::mem::take(
             &mut *self
                 .background_tasks
-                .try_lock_for(MAX_LOCK_DURATION)
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap(),
         );
 
@@ -1108,21 +1108,14 @@ impl ZigbeeStack {
     }
 
     pub fn next_aps_counter(&self) -> u8 {
-        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let mut core = self.core();
         core.aib.aps_counter = core.aib.aps_counter.wrapping_add(1);
 
         core.aib.aps_counter
     }
 
     pub fn next_nwk_frame_counter(&self) -> u32 {
-        let advance = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .nwk_security
-            .next_outgoing_frame_counter();
+        let advance = self.core().nib.nwk_security.next_outgoing_frame_counter();
 
         if advance.should_persist {
             let _ = self

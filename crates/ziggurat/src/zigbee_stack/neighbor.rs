@@ -6,37 +6,19 @@ use zigbee::Command;
 use zigbee::nwk::commands::NwkLinkStatusCommand;
 use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
-use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack};
+use super::{NwkSecurityMode, ZigbeeStack};
 
 impl ZigbeeStack {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .record_lqa(sender_nwk, lqi);
+        self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
     }
 
     pub(super) fn end_device_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .end_device_child_eui64(nwk)
+        self.core().nib.neighbors.end_device_child_eui64(nwk)
     }
 
     pub(super) fn sleepy_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .sleepy_child_eui64(nwk)
+        self.core().nib.neighbors.sleepy_child_eui64(nwk)
     }
 
     /// Clean up after a child that attached to another parent: leftover state would
@@ -46,25 +28,12 @@ impl ZigbeeStack {
         tracing::info!("Child {eui64:?} ({nwk:?}) is now parented by {new_parent:?}");
 
         self.drop_indirect_transactions(Some(eui64), nwk);
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .routing
-            .remove_route(nwk);
+        self.core().nib.routing.remove_route(nwk);
     }
 
     /// Drop our child entry for a device known to have attached to another parent.
     pub(super) fn forget_moved_child(&self, eui64: Eui64, new_parent: Nwk) {
-        let removed = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .take_child(eui64);
+        let removed = self.core().nib.neighbors.take_child(eui64);
 
         if let Some(nwk) = removed {
             self.cleanup_moved_child(eui64, nwk, new_parent);
@@ -73,14 +42,7 @@ impl ZigbeeStack {
 
     pub(super) fn maybe_age_neighbors(&self) {
         // TODO: this function should be replaced by real timers
-        let stale_neighbors = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .age(Instant::now().into_std());
+        let stale_neighbors = self.core().nib.neighbors.age(Instant::now().into_std());
 
         for neighbor_nwk in stale_neighbors {
             self.invalidate_routes_via(neighbor_nwk);
@@ -105,20 +67,13 @@ impl ZigbeeStack {
             return;
         };
 
-        let lost_link = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .on_link_status(
-                source_ieee,
-                nwk_frame.nwk_header.source,
-                lqi,
-                &link_status_cmd,
-                Instant::now().into_std(),
-            );
+        let lost_link = self.core().nib.neighbors.on_link_status(
+            source_ieee,
+            nwk_frame.nwk_header.source,
+            lqi,
+            &link_status_cmd,
+            Instant::now().into_std(),
+        );
 
         // Spec 3.6.4.4.2: when the outgoing cost collapses to zero the link is
         // considered broken, and routes through this neighbor with it
@@ -138,19 +93,13 @@ impl ZigbeeStack {
         }
 
         // Decrement the `recent_activity` field of every active routing table entry
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .routing
-            .decay_activity();
+        self.core().nib.routing.decay_activity();
 
         self.maybe_age_neighbors();
 
         // Decrement the inbound and outbound activity fields for neighbors
         let mut link_statuses = {
-            let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let mut core = self.core();
             core.nib.neighbors.decay_activity();
 
             if empty {

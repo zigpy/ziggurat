@@ -11,7 +11,8 @@ use zigbee::zdp::{
 };
 
 use super::{
-    MAX_DEPTH, MAX_LOCK_DURATION, NwkDeviceType, ZigbeeStack, ZigbeeStackError, neighbors, routing,
+    LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkDeviceType, ZigbeeStack, ZigbeeStackError, neighbors,
+    routing,
 };
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
@@ -63,7 +64,7 @@ impl ZigbeeStack {
         };
 
         let (total, descriptors) = {
-            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let core = self.core();
 
             let mut entries: Vec<&neighbors::TableEntry> = core.nib.neighbors.entries().collect();
             entries.sort_by_key(|entry| entry.network_address.as_u16());
@@ -145,7 +146,7 @@ impl ZigbeeStack {
         };
 
         let (total, descriptors) = {
-            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let core = self.core();
 
             let mut entries: Vec<&routing::TableEntry> = core.nib.routing.entries().collect();
             entries.sort_by_key(|entry| entry.destination.as_u16());
@@ -212,20 +213,11 @@ impl ZigbeeStack {
         // The spec allows announcements with an unknown (all-ones) IEEE address,
         // which evict stale owners of the announced address without claiming it
         if annce.ieee_addr == Eui64([0xFF; 8]) {
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .address_map
-                .forget_address(annce.nwk_addr);
+            self.core().nib.address_map.forget_address(annce.nwk_addr);
             return;
         }
 
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+        self.core()
             .nib
             .address_map
             .claim(annce.ieee_addr, annce.nwk_addr);
@@ -233,10 +225,7 @@ impl ZigbeeStack {
         // A child of ours confirming an address change (e.g. after conflict
         // resolution) must keep its neighbor entry in sync, or its new address
         // would bypass the indirect queue
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+        self.core()
             .nib
             .neighbors
             .update_network_address(annce.ieee_addr, annce.nwk_addr);
@@ -261,14 +250,11 @@ impl ZigbeeStack {
         // announcement countdown to avoid a network-wide broadcast storm
         *self
             .parent_annce_received
-            .try_lock_for(MAX_LOCK_DURATION)
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
             .unwrap() = Some(Instant::now());
 
         let (claimed, removed) = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .nib
             .neighbors
             .process_parent_annce(&annce.children);
@@ -347,10 +333,7 @@ impl ZigbeeStack {
         };
 
         let removed = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .nib
             .neighbors
             .remove_claimed_children(&response.children);
@@ -378,7 +361,7 @@ impl ZigbeeStack {
             // countdown
             if self
                 .parent_annce_received
-                .try_lock_for(MAX_LOCK_DURATION)
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap()
                 .is_some_and(|received_at| received_at > slept_at)
             {
@@ -386,7 +369,7 @@ impl ZigbeeStack {
             }
 
             {
-                let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+                let core = self.core();
 
                 if let Some(remaining) = &mut remaining {
                     // Children that confirmed themselves with a keepalive since the

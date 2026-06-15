@@ -11,7 +11,7 @@ use std::cmp;
 use tokio::sync::oneshot;
 
 use super::{
-    ApsAckData, ApsAckWaiter, MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
+    ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, ZigbeeStack, ZigbeeStackError,
 };
 
 impl ZigbeeStack {
@@ -28,14 +28,7 @@ impl ZigbeeStack {
         }
 
         let nwk_source = nwk_frame.nwk_header.source;
-        let eui64 = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .address_map
-            .eui64_for(nwk_source);
+        let eui64 = self.core().nib.address_map.eui64_for(nwk_source);
 
         if eui64.is_none() {
             tracing::warn!("Cannot resolve the EUI64 of {nwk_source:?} to decrypt an APS frame");
@@ -53,7 +46,7 @@ impl ZigbeeStack {
     ) -> Option<(ApsDataFrame, Eui64)> {
         let source = self.aps_frame_source(nwk_frame, frame.aux_header.extended_source)?;
 
-        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let mut core = self.core();
         let network_key = core.nib.nwk_security.network_key();
 
         core.aib
@@ -70,7 +63,7 @@ impl ZigbeeStack {
     ) -> Option<ApsAckFrame> {
         let source = self.aps_frame_source(nwk_frame, frame.aux_header.extended_source)?;
 
-        let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+        let mut core = self.core();
         let network_key = core.nib.nwk_security.network_key();
 
         core.aib
@@ -86,7 +79,7 @@ impl ZigbeeStack {
         let tx = self
             .state
             .pending_aps_acks
-            .try_lock_for(MAX_LOCK_DURATION)
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
             .unwrap()
             .remove(&ack_data);
         if let Some(tx) = tx {
@@ -128,10 +121,7 @@ impl ZigbeeStack {
             };
 
             let encrypted = self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
+                .core()
                 .aib
                 .aps_security
                 .encrypt_ack(source_eui64, &ack_frame);
@@ -238,10 +228,7 @@ impl ZigbeeStack {
 
         let aps_payload = if let Some(destination_eui64) = aps_security {
             let encrypted = self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
+                .core()
                 .aib
                 .aps_security
                 .encrypt_data(destination_eui64, &aps_frame);
@@ -288,7 +275,7 @@ impl ZigbeeStack {
         {
             self.state
                 .pending_aps_acks
-                .try_lock_for(MAX_LOCK_DURATION)
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap()
                 .insert(ack_data.clone(), ack_tx);
         }
@@ -299,7 +286,7 @@ impl ZigbeeStack {
         {
             self.state
                 .pending_aps_acks
-                .try_lock_for(MAX_LOCK_DURATION)
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap()
                 .remove(&ack_data);
             return Err(err);
@@ -330,7 +317,7 @@ impl ZigbeeStack {
                 tracing::warn!("APS ACK timed out for {:?}", waiter.ack_data);
                 self.state
                     .pending_aps_acks
-                    .try_lock_for(MAX_LOCK_DURATION)
+                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                     .unwrap()
                     .remove(&waiter.ack_data);
                 Err(ZigbeeStackError::ApsAckTimeout)

@@ -13,7 +13,7 @@ use zigbee::nwk::commands::{
 use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::routing::{RouteReplyDisposition, Status};
-use super::{MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
+use super::{LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     fn notify_routing_change(&self, nwk: &Nwk) {
@@ -21,7 +21,7 @@ impl ZigbeeStack {
             let pending_route_notifications = self
                 .state
                 .pending_route_notifications
-                .try_lock_for(MAX_LOCK_DURATION)
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap();
 
             if !pending_route_notifications.contains_key(nwk) {
@@ -48,14 +48,7 @@ impl ZigbeeStack {
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
 
-        let sender_link = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .link(nwk_frame.nwk_header.source);
+        let sender_link = self.core().nib.neighbors.link(nwk_frame.nwk_header.source);
 
         let Some(sender_link) = sender_link else {
             tracing::debug!("Ignoring route reply from unknown neighbor");
@@ -71,20 +64,13 @@ impl ZigbeeStack {
             .path_cost
             .saturating_add(sender_link.outgoing_cost);
 
-        let disposition = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .routing
-            .accept_route_reply(
-                route_reply_cmd.originator_nwk,
-                route_reply_cmd.route_request_identifier,
-                route_reply_cmd.responder_nwk,
-                nwk_frame.nwk_header.source,
-                updated_path_cost,
-            );
+        let disposition = self.core().nib.routing.accept_route_reply(
+            route_reply_cmd.originator_nwk,
+            route_reply_cmd.route_request_identifier,
+            route_reply_cmd.responder_nwk,
+            nwk_frame.nwk_header.source,
+            updated_path_cost,
+        );
 
         let (next_hop_nwk, path_cost) = match disposition {
             RouteReplyDisposition::Drop => return,
@@ -100,14 +86,7 @@ impl ZigbeeStack {
 
         self.notify_routing_change(&route_reply_cmd.responder_nwk);
 
-        let next_hop_link = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .link(next_hop_nwk);
+        let next_hop_link = self.core().nib.neighbors.link(next_hop_nwk);
 
         let Some(next_hop_link) = next_hop_link else {
             tracing::warn!("Next hop neighbor not found in neighbor table");
@@ -160,14 +139,7 @@ impl ZigbeeStack {
         let many_to_one = route_request_cmd.many_to_one != NwkRouteRequestManyToOne::NotManyToOne;
 
         // We need to know who sent the frame
-        let sender_link = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .link(sender_nwk);
+        let sender_link = self.core().nib.neighbors.link(sender_nwk);
 
         let Some(sender_link) = sender_link else {
             // Can we do anything here? Broadcast an unsolicited link status?
@@ -192,22 +164,15 @@ impl ZigbeeStack {
         // Deduplicate route requests and track the best path back to the originator.
         // Only requests advertising a strictly better forward cost are processed
         // further; this also stops our own requests from echoing back at us.
-        let accepted = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .routing
-            .accept_route_request(
-                nwk_frame.nwk_header.source,
-                route_request_cmd.route_request_identifier,
-                route_request_cmd.destination_address,
-                sender_nwk,
-                updated_path_cost,
-                route_request_cmd.many_to_one,
-                Instant::now().into_std(),
-            );
+        let accepted = self.core().nib.routing.accept_route_request(
+            nwk_frame.nwk_header.source,
+            route_request_cmd.route_request_identifier,
+            route_request_cmd.destination_address,
+            sender_nwk,
+            updated_path_cost,
+            route_request_cmd.many_to_one,
+            Instant::now().into_std(),
+        );
 
         if !accepted {
             return;
@@ -260,10 +225,7 @@ impl ZigbeeStack {
         // many-to-one requests are addressed to a broadcast address, so there is no
         // destination to track for them.
         if !many_to_one {
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
+            self.core()
                 .nib
                 .routing
                 .note_relayed_discovery(route_request_cmd.destination_address);
@@ -351,10 +313,7 @@ impl ZigbeeStack {
     /// store for future source routing.
     pub async fn send_many_to_one_route_request(&self) {
         let route_request_identifier = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .nib
             .routing
             .begin_many_to_one_advertisement(Instant::now().into_std());
@@ -398,15 +357,7 @@ impl ZigbeeStack {
         let startup_deadline = Instant::now() + 2 * self.tunables.link_status_period;
 
         loop {
-            if self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .neighbors
-                .any_live_router_link()
-            {
+            if self.core().nib.neighbors.any_live_router_link() {
                 break;
             }
 
@@ -421,13 +372,7 @@ impl ZigbeeStack {
         loop {
             self.send_many_to_one_route_request().await;
 
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .routing
-                .reset_mtorr_triggers();
+            self.core().nib.routing.reset_mtorr_triggers();
 
             let min_deadline = Instant::now() + self.tunables.mtorr_min_interval;
             let max_deadline = Instant::now() + self.tunables.mtorr_max_interval;
@@ -451,14 +396,7 @@ impl ZigbeeStack {
             return;
         }
 
-        let kick = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .routing
-            .note_route_error();
+        let kick = self.core().nib.routing.note_route_error();
 
         if kick {
             self.mtorr_kick.notify_one();
@@ -472,14 +410,7 @@ impl ZigbeeStack {
             return;
         }
 
-        let kick = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .routing
-            .note_delivery_failure();
+        let kick = self.core().nib.routing.note_delivery_failure();
 
         if kick {
             self.mtorr_kick.notify_one();
@@ -487,13 +418,7 @@ impl ZigbeeStack {
     }
 
     pub(super) fn invalidate_routes_via(&self, next_hop: Nwk) {
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .routing
-            .invalidate_via(next_hop);
+        self.core().nib.routing.invalidate_via(next_hop);
     }
 
     /// Zigbee spec 3.6.4.8.1: another router could not deliver a frame we originated;
@@ -517,7 +442,7 @@ impl ZigbeeStack {
             | NwkNetworkStatus::LegacyLinkFailure
             | NwkNetworkStatus::LinkFailure
             | NwkNetworkStatus::SourceRouteFailure => {
-                let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+                let mut core = self.core();
 
                 let removed_route = core
                     .nib
@@ -573,15 +498,7 @@ impl ZigbeeStack {
         }
 
         if self.state.hack_force_route_discovery
-            || self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .routing
-                .route_status(destination)
-                .is_none()
+            || self.core().nib.routing.route_status(destination).is_none()
         {
             tracing::debug!("Starting route discovery for NWK {destination:?}");
             self.send_route_discovery(destination).await;
@@ -591,10 +508,7 @@ impl ZigbeeStack {
         // link-failure network status removing the route), so a missing entry is
         // treated like an inactive route and discovery starts over
         let route_entry_status = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .nib
             .routing
             .route_status(destination)
@@ -604,14 +518,7 @@ impl ZigbeeStack {
 
         match route_entry_status {
             Status::Active => {
-                let next_hop = self
-                    .state
-                    .core
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .nib
-                    .routing
-                    .next_hop(destination);
+                let next_hop = self.core().nib.routing.next_hop(destination);
 
                 // The same concurrent teardown can strike between the two reads
                 if let Some(next_hop) = next_hop {
@@ -636,7 +543,7 @@ impl ZigbeeStack {
             let mut pending_route_notifications = self
                 .state
                 .pending_route_notifications
-                .try_lock_for(MAX_LOCK_DURATION)
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap();
             let tx = pending_route_notifications
                 .entry(destination)
@@ -651,10 +558,7 @@ impl ZigbeeStack {
         // Pull the current route discovery entry for the device to determine the timeout
         let discovery_timeout = {
             let deadline = self
-                .state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
+                .core()
                 .nib
                 .routing
                 .discovery_deadline(destination, Instant::now().into_std());
@@ -681,21 +585,12 @@ impl ZigbeeStack {
             }
             Err(err) => {
                 tracing::debug!("Route discovery timed out");
-                self.state
-                    .core
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .nib
-                    .routing
-                    .mark_discovery_failed(destination);
+                self.core().nib.routing.mark_discovery_failed(destination);
                 return Err(ZigbeeStackError::RouteDiscoveryTimeout(err));
             }
         };
 
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+        self.core()
             .nib
             .routing
             .next_hop(destination)
@@ -711,23 +606,13 @@ impl ZigbeeStack {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
 
         let route_request_identifier = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .nib
             .routing
             .begin_discovery(destination, Instant::now().into_std());
 
         // If we know the EUI64 corresponding to the NWK, use it
-        let destination_eui64 = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .address_map
-            .eui64_for(destination);
+        let destination_eui64 = self.core().nib.address_map.eui64_for(destination);
 
         let route_request_frame = self
             .nwk_command_frame(

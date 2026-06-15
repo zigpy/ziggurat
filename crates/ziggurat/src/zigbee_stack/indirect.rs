@@ -12,7 +12,7 @@ use zigbee::nwk::frame::EncryptedNwkFrame;
 use zigbee::indirect::Delivery;
 
 use super::{
-    IndirectCompletion, MAX_LOCK_DURATION, NwkSecurityMode, ZigbeeNotification, ZigbeeStack,
+    IndirectCompletion, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, ZigbeeNotification, ZigbeeStack,
     ZigbeeStackError,
 };
 
@@ -37,13 +37,12 @@ impl ZigbeeStack {
     ) -> Result<(), ZigbeeStackError> {
         let (completion, result_rx) = oneshot::channel();
 
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .indirect_queue
-            .push(destination, frame, completion, Instant::now().into_std());
+        self.core().mac.indirect_queue.push(
+            destination,
+            frame,
+            completion,
+            Instant::now().into_std(),
+        );
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
@@ -64,26 +63,12 @@ impl ZigbeeStack {
 
         let (source_eui64, source_nwk) = match poll_source {
             Some(Ieee802154Address::Eui64(eui64)) => {
-                let nwk = self
-                    .state
-                    .core
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .nib
-                    .address_map
-                    .nwk_for(eui64);
+                let nwk = self.core().nib.address_map.nwk_for(eui64);
 
                 (Some(eui64), nwk)
             }
             Some(Ieee802154Address::Nwk(nwk)) => {
-                let eui64 = self
-                    .state
-                    .core
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
-                    .nib
-                    .address_map
-                    .eui64_for(nwk);
+                let eui64 = self.core().nib.address_map.eui64_for(nwk);
 
                 (eui64, Some(nwk))
             }
@@ -91,14 +76,11 @@ impl ZigbeeStack {
         };
 
         // Spec 3.6.10.4: a poll from a known device refreshes its keepalive deadline
-        let known_device = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .neighbors
-            .refresh_child_timeout(source_eui64, source_nwk, Instant::now().into_std());
+        let known_device = self.core().nib.neighbors.refresh_child_timeout(
+            source_eui64,
+            source_nwk,
+            Instant::now().into_std(),
+        );
 
         // The RCP only told the device to keep listening (frame-pending=1 in the
         // poll's auto-ACK) if the poll's source address was already written to the
@@ -107,7 +89,7 @@ impl ZigbeeStack {
         // being transmitted into the void.
         let fp_advertised = poll_source.is_some_and(|address| {
             self.src_match_written
-                .try_lock_for(MAX_LOCK_DURATION)
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap()
                 .contains(address)
         });
@@ -133,14 +115,11 @@ impl ZigbeeStack {
         source_eui64: Option<Eui64>,
         source_nwk: Option<Nwk>,
     ) -> bool {
-        let outcome = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .indirect_queue
-            .extract(source_eui64, source_nwk, Instant::now().into_std());
+        let outcome = self.core().mac.indirect_queue.extract(
+            source_eui64,
+            source_nwk,
+            Instant::now().into_std(),
+        );
 
         for (destination, transaction) in outcome.expired {
             let _ = transaction
@@ -195,10 +174,7 @@ impl ZigbeeStack {
             // so a failed transmit goes back to the head of the queue for the next poll
             Err(err) if Instant::now().into_std() < transaction.expires_at => {
                 tracing::warn!("Indirect transmit to {destination:?} failed ({err}), requeueing");
-                self.state
-                    .core
-                    .try_lock_for(MAX_LOCK_DURATION)
-                    .unwrap()
+                self.core()
                     .mac
                     .indirect_queue
                     .requeue(destination, transaction);
@@ -211,27 +187,14 @@ impl ZigbeeStack {
     }
 
     fn remove_indirect_queue_if_empty(&self, destination: Ieee802154Address) {
-        self.state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .indirect_queue
-            .remove_if_empty(destination);
+        self.core().mac.indirect_queue.remove_if_empty(destination);
 
         self.src_match_sync.notify_one();
     }
 
     /// Drop every transaction queued for a device that is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
-        let dropped = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .indirect_queue
-            .drop_for(eui64, nwk);
+        let dropped = self.core().mac.indirect_queue.drop_for(eui64, nwk);
 
         if dropped.is_empty() {
             return;
@@ -253,15 +216,7 @@ impl ZigbeeStack {
         let destination = Ieee802154Address::Nwk(nwk);
 
         // One queued leave at a time, or every poll until extraction would add one
-        if self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .indirect_queue
-            .has_queued(destination)
-        {
+        if self.core().mac.indirect_queue.has_queued(destination) {
             return;
         }
 
@@ -317,7 +272,7 @@ impl ZigbeeStack {
     /// that has queued indirect transactions.
     pub(super) async fn write_src_match_table(&self) -> Result<(), ZigbeeStackError> {
         let table = {
-            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let core = self.core();
 
             core.mac
                 .indirect_queue
@@ -354,7 +309,7 @@ impl ZigbeeStack {
 
         *self
             .src_match_written
-            .try_lock_for(MAX_LOCK_DURATION)
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
             .unwrap() = table;
 
         Ok(())
@@ -382,20 +337,14 @@ impl ZigbeeStack {
     /// transaction expiry or a child keepalive timeout.
     fn next_maintenance_deadline(&self) -> Option<Instant> {
         let next_expiry = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .mac
             .indirect_queue
             .next_expiry()
             .map(Instant::from_std);
 
         let next_eviction = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .nib
             .neighbors
             .next_child_timeout()
@@ -406,10 +355,7 @@ impl ZigbeeStack {
 
     fn expire_indirect_transactions(&self) {
         let expired = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .mac
             .indirect_queue
             .expire(Instant::now().into_std());
@@ -430,10 +376,7 @@ impl ZigbeeStack {
 
     fn evict_timed_out_children(&self) {
         let evicted = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
+            .core()
             .nib
             .neighbors
             .evict_timed_out_children(Instant::now().into_std());
@@ -444,13 +387,7 @@ impl ZigbeeStack {
             // The address map entry and any negotiated link key are kept so that the
             // device can rejoin later (mirrors `handle_leave`)
             self.drop_indirect_transactions(Some(eui64), nwk);
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .routing
-                .remove_route(nwk);
+            self.core().nib.routing.remove_route(nwk);
 
             let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
                 nwk,

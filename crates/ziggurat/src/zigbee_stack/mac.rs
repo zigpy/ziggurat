@@ -13,7 +13,7 @@ use zigbee::nwk::frame::{
     NwkSecurityLevel,
 };
 
-use super::{MAX_LOCK_DURATION, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
+use super::{PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
@@ -49,18 +49,11 @@ impl ZigbeeStack {
         let permitting_joins = self.permitting_joins();
         tracing::debug!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
 
-        let end_device_capacity = {
-            self.state
-                .core
-                .try_lock_for(MAX_LOCK_DURATION)
-                .unwrap()
-                .nib
-                .neighbors
-                .child_count()
-        } < usize::from(self.tunables.max_children);
+        let end_device_capacity =
+            { self.core().nib.neighbors.child_count() } < usize::from(self.tunables.max_children);
 
         let (ieee802154_sequence_number, pan_id, update_id) = {
-            let core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+            let core = self.core();
             (
                 core.mac.ieee802154_sequence_number,
                 core.mac.pan_id,
@@ -134,13 +127,7 @@ impl ZigbeeStack {
         }
 
         // Only process packets destined for our PAN ID
-        let pan_id = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .mac
-            .pan_id;
+        let pan_id = self.core().mac.pan_id;
 
         match data_frame.header.dest_pan_id {
             None => {
@@ -224,18 +211,11 @@ impl ZigbeeStack {
 
         // Validate the key sequence number and the relayer's frame counter, and
         // fetch the decryption key
-        let key = self
-            .state
-            .core
-            .try_lock_for(MAX_LOCK_DURATION)
-            .unwrap()
-            .nib
-            .nwk_security
-            .inbound_network_key(
-                src_eui64,
-                aux_header.key_sequence_number,
-                aux_header.frame_counter,
-            )?;
+        let key = self.core().nib.nwk_security.inbound_network_key(
+            src_eui64,
+            aux_header.key_sequence_number,
+            aux_header.frame_counter,
+        )?;
 
         let decrypted_nwk_frame = match nwk_frame.decrypt(&key) {
             Ok(decrypted_frame) => decrypted_frame,
@@ -279,7 +259,7 @@ impl ZigbeeStack {
         let final_frame = if !frame.header().frame_control.sequence_number_suppression {
             // Hold the lock for the shortest time possible
             let ieee802154_sequence_number = {
-                let mut core = self.state.core.try_lock_for(MAX_LOCK_DURATION).unwrap();
+                let mut core = self.core();
                 core.mac.ieee802154_sequence_number =
                     core.mac.ieee802154_sequence_number.wrapping_add(1);
                 core.mac.ieee802154_sequence_number
@@ -323,16 +303,7 @@ impl ZigbeeStack {
             .transmit_frame(
                 &SpinelTxFrame {
                     psdu: final_frame.to_bytes(),
-                    channel: {
-                        Some(
-                            self.state
-                                .core
-                                .try_lock_for(MAX_LOCK_DURATION)
-                                .unwrap()
-                                .mac
-                                .channel,
-                        )
-                    },
+                    channel: { Some(self.core().mac.channel) },
                     max_csma_backoffs: Some(2),
                     max_frame_retries: Some(5),
                     enable_csma_ca: Some(true),
