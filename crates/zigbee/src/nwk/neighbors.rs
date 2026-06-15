@@ -355,6 +355,8 @@ impl Neighbors {
 
     /// Spec 2.4.4.2.22.2: remove the entries for end devices that another router has
     /// claimed with keepalive-confirmed ownership.
+    #[must_use = "the removed children must be cleaned up from dependent state; \
+        dropping them leaves stale entries"]
     pub fn remove_claimed_children(&mut self, claimed: &[Eui64]) -> Vec<(Eui64, Nwk)> {
         let mut removed = Vec::new();
 
@@ -377,6 +379,8 @@ impl Neighbors {
     /// Spec 2.4.4.2.22.1: another router announced the end devices it believes are
     /// its children. Announced devices we have heard a keepalive from are kept and
     /// returned for claiming back; our entries for the rest are stale and removed.
+    #[must_use = "the children to claim back and the removed stale entries must both be \
+        acted on; dropping the result silently skips both"]
     pub fn process_parent_annce(&mut self, announced: &[Eui64]) -> (Vec<Eui64>, Vec<(Eui64, Nwk)>) {
         let mut claimed = Vec::new();
         let mut removed = Vec::new();
@@ -403,6 +407,8 @@ impl Neighbors {
 
     /// Remove children whose keepalive deadline has passed (spec 3.6.10.1), returning
     /// their addresses for cleanup.
+    #[must_use = "evicted children must be cleaned up and announced; dropping them \
+        leaves stale entries and silent losses"]
     pub fn evict_timed_out_children(&mut self, now: Instant) -> Vec<(Eui64, Nwk)> {
         let evicted: Vec<(Eui64, Nwk)> = self
             .table
@@ -492,6 +498,8 @@ impl Neighbors {
 
     /// Reset link costs of neighbors that have stopped sending link status frames,
     /// returning their addresses so routes through them can be invalidated.
+    #[must_use = "routes through the returned aged-out neighbors must be invalidated; \
+        dropping them leaves stale routes"]
     pub fn age(&mut self, now: Instant) -> Vec<Nwk> {
         let mut stale_neighbors = Vec::new();
 

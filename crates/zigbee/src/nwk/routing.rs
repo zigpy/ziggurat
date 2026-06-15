@@ -128,6 +128,8 @@ pub enum Route {
 
 /// What to do with an accepted route reply.
 #[derive(Debug, PartialEq, Eq)]
+#[must_use = "the driver must act on the disposition (relay onward or mark the route \
+    established); dropping it silently discards the route reply"]
 pub enum RouteReplyDisposition {
     /// Stale, unsolicited, or no better than what we already have
     Drop,

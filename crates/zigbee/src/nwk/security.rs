@@ -19,6 +19,8 @@ struct NwkSecurityDescriptor {
 
 /// The outcome of advancing the outgoing NWK security frame counter.
 #[derive(Debug)]
+#[must_use = "the advanced counter must be written into the frame and persisted when \
+    requested; dropping it risks reusing a counter or a rollback on restart"]
 pub struct CounterAdvance {
     pub value: u32,
     /// The client's persisted copy of the counter should be refreshed: a rollback

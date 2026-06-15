@@ -34,6 +34,8 @@ pub struct Delivery<C> {
 
 /// What a poll extracted from the queue.
 #[derive(Debug)]
+#[must_use = "the expired transactions must be failed and the delivery transmitted; \
+    dropping the outcome silently loses queued frames and leaks their completions"]
 pub struct PollOutcome<C> {
     /// Transactions that expired at the head of the queue, to be failed
     pub expired: Vec<(Ieee802154Address, Transaction<C>)>,
@@ -201,6 +203,8 @@ impl<C> IndirectQueue<C> {
     /// Pop every transaction whose deadline has passed, returning them for
     /// resolution. Transactions expire in arrival order: they are queued with a
     /// uniform persistence time and requeued transmit failures keep their deadline.
+    #[must_use = "expired transactions must be failed (their completions resolved); \
+        dropping them leaves their awaiters hanging"]
     pub fn expire(&mut self, now: Instant) -> Vec<(Ieee802154Address, Transaction<C>)> {
         let mut expired = Vec::new();
 
