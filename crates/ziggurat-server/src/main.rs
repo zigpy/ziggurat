@@ -222,6 +222,20 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                 "ieee": ieee.map(eui64_to_string),
             }),
         ),
+        ZigbeeNotification::ApsDecryptionFailure {
+            source,
+            source_ieee,
+            frame_counter,
+            key_id,
+        } => notification(
+            "aps_decryption_failure",
+            json!({
+                "source": hex::encode(source.to_bytes()),
+                "source_ieee": eui64_to_string(source_ieee),
+                "frame_counter": frame_counter,
+                "key_id": key_id,
+            }),
+        ),
     }
 }
 

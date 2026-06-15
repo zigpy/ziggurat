@@ -402,6 +402,17 @@ pub enum ZigbeeNotification {
     /// A device announced that it is leaving the network. The EUI64 is unknown when
     /// the leaving device never made it into the address map.
     DeviceLeft { nwk: Nwk, ieee: Option<Eui64> },
+    /// An APS command frame from a device could not be decrypted with any key we hold
+    /// (its trust center link key, a configured TCLK seed, or the well-known key).
+    /// This almost always means the device's link key is wrong/missing and it silently
+    /// breaks joins routed through that device, since the trust center can't read its
+    /// Update-Device notification.
+    ApsDecryptionFailure {
+        source: Nwk,
+        source_ieee: Eui64,
+        frame_counter: u32,
+        key_id: String,
+    },
 }
 
 #[derive(Debug)]

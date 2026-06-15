@@ -537,9 +537,21 @@ impl ZigbeeStack {
             }
             None => {
                 tracing::warn!(
-                    "Failed to decrypt APS command frame from {:?}",
-                    nwk_frame.nwk_header.source
+                    "Failed to decrypt APS command frame from {:?} (EUI {:?})",
+                    nwk_frame.nwk_header.source,
+                    extended_source
                 );
+                let _ = self
+                    .notification_tx
+                    .send(ZigbeeNotification::ApsDecryptionFailure {
+                        source: nwk_frame.nwk_header.source,
+                        source_ieee: extended_source,
+                        frame_counter: encrypted_command_frame.aux_header.frame_counter,
+                        key_id: format!(
+                            "{:?}",
+                            encrypted_command_frame.aux_header.security_control.key_id
+                        ),
+                    });
             }
         }
     }
