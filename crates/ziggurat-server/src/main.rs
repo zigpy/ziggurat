@@ -637,9 +637,8 @@ impl ZigguratServer {
                 }),
                 "key_table": aps_security
                     .device_keys()
-                    .iter()
                     .map(|(partner_ieee, entry)| json!({
-                        "partner_ieee": eui64_to_string(*partner_ieee),
+                        "partner_ieee": eui64_to_string(partner_ieee),
                         "key": key_to_string(&entry.key),
                     }))
                     .collect::<Vec<_>>(),

@@ -62,6 +62,22 @@ pub struct DeviceLinkKey {
     pub attributes: KeyAttributes,
 }
 
+/// What we track per peer device. The two have independent lifetimes (a seed-derived
+/// device has a counter but no stored key, and reissuing a key
+/// (`issue_device_key`) must not reset the counter) so each field is independently
+/// optional. An entry with both fields empty is pruned.
+#[derive(Debug, Default)]
+struct DeviceState {
+    /// The unique trust center link key negotiated with this device, if any. Absent
+    /// when the device still uses the well-known key or a seed-derived one.
+    key: Option<DeviceLinkKey>,
+    /// Incoming security frame counter, spec 4.4.1.2 steps 4 and 9: a frame secured
+    /// with a unique link key must carry a counter no smaller than this stored value,
+    /// which is one past the last accepted counter. Kept in memory only: losing it
+    /// across a restart merely suspends replay protection until the next valid frame.
+    incoming_frame_counter: Option<u32>,
+}
+
 /// The APS security layer: the spec's `apsDeviceKeyPairSet`, link-key derivation, and
 /// APS frame encryption/decryption (commands, data, and ACKs).
 #[derive(Debug)]
@@ -69,19 +85,14 @@ pub struct ApsSecurity {
     /// The well-known key devices join with (usually "ZigBeeAlliance09")
     global_link_key: Key,
     local_eui64: Eui64,
-    /// Unique trust center link keys negotiated with individual devices
-    device_keys: HashMap<Eui64, DeviceLinkKey>,
+    /// Per-device link keys and replay counters, keyed by peer EUI64
+    devices: HashMap<Eui64, DeviceState>,
     /// When set, unique link keys are derived from this seed instead of generated
     /// randomly, mirroring the stack the network was taken over from
     tclk_seed: Option<TclkSeed>,
     /// The outgoing security frame counter shared by all frames encrypted with keys
     /// derived from link keys
     outgoing_frame_counter: u32,
-    /// Incoming security frame counters, spec 4.4.1.2 steps 4 and 9: a frame secured
-    /// with a unique link key must carry a counter no smaller than the stored value,
-    /// which is one past the last accepted counter. Kept in memory only: losing them
-    /// across a restart merely suspends replay protection until the next valid frame.
-    incoming_frame_counters: HashMap<Eui64, u32>,
 }
 
 impl ApsSecurity {
@@ -89,35 +100,38 @@ impl ApsSecurity {
         Self {
             global_link_key,
             local_eui64,
-            device_keys: HashMap::new(),
+            devices: HashMap::new(),
             tclk_seed,
             outgoing_frame_counter: 0,
-            incoming_frame_counters: HashMap::new(),
+        }
+    }
+
+    /// Drop an entry that no longer holds either a key or a replay counter.
+    fn prune_if_empty(&mut self, eui64: Eui64) {
+        if let Some(entry) = self.devices.get(&eui64)
+            && entry.key.is_none()
+            && entry.incoming_frame_counter.is_none()
+        {
+            self.devices.remove(&eui64);
         }
     }
 
     /// Restore a key negotiated in an earlier session and persisted by the client.
     pub fn restore_device_key(&mut self, eui64: Eui64, key: Key) {
-        self.device_keys.insert(
-            eui64,
-            DeviceLinkKey {
-                key,
-                attributes: KeyAttributes::Verified,
-            },
-        );
+        self.devices.entry(eui64).or_default().key = Some(DeviceLinkKey {
+            key,
+            attributes: KeyAttributes::Verified,
+        });
     }
 
     /// Register a link key provisioned out of band (derived from an install code)
     /// for a device expected to join: an `apsDeviceKeyPairSet` entry with
     /// `PROVISIONAL_KEY` attributes, replacing the well-known key for that device.
     pub fn set_provisional_key(&mut self, eui64: Eui64, key: Key) {
-        self.device_keys.insert(
-            eui64,
-            DeviceLinkKey {
-                key,
-                attributes: KeyAttributes::Provisional,
-            },
-        );
+        self.devices.entry(eui64).or_default().key = Some(DeviceLinkKey {
+            key,
+            attributes: KeyAttributes::Provisional,
+        });
     }
 
     /// A device is joining fresh. A provisional (install-code) entry is its
@@ -125,12 +139,14 @@ impl ApsSecurity {
     /// persist; any other key on record is stale, since a factory-new device only
     /// knows the well-known link key.
     pub fn begin_join(&mut self, eui64: Eui64) -> Option<Key> {
-        match self.device_keys.get(&eui64) {
-            Some(entry) if entry.attributes == KeyAttributes::Provisional => {
-                Some(entry.key.clone())
+        let entry = self.devices.get_mut(&eui64)?;
+        match &entry.key {
+            Some(link_key) if link_key.attributes == KeyAttributes::Provisional => {
+                Some(link_key.key.clone())
             }
             Some(_) => {
-                self.device_keys.remove(&eui64);
+                entry.key = None;
+                self.prune_if_empty(eui64);
                 None
             }
             None => None,
@@ -140,16 +156,18 @@ impl ApsSecurity {
     /// Whether a device shares a key with us other than the well-known one. With a
     /// TCLK seed configured every device implicitly does.
     pub fn has_unique_link_key(&self, eui64: Eui64) -> bool {
-        self.device_keys.contains_key(&eui64) || self.tclk_seed.is_some()
+        self.devices.get(&eui64).is_some_and(|e| e.key.is_some()) || self.tclk_seed.is_some()
     }
 
     pub fn device_key_count(&self) -> usize {
-        self.device_keys.len()
+        self.devices.values().filter(|e| e.key.is_some()).count()
     }
 
     /// The unique trust center link keys on record, for the client to persist.
-    pub const fn device_keys(&self) -> &HashMap<Eui64, DeviceLinkKey> {
-        &self.device_keys
+    pub fn device_keys(&self) -> impl Iterator<Item = (Eui64, &DeviceLinkKey)> {
+        self.devices
+            .iter()
+            .filter_map(|(eui64, entry)| entry.key.as_ref().map(|key| (*eui64, key)))
     }
 
     /// Issue a fresh unique link key for a device, replacing any previous one. The key
@@ -162,13 +180,10 @@ impl ApsSecurity {
             .as_ref()
             .map_or(fresh_key, |seed| seed.derive(eui64));
 
-        self.device_keys.insert(
-            eui64,
-            DeviceLinkKey {
-                key: key.clone(),
-                attributes: KeyAttributes::Unverified,
-            },
-        );
+        self.devices.entry(eui64).or_default().key = Some(DeviceLinkKey {
+            key: key.clone(),
+            attributes: KeyAttributes::Unverified,
+        });
 
         key
     }
@@ -181,8 +196,8 @@ impl ApsSecurity {
     /// Only joining devices share the well-known key: fresh joins use
     /// [`Self::join_link_key`] instead.
     pub fn device_link_key(&self, eui64: Eui64) -> Key {
-        if let Some(entry) = self.device_keys.get(&eui64) {
-            return entry.key.clone();
+        if let Some(link_key) = self.devices.get(&eui64).and_then(|e| e.key.as_ref()) {
+            return link_key.key.clone();
         }
 
         if let Some(seed) = &self.tclk_seed {
@@ -196,15 +211,19 @@ impl ApsSecurity {
     /// provisional install-code key if one was registered, otherwise the well-known
     /// key. A joiner never holds a seed-derived key yet.
     pub fn join_link_key(&self, eui64: Eui64) -> Key {
-        self.device_keys
+        self.devices
             .get(&eui64)
-            .map_or_else(|| self.global_link_key.clone(), |entry| entry.key.clone())
+            .and_then(|e| e.key.as_ref())
+            .map_or_else(
+                || self.global_link_key.clone(),
+                |link_key| link_key.key.clone(),
+            )
     }
 
     /// Zigbee spec 4.4.8.1: check a device's keyed hash proving possession of its link
     /// key, marking the key verified on success. `None` means no key is on record.
     pub fn verify_device_key(&mut self, eui64: Eui64, hash: &[u8; 16]) -> Option<bool> {
-        let entry = self.device_keys.get_mut(&eui64)?;
+        let entry = self.devices.get_mut(&eui64)?.key.as_mut()?;
 
         if verify_key_hash(&entry.key).ct_eq(hash).into() {
             entry.attributes = KeyAttributes::Verified;
@@ -263,7 +282,7 @@ impl ApsSecurity {
     /// Spec 4.4.1.1 step 1a: only provisional or verified `apsDeviceKeyPairSet`
     /// entries may encrypt; a key issued to a device but not yet verified may not.
     fn data_link_key(&self, eui64: Eui64) -> Option<Key> {
-        match self.device_keys.get(&eui64) {
+        match self.devices.get(&eui64).and_then(|e| e.key.as_ref()) {
             Some(entry) if entry.attributes == KeyAttributes::Unverified => None,
             Some(entry) => Some(entry.key.clone()),
             None => Some(
@@ -353,7 +372,10 @@ impl ApsSecurity {
 
         // Spec 4.4.1.2 steps 4 and 9: replay protection applies to unique link keys
         if *link_key != self.global_link_key {
-            if let Some(&minimum) = self.incoming_frame_counters.get(&source)
+            if let Some(minimum) = self
+                .devices
+                .get(&source)
+                .and_then(|e| e.incoming_frame_counter)
                 && aux_header.frame_counter < minimum
             {
                 tracing::warn!(
@@ -363,8 +385,10 @@ impl ApsSecurity {
                 return None;
             }
 
-            self.incoming_frame_counters
-                .insert(source, aux_header.frame_counter + 1);
+            self.devices
+                .entry(source)
+                .or_default()
+                .incoming_frame_counter = Some(aux_header.frame_counter + 1);
         }
 
         Some(frame)
