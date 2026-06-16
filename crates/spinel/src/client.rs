@@ -378,6 +378,17 @@ impl SpinelClient {
     /// Serial death (USB yank, EOF) exits the whole process: the supervisor (Docker)
     /// restarts us. A half-dead process with a deaf radio is the worst failure mode.
     pub fn spawn_reader(&self) {
+        self.spawn_reader_inner(true);
+    }
+
+    /// Like [`Self::spawn_reader`] but stops the reader task on transport close instead
+    /// of exiting the process. For embedders (e.g. the Python bindings) whose transport
+    /// closing is a normal shutdown, not a fault that warrants killing the host process.
+    pub fn spawn_reader_graceful(&self) {
+        self.spawn_reader_inner(false);
+    }
+
+    fn spawn_reader_inner(&self, exit_on_close: bool) {
         let mut reader = self
             .reader
             .lock()
@@ -395,13 +406,21 @@ impl SpinelClient {
                         let mut protocol = protocol.lock().expect("Failed to lock Spinel");
                         protocol.handle_inbound_bytes(&buffer[..n])
                     }
-                    Ok(_) => {
+                    Ok(_) if exit_on_close => {
                         tracing::error!("Serial port EOF, exiting");
                         std::process::exit(1);
                     }
-                    Err(e) => {
+                    Err(e) if exit_on_close => {
                         tracing::error!("Serial port read failed ({e}), exiting");
                         std::process::exit(1);
+                    }
+                    Ok(_) => {
+                        tracing::warn!("Spinel transport closed, stopping reader");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Spinel transport read failed ({e}), stopping reader");
+                        return;
                     }
                 }
             }

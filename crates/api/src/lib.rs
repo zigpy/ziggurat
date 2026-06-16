@@ -24,6 +24,9 @@ use ziggurat::zigbee_stack::{
     WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 
+/// Bumped on any breaking change to the wire protocol; sent in the `hello` greeting.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// The server-level notification hub buffers this many notifications for slow
 /// connection forwarders before they start lagging.
 const NOTIFICATION_HUB_DEPTH: usize = 1024;
@@ -101,6 +104,18 @@ pub fn error_response(id: u64, code: &str, message: impl ToString) -> serde_json
 
 fn notification(event: &str, data: serde_json::Value) -> serde_json::Value {
     json!({"type": "notification", "event": event, "data": data})
+}
+
+/// The greeting a transport sends as soon as a client connects, reporting the protocol
+/// version and whether a stack is already running.
+pub fn hello(is_configured: bool) -> serde_json::Value {
+    let state = if is_configured {
+        "running"
+    } else {
+        "awaiting_configuration"
+    };
+
+    json!({"type": "hello", "version": PROTOCOL_VERSION, "state": state})
 }
 
 // Each `params` payload deserializes into the struct matching its `method`.

@@ -1,7 +1,6 @@
 use clap::{Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::json;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
@@ -14,9 +13,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use spinel::client::SpinelClient;
-use ziggurat_api::{Api, error_response, event, notification_to_message};
-
-const PROTOCOL_VERSION: u32 = 1;
+use ziggurat_api::{Api, error_response, event, hello, notification_to_message};
 
 /// Outbound messages a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -139,14 +136,7 @@ impl ZigguratServer {
             let _ = sink.close().await;
         });
 
-        let state = if self.api.is_configured() {
-            "running"
-        } else {
-            "awaiting_configuration"
-        };
-        outbound_tx
-            .send(json!({"type": "hello", "version": PROTOCOL_VERSION, "state": state}))
-            .await?;
+        outbound_tx.send(hello(self.api.is_configured())).await?;
 
         // Forward hub notifications to this connection
         let mut notification_rx = self.api.subscribe();
