@@ -747,6 +747,17 @@ impl ZigbeeStack {
 
         match update.status {
             ApsUpdateDeviceStatus::StandardDeviceUnsecuredJoin => {
+                // A new join through a router is only authorized while the trust
+                // center window is open; otherwise we withhold the key and let the
+                // joiner time out (spec 4.6.3.2)
+                if !self.trust_center_permitting_joins() {
+                    tracing::info!(
+                        "Joins not permitted, ignoring unsecured join of {:?} via {router_nwk:?}",
+                        update.device_address
+                    );
+                    return;
+                }
+
                 self.begin_join(update.device_address);
 
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
@@ -1147,22 +1158,35 @@ impl ZigbeeStack {
         );
     }
 
-    pub fn permit_joins(&self, duration: u64) {
-        let deadline = if duration == 0 {
-            tracing::info!("Permitting joins disabled");
-            None
-        } else {
-            tracing::info!("Permitting joins for {duration} seconds");
-            Some(Instant::now() + Duration::from_secs(duration))
-        };
+    /// Open (or close, with `duration == 0`) the join window. The trust center
+    /// authorization window always tracks `duration`; the coordinator's beacon and
+    /// direct-association window only follows it when `accept_direct_joins` is set,
+    /// leaving a steered join authorized without advertising us as a parent.
+    pub fn permit_joins(&self, duration: u64, accept_direct_joins: bool) {
+        let deadline = (duration != 0).then(|| Instant::now() + Duration::from_secs(duration));
 
-        self.core().permitting_joins_until = deadline;
+        tracing::info!(
+            "Permitting joins for {duration} seconds (accept_direct_joins: {accept_direct_joins})"
+        );
+
+        let mut core = self.core();
+        core.trust_center_joins_until = deadline;
+        if accept_direct_joins {
+            core.permitting_joins_until = deadline;
+        }
     }
 
-    /// Whether joins are permitted right now.
+    /// Whether the coordinator advertises and accepts direct joins right now.
     pub(super) fn permitting_joins(&self) -> bool {
         self.core()
             .permitting_joins_until
+            .is_some_and(|deadline| deadline > Instant::now())
+    }
+
+    /// Whether the trust center authorizes new joins through a router right now.
+    pub(super) fn trust_center_permitting_joins(&self) -> bool {
+        self.core()
+            .trust_center_joins_until
             .is_some_and(|deadline| deadline > Instant::now())
     }
 }

@@ -307,11 +307,16 @@ pub struct ZigbeeCore {
     pub aib: Aib,
     pub mac: MacState,
 
-    /// The deadline until which joins are permitted; `None` or a past deadline
-    /// means joins are denied. A deadline instead of a flag-plus-disable-timer
-    /// makes renewals extend the window instead of being cut short by the
-    /// earlier request's timer. Not a spec information-base attribute.
+    /// Deadline until which the coordinator advertises `association_permit` in its
+    /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
+    /// renewals extend the window. `None` or past means direct joins are denied.
     pub permitting_joins_until: Option<Instant>,
+
+    /// Deadline until which the trust center authorizes new devices joining through a
+    /// router. Opened on every permit, independent of the beacon window, so a steered
+    /// join completes while the coordinator's own beacon stays closed. Rejoins are
+    /// never gated by this.
+    pub trust_center_joins_until: Option<Instant>,
 }
 
 /// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It exists
@@ -438,6 +443,7 @@ impl State {
                     indirect_queue: IndirectQueue::new(tunables.transaction_persistence_time),
                 },
                 permitting_joins_until: None,
+                trust_center_joins_until: None,
             }),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),

@@ -155,6 +155,12 @@ struct EnergyScanRequest {
 struct PermitJoinsRequest {
     #[serde(default)]
     duration: u64,
+    #[serde(default = "default_accept_direct_joins")]
+    accept_direct_joins: bool,
+}
+
+const fn default_accept_direct_joins() -> bool {
+    true
 }
 
 #[derive(Deserialize, Debug)]
@@ -828,7 +834,7 @@ impl ZigguratServer {
             return error_response(id, "not_configured", "no stack is running");
         };
 
-        stack.permit_joins(request.duration);
+        stack.permit_joins(request.duration, request.accept_direct_joins);
 
         response(id, json!({"status": "success"}))
     }
