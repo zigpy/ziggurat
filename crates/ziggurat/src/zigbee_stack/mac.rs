@@ -304,8 +304,8 @@ impl ZigbeeStack {
                 &SpinelTxFrame {
                     psdu: final_frame.to_bytes(),
                     channel: { Some(self.core().mac.channel) },
-                    max_csma_backoffs: Some(2),
-                    max_frame_retries: Some(5),
+                    max_csma_backoffs: Some(self.tunables.mac_max_csma_backoffs),
+                    max_frame_retries: Some(self.tunables.mac_max_frame_retries),
                     enable_csma_ca: Some(true),
                     is_header_updated: Some(true),
                     is_a_retransmit: Some(false),

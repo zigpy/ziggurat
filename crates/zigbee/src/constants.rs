@@ -89,6 +89,14 @@ pub struct Tunables {
     /// wait must cover a full indirect transaction lifetime (7.68s) plus the ack's trip
     /// back.
     pub aps_ack_timeout_indirect: Duration,
+
+    /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel before
+    /// declaring a transmit failed.
+    pub mac_max_csma_backoffs: u8,
+
+    /// `macMaxFrameRetries`: how many times the radio retransmits a unicast that goes
+    /// unacknowledged before declaring it failed.
+    pub mac_max_frame_retries: u8,
 }
 
 impl Default for Tunables {
@@ -128,6 +136,8 @@ impl Tunables {
             parent_annce_jitter_max: Duration::from_secs(10),
             aps_ack_timeout: Duration::from_millis(5000),
             aps_ack_timeout_indirect: Duration::from_millis(10000),
+            mac_max_csma_backoffs: 2,
+            mac_max_frame_retries: 5,
         }
     }
 }
