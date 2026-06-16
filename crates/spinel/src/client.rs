@@ -9,7 +9,7 @@ use std::string::String;
 use thiserror::Error;
 use tokio_serial::SerialStream;
 
-use crate::priority_lock::{PriorityGuard, PriorityLock};
+use crate::priority_lock::PriorityLock;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -262,10 +262,13 @@ pub struct SpinelClient {
     /// concurrent commands cannot interleave partial frames inside the byte stream.
     writer: AsyncMutex<SpinelWriter>,
     pub protocol: Arc<Mutex<SpinelProtocol>>,
-    /// The RCP has a single radio (and a single TX buffer): transmit transactions are
-    /// serialized end to end, and energy scans hold the lock per scanned channel via
-    /// [`Self::lock_radio`].
-    radio_lock: PriorityLock<TxPriority>,
+    /// Orders queued transmits among themselves; priority decides which goes first.
+    transmit_lock: PriorityLock<TxPriority>,
+    /// Functional ownership of the radio (scan, reset recovery, channel retune), taken via
+    /// [`Self::lock_radio`]. A transmit locks it only for its send; an exclusive op holds it
+    /// throughout. Because transmits queue on `transmit_lock` first, an exclusive op waits
+    /// out only the in-flight frame, not the whole backlog.
+    exclusive_lock: AsyncMutex<()>,
     consecutive_timeouts: AtomicU32,
 }
 
@@ -282,7 +285,8 @@ impl SpinelClient {
                 hdlc_scratch: Vec::with_capacity(2 * SPINEL_FRAME_MAX_SIZE + 2),
             }),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
-            radio_lock: PriorityLock::new(),
+            transmit_lock: PriorityLock::new(),
+            exclusive_lock: AsyncMutex::new(()),
             consecutive_timeouts: AtomicU32::new(0),
         }
     }
@@ -511,16 +515,15 @@ impl SpinelClient {
         Ok((rsp_property_id, payload.to_vec()))
     }
 
-    /// Take exclusive ownership of the radio, pausing transmissions for as long as the
-    /// guard is held. A transmit submitted during an energy scan is put on the air by
-    /// the RCP the moment the scanned channel completes, and a scan start is rejected
-    /// with `INVALID_STATE` while a frame is in flight — holding this lock around a
-    /// scan makes that race impossible, since a transmit holds it until its frame is
-    /// off the air.
-    pub async fn lock_radio(&self) -> PriorityGuard<TxPriority> {
-        // Exclusive operations (scans, reset recovery) take the radio at top priority so a
-        // transmit backlog cannot starve them.
-        self.radio_lock.acquire(TxPriority::STACK_CRITICAL).await
+    /// Take functional ownership of the radio, fencing out transmits for the life of the
+    /// guard. The right tool for any operation that drives the radio across multiple
+    /// commands: scans, channel retune, reset recovery. The guard can itself transmit —
+    /// see [`ExclusiveRadio::transmit_frame`].
+    pub async fn lock_radio(&self) -> ExclusiveRadio<'_> {
+        ExclusiveRadio {
+            client: self,
+            _guard: self.exclusive_lock.lock().await,
+        }
     }
 
     // Convenience method wrapping broad functionality are below
@@ -551,8 +554,20 @@ impl SpinelClient {
         tx_frame: &SpinelTxFrame,
         priority: TxPriority,
     ) -> Result<SpinelStatus, SpinelError> {
-        let _radio_lock = self.radio_lock.acquire(priority).await;
+        // Wait our turn among transmits, then the radio-ownership gate. This order keeps
+        // the backlog on `transmit_lock`, so an exclusive op only outwaits the in-flight
+        // frame.
+        let _transmit_lock = self.transmit_lock.acquire(priority).await;
+        let _exclusive_lock = self.exclusive_lock.lock().await;
 
+        self.transmit_frame_inner(tx_frame).await
+    }
+
+    /// Put a frame on the air, assuming the caller already holds the radio.
+    async fn transmit_frame_inner(
+        &self,
+        tx_frame: &SpinelTxFrame,
+    ) -> Result<SpinelStatus, SpinelError> {
         // No retry on timeout: a duplicate transmit is worse than a failed one, and the
         // NWK retry paths handle the failure
         let (rsp_prop_id, rsp) = self
@@ -571,5 +586,21 @@ impl SpinelClient {
         }
 
         SpinelStatus::try_from(rsp[0]).map_err(|_| SpinelError::InvalidStatus { status: rsp[0] })
+    }
+}
+
+/// Functional ownership of the radio, handed out by [`SpinelClient::lock_radio`].
+pub struct ExclusiveRadio<'a> {
+    client: &'a SpinelClient,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl ExclusiveRadio<'_> {
+    /// Put a frame on the air while owning the radio.
+    pub async fn transmit_frame(
+        &self,
+        tx_frame: &SpinelTxFrame,
+    ) -> Result<SpinelStatus, SpinelError> {
+        self.client.transmit_frame_inner(tx_frame).await
     }
 }

@@ -4,7 +4,7 @@ use crate::ieee_802154::{
 };
 use abstract_bits::AbstractBits;
 use arbitrary_int::u24;
-use ieee_802154::types::Nwk;
+use ieee_802154::types::{Nwk, PanId};
 use spinel::SpinelStatus;
 use spinel::client::{SpinelTxFrame, TxPriority};
 use zigbee::beacon::{RenamedU24, ZigbeeBeacon};
@@ -111,6 +111,58 @@ impl ZigbeeStack {
         });
 
         self.background_send_802154_frame(beacon_frame, TxPriority::USER_NORMAL);
+    }
+
+    pub(super) fn beacon_request_frame(&self, channel: u8) -> SpinelTxFrame {
+        let sequence_number = {
+            let mut core = self.core();
+            core.mac.ieee802154_sequence_number =
+                core.mac.ieee802154_sequence_number.wrapping_add(1);
+            core.mac.ieee802154_sequence_number
+        };
+
+        let frame: Ieee802154Frame = Ieee802154Frame::Command(Ieee802154CommandFrame {
+            header: Ieee802154FrameHeader {
+                frame_control: Ieee802154FrameControl {
+                    frame_type: Ieee802154FrameType::Command,
+                    security_enabled: false,
+                    frame_pending: false,
+                    ack_request: false,
+                    pan_id_compression: false,
+                    reserved1: false,
+                    sequence_number_suppression: false,
+                    information_elements_present: false,
+                    dest_addr_mode: Ieee802154AddressingMode::Short,
+                    frame_version: 0,
+                    src_addr_mode: Ieee802154AddressingMode::None,
+                },
+                sequence_number: Some(sequence_number),
+                dest_pan_id: Some(PanId(0xFFFF)),
+                dest_address: Some(Ieee802154Address::Nwk(Nwk(0xFFFF))),
+                src_pan_id: None,
+                src_address: None,
+            },
+            command_id: ieee_802154::Ieee802154CommandId::BeaconRequest,
+            command_payload: ieee_802154::Ieee802154CommandPayload::BeaconRequest(
+                ieee_802154::commands::Ieee802154BeaconRequestCommand,
+            ),
+            fcs: 0x0000,
+        });
+
+        SpinelTxFrame {
+            psdu: frame.to_bytes(),
+            channel: Some(channel),
+            max_csma_backoffs: Some(self.tunables.mac_max_csma_backoffs),
+            max_frame_retries: Some(self.tunables.mac_max_frame_retries),
+            enable_csma_ca: Some(true),
+            is_header_updated: Some(true),
+            is_a_retransmit: Some(false),
+            is_security_processed: Some(true),
+            tx_delay: None,
+            tx_delay_base_time: None,
+            rx_channel_after_tx: None,
+            tx_power: None,
+        }
     }
 
     #[allow(clippy::cognitive_complexity)]

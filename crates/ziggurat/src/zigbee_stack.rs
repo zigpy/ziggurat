@@ -1,5 +1,7 @@
 use crate::ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
+use abstract_bits::AbstractBits;
+use arbitrary_int::prelude::*;
 use ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use spinel::client::{SpinelClient, SpinelError, SpinelRxFrame};
 use spinel::{
@@ -8,6 +10,7 @@ use spinel::{
 };
 use tokio::time::{sleep, timeout};
 use zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
+use zigbee::beacon::ZigbeeBeacon;
 use zigbee::nwk::frame::NwkFrameType;
 
 use thiserror::Error;
@@ -546,6 +549,24 @@ pub enum ZigbeeNotification {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct NetworkBeacon {
+    pub channel: u8,
+    pub source: Option<Nwk>,
+    pub pan_id: PanId,
+    pub extended_pan_id: Eui64,
+    pub permit_joining: bool,
+    pub stack_profile: u8,
+    pub protocol_version: u8,
+    pub router_capacity: bool,
+    pub end_device_capacity: bool,
+    pub device_depth: u8,
+    pub update_id: u8,
+    // Metadata that isn't part of a beacon
+    pub lqi: u8,
+    pub rssi: i8,
+}
+
 #[derive(Debug)]
 pub struct ZigbeeStack {
     self_weak: Weak<Self>,
@@ -560,6 +581,9 @@ pub struct ZigbeeStack {
     pub raw_frame_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
     pub reset_rx: AsyncMutex<mpsc::Receiver<SpinelStatus>>,
     pub energy_scan_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
+    /// Installed for the duration of a network scan; the receive loop forwards decoded
+    /// beacons here while it is set.
+    network_scan_tx: Mutex<Option<mpsc::Sender<NetworkBeacon>>>,
 
     /// Wakes the task that rewrites the RCP source address match table whenever the
     /// set of devices with queued indirect transactions changes
@@ -623,6 +647,7 @@ impl ZigbeeStack {
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
             energy_scan_rx: AsyncMutex::new(energy_scan_rx),
+            network_scan_tx: Mutex::new(None),
             src_match_sync: Notify::new(),
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
@@ -642,8 +667,9 @@ impl ZigbeeStack {
         loop {
             let (packet, ieee802154_frame) = self.recv_frame().await;
 
-            // Ignore our own packets
-            if ieee802154_frame.header().src_address
+            if !matches!(ieee802154_frame, ieee_802154::Ieee802154Frame::Beacon(_)) {
+                // Allow through all IEEE 802.15.4 beacon frames
+            } else if ieee802154_frame.header().src_address
                 == Some(Ieee802154Address::Nwk(self.state.network_address))
             {
                 tracing::debug!("Ignoring our own packet");
@@ -736,7 +762,9 @@ impl ZigbeeStack {
                     let _ = self.notification_tx.send(notification);
                 }
                 ieee_802154::Ieee802154Frame::Ack(_ack_frame) => {}
-                ieee_802154::Ieee802154Frame::Beacon(_beacon_frame) => {}
+                ieee_802154::Ieee802154Frame::Beacon(beacon_frame) => {
+                    self.handle_beacon(&beacon_frame, packet.channel, packet.lqi, packet.rssi);
+                }
                 ieee_802154::Ieee802154Frame::Command(command_frame) => {
                     self.process_802154_command_frame(&command_frame);
                 }
@@ -1006,15 +1034,104 @@ impl ZigbeeStack {
         }
     }
 
-    /// Performs an energy detect scan and returns the maximum RSSI seen on each
-    /// channel. The RCP only scans a single channel per request, so channels are
-    /// scanned sequentially; reception is suspended for the duration of the scan.
+    /// Decode a received beacon and, if a network scan is in flight, forward it to the
+    /// scan's collector. Beacons received outside a scan are dropped.
+    fn handle_beacon(
+        &self,
+        beacon: &ieee_802154::Ieee802154BeaconFrame,
+        channel: u8,
+        lqi: u8,
+        rssi: i8,
+    ) {
+        let Some(tx) = self.network_scan_tx.lock().clone() else {
+            return;
+        };
+
+        let payload = match ZigbeeBeacon::from_abstract_bits(&beacon.beacon_payload) {
+            Ok(payload) => payload,
+            Err(e) => {
+                tracing::debug!("Ignoring non-Zigbee beacon: {e:?}");
+                return;
+            }
+        };
+
+        let source = match beacon.header.src_address {
+            Some(Ieee802154Address::Nwk(nwk)) => Some(nwk),
+            Some(Ieee802154Address::Eui64(_)) | None => None,
+        };
+        let Some(pan_id) = beacon.header.src_pan_id else {
+            return;
+        };
+
+        let _ = tx.try_send(NetworkBeacon {
+            channel,
+            source,
+            pan_id,
+            extended_pan_id: payload.extended_pan_id,
+            permit_joining: beacon.superframe_specification.association_permit,
+            stack_profile: payload.stack_profile.value(),
+            protocol_version: payload.protocol_version.value(),
+            router_capacity: payload.router_capacity,
+            end_device_capacity: payload.end_device_capacity,
+            device_depth: payload.device_depth.value(),
+            update_id: payload.update_id,
+            lqi,
+            rssi,
+        });
+    }
+
+    /// Active scan: broadcast a beacon request on each channel and collect the beacons
+    /// that answer, sent to `found` as they arrive. The radio is owned per channel (like
+    /// [`Self::energy_scan`]) so queued transmits slip out between channels; the receive
+    /// loop keeps running throughout and feeds the collector.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn network_scan(
+        &self,
+        channels: &[u8],
+        duration_per_channel: Duration,
+        found: mpsc::Sender<NetworkBeacon>,
+    ) -> Result<(), ZigbeeStackError> {
+        *self.network_scan_tx.lock() = Some(found);
+
+        let scan = async {
+            for &channel in channels {
+                let radio = self.spinel.lock_radio().await;
+
+                self.spinel
+                    .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
+                    .await?;
+
+                radio
+                    .transmit_frame(&self.beacon_request_frame(channel))
+                    .await?;
+
+                sleep(duration_per_channel).await;
+            }
+            Ok(())
+        };
+        let result = scan.await;
+
+        *self.network_scan_tx.lock() = None;
+
+        // The sweep leaves the radio on the last scanned channel, even on failure
+        let network_channel = self.core().mac.channel;
+        self.spinel
+            .prop_value_set(SpinelPropertyId::PhyChan, vec![network_channel])
+            .await?;
+
+        result
+    }
+
+    /// Performs an energy detect scan, sending the maximum RSSI seen on each channel to
+    /// `results` as that channel completes. The RCP only scans a single channel per
+    /// request, so channels are scanned sequentially; reception is suspended throughout.
     #[allow(clippy::significant_drop_tightening)]
     pub async fn energy_scan(
         &self,
         channels: &[u8],
         duration_per_channel: Duration,
-    ) -> Result<Vec<(u8, i8)>, ZigbeeStackError> {
+        results: mpsc::Sender<(u8, i8)>,
+    ) -> Result<(), ZigbeeStackError> {
         let mut energy_scan_rx = self
             .energy_scan_rx
             .try_lock()
@@ -1027,75 +1144,78 @@ impl ZigbeeStack {
             .expect("Scan duration does not fit into a u16");
 
         let scan = async {
-            let mut results = Vec::with_capacity(channels.len());
-
             for &channel in channels {
                 // The RCP rejects a scan start while a transmit is in flight, so the
                 // radio is owned exclusively for each channel's scan. Taking the (fair)
                 // lock per channel lets transmissions queued during one channel slip
                 // out before the next, instead of blacking out transmission for the
-                // whole sweep.
-                let _radio_lock = self.spinel.lock_radio().await;
+                // whole sweep. The lock is dropped before the result is sent so a slow
+                // consumer never stalls transmits.
+                let max_rssi = {
+                    let _radio_lock = self.spinel.lock_radio().await;
 
-                self.spinel
-                    .prop_value_set(SpinelPropertyId::MacScanMask, vec![channel])
-                    .await?;
-                self.spinel
-                    .prop_value_set(
-                        SpinelPropertyId::MacScanPeriod,
-                        scan_period_ms.to_le_bytes().to_vec(),
+                    self.spinel
+                        .prop_value_set(SpinelPropertyId::MacScanMask, vec![channel])
+                        .await?;
+                    self.spinel
+                        .prop_value_set(
+                            SpinelPropertyId::MacScanPeriod,
+                            scan_period_ms.to_le_bytes().to_vec(),
+                        )
+                        .await?;
+
+                    // A rejected scan start is answered with a `LastStatus` instead of
+                    // the scan state, and no result would ever arrive
+                    let (response_property, response_value) = self
+                        .spinel
+                        .prop_value_set(
+                            SpinelPropertyId::MacScanState,
+                            vec![SpinelMacScanState::Energy as u8],
+                        )
+                        .await?;
+
+                    if response_property != SpinelPropertyId::MacScanState {
+                        tracing::warn!(
+                            "Energy scan of channel {channel} was rejected: \
+                             {response_property:?}={response_value:02X?}"
+                        );
+                        return Err(ZigbeeStackError::SpinelError(
+                            SpinelError::UnexpectedResponseProperty {
+                                expected: SpinelPropertyId::MacScanState,
+                                got: response_property,
+                            },
+                        ));
+                    }
+
+                    // The single scan result update doubles as the completion notification
+                    let update = timeout(
+                        duration_per_channel + ENERGY_SCAN_RESULT_TIMEOUT,
+                        energy_scan_rx.recv(),
                     )
-                    .await?;
+                    .await
+                    .map_err(|_| ZigbeeStackError::SpinelError(SpinelError::Timeout))?
+                    .expect("Spinel energy scan sender hung up");
 
-                // A rejected scan start is answered with a `LastStatus` instead of the
-                // scan state, and no result would ever arrive
-                let (response_property, response_value) = self
-                    .spinel
-                    .prop_value_set(
-                        SpinelPropertyId::MacScanState,
-                        vec![SpinelMacScanState::Energy as u8],
-                    )
-                    .await?;
+                    let [scanned_channel, max_rssi] = update.value[..] else {
+                        return Err(ZigbeeStackError::InvalidEnergyScanResult {
+                            value: update.value,
+                        });
+                    };
+                    if scanned_channel != channel {
+                        return Err(ZigbeeStackError::InvalidEnergyScanResult {
+                            value: update.value,
+                        });
+                    }
 
-                if response_property != SpinelPropertyId::MacScanState {
-                    tracing::warn!(
-                        "Energy scan of channel {channel} was rejected: \
-                         {response_property:?}={response_value:02X?}"
-                    );
-                    return Err(ZigbeeStackError::SpinelError(
-                        SpinelError::UnexpectedResponseProperty {
-                            expected: SpinelPropertyId::MacScanState,
-                            got: response_property,
-                        },
-                    ));
-                }
-
-                // The single scan result update doubles as the completion notification
-                let update = timeout(
-                    duration_per_channel + ENERGY_SCAN_RESULT_TIMEOUT,
-                    energy_scan_rx.recv(),
-                )
-                .await
-                .map_err(|_| ZigbeeStackError::SpinelError(SpinelError::Timeout))?
-                .expect("Spinel energy scan sender hung up");
-
-                let [scanned_channel, max_rssi] = update.value[..] else {
-                    return Err(ZigbeeStackError::InvalidEnergyScanResult {
-                        value: update.value,
-                    });
+                    max_rssi as i8
                 };
-                if scanned_channel != channel {
-                    return Err(ZigbeeStackError::InvalidEnergyScanResult {
-                        value: update.value,
-                    });
-                }
 
-                results.push((scanned_channel, max_rssi as i8));
+                let _ = results.send((channel, max_rssi)).await;
             }
 
-            Ok(results)
+            Ok(())
         };
-        let results = scan.await;
+        let result = scan.await;
 
         // The scan leaves the radio tuned to the last scanned channel, even on failure
         let network_channel = self.core().mac.channel;
@@ -1103,7 +1223,7 @@ impl ZigbeeStack {
             .prop_value_set(SpinelPropertyId::PhyChan, vec![network_channel])
             .await?;
 
-        results
+        result
     }
 
     /// Retune the radio to a new channel, the coordinator's half of a network-wide

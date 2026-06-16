@@ -2,7 +2,6 @@ use clap::{Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -21,8 +20,8 @@ use zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat::zigbee_stack::{
-    ApsAck, DeviceLeaveReason, NetworkConfig, TclkSeed, Tunables, WELL_KNOWN_LINK_KEY,
-    ZigbeeNotification, ZigbeeStack,
+    ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, TclkSeed, Tunables,
+    WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -59,6 +58,24 @@ fn key_to_string(key: &Key) -> String {
         .join(":")
 }
 
+fn network_beacon_json(beacon: &NetworkBeacon) -> serde_json::Value {
+    json!({
+        "channel": beacon.channel,
+        "source": beacon.source.map(|nwk| format!("{:04x}", nwk.0)),
+        "pan_id": format!("{:04x}", beacon.pan_id.0),
+        "extended_pan_id": eui64_to_string(beacon.extended_pan_id),
+        "permit_joining": beacon.permit_joining,
+        "stack_profile": beacon.stack_profile,
+        "protocol_version": beacon.protocol_version,
+        "router_capacity": beacon.router_capacity,
+        "end_device_capacity": beacon.end_device_capacity,
+        "device_depth": beacon.device_depth,
+        "update_id": beacon.update_id,
+        "lqi": beacon.lqi,
+        "rssi": beacon.rssi,
+    })
+}
+
 // The client wire protocol: requests carry a client-chosen correlation id; the
 // server answers each request with exactly one `response`, preceded by zero or more
 // `event` messages sharing the id. `notification` messages are unsolicited.
@@ -73,6 +90,10 @@ struct Request {
 
 fn event(id: u64, event: &str) -> serde_json::Value {
     json!({"type": "event", "id": id, "event": event})
+}
+
+fn event_data(id: u64, event: &str, data: serde_json::Value) -> serde_json::Value {
+    json!({"type": "event", "id": id, "event": event, "data": data})
 }
 
 fn response(id: u64, result: serde_json::Value) -> serde_json::Value {
@@ -147,6 +168,12 @@ struct SendApsRequest {
 
 #[derive(Deserialize, Debug)]
 struct EnergyScanRequest {
+    channels: Vec<u8>,
+    duration_per_channel_ms: u16,
+}
+
+#[derive(Deserialize, Debug)]
+struct NetworkScanRequest {
     channels: Vec<u8>,
     duration_per_channel_ms: u16,
 }
@@ -480,7 +507,8 @@ impl ZigguratServer {
                     "get_hw_address" => server.handle_get_hw_address(id).await,
                     "get_network_info" => server.handle_get_network_info(id),
                     "send_aps" => server.handle_send_aps(id, params, &outbound).await,
-                    "energy_scan" => server.handle_energy_scan(id, params).await,
+                    "energy_scan" => server.handle_energy_scan(id, params, &outbound).await,
+                    "network_scan" => server.handle_network_scan(id, params, &outbound).await,
                     "permit_joins" => server.handle_permit_joins(id, params),
                     "set_provisional_key" => server.handle_set_provisional_key(id, params),
                     "set_nwk_update_id" => server.handle_set_nwk_update_id(id, params),
@@ -798,7 +826,12 @@ impl ZigguratServer {
         }
     }
 
-    async fn handle_energy_scan(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+    async fn handle_energy_scan(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+        outbound: &mpsc::Sender<serde_json::Value>,
+    ) -> serde_json::Value {
         let request: EnergyScanRequest = match serde_json::from_value(params) {
             Ok(request) => request,
             Err(e) => return error_response(id, "invalid_request", e),
@@ -808,19 +841,76 @@ impl ZigguratServer {
             return error_response(id, "not_configured", "no stack is running");
         };
 
-        let results = stack
-            .energy_scan(
-                &request.channels,
-                Duration::from_millis(u64::from(request.duration_per_channel_ms)),
-            )
-            .await;
+        let (result_tx, mut result_rx) = mpsc::channel::<(u8, i8)>(32);
 
-        match results {
-            Ok(results) => response(
-                id,
-                json!({"results": results.into_iter().collect::<HashMap<u8, i8>>()}),
-            ),
+        // The scan runs on its own task so it always reaches its channel restore, even if
+        // this request's task is dropped. Its only sender lives until the scan ends, so
+        // the drain loop below terminates exactly when the scan is done.
+        let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
+        let scan = tokio::spawn(async move {
+            stack
+                .energy_scan(&request.channels, duration, result_tx)
+                .await
+        });
+
+        while let Some((channel, rssi)) = result_rx.recv().await {
+            let _ = outbound
+                .send(event_data(
+                    id,
+                    "energy_result",
+                    json!({"channel": channel, "rssi": rssi}),
+                ))
+                .await;
+        }
+
+        match scan.await {
+            Ok(Ok(())) => response(id, json!({"status": "complete"})),
+            Ok(Err(e)) => error_response(id, "energy_scan_failed", e),
             Err(e) => error_response(id, "energy_scan_failed", e),
+        }
+    }
+
+    async fn handle_network_scan(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+        outbound: &mpsc::Sender<serde_json::Value>,
+    ) -> serde_json::Value {
+        let request: NetworkScanRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let Some(stack) = self.current_stack() else {
+            return error_response(id, "not_configured", "no stack is running");
+        };
+
+        let (found_tx, mut found_rx) = mpsc::channel::<NetworkBeacon>(32);
+
+        // The scan runs on its own task so it always reaches its channel restore, even if
+        // this request's task is dropped. Its only sender lives until the scan ends, so
+        // the drain loop below terminates exactly when the scan is done.
+        let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
+        let scan = tokio::spawn(async move {
+            stack
+                .network_scan(&request.channels, duration, found_tx)
+                .await
+        });
+
+        while let Some(beacon) = found_rx.recv().await {
+            let _ = outbound
+                .send(event_data(
+                    id,
+                    "network_found",
+                    network_beacon_json(&beacon),
+                ))
+                .await;
+        }
+
+        match scan.await {
+            Ok(Ok(())) => response(id, json!({"status": "complete"})),
+            Ok(Err(e)) => error_response(id, "network_scan_failed", e),
+            Err(e) => error_response(id, "network_scan_failed", e),
         }
     }
 
