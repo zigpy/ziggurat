@@ -238,6 +238,25 @@ pub enum DeserializeError {
     ZeroBytes,
 }
 
+/// Failure to parse a frame or one of its fields off the wire.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ParseError {
+    #[error("not enough data to parse {ty}")]
+    UnexpectedEnd { ty: &'static str },
+    #[error("{ty} has an invalid length")]
+    InvalidLength { ty: &'static str },
+    #[error("invalid discriminant {got} for {ty}")]
+    InvalidDiscriminant { ty: &'static str, got: u8 },
+    #[error("invalid frame check sequence")]
+    InvalidFcs,
+    #[error("{0} is not supported")]
+    Unsupported(&'static str),
+    #[error(transparent)]
+    Bits(#[from] abstract_bits::FromBytesError),
+    #[error(transparent)]
+    Command(#[from] DeserializeError),
+}
+
 /// Append a structure's serialized form to `bytes`.
 ///
 /// Avoids the intermediate Vec that [`AbstractBits::to_abstract_bits`] allocates; the
@@ -304,28 +323,31 @@ pub enum Ieee802154CommandPayload {
 }
 
 impl Ieee802154Frame<FrameBytes> {
-    pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, ParseError> {
         if data.len() < 2 + 2 {
-            return Err("Data too short to contain a frame");
+            return Err(ParseError::UnexpectedEnd {
+                ty: "Ieee802154Frame",
+            });
         }
 
         // No 802.15.4 frame exceeds the PHY packet size; a longer input parses
         // into a frame that cannot be re-serialized into the fixed scratch buffer
         if data.len() > MAX_PHY_PACKET_SIZE {
-            return Err("Frame exceeds the maximum PHY packet size");
+            return Err(ParseError::InvalidLength {
+                ty: "Ieee802154Frame",
+            });
         }
 
         let fcs = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
         let mut remaining = &data[..data.len() - 2];
 
         if Self::compute_fcs(remaining) != fcs {
-            return Err("Invalid FCS");
+            return Err(ParseError::InvalidFcs);
         }
 
         // Parse frame control
         let mut reader = BitReader::from(remaining);
-        let frame_control = Ieee802154FrameControl::read_abstract_bits(&mut reader)
-            .map_err(|_| "Failed to parse frame control")?;
+        let frame_control = Ieee802154FrameControl::read_abstract_bits(&mut reader)?;
         remaining = &remaining[reader.bytes_read()..];
 
         // Parse sequence number
@@ -333,7 +355,9 @@ impl Ieee802154Frame<FrameBytes> {
             None
         } else {
             if remaining.is_empty() {
-                return Err("Not enough data to parse sequence number");
+                return Err(ParseError::UnexpectedEnd {
+                    ty: "Ieee802154 sequence number",
+                });
             }
 
             let seq = remaining[0];
@@ -401,11 +425,12 @@ impl Ieee802154Frame<FrameBytes> {
         match header.frame_control.frame_type {
             Ieee802154FrameType::Beacon => {
                 if remaining.len() < 4 {
-                    return Err("Beacon frame too short");
+                    return Err(ParseError::UnexpectedEnd {
+                        ty: "Ieee802154BeaconFrame",
+                    });
                 }
                 let superframe_specification =
-                    SuperframeSpecification::from_abstract_bits(&remaining[..4])
-                        .map_err(|_| "Failed to parse superframe specification")?;
+                    SuperframeSpecification::from_abstract_bits(&remaining[..4])?;
                 let gts_specification = remaining[2];
                 let pending_address_specification = remaining[3];
                 let beacon_payload = remaining[4..].to_vec();
@@ -420,7 +445,10 @@ impl Ieee802154Frame<FrameBytes> {
                 }))
             }
             Ieee802154FrameType::Data => {
-                let payload = FrameBytes::from_slice(remaining).map_err(|_| "Payload too long")?;
+                let payload =
+                    FrameBytes::from_slice(remaining).map_err(|_| ParseError::InvalidLength {
+                        ty: "Ieee802154DataFrame payload",
+                    })?;
                 Ok(Self::Data(Ieee802154DataFrame {
                     header,
                     payload,
@@ -430,10 +458,16 @@ impl Ieee802154Frame<FrameBytes> {
             Ieee802154FrameType::Ack => Ok(Self::Ack(Ieee802154AckFrame { header, fcs })),
             Ieee802154FrameType::Command => {
                 if remaining.is_empty() {
-                    return Err("Command frame missing command ID");
+                    return Err(ParseError::UnexpectedEnd {
+                        ty: "Ieee802154 command ID",
+                    });
                 }
-                let command_id = Ieee802154CommandId::try_from(remaining[0])
-                    .map_err(|_| "Invalid command ID")?;
+                let command_id = Ieee802154CommandId::try_from(remaining[0]).map_err(|_| {
+                    ParseError::InvalidDiscriminant {
+                        ty: "Ieee802154CommandId",
+                        got: remaining[0],
+                    }
+                })?;
                 let command_payload = Self::parse_command_payload(command_id, &remaining[1..])?;
 
                 Ok(Self::Command(Ieee802154CommandFrame {
@@ -449,43 +483,38 @@ impl Ieee802154Frame<FrameBytes> {
     fn parse_command_payload(
         command_id: Ieee802154CommandId,
         payload: &[u8],
-    ) -> Result<Ieee802154CommandPayload, &'static str> {
+    ) -> Result<Ieee802154CommandPayload, ParseError> {
         // Reconstruct the full command bytes (command ID + payload)
         let mut full_command = Vec::with_capacity(payload.len() + 1);
         full_command.push(command_id as u8);
         full_command.extend_from_slice(payload);
 
         match command_id {
-            Ieee802154CommandId::AssociationRequest => {
+            Ieee802154CommandId::AssociationRequest => Ok(
                 commands::Ieee802154AssociationRequestCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::AssociationRequest)
-                    .map_err(|_| "Failed to parse AssociationRequest command")
-            }
-            Ieee802154CommandId::AssociationResponse => {
+                    .map(Ieee802154CommandPayload::AssociationRequest)?,
+            ),
+            Ieee802154CommandId::AssociationResponse => Ok(
                 commands::Ieee802154AssociationResponseCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::AssociationResponse)
-                    .map_err(|_| "Failed to parse AssociationResponse command")
-            }
-            Ieee802154CommandId::DisassociationNotification => {
+                    .map(Ieee802154CommandPayload::AssociationResponse)?,
+            ),
+            Ieee802154CommandId::DisassociationNotification => Ok(
                 commands::Ieee802154DisassociationNotificationCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::DisassociationNotification)
-                    .map_err(|_| "Failed to parse DisassociationNotification command")
-            }
-            Ieee802154CommandId::DataRequest => {
+                    .map(Ieee802154CommandPayload::DisassociationNotification)?,
+            ),
+            Ieee802154CommandId::DataRequest => Ok(
                 commands::Ieee802154DataRequestCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::DataRequest)
-                    .map_err(|_| "Failed to parse DataRequest command")
-            }
-            Ieee802154CommandId::BeaconRequest => {
+                    .map(Ieee802154CommandPayload::DataRequest)?,
+            ),
+            Ieee802154CommandId::BeaconRequest => Ok(
                 commands::Ieee802154BeaconRequestCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::BeaconRequest)
-                    .map_err(|_| "Failed to parse BeaconRequest command")
-            }
+                    .map(Ieee802154CommandPayload::BeaconRequest)?,
+            ),
             _ => Ok(Ieee802154CommandPayload::Unknown(payload.to_vec())),
         }
     }
 
-    pub fn from_bytes_without_fcs(data: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes_without_fcs(data: &[u8]) -> Result<Self, ParseError> {
         let mut data_with_fcs = Vec::new();
         data_with_fcs.extend(data);
         data_with_fcs.extend(&Self::compute_fcs(data).to_le_bytes());
@@ -730,7 +759,7 @@ mod test {
         bytes[5] ^= 0xFF;
 
         let err = Ieee802154Frame::from_bytes(&bytes).unwrap_err();
-        assert_eq!(err, "Invalid FCS");
+        assert_eq!(err, ParseError::InvalidFcs);
     }
 
     #[test]

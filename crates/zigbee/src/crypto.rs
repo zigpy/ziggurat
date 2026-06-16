@@ -102,21 +102,12 @@ type ZigbeeCcm = Ccm<Aes128, U4, U13>;
 
 pub const MIC_LENGTH: usize = 4;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum DecryptionError {
     #[error("Invalid MAC tag")]
     InvalidMacTag,
     #[error("Ciphertext too short to contain a MAC tag")]
     CiphertextTooShort,
-}
-
-impl From<DecryptionError> for &'static str {
-    fn from(err: DecryptionError) -> Self {
-        match err {
-            DecryptionError::InvalidMacTag => "Invalid MAC tag",
-            DecryptionError::CiphertextTooShort => "Ciphertext too short to contain a MAC tag",
-        }
-    }
 }
 
 /// CCM*-protect a payload in place: `auth_data` is authenticated, the buffer is

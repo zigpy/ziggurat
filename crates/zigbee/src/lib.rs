@@ -42,6 +42,25 @@ pub enum DeserializeError {
     ZeroBytes,
 }
 
+/// Failure to parse an NWK or APS frame (or one of its fields) off the wire.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ParseError {
+    #[error("not enough data to parse {ty}")]
+    UnexpectedEnd { ty: &'static str },
+    #[error("{ty} is too long for its frame bound")]
+    TooLong { ty: &'static str },
+    #[error("invalid discriminant {got} for {ty}")]
+    InvalidDiscriminant { ty: &'static str, got: u8 },
+    #[error("{0} is not supported")]
+    Unsupported(&'static str),
+    #[error(transparent)]
+    Bits(#[from] abstract_bits::FromBytesError),
+    #[error(transparent)]
+    Address(#[from] ieee_802154::ParseError),
+    #[error(transparent)]
+    Decrypt(#[from] crypto::DecryptionError),
+}
+
 fn serialize<T: AbstractBits>(thing: &T, id: NwkCommandId) -> Result<Vec<u8>, SerializeError> {
     let mut bytes = vec![0u8; MAC_PAYLOAD_MAX_LEN];
     bytes[0] = id as u8;

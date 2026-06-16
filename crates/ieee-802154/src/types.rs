@@ -1,6 +1,8 @@
 use hex;
 use std::fmt;
 
+use crate::ParseError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum FromHexError {
     #[error("invalid length, expected {expected} hex characters, got {got}")]
@@ -57,9 +59,9 @@ impl Nwk {
         Self::try_from_hex(text).unwrap()
     }
 
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), ParseError> {
         if bytes.len() < 2 {
-            return Err("Not enough data to parse Nwk");
+            return Err(ParseError::UnexpectedEnd { ty: "Nwk" });
         }
 
         Ok((Self(u16::from_le_bytes([bytes[0], bytes[1]])), &bytes[2..]))
@@ -98,9 +100,9 @@ impl Eui64 {
         Self::try_from_hex(text).unwrap()
     }
 
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), ParseError> {
         if bytes.len() < 8 {
-            return Err("Not enough data to parse Eui64");
+            return Err(ParseError::UnexpectedEnd { ty: "Eui64" });
         }
 
         let mut eui = [0; 8];
@@ -151,9 +153,9 @@ impl PanId {
         Self::try_from_hex(text).unwrap()
     }
 
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), ParseError> {
         if bytes.len() < 2 {
-            return Err("Not enough data to parse PanId");
+            return Err(ParseError::UnexpectedEnd { ty: "PanId" });
         }
 
         Ok((Self(u16::from_le_bytes([bytes[0], bytes[1]])), &bytes[2..]))
@@ -192,9 +194,9 @@ impl Key {
         Self(key)
     }
 
-    pub const fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub const fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.len() != 16 {
-            return Err("Invalid key length");
+            return Err(ParseError::InvalidLength { ty: "Key" });
         }
 
         let mut key = [0; 16];

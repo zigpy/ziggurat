@@ -10,6 +10,8 @@ use num_enum::TryFromPrimitive;
 
 use educe::Educe;
 
+use crate::ParseError;
+
 use crate::crypto::{DecryptionError, decrypt_ccm, encrypt_ccm};
 
 pub const BROADCAST_ALL_DEVICES: Nwk = Nwk(0xFFFF);
@@ -73,14 +75,13 @@ pub struct NwkHeader {
 }
 
 impl NwkHeader {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), ParseError> {
         if bytes.len() < 8 {
-            return Err("Not enough data to parse NwkHeader");
+            return Err(ParseError::UnexpectedEnd { ty: "NwkHeader" });
         }
 
         let mut reader = BitReader::from(bytes);
-        let frame_control = NwkFrameControl::read_abstract_bits(&mut reader)
-            .map_err(|_| "Failed to parse NwkFrameControl")?;
+        let frame_control = NwkFrameControl::read_abstract_bits(&mut reader)?;
         let mut remaining = &bytes[reader.bytes_read()..];
 
         let destination;
@@ -116,7 +117,9 @@ impl NwkHeader {
         let multicast_control = match frame_control.multicast {
             true => {
                 if remaining.is_empty() {
-                    return Err("Not enough data to parse multicast control");
+                    return Err(ParseError::UnexpectedEnd {
+                        ty: "NWK multicast control",
+                    });
                 }
 
                 let control = remaining[0];
@@ -129,8 +132,7 @@ impl NwkHeader {
         let source_route = match frame_control.source_route {
             true => {
                 let mut reader = BitReader::from(remaining);
-                let source_route = NwkSourceRoute::read_abstract_bits(&mut reader)
-                    .map_err(|_| "Failed to parse NwkSourceRoute")?;
+                let source_route = NwkSourceRoute::read_abstract_bits(&mut reader)?;
                 remaining = &remaining[reader.bytes_read()..];
                 Some(source_route)
             }
@@ -239,14 +241,13 @@ pub struct NwkAuxHeader {
 
 impl NwkAuxHeader {
     #[allow(clippy::useless_let_if_seq)]
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), ParseError> {
         if bytes.len() < 6 {
-            return Err("Not enough data to parse NwkAuxHeader");
+            return Err(ParseError::UnexpectedEnd { ty: "NwkAuxHeader" });
         }
 
         let mut reader = BitReader::from(bytes);
-        let security_control = NwkSecurityHeaderControlField::read_abstract_bits(&mut reader)
-            .map_err(|_| "Failed to parse NwkSecurityHeaderControlField")?;
+        let security_control = NwkSecurityHeaderControlField::read_abstract_bits(&mut reader)?;
         let mut remaining = &bytes[reader.bytes_read()..];
 
         let frame_counter =
@@ -262,7 +263,9 @@ impl NwkAuxHeader {
         }
 
         if remaining.is_empty() {
-            return Err("Not enough data to parse key sequence number");
+            return Err(ParseError::UnexpectedEnd {
+                ty: "NWK key sequence number",
+            });
         }
 
         let key_sequence_number = remaining[0];
@@ -394,11 +397,11 @@ impl EncryptedNwkFrame {
     }
 
     #[allow(clippy::useless_let_if_seq)]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         // A NWK frame rides inside a MAC frame, so it cannot exceed the PHY packet
         // size; a longer input parses into a frame too large to re-serialize
         if bytes.len() > MAX_PHY_PACKET_SIZE {
-            return Err("Frame exceeds the maximum PHY packet size");
+            return Err(ParseError::TooLong { ty: "NwkFrame" });
         }
 
         let mut remaining;
@@ -416,7 +419,8 @@ impl EncryptedNwkFrame {
         Ok(Self {
             nwk_header,
             aux_header,
-            ciphertext: FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?,
+            ciphertext: FrameBytes::from_slice(remaining)
+                .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?,
         })
     }
 

@@ -4,6 +4,7 @@ use ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 use ieee_802154::{FrameBytes, extend_abstract_bits};
 use num_enum::TryFromPrimitive;
 
+use crate::ParseError;
 use crate::crypto::{decrypt_ccm, encrypt_ccm};
 use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
@@ -61,17 +62,18 @@ pub struct ApsAckFrame {
 
 impl ApsAckFrame {
     #[allow(clippy::useless_let_if_seq)]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.is_empty() {
-            return Err("Not enough data to parse ApsAckFrame");
+            return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
         }
 
-        let frame_control = ApsAckFrameControl::from_abstract_bits(bytes)
-            .map_err(|_| "Failed to parse ApsAckFrameControl")?;
+        let frame_control = ApsAckFrameControl::from_abstract_bits(bytes)?;
         let remaining = &bytes[1..];
 
         if frame_control.frame_type != ApsFrameType::Ack {
-            return Err("Invalid frame type for ApsAckFrame");
+            return Err(ParseError::Unsupported(
+                "non-Ack frame type for ApsAckFrame",
+            ));
         }
 
         let destination_endpoint;
@@ -84,7 +86,7 @@ impl ApsAckFrame {
         // counter; a data ack additionally carries the addressing fields
         if frame_control.ack_format {
             if remaining.is_empty() {
-                return Err("Not enough data to parse ApsAckFrame");
+                return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
             }
             destination_endpoint = None;
             cluster_id = None;
@@ -93,7 +95,7 @@ impl ApsAckFrame {
             counter = u8::from_le_bytes([remaining[0]]);
         } else {
             if remaining.len() < 7 {
-                return Err("Not enough data to parse ApsAckFrame");
+                return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
             }
             destination_endpoint = Some(u8::from_le_bytes([remaining[0]]));
             cluster_id = Some(u16::from_le_bytes([remaining[1], remaining[2]]));
@@ -149,13 +151,12 @@ pub struct ApsDataFrame {
 
 impl ApsDataFrame {
     #[allow(clippy::useless_let_if_seq)]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.len() < 8 {
-            return Err("Not enough data to parse ApsDataFrame");
+            return Err(ParseError::UnexpectedEnd { ty: "ApsDataFrame" });
         }
 
-        let frame_control = ApsFrameControl::from_abstract_bits(bytes)
-            .map_err(|_| "Failed to parse ApsFrameControl")?;
+        let frame_control = ApsFrameControl::from_abstract_bits(bytes)?;
         let mut remaining = &bytes[1..];
 
         let group_id;
@@ -165,7 +166,9 @@ impl ApsDataFrame {
             // The 2-byte group address replaces the 1-byte destination endpoint,
             // shifting every subsequent field
             if remaining.len() < 8 {
-                return Err("Not enough data to parse multicast ApsDataFrame");
+                return Err(ParseError::UnexpectedEnd {
+                    ty: "multicast ApsDataFrame",
+                });
             }
 
             group_id = Some(u16::from_le_bytes([remaining[0], remaining[1]]));
@@ -181,7 +184,8 @@ impl ApsDataFrame {
         let profile_id = u16::from_le_bytes([remaining[2], remaining[3]]);
         let source_endpoint = remaining[4];
         let counter = remaining[5];
-        let asdu = FrameBytes::from_slice(&remaining[6..]).map_err(|_| "ASDU too long")?;
+        let asdu = FrameBytes::from_slice(&remaining[6..])
+            .map_err(|_| ParseError::TooLong { ty: "ASDU" })?;
 
         Ok(Self {
             frame_control,
@@ -287,29 +291,32 @@ pub struct ApsTransportKeyCommandFrame {
 }
 
 impl ApsTransportKeyCommandFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.len() < 2 {
-            return Err("Not enough data to parse ApsTransportKeyCommandFrame");
+            return Err(ParseError::UnexpectedEnd {
+                ty: "ApsTransportKeyCommandFrame",
+            });
         }
 
-        let standard_key_type =
-            ApsStandardKeyType::try_from(bytes[0]).map_err(|_| "Invalid standard key type")?;
+        let standard_key_type = ApsStandardKeyType::try_from(bytes[0]).map_err(|_| {
+            ParseError::InvalidDiscriminant {
+                ty: "ApsStandardKeyType",
+                got: bytes[0],
+            }
+        })?;
 
         let key_descriptor = match standard_key_type {
             ApsStandardKeyType::StandardNetworkKey => ApsTransportKeyDescriptor::NetworkKey(
-                ApsNetworkKeyDescriptor::from_abstract_bits(&bytes[1..])
-                    .map_err(|_| "Failed to parse ApsNetworkKeyDescriptor")?,
+                ApsNetworkKeyDescriptor::from_abstract_bits(&bytes[1..])?,
             ),
             ApsStandardKeyType::ApplicationLinkKey => {
                 ApsTransportKeyDescriptor::ApplicationLinkKey(
-                    ApsApplicationLinkKeyDescriptor::from_abstract_bits(&bytes[1..])
-                        .map_err(|_| "Failed to parse ApsApplicationLinkKeyDescriptor")?,
+                    ApsApplicationLinkKeyDescriptor::from_abstract_bits(&bytes[1..])?,
                 )
             }
             ApsStandardKeyType::TrustCenterLinkKey => {
                 ApsTransportKeyDescriptor::TrustCenterLinkKey(
-                    ApsTrustCenterLinkKeyDescriptor::from_abstract_bits(&bytes[1..])
-                        .map_err(|_| "Failed to parse TrustCenterLinkKeyDescriptor")?,
+                    ApsTrustCenterLinkKeyDescriptor::from_abstract_bits(&bytes[1..])?,
                 )
             }
         };
@@ -383,12 +390,18 @@ pub struct ApsRequestKeyCommandFrame {
 }
 
 impl ApsRequestKeyCommandFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.is_empty() {
-            return Err("Not enough data to parse ApsRequestKeyCommandFrame");
+            return Err(ParseError::UnexpectedEnd {
+                ty: "ApsRequestKeyCommandFrame",
+            });
         }
 
-        let key_type = ApsRequestKeyType::try_from(bytes[0]).map_err(|_| "Invalid key type")?;
+        let key_type =
+            ApsRequestKeyType::try_from(bytes[0]).map_err(|_| ParseError::InvalidDiscriminant {
+                ty: "ApsRequestKeyType",
+                got: bytes[0],
+            })?;
 
         let partner_address = match key_type {
             ApsRequestKeyType::ApplicationLinkKey => Some(Eui64::deserialize(&bytes[1..])?.0),
@@ -431,13 +444,14 @@ pub struct ApsTunnelCommandFrame {
 }
 
 impl ApsTunnelCommandFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         let (destination_address, remaining) = Eui64::deserialize(bytes)?;
 
         Ok(Self {
             destination_address,
-            tunneled_frame: FrameBytes::from_slice(remaining)
-                .map_err(|_| "Tunneled frame too long")?,
+            tunneled_frame: FrameBytes::from_slice(remaining).map_err(|_| ParseError::TooLong {
+                ty: "tunneled frame",
+            })?,
         })
     }
 
@@ -493,54 +507,51 @@ pub struct ApsCommandFrame {
 
 impl ApsCommandFrame {
     #[allow(clippy::useless_let_if_seq)]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.len() < 3 {
-            return Err("Not enough data to parse ApsCommandFrame");
+            return Err(ParseError::UnexpectedEnd {
+                ty: "ApsCommandFrame",
+            });
         }
 
-        let frame_control = ApsFrameControl::from_abstract_bits(bytes)
-            .map_err(|_| "Failed to parse ApsFrameControl")?;
+        let frame_control = ApsFrameControl::from_abstract_bits(bytes)?;
         let remaining = &bytes[1..];
 
         let counter = u8::from_le_bytes([remaining[0]]);
-        let command_id = ApsCommandId::try_from(remaining[1]).map_err(|_| "Invalid command ID")?;
+        let command_id =
+            ApsCommandId::try_from(remaining[1]).map_err(|_| ParseError::InvalidDiscriminant {
+                ty: "ApsCommandId",
+                got: remaining[1],
+            })?;
         let payload = &remaining[2..];
 
         let command = match command_id {
             ApsCommandId::TransportKey => ApsCommandFrameCommand::TransportKey(
-                ApsTransportKeyCommandFrame::from_bytes(payload)
-                    .map_err(|_| "Failed to parse ApsTransportKeyCommandFrame")?,
+                ApsTransportKeyCommandFrame::from_bytes(payload)?,
             ),
             ApsCommandId::UpdateDevice => ApsCommandFrameCommand::UpdateDevice(
-                ApsUpdateDeviceCommandFrame::from_abstract_bits(payload)
-                    .map_err(|_| "Failed to parse ApsUpdateDeviceCommandFrame")?,
+                ApsUpdateDeviceCommandFrame::from_abstract_bits(payload)?,
             ),
             ApsCommandId::RemoveDevice => ApsCommandFrameCommand::RemoveDevice(
-                ApsRemoveDeviceCommandFrame::from_abstract_bits(payload)
-                    .map_err(|_| "Failed to parse ApsRemoveDeviceCommandFrame")?,
+                ApsRemoveDeviceCommandFrame::from_abstract_bits(payload)?,
             ),
-            ApsCommandId::RequestKey => ApsCommandFrameCommand::RequestKey(
-                ApsRequestKeyCommandFrame::from_bytes(payload)
-                    .map_err(|_| "Failed to parse ApsRequestKeyCommandFrame")?,
-            ),
+            ApsCommandId::RequestKey => {
+                ApsCommandFrameCommand::RequestKey(ApsRequestKeyCommandFrame::from_bytes(payload)?)
+            }
             ApsCommandId::SwitchKey => ApsCommandFrameCommand::SwitchKey(
-                ApsSwitchKeyCommandFrame::from_abstract_bits(payload)
-                    .map_err(|_| "Failed to parse ApsSwitchKeyCommandFrame")?,
+                ApsSwitchKeyCommandFrame::from_abstract_bits(payload)?,
             ),
-            ApsCommandId::Tunnel => ApsCommandFrameCommand::Tunnel(
-                ApsTunnelCommandFrame::from_bytes(payload)
-                    .map_err(|_| "Failed to parse ApsTunnelCommandFrame")?,
-            ),
+            ApsCommandId::Tunnel => {
+                ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame::from_bytes(payload)?)
+            }
             ApsCommandId::VerifyKey => ApsCommandFrameCommand::VerifyKey(
-                ApsVerifyKeyCommandFrame::from_abstract_bits(payload)
-                    .map_err(|_| "Failed to parse ApsVerifyKeyCommandFrame")?,
+                ApsVerifyKeyCommandFrame::from_abstract_bits(payload)?,
             ),
             ApsCommandId::ConfirmKey => ApsCommandFrameCommand::ConfirmKey(
-                ApsConfirmKeyCommandFrame::from_abstract_bits(payload)
-                    .map_err(|_| "Failed to parse ApsConfirmKeyCommandFrame")?,
+                ApsConfirmKeyCommandFrame::from_abstract_bits(payload)?,
             ),
             _ => {
-                return Err("Unsupported command ID for ApsCommandFrame");
+                return Err(ParseError::Unsupported("command ID for ApsCommandFrame"));
             }
         };
 
@@ -619,13 +630,12 @@ pub struct ApsAuxHeader {
 }
 
 impl ApsAuxHeader {
-    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), ParseError> {
         if bytes.len() < 5 {
-            return Err("Not enough data to parse ApsAuxHeader");
+            return Err(ParseError::UnexpectedEnd { ty: "ApsAuxHeader" });
         }
 
-        let security_control = NwkSecurityHeaderControlField::from_abstract_bits(bytes)
-            .map_err(|_| "Failed to parse NwkSecurityHeaderControlField")?;
+        let security_control = NwkSecurityHeaderControlField::from_abstract_bits(bytes)?;
         let mut remaining = &bytes[1..];
 
         let frame_counter =
@@ -643,7 +653,9 @@ impl ApsAuxHeader {
         let mut key_sequence_number = None;
         if security_control.key_id == NwkSecurityHeaderKeyId::NetworkKey {
             if remaining.is_empty() {
-                return Err("Not enough data to parse ApsAuxHeader key sequence number");
+                return Err(ParseError::UnexpectedEnd {
+                    ty: "ApsAuxHeader key sequence number",
+                });
             }
 
             key_sequence_number = Some(remaining[0]);
@@ -732,7 +744,7 @@ fn decrypt_aps_payload(
     source: Eui64,
     header: &[u8],
     tagged_ciphertext: &[u8],
-) -> Result<FrameBytes, &'static str> {
+) -> Result<FrameBytes, ParseError> {
     let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
     let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
 
@@ -754,13 +766,14 @@ pub struct EncryptedApsCommandFrame {
 }
 
 impl EncryptedApsCommandFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.len() < 7 {
-            return Err("Not enough data to parse EncryptedApsCommandFrame");
+            return Err(ParseError::UnexpectedEnd {
+                ty: "EncryptedApsCommandFrame",
+            });
         }
 
-        let frame_control = ApsFrameControl::from_abstract_bits(bytes)
-            .map_err(|_| "Failed to parse ApsFrameControl")?;
+        let frame_control = ApsFrameControl::from_abstract_bits(bytes)?;
         let counter = bytes[1];
         let (aux_header, remaining) = ApsAuxHeader::deserialize(&bytes[2..])?;
 
@@ -768,7 +781,8 @@ impl EncryptedApsCommandFrame {
             frame_control,
             counter,
             aux_header,
-            ciphertext: FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?,
+            ciphertext: FrameBytes::from_slice(remaining)
+                .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?,
         })
     }
 
@@ -783,12 +797,14 @@ impl EncryptedApsCommandFrame {
         bytes
     }
 
-    pub fn decrypt(&self, key: &Key) -> Result<ApsCommandFrame, &'static str> {
+    pub fn decrypt(&self, key: &Key) -> Result<ApsCommandFrame, ParseError> {
         // Spec 4.4.1.1 step 4a: APS commands always carry an extended nonce
         let source = self
             .aux_header
             .extended_source
-            .ok_or("APS command frames without an extended nonce are not supported")?;
+            .ok_or(ParseError::Unsupported(
+                "APS command frames without an extended nonce",
+            ))?;
 
         let mut header = Vec::new();
         extend_abstract_bits(&mut header, &self.frame_control);
@@ -833,10 +849,11 @@ impl ApsDataFrame {
 }
 
 impl EncryptedApsDataFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         let mut header = ApsDataFrame::from_bytes(bytes)?;
         let (aux_header, remaining) = ApsAuxHeader::deserialize(&header.asdu)?;
-        let ciphertext = FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?;
+        let ciphertext = FrameBytes::from_slice(remaining)
+            .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?;
         header.asdu = FrameBytes::new();
 
         Ok(Self {
@@ -856,7 +873,7 @@ impl EncryptedApsDataFrame {
 
     /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
     /// carries no extended nonce.
-    pub fn decrypt(&self, key: &Key, source: Eui64) -> Result<ApsDataFrame, &'static str> {
+    pub fn decrypt(&self, key: &Key, source: Eui64) -> Result<ApsDataFrame, ParseError> {
         let asdu = decrypt_aps_payload(
             key,
             &self.aux_header,
@@ -896,7 +913,7 @@ impl ApsAckFrame {
 }
 
 impl EncryptedApsAckFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         let header = ApsAckFrame::from_bytes(bytes)?;
         // `ApsAckFrame::from_bytes` ignores trailing bytes; the aux header starts
         // right after the fixed header fields, whose length only the ACK format
@@ -911,7 +928,8 @@ impl EncryptedApsAckFrame {
         Ok(Self {
             header,
             aux_header,
-            ciphertext: FrameBytes::from_slice(remaining).map_err(|_| "Ciphertext too long")?,
+            ciphertext: FrameBytes::from_slice(remaining)
+                .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?,
         })
     }
 
@@ -925,7 +943,7 @@ impl EncryptedApsAckFrame {
 
     /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
     /// carries no extended nonce.
-    pub fn decrypt(&self, key: &Key, source: Eui64) -> Result<ApsAckFrame, &'static str> {
+    pub fn decrypt(&self, key: &Key, source: Eui64) -> Result<ApsAckFrame, ParseError> {
         decrypt_aps_payload(
             key,
             &self.aux_header,
@@ -947,12 +965,16 @@ pub enum ApsFrame {
     EncryptedCommand(EncryptedApsCommandFrame),
 }
 
-pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, &'static str> {
+pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, ParseError> {
     if bytes.is_empty() {
-        return Err("Not enough data to parse ApsFrame");
+        return Err(ParseError::UnexpectedEnd { ty: "ApsFrame" });
     }
 
-    let frame_type = ApsFrameType::try_from(bytes[0] & 0b11).map_err(|_| "Invalid frame type")?;
+    let frame_type =
+        ApsFrameType::try_from(bytes[0] & 0b11).map_err(|_| ParseError::InvalidDiscriminant {
+            ty: "ApsFrameType",
+            got: bytes[0] & 0b11,
+        })?;
     let security = bytes[0] & 0b0010_0000 != 0;
 
     match (frame_type, security) {
@@ -970,7 +992,7 @@ pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, &'static str> {
         )?)),
         (ApsFrameType::Data, false) => Ok(ApsFrame::Data(ApsDataFrame::from_bytes(bytes)?)),
         (ApsFrameType::Ack, false) => Ok(ApsFrame::Ack(ApsAckFrame::from_bytes(bytes)?)),
-        (ApsFrameType::Interpan, _) => Err("Interpan not supported"),
+        (ApsFrameType::Interpan, _) => Err(ParseError::Unsupported("Interpan")),
     }
 }
 

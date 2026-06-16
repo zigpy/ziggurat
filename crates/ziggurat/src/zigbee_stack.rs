@@ -64,8 +64,10 @@ const FRAME_COUNTER_NOTIFY_INTERVAL: u32 = 100;
 pub enum ZigbeeStackError {
     #[error("route discovery timed out")]
     RouteDiscoveryTimeout(#[from] Elapsed),
-    #[error("route discovery unexpectedly failed: {0}")]
-    RouteDiscoveryFailure(String),
+    #[error("no route discovery entry found for the destination")]
+    RouteDiscoveryNoEntry,
+    #[error("route not active after discovery completed")]
+    RouteInactiveAfterDiscovery,
     #[error("next hop {next_hop:?} did not ACK")]
     NwkNoAck { next_hop: Ieee802154Address },
     #[error("transmit rejected due to CCA failure")]
@@ -80,6 +82,8 @@ pub enum ZigbeeStackError {
     ApsSecurityFailed,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
+    #[error("malformed energy scan result from the RCP: {value:02X?}")]
+    InvalidEnergyScanResult { value: Vec<u8> },
     #[error("spinel error: {0}")]
     SpinelError(#[from] SpinelError),
 }
@@ -879,7 +883,7 @@ impl ZigbeeStack {
                     tracing::info!("RCP reset complete: {status:?}");
                     return Ok(());
                 }
-                Ok(None) => panic!("Spinel reset notification sender hung up"),
+                Ok(None) => return Err(SpinelError::TransportClosed.into()),
                 Err(_) => {
                     tracing::warn!("No reset notification, attempt {attempt}/{RESET_ATTEMPTS}");
                 }
@@ -1054,12 +1058,14 @@ impl ZigbeeStack {
                     .await?;
 
                 if response_property != SpinelPropertyId::MacScanState {
+                    tracing::warn!(
+                        "Energy scan of channel {channel} was rejected: \
+                         {response_property:?}={response_value:02X?}"
+                    );
                     return Err(ZigbeeStackError::SpinelError(
-                        SpinelError::InvalidResponseError {
-                            reason: format!(
-                                "Energy scan of channel {channel} was rejected: \
-                                 {response_property:?}={response_value:02X?}"
-                            ),
+                        SpinelError::UnexpectedResponseProperty {
+                            expected: SpinelPropertyId::MacScanState,
+                            got: response_property,
                         },
                     ));
                 }
@@ -1074,9 +1080,15 @@ impl ZigbeeStack {
                 .expect("Spinel energy scan sender hung up");
 
                 let [scanned_channel, max_rssi] = update.value[..] else {
-                    panic!("Invalid energy scan result: {:02X?}", update.value);
+                    return Err(ZigbeeStackError::InvalidEnergyScanResult {
+                        value: update.value,
+                    });
                 };
-                assert_eq!(scanned_channel, channel);
+                if scanned_channel != channel {
+                    return Err(ZigbeeStackError::InvalidEnergyScanResult {
+                        value: update.value,
+                    });
+                }
 
                 results.push((scanned_channel, max_rssi as i8));
             }
@@ -1113,12 +1125,13 @@ impl ZigbeeStack {
         // A rejected change (e.g. an out-of-range channel) is answered with a
         // `LastStatus` instead of the property
         if rsp_property != SpinelPropertyId::PhyChan {
+            tracing::warn!(
+                "Channel change to {channel} was rejected: {rsp_property:?}={rsp_value:02X?}"
+            );
             return Err(ZigbeeStackError::SpinelError(
-                SpinelError::InvalidResponseError {
-                    reason: format!(
-                        "Channel change to {channel} was rejected: \
-                         {rsp_property:?}={rsp_value:02X?}"
-                    ),
+                SpinelError::UnexpectedResponseProperty {
+                    expected: SpinelPropertyId::PhyChan,
+                    got: rsp_property,
                 },
             ));
         }

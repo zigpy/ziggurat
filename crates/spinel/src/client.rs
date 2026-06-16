@@ -110,19 +110,40 @@ pub struct SpinelRxFrame {
     pub manufacturer_specific: Vec<u8>,
 }
 
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum SpinelRxFrameError {
+    #[error("frame too short, expected at least {expected} bytes, got {got}")]
+    TooShort { expected: usize, got: usize },
+    #[error("PSDU too long to fit its frame bound, got {got} bytes")]
+    PsduTooLong { got: usize },
+}
+
 impl SpinelRxFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelRxFrameError> {
         let mut offset = 0;
 
+        // The 2-byte PSDU length prefix must be present before it can be read
+        if bytes.len() < 2 {
+            return Err(SpinelRxFrameError::TooShort {
+                expected: 2,
+                got: bytes.len(),
+            });
+        }
         let psdu_len = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as usize;
         offset += 2;
 
-        if offset + (psdu_len + 1 + 1 + 4 + 1 + 1 + 8 + 1) > bytes.len() {
-            return Err("Invalid frame length");
+        // The PSDU is followed by a fixed metadata trailer: rssi, noise floor, flags,
+        // channel, lqi, timestamp, and receive error
+        let expected = offset + psdu_len + (1 + 1 + 4 + 1 + 1 + 8 + 1);
+        if expected > bytes.len() {
+            return Err(SpinelRxFrameError::TooShort {
+                expected,
+                got: bytes.len(),
+            });
         }
 
         let psdu = FrameBytes::from_slice(&bytes[offset..offset + psdu_len])
-            .map_err(|_| "PSDU too long")?;
+            .map_err(|_| SpinelRxFrameError::PsduTooLong { got: psdu_len })?;
         offset += psdu_len;
 
         let rssi = bytes[offset] as i8;
@@ -182,12 +203,27 @@ pub enum SpinelError {
     IoError(#[from] std::io::Error),
     #[error("command cancelled by an RCP reset")]
     CancelledByReset,
+    #[error("the spinel transport closed")]
+    TransportClosed,
     #[error("timeout")]
     Timeout,
     #[error("spinel U21 parsing error")]
     U21ParsingError(#[from] SpinelFrameParsingError),
-    #[error("spinel parsing error: {reason}")]
-    InvalidResponseError { reason: String },
+    #[error("invalid property id {property_id} in response")]
+    InvalidResponsePropertyId { property_id: u32 },
+    #[error("NCP version is not valid UTF-8")]
+    NcpVersionNotUtf8,
+    #[error("invalid hardware address: {got:02X?}")]
+    InvalidHardwareAddress { got: Vec<u8> },
+    #[error("unexpected response property: expected {expected:?}, got {got:?}")]
+    UnexpectedResponseProperty {
+        expected: SpinelPropertyId,
+        got: SpinelPropertyId,
+    },
+    #[error("response payload was empty")]
+    EmptyResponse,
+    #[error("invalid spinel status {status}")]
+    InvalidStatus { status: u8 },
 }
 
 /// The writer half of the port plus its serialization scratch: frames go out one at a
@@ -463,8 +499,8 @@ impl SpinelClient {
             packed_uint21_deserialize(&response_payload).map_err(SpinelError::U21ParsingError)?;
 
         let rsp_property_id = SpinelPropertyId::try_from(rsp_property_id_int).map_err(|_| {
-            SpinelError::InvalidResponseError {
-                reason: "Invalid property ID in response".to_string(),
+            SpinelError::InvalidResponsePropertyId {
+                property_id: rsp_property_id_int,
             }
         })?;
 
@@ -492,9 +528,7 @@ impl SpinelClient {
         let ncp_version_rsp = self.prop_value_get(SpinelPropertyId::NcpVersion).await?;
 
         let ncp_version_with_null =
-            String::from_utf8(ncp_version_rsp).map_err(|_| SpinelError::InvalidResponseError {
-                reason: "NCP version is not valid UTF-8".to_string(),
-            })?;
+            String::from_utf8(ncp_version_rsp).map_err(|_| SpinelError::NcpVersionNotUtf8)?;
 
         Ok(ncp_version_with_null
             .trim_matches(char::from(0x00))
@@ -505,11 +539,9 @@ impl SpinelClient {
     pub async fn get_hw_address(&self) -> Result<Eui64, SpinelError> {
         let rsp = self.prop_value_get(SpinelPropertyId::Hwaddr).await?;
 
-        let bytes: [u8; 8] =
-            rsp.try_into()
-                .map_err(|rsp: Vec<u8>| SpinelError::InvalidResponseError {
-                    reason: format!("Invalid hardware address: {rsp:02X?}"),
-                })?;
+        let bytes: [u8; 8] = rsp
+            .try_into()
+            .map_err(|rsp: Vec<u8>| SpinelError::InvalidHardwareAddress { got: rsp })?;
 
         Ok(crate::eui64_from_spinel_bytes(bytes))
     }
@@ -528,19 +560,16 @@ impl SpinelClient {
             .await?;
 
         if rsp_prop_id != SpinelPropertyId::LastStatus {
-            return Err(SpinelError::InvalidResponseError {
-                reason: "Unexpected response property ID".to_string(),
+            return Err(SpinelError::UnexpectedResponseProperty {
+                expected: SpinelPropertyId::LastStatus,
+                got: rsp_prop_id,
             });
         }
 
         if rsp.is_empty() {
-            return Err(SpinelError::InvalidResponseError {
-                reason: "Unexpected response length".to_string(),
-            });
+            return Err(SpinelError::EmptyResponse);
         }
 
-        SpinelStatus::try_from(rsp[0]).map_err(|_| SpinelError::InvalidResponseError {
-            reason: "Invalid Spinel status".to_string(),
-        })
+        SpinelStatus::try_from(rsp[0]).map_err(|_| SpinelError::InvalidStatus { status: rsp[0] })
     }
 }

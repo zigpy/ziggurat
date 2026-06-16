@@ -578,9 +578,7 @@ impl ZigbeeStack {
                 Some(deadline) => deadline - Instant::now().into_std(),
                 None => {
                     tracing::warn!("No route discovery entry found for {destination:?}");
-                    return Err(ZigbeeStackError::RouteDiscoveryFailure(
-                        "No discovery entry found".to_string(),
-                    ));
+                    return Err(ZigbeeStackError::RouteDiscoveryNoEntry);
                 }
             }
         };
@@ -604,11 +602,7 @@ impl ZigbeeStack {
             .nib
             .routing
             .next_hop(destination)
-            .ok_or_else(|| {
-                ZigbeeStackError::RouteDiscoveryFailure(
-                    "Route not active after discovery".to_string(),
-                )
-            })
+            .ok_or(ZigbeeStackError::RouteInactiveAfterDiscovery)
     }
 
     #[allow(clippy::significant_drop_tightening)]
