@@ -73,6 +73,19 @@ def complete(fut, is_exception, value):
     Ok(COMPLETE.get().unwrap().bind(py).clone())
 }
 
+/// An already-resolved asyncio future. Used by the context-manager dunders, which run on
+/// the loop thread and must not route through the runtime (`__aexit__` is shutting it
+/// down), so the result is set synchronously here.
+fn resolved_future<'py>(
+    py: Python<'py>,
+    value: Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let event_loop = py.import("asyncio")?.call_method0("get_running_loop")?;
+    let py_fut = event_loop.call_method0("create_future")?;
+    py_fut.call_method1("set_result", (value,))?;
+    Ok(py_fut)
+}
+
 /// A future done-callback that aborts the backing runtime task if the asyncio future was
 /// cancelled, so a cancelled `recv_message` cannot leave a task that steals the next
 /// message off the channel. A normal completion makes the abort a no-op.
@@ -280,6 +293,25 @@ impl Ziggurat {
     /// Stop the stack and reclaim every task. Idempotent; further calls are no-ops.
     fn close(&self) {
         self.shutdown();
+    }
+
+    /// `async with Ziggurat() as z:` — entering yields the stack itself.
+    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        resolved_future(py, slf.into_any())
+    }
+
+    /// Exiting closes the stack. Returns `None` (falsy) so an exception in the body is
+    /// not suppressed.
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_value: Option<Py<PyAny>>,
+        _traceback: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.shutdown();
+        resolved_future(py, py.None().into_bound(py))
     }
 }
 
