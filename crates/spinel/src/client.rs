@@ -1,7 +1,7 @@
 use crate::{
     HdlcSpecial, SPINEL_FRAME_MAX_SIZE, SpinelCommandId, SpinelFrame, SpinelFrameParsingError,
-    SpinelFramePropValueIs, SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelStatus,
-    hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
+    SpinelFramePropValueIs, SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelResetReason,
+    SpinelStatus, hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
 };
 use ieee_802154::FrameBytes;
 use ieee_802154::types::Eui64;
@@ -377,7 +377,7 @@ impl SpinelClient {
 
     /// `CMD_RESET` is acknowledged with an unsolicited `LastStatus = RESET_*`
     /// notification rather than a tid-matched response, so this only sends.
-    pub async fn send_reset(&self) -> Result<(), SpinelError> {
+    pub async fn send_reset(&self, reason: SpinelResetReason) -> Result<(), SpinelError> {
         let frame = SpinelFrame {
             header: SpinelHeader {
                 flag: 0b10,
@@ -385,7 +385,7 @@ impl SpinelClient {
                 transaction_id: 0,
             },
             command_id: SpinelCommandId::Reset,
-            payload: vec![],
+            payload: vec![reason as u8],
         };
 
         self.send_frame(&frame).await

@@ -6,7 +6,7 @@ use ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use spinel::client::{SpinelClient, SpinelError, SpinelRxFrame};
 use spinel::{
     SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelMacScanState, SpinelPropertyId,
-    SpinelStatus,
+    SpinelResetReason, SpinelStatus,
 };
 use tokio::time::{sleep, timeout};
 use zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
@@ -904,7 +904,7 @@ impl ZigbeeStack {
         let mut reset_rx = self.reset_rx.try_lock().expect("Reset receiver is locked");
 
         for attempt in 1..=RESET_ATTEMPTS {
-            self.spinel.send_reset().await?;
+            self.spinel.send_reset(SpinelResetReason::Stack).await?;
 
             match timeout(RESET_NOTIFICATION_TIMEOUT, reset_rx.recv()).await {
                 Ok(Some(status)) => {
