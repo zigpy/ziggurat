@@ -31,8 +31,8 @@ use zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, JoinKind, LOCK_ACQUIRE_TIMEOUT, NwkDeviceType, NwkSecurityMode, SendMode,
-    ZigbeeNotification, ZigbeeStack, neighbors,
+    AddrConflictSource, DeviceLeaveReason, JoinKind, LOCK_ACQUIRE_TIMEOUT, NwkDeviceType,
+    NwkSecurityMode, SendMode, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl ZigbeeStack {
@@ -795,9 +795,18 @@ impl ZigbeeStack {
             ApsUpdateDeviceStatus::DeviceLeft => {
                 // Spec 4.4.3.2.3: informative only, no action is taken beyond
                 // notifying the client
+                let router_ieee = nwk_frame
+                    .nwk_header
+                    .source_ieee
+                    .or_else(|| self.core().nib.address_map.eui64_for(router_nwk));
+
                 let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
                     nwk: update.device_short_address,
                     ieee: Some(update.device_address),
+                    reason: DeviceLeaveReason::RouterReported {
+                        router: router_nwk,
+                        router_ieee,
+                    },
                 });
             }
         }
@@ -1046,6 +1055,9 @@ impl ZigbeeStack {
         let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
             nwk: source,
             ieee: source_ieee,
+            reason: DeviceLeaveReason::Announced {
+                rejoin: leave_cmd.rejoin,
+            },
         });
     }
 

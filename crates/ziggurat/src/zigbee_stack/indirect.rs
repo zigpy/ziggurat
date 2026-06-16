@@ -12,8 +12,8 @@ use zigbee::nwk::frame::EncryptedNwkFrame;
 use zigbee::indirect::Delivery;
 
 use super::{
-    IndirectCompletion, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, ZigbeeNotification, ZigbeeStack,
-    ZigbeeStackError,
+    DeviceLeaveReason, IndirectCompletion, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode,
+    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 const fn set_frame_pending(frame: &mut Ieee802154Frame<EncryptedNwkFrame>) {
@@ -392,6 +392,7 @@ impl ZigbeeStack {
             let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
                 nwk,
                 ieee: Some(eui64),
+                reason: DeviceLeaveReason::KeepaliveTimeout,
             });
         }
     }

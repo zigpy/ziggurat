@@ -21,7 +21,8 @@ use zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat::ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat::zigbee_stack::{
-    ApsAck, NetworkConfig, TclkSeed, Tunables, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, DeviceLeaveReason, NetworkConfig, TclkSeed, Tunables, WELL_KNOWN_LINK_KEY,
+    ZigbeeNotification, ZigbeeStack,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -215,13 +216,30 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                 "parent": hex::encode(parent.to_bytes()),
             }),
         ),
-        ZigbeeNotification::DeviceLeft { nwk, ieee } => notification(
-            "device_left",
-            json!({
+        ZigbeeNotification::DeviceLeft { nwk, ieee, reason } => {
+            let mut params = json!({
                 "nwk": hex::encode(nwk.to_bytes()),
                 "ieee": ieee.map(eui64_to_string),
-            }),
-        ),
+            });
+            match reason {
+                DeviceLeaveReason::Announced { rejoin } => {
+                    params["reason"] = json!("announced");
+                    params["rejoin"] = json!(rejoin);
+                }
+                DeviceLeaveReason::RouterReported {
+                    router,
+                    router_ieee,
+                } => {
+                    params["reason"] = json!("router_reported");
+                    params["router"] = json!(hex::encode(router.to_bytes()));
+                    params["router_ieee"] = json!(router_ieee.map(eui64_to_string));
+                }
+                DeviceLeaveReason::KeepaliveTimeout => {
+                    params["reason"] = json!("keepalive_timeout");
+                }
+            }
+            notification("device_left", params)
+        }
         ZigbeeNotification::ApsDecryptionFailure {
             source,
             source_ieee,

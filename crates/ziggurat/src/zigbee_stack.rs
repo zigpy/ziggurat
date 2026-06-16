@@ -477,6 +477,23 @@ impl State {
     }
 }
 
+/// How the stack learned that a device left the network.
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceLeaveReason {
+    /// The device itself broadcast a NWK Leave announcement. `rejoin` mirrors the
+    /// Leave command's Rejoin sub-field: `true` means it intends to rejoin.
+    Announced { rejoin: bool },
+    /// A parent router relayed an APS Update-Device "Device Left" for one of its
+    /// children (spec 4.6.3.6.2); the device is out of our radio range. `router_ieee`
+    /// is the reporting router's EUI64 when we can resolve it from the address map.
+    RouterReported {
+        router: Nwk,
+        router_ieee: Option<Eui64>,
+    },
+    /// A sleepy child aged out of the neighbor table without sending a keepalive.
+    KeepaliveTimeout,
+}
+
 #[derive(Debug, Clone)]
 pub enum ZigbeeNotification {
     ReceivedApsCommand {
@@ -499,9 +516,13 @@ pub enum ZigbeeNotification {
     LinkKeyUpdate { ieee: Eui64, key: Key },
     /// A device joined or rejoined the network, directly or through a router
     DeviceJoined { nwk: Nwk, ieee: Eui64, parent: Nwk },
-    /// A device announced that it is leaving the network. The EUI64 is unknown when
-    /// the leaving device never made it into the address map.
-    DeviceLeft { nwk: Nwk, ieee: Option<Eui64> },
+    /// A device left the network. The EUI64 is unknown when the leaving device never
+    /// made it into the address map. `reason` records how we learned of the departure.
+    DeviceLeft {
+        nwk: Nwk,
+        ieee: Option<Eui64>,
+        reason: DeviceLeaveReason,
+    },
     /// An APS command frame from a device could not be decrypted with any key we hold
     /// (its trust center link key, a configured TCLK seed, or the well-known key).
     /// This almost always means the device's link key is wrong/missing and it silently
