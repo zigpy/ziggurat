@@ -10,10 +10,14 @@ use thiserror::Error;
 use tokio_serial::SerialStream;
 
 use crate::priority_lock::PriorityLock;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use std::task::{Context, Poll};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, ReadHalf, WriteHalf,
+};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
@@ -24,6 +28,65 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// Consecutive command timeouts before the RCP is presumed wedged and the
 /// reset-recovery path is triggered.
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 4;
+
+/// The byte transport under the Spinel client, either a serial port or a raw stream.
+#[derive(Debug)]
+pub enum SpinelTransport {
+    Serial(SerialStream),
+    Duplex(DuplexStream),
+}
+
+impl From<SerialStream> for SpinelTransport {
+    fn from(port: SerialStream) -> Self {
+        Self::Serial(port)
+    }
+}
+
+impl From<DuplexStream> for SpinelTransport {
+    fn from(pipe: DuplexStream) -> Self {
+        Self::Duplex(pipe)
+    }
+}
+
+impl AsyncRead for SpinelTransport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Serial(port) => Pin::new(port).poll_read(cx, buf),
+            Self::Duplex(pipe) => Pin::new(pipe).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for SpinelTransport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Serial(port) => Pin::new(port).poll_write(cx, buf),
+            Self::Duplex(pipe) => Pin::new(pipe).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Serial(port) => Pin::new(port).poll_flush(cx),
+            Self::Duplex(pipe) => Pin::new(pipe).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Serial(port) => Pin::new(port).poll_shutdown(cx),
+            Self::Duplex(pipe) => Pin::new(pipe).poll_shutdown(cx),
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelTxFrame {
@@ -230,7 +293,7 @@ pub enum SpinelError {
 /// time, so two persistent buffers cover every TX without per-frame allocation.
 #[derive(Debug)]
 struct SpinelWriter {
-    port: WriteHalf<SerialStream>,
+    port: WriteHalf<SpinelTransport>,
     frame_scratch: Vec<u8>,
     hdlc_scratch: Vec<u8>,
 }
@@ -257,7 +320,7 @@ impl Default for TxPriority {
 #[derive(Debug)]
 pub struct SpinelClient {
     /// The reader half of the port, owned by the task spawned in `spawn_reader`.
-    reader: Mutex<Option<ReadHalf<SerialStream>>>,
+    reader: Mutex<Option<ReadHalf<SpinelTransport>>>,
     /// The writer half of the port. The mutex also serializes outbound HDLC writes so
     /// concurrent commands cannot interleave partial frames inside the byte stream.
     writer: AsyncMutex<SpinelWriter>,
@@ -273,8 +336,8 @@ pub struct SpinelClient {
 }
 
 impl SpinelClient {
-    pub fn new(port: SerialStream) -> Self {
-        let (reader, writer) = tokio::io::split(port);
+    pub fn new(transport: impl Into<SpinelTransport>) -> Self {
+        let (reader, writer) = tokio::io::split(transport.into());
 
         Self {
             reader: Mutex::new(Some(reader)),
@@ -315,6 +378,17 @@ impl SpinelClient {
     /// Serial death (USB yank, EOF) exits the whole process: the supervisor (Docker)
     /// restarts us. A half-dead process with a deaf radio is the worst failure mode.
     pub fn spawn_reader(&self) {
+        self.spawn_reader_inner(true);
+    }
+
+    /// Like [`Self::spawn_reader`] but stops the reader task on transport close instead
+    /// of exiting the process. For embedders (e.g. the Python bindings) whose transport
+    /// closing is a normal shutdown, not a fault that warrants killing the host process.
+    pub fn spawn_reader_graceful(&self) {
+        self.spawn_reader_inner(false);
+    }
+
+    fn spawn_reader_inner(&self, exit_on_close: bool) {
         let mut reader = self
             .reader
             .lock()
@@ -332,13 +406,21 @@ impl SpinelClient {
                         let mut protocol = protocol.lock().expect("Failed to lock Spinel");
                         protocol.handle_inbound_bytes(&buffer[..n])
                     }
-                    Ok(_) => {
+                    Ok(_) if exit_on_close => {
                         tracing::error!("Serial port EOF, exiting");
                         std::process::exit(1);
                     }
-                    Err(e) => {
+                    Err(e) if exit_on_close => {
                         tracing::error!("Serial port read failed ({e}), exiting");
                         std::process::exit(1);
+                    }
+                    Ok(_) => {
+                        tracing::warn!("Spinel transport closed, stopping reader");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Spinel transport read failed ({e}), stopping reader");
+                        return;
                     }
                 }
             }

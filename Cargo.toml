@@ -1,7 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["fuzz"]
+# ziggurat-py is a PyO3 extension module built with maturin; it stays out of the
+# workspace so its cdylib link flags and unwinding panics (a panic must become a Python
+# exception, never abort the host process) do not perturb the server's build profile.
+exclude = ["fuzz", "crates/ziggurat-py"]
 
 [workspace.package]
 rust-version = "1.96" # latest as of creating this
