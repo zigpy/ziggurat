@@ -547,6 +547,13 @@ impl Neighbors {
         }
     }
 
+    /// A unicast to this neighbor went unacknowledged (spec Table 3-75).
+    pub fn record_transmit_failure(&mut self, eui64: Eui64) {
+        if let Some(entry) = self.table.get_mut(&eui64) {
+            entry.transmit_failure = entry.transmit_failure.saturating_add(1);
+        }
+    }
+
     /// `nwkTxTotal` wrapped: the spec requires every transmit failure counter to reset.
     pub fn reset_transmit_failures(&mut self) {
         for entry in self.table.values_mut() {

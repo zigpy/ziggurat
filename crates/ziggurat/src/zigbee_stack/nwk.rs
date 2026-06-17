@@ -568,6 +568,18 @@ impl ZigbeeStack {
                     break;
                 }
                 Err(e) => {
+                    // Spec Table 3-75: an unacknowledged unicast is a transmit failure
+                    // recorded against the next hop. Counted per MCPS-DATA.request, like
+                    // `nwkTxTotal` above, so the two stay on the same denominator.
+                    if let ZigbeeStackError::NwkNoAck { .. } = e {
+                        let mut core = self.core();
+                        if let Some(next_hop_eui64) =
+                            core.nib.address_map.eui64_for(next_hop_address)
+                        {
+                            core.nib.neighbors.record_transmit_failure(next_hop_eui64);
+                        }
+                    }
+
                     tracing::warn!("Failed to send unicast frame: {e}");
 
                     if attempt + 1 > self.tunables.unicast_retries {
