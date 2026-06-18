@@ -386,12 +386,7 @@ impl ZigbeeStack {
     }
 
     pub fn background_send_802154_frame(&self, frame: Ieee802154Frame, priority: TxPriority) {
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked_self(|arc_self| async move {
             arc_self
                 .send_802154_frame(frame, priority)
                 .await

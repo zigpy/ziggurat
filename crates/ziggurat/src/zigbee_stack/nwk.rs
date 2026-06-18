@@ -299,12 +299,7 @@ impl ZigbeeStack {
         security: NwkSecurityMode,
         route_directly: SendMode,
     ) {
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked_self(|arc_self| async move {
             arc_self
                 .send_nwk_frame(nwk_frame, security, route_directly, TxPriority::USER_NORMAL)
                 .await
@@ -833,12 +828,7 @@ impl ZigbeeStack {
             nwk_frame.nwk_header.source
         );
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked_self(|arc_self| async move {
             // The originator's sequence number is preserved when relaying
             if let Err(err) = arc_self
                 .transmit_unicast_nwk_frame(

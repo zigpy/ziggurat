@@ -113,12 +113,7 @@ impl ZigbeeStack {
             neighbor_table_list: descriptors,
         };
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked_self(|arc_self| async move {
             if let Err(err) = arc_self
                 .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
                 .await
@@ -180,12 +175,7 @@ impl ZigbeeStack {
             routing_table_list: descriptors,
         };
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked_self(|arc_self| async move {
             if let Err(err) = arc_self
                 .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
                 .await
@@ -277,12 +267,7 @@ impl ZigbeeStack {
             children: claimed,
         };
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked_self(|arc_self| async move {
             if let Err(err) = arc_self
                 .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
                 .await
