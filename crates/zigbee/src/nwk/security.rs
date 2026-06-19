@@ -67,7 +67,7 @@ impl NwkSecurity {
                 key: Key::from_hex("00000000000000000000000000000000"),
                 network_key_type: NetworkKeyType::Standard,
             },
-            active_key_seq_number: 0,
+            active_key_seq_number: key_seq_number,
             all_fresh: false,
             persist_interval,
         }
