@@ -159,6 +159,12 @@ impl ApsDataFrame {
         let frame_control = ApsFrameControl::from_abstract_bits(bytes)?;
         let mut remaining = &bytes[1..];
 
+        // Spec 2.2.5: reserved fields SHALL be zero on reception; a nonzero value marks
+        // a malformed frame, which is discarded.
+        if frame_control.reserved1 != 0 {
+            return Err(ParseError::Unsupported("APS frame control reserved bits"));
+        }
+
         let group_id;
         let destination_endpoint;
 

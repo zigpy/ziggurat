@@ -218,6 +218,13 @@ impl ZigbeeStack {
             }
         };
 
+        // Spec 2.2.5/3.x: reserved frame-control bits SHALL be zero on reception; a
+        // nonzero value marks a malformed frame, which is discarded.
+        if nwk_frame.nwk_header.frame_control.reserved1 != 0 {
+            tracing::warn!("Ignoring NWK frame with reserved frame-control bits set");
+            return None;
+        }
+
         // Unicast frames addressed to other devices are relayed after decryption
         let is_transit = nwk_frame.nwk_header.destination != self.state.network_address
             && nwk_frame.nwk_header.destination.as_u16()

@@ -49,7 +49,7 @@ pub struct NwkFrameControl {
     pub destination: bool,
     pub extended_source: bool,
     pub end_device_initiator: bool,
-    reserved: u2,
+    pub reserved1: u2,
 }
 
 #[abstract_bits]
@@ -538,6 +538,7 @@ mod test {
                     destination: false,
                     extended_source: false,
                     end_device_initiator: false,
+                    reserved1: 0,
                 },
                 destination: Nwk(0x6b42),
                 source: Nwk(0x0000),
@@ -600,6 +601,7 @@ mod test {
                     destination: false,
                     extended_source: false,
                     end_device_initiator: false,
+                    reserved1: 0,
                 },
                 destination: Nwk(0x3ce7),
                 source: Nwk(0x5f37),
