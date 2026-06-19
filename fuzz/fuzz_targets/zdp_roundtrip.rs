@@ -2,7 +2,7 @@
 
 use core::fmt::Debug;
 use libfuzzer_sys::fuzz_target;
-use zigbee::zdp::{
+use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, ParentAnnce, ParentAnnceRsp,
     ZdpCommand,
 };

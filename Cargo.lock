@@ -1685,7 +1685,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ziggurat"
+name = "ziggurat-driver"
 version = "0.0.1"
 dependencies = [
  "abstract-bits",
@@ -1728,7 +1728,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
- "ziggurat",
+ "ziggurat-driver",
  "ziggurat-spinel",
  "ziggurat-zigbee",
 ]

@@ -2,7 +2,7 @@
 
 use abstract_bits::{AbstractBits, BitReader};
 use libfuzzer_sys::fuzz_target;
-use zigbee::beacon::ZigbeeBeacon;
+use ziggurat_zigbee::beacon::ZigbeeBeacon;
 
 fuzz_target!(|data: &[u8]| {
     let mut reader = BitReader::from(data);

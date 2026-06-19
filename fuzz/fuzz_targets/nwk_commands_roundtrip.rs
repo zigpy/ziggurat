@@ -2,8 +2,8 @@
 
 use core::fmt::Debug;
 use libfuzzer_sys::fuzz_target;
-use zigbee::Command;
-use zigbee::nwk::commands::{
+use ziggurat_zigbee::Command;
+use ziggurat_zigbee::nwk::commands::{
     NwkEndDeviceTimeoutRequestCommand, NwkEndDeviceTimeoutResponseCommand, NwkLeaveCommand,
     NwkLinkPowerDeltaCommand, NwkLinkStatusCommand, NwkNetworkCommissioningRequestCommand,
     NwkNetworkCommissioningResponseCommand, NwkNetworkReportCommand, NwkNetworkStatusCommand,

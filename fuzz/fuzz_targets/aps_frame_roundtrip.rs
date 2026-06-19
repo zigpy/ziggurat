@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use zigbee::aps::frame::{ApsFrame, parse_aps_frame};
+use ziggurat_zigbee::aps::frame::{ApsFrame, parse_aps_frame};
 
 // ApsFrame has no PartialEq or unified to_bytes, so assert the weaker but
 // still-useful property that serialize-then-parse is a fixed point: encoding a
