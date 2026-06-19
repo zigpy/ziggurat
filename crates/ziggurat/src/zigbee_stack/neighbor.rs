@@ -8,6 +8,9 @@ use zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::{NwkSecurityMode, ZigbeeStack};
 
+/// Maximum number of link status entries that can be carried in a single frame.
+const MAX_LINK_STATUSES: usize = 7;
+
 impl ZigbeeStack {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
         self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
@@ -112,29 +115,23 @@ impl ZigbeeStack {
         // Link statuses are sorted in ascending order
         link_statuses.sort_by_key(|a| a.address.as_u16());
 
-        let max_link_statuses = 7;
-        let mut remaining_link_statuses = link_statuses.clone();
+        let total = link_statuses.len();
+        let mut start = 0;
 
         loop {
+            // Each frame carries up to `MAX_LINK_STATUSES` entries; consecutive frames
+            // repeat one boundary entry (the last of frame N is the first of frame N+1)
+            // so a receiver can stitch the advertised address range together (spec
+            // 3.6.4.4.2). An empty list still emits a single first+last frame.
+            let end = std::cmp::min(start + MAX_LINK_STATUSES, total);
+
             let link_status_frame = self
                 .nwk_command_frame(
                     BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
                     NwkLinkStatusCommand {
-                        is_first_frame: remaining_link_statuses.len() == link_statuses.len(),
-                        is_last_frame: remaining_link_statuses.len() <= max_link_statuses,
-                        link_statuses: if remaining_link_statuses.is_empty() {
-                            vec![]
-                        } else {
-                            // Link status frames overlap by a single entry
-                            remaining_link_statuses
-                                .drain(
-                                    ..std::cmp::min(
-                                        remaining_link_statuses.len(),
-                                        max_link_statuses - 1,
-                                    ),
-                                )
-                                .collect()
-                        },
+                        is_first_frame: start == 0,
+                        is_last_frame: end == total,
+                        link_statuses: link_statuses[start..end].to_vec(),
                     }
                     .serialize()
                     .unwrap(),
@@ -157,9 +154,12 @@ impl ZigbeeStack {
                 tracing::warn!("Failed to broadcast link status: {err}");
             }
 
-            if remaining_link_statuses.is_empty() {
+            if end == total {
                 break;
             }
+
+            // Repeat the boundary entry as the first of the next frame
+            start = end - 1;
         }
     }
 
