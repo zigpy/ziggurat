@@ -63,9 +63,9 @@ impl ZigbeeStack {
             return;
         }
 
-        let updated_path_cost = route_reply_cmd
-            .path_cost
-            .saturating_add(sender_link.outgoing_cost);
+        // The path cost already accounts for every link the reply has traversed: the
+        // responder seeds the first hop and each relay adds the link it forwards across.
+        let updated_path_cost = route_reply_cmd.path_cost;
 
         let disposition = self.core().nib.routing.accept_route_reply(
             route_reply_cmd.originator_nwk,
