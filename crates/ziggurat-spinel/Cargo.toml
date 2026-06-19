@@ -1,6 +1,6 @@
 [package]
 name = "ziggurat-spinel"
-version = "0.1.0"
+version.workspace = true
 description = "OpenThread Spinel protocol codec and RCP client for the Ziggurat Zigbee stack"
 rust-version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154", version = "0.1.0" }
+ziggurat-ieee-802154.workspace = true
 
 crc_all = "0.2.2"
 tracing = "0.1"

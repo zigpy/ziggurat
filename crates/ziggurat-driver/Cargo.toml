@@ -1,6 +1,6 @@
 [package]
 name = "ziggurat-driver"
-version = "0.0.1"
+version.workspace = true
 description = "Async (tokio) Zigbee stack driver built on the sans-io ziggurat-zigbee crate"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154", version = "0.1.0" }
-ziggurat-spinel = { path = "../ziggurat-spinel", version = "0.1.0" }
-ziggurat-zigbee = { path = "../ziggurat-zigbee", version = "0.1.0" }
+ziggurat-ieee-802154.workspace = true
+ziggurat-spinel.workspace = true
+ziggurat-zigbee.workspace = true
 
 abstract-bits = "0.2.0"
 arbitrary-int = "2.1.1"

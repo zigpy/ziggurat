@@ -1,6 +1,6 @@
 [package]
 name = "ziggurat-zigbee"
-version = "0.1.0"
+version.workspace = true
 description = "sans-io Zigbee protocol codecs and decision state machines for the Ziggurat stack"
 rust-version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154", version = "0.1.0" }
+ziggurat-ieee-802154.workspace = true
 
 abstract-bits = "0.2.0"
 aes = "0.9.1"

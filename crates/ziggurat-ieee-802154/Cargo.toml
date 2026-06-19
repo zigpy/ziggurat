@@ -1,6 +1,6 @@
 [package]
 name = "ziggurat-ieee-802154"
-version = "0.1.0"
+version.workspace = true
 description = "IEEE 802.15.4 MAC frame codec used by the Ziggurat Zigbee stack"
 rust-version.workspace = true
 edition.workspace = true
