@@ -44,19 +44,9 @@ pub struct TableEntry {
     /// TRUE.
     pub expired: bool,
 
-    /// Used for `TLVs` and a few subsequent fields
-    pub sequence_number_valid: bool,
-
     /// The 16-bit network address of the next hop on the way to the destination.
     /// This is the routing table entry's primary purpose.
     pub next_hop_address: Nwk,
-
-    /// The 16-bit sequence number associated with this entry, obtained from the last
-    /// route message that successfully updated this entry and conveyed a sequence
-    /// number. Notice that routers prior to `R23` did neither maintain nor convey a
-    /// sequence number. The value stored in this field is only valid if the Sequence
-    /// Number Valid flag is set.
-    pub sequence_number: u16,
 
     /// A 32-bit saturating counter, which is incremented whenever this routing table
     /// entry is used to forward a data packet towards its destination
@@ -79,9 +69,7 @@ impl TableEntry {
             many_to_one: false,
             route_record_required: false,
             expired: false,
-            sequence_number_valid: false,
             next_hop_address,
-            sequence_number: 0,
             total_usage_count: 0,
             recent_activity: 0,
         }
