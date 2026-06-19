@@ -151,7 +151,7 @@ impl ZigbeeStack {
         };
 
         if sender_link.outgoing_cost == 0 {
-            tracing::warn!("Path cost to neighbor is 0, not sending route reply");
+            tracing::debug!("Path cost to neighbor is 0, not sending route reply");
             return;
         }
 
