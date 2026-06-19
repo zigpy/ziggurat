@@ -618,14 +618,9 @@ impl ZigbeeStack {
             .issue_device_key(source_ieee, Key(rand::random()));
         drop(core);
 
-        // The key must be persisted by the client: a device that completed a key
-        // exchange expects its unique key even after we restart
-        let _ = self
-            .notification_tx
-            .send(ZigbeeNotification::LinkKeyUpdate {
-                ieee: source_ieee,
-                key: new_key.clone(),
-            });
+        // The key is persisted only once the device proves possession via Verify-Key
+        // (see `handle_verify_key`); a device that never completes the exchange must not
+        // leave a stored key behind, and its old key stays usable in the meantime.
 
         let transport_key_command = ApsCommandFrame {
             frame_control: ApsFrameControl {
@@ -713,6 +708,17 @@ impl ZigbeeStack {
             }
             Some(true) => {
                 tracing::info!("Device {source_ieee:?} verified its trust center link key");
+
+                // Persist only now that the device has proven possession (spec 4.7.3.3):
+                // the pending key has been promoted to the device's active key.
+                let key = self.core().aib.aps_security.device_link_key(source_ieee);
+                let _ = self
+                    .notification_tx
+                    .send(ZigbeeNotification::LinkKeyUpdate {
+                        ieee: source_ieee,
+                        key,
+                    });
+
                 APS_STATUS_SUCCESS
             }
             Some(false) => {
