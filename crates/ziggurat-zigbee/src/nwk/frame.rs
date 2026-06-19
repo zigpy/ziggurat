@@ -56,9 +56,9 @@ pub struct NwkFrameControl {
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkSourceRoute {
-    #[abstract_bits(length_of = relays)]
     relay_count: u8,
     pub relay_index: u8,
+    #[abstract_bits(length_from = relay_count)]
     pub relays: Vec<Nwk>,
 }
 

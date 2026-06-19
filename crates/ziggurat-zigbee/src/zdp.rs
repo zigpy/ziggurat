@@ -86,8 +86,8 @@ impl ZdpCommand for DeviceAnnce {
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ParentAnnce {
-    #[abstract_bits(length_of = children)]
     number_of_children: u8,
+    #[abstract_bits(length_from = number_of_children)]
     pub children: Vec<Eui64>,
 }
 
@@ -101,8 +101,8 @@ impl ZdpCommand for ParentAnnce {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ParentAnnceRsp {
     pub status: ZdpStatus,
-    #[abstract_bits(length_of = children)]
     number_of_children: u8,
+    #[abstract_bits(length_from = number_of_children)]
     pub children: Vec<Eui64>,
 }
 
@@ -185,8 +185,8 @@ pub struct MgmtLqiRsp {
     pub status: ZdpStatus,
     pub neighbor_table_entries: u8,
     pub start_index: u8,
-    #[abstract_bits(length_of = neighbor_table_list)]
     neighbor_table_list_count: u8,
+    #[abstract_bits(length_from = neighbor_table_list_count)]
     pub neighbor_table_list: Vec<NeighborDescriptor>,
 }
 
@@ -235,8 +235,8 @@ pub struct MgmtRtgRsp {
     pub status: ZdpStatus,
     pub routing_table_entries: u8,
     pub start_index: u8,
-    #[abstract_bits(length_of = routing_table_list)]
     routing_table_list_count: u8,
+    #[abstract_bits(length_from = routing_table_list_count)]
     pub routing_table_list: Vec<RoutingDescriptor>,
 }
 

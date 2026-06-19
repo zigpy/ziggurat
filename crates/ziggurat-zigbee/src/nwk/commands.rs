@@ -44,12 +44,12 @@ pub enum NwkRouteRequestManyToOne {
 pub struct NwkRouteRequestCommand {
     reserved: u3,
     pub many_to_one: NwkRouteRequestManyToOne,
-    #[abstract_bits(presence_of = destination_eui64)]
-    reserved: bool,
+    has_destination_eui64: bool,
     reserved: u2,
     pub route_request_identifier: u8,
     pub destination_address: Nwk,
     pub path_cost: u8,
+    #[abstract_bits(presence_from = has_destination_eui64)]
     pub destination_eui64: Option<Eui64>,
 }
 
@@ -58,16 +58,16 @@ pub struct NwkRouteRequestCommand {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRouteReplyCommand {
     reserved: u4,
-    #[abstract_bits(presence_of = originator_eui64)]
-    reserved: bool,
-    #[abstract_bits(presence_of = responder_eui64)]
-    reserved: bool,
+    has_originator_eui64: bool,
+    has_responder_eui64: bool,
     reserved: u2,
     pub route_request_identifier: u8,
     pub originator_nwk: Nwk,
     pub responder_nwk: Nwk,
     pub path_cost: u8,
+    #[abstract_bits(presence_from = has_originator_eui64)]
     pub originator_eui64: Option<Eui64>,
+    #[abstract_bits(presence_from = has_responder_eui64)]
     pub responder_eui64: Option<Eui64>,
 }
 
@@ -149,8 +149,8 @@ pub struct NwkNetworkStatusCommand {
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRouteRecordCommand {
-    #[abstract_bits(length_of = relays)]
-    reserved: u8,
+    relay_count: u8,
+    #[abstract_bits(length_from = relay_count)]
     pub relays: Vec<Nwk>,
 }
 
@@ -232,11 +232,11 @@ pub struct NwkRejoinResponseCommand {
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkLinkStatusCommand {
-    #[abstract_bits(length_of = link_statuses)]
-    reserved: u5,
+    link_statuses_len: u5,
     pub is_first_frame: bool,
     pub is_last_frame: bool,
     reserved: u1,
+    #[abstract_bits(length_from = link_statuses_len)]
     pub link_statuses: Vec<NwkLinkStatus>,
 }
 
@@ -305,13 +305,13 @@ pub enum NwkReportCommandIdentifier {
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkNetworkReportCommand {
-    #[abstract_bits(length_of = pan_ids)]
     report_information_count: u5,
     pub report_command_identifier: NwkReportCommandIdentifier,
     pub epid: Eui64,
     /// A list of 16-bit PAN identifiers that are in conflict. This field's format is
     /// determined by the `report_command_identifier` but the only defined type is
     /// `PanIdentifierConflict`.
+    #[abstract_bits(length_from = report_information_count)]
     pub pan_ids: Vec<PanId>,
 }
 
@@ -392,8 +392,8 @@ pub struct NwkPowerListEntry {
 pub struct NwkLinkPowerDeltaCommand {
     pub command_type: NwkLinkPowerDeltaType,
     reserved: u6,
-    #[abstract_bits(length_of = power_list)]
     list_count: u8,
+    #[abstract_bits(length_from = list_count)]
     pub power_list: Vec<NwkPowerListEntry>,
 }
 
