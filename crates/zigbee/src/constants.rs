@@ -26,6 +26,12 @@ pub struct Tunables {
     pub max_source_route: u8,
     pub max_children: u8,
 
+    /// Trust center policy: allow an unsecured (trust center) rejoin from a device that
+    /// has not established a unique link key. Off by default — such a rejoin re-delivers
+    /// the network key encrypted with the well-known key, exposing it to anyone who
+    /// knows that key (spec 4.7.3.6).
+    pub allow_unsecured_rejoins: bool,
+
     pub passive_ack_timeout: Duration,
 
     /// The maximum number of retries allowed after a broadcast transmission failure.
@@ -112,6 +118,7 @@ impl Tunables {
             max_broadcast_retries: 2,
             broadcast_passive_ack_quorum: 8,
             max_children: 32,
+            allow_unsecured_rejoins: false,
             max_source_route: 12,
             transaction_persistence_time: Duration::from_millis(7680),
             concentrator_radius: 10,

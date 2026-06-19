@@ -813,19 +813,15 @@ impl ZigbeeStack {
                 });
             }
             ApsUpdateDeviceStatus::StandardDeviceTrustCenterRejoin => {
-                // The spec requires a unique link key for trust center rejoins, but
-                // devices that never completed a key exchange are still let in with the
-                // well-known key for compatibility
-                if !self
-                    .core()
-                    .aib
-                    .aps_security
-                    .has_unique_link_key(update.device_address)
-                {
+                // Spec 4.7.3.6: a trust center rejoin requires a unique link key, since
+                // the network key would otherwise be tunneled encrypted with the well-
+                // known key. Reject unless the device has one (or policy allows it).
+                if !self.may_rejoin_unsecured(update.device_address) {
                     tracing::warn!(
-                        "Trust center rejoin from {:?} without a unique link key",
+                        "Rejecting trust center rejoin from {:?} without a unique link key",
                         update.device_address
                     );
+                    return;
                 }
 
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
@@ -920,6 +916,15 @@ impl ZigbeeStack {
     /// Zigbee spec 3.6.1.4.2: a previously joined device re-attaches to us, either
     /// securely (it still has the network key) or via an unsecured trust center rejoin.
     #[allow(clippy::significant_drop_tightening)]
+    /// Spec 4.7.3.6: an unsecured / trust center rejoin re-delivers the network key. It
+    /// is only safe for a device that already holds a unique link key (so the key is not
+    /// exposed under the well-known key); the `allow_unsecured_rejoins` policy overrides
+    /// this for migration scenarios.
+    fn may_rejoin_unsecured(&self, eui64: Eui64) -> bool {
+        self.tunables.allow_unsecured_rejoins
+            || self.core().aib.aps_security.has_unique_link_key(eui64)
+    }
+
     pub(super) fn handle_rejoin_request(&self, nwk_frame: &NwkFrame, secured: bool) {
         let rejoin_request = match NwkRejoinRequestCommand::deserialize(&nwk_frame.payload) {
             Ok(cmd) => cmd,
@@ -1023,6 +1028,16 @@ impl ZigbeeStack {
 
         // A trust center rejoin means the device no longer has the network key
         if !secured {
+            // Spec 4.7.3.6: an unsecured rejoin re-delivers the network key encrypted
+            // with the well-known key unless the device holds a unique link key. Reject
+            // when it has neither, so the network key is never exposed to anyone who
+            // knows the well-known key.
+            if !self.may_rejoin_unsecured(source_ieee) {
+                tracing::warn!(
+                    "Rejecting unsecured rejoin from {source_ieee:?} without a unique link key"
+                );
+                return;
+            }
             // `send_network_key` also emits the join notification
             self.send_network_key(assigned_nwk, source_ieee, JoinKind::Rejoin);
         } else {
