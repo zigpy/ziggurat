@@ -588,6 +588,25 @@ impl ZigbeeStack {
             return;
         };
 
+        // Spec 4.7.3.8 step 2: the claimed source (the EUI64 whose link key decrypted
+        // the request, and to which the new key will be delivered) must be the device
+        // that actually sent the frame, resolved via our trusted address map rather than
+        // the spoofable NWK header. Otherwise an attacker who knows the well-known key
+        // could request - and receive - a fresh unique key minted for a victim's EUI64.
+        // An unmappable sender cannot be bound to the claim, so it is rejected.
+        let sender_ieee = self
+            .core()
+            .nib
+            .address_map
+            .eui64_for(nwk_frame.nwk_header.source);
+        if sender_ieee != Some(source_ieee) {
+            tracing::warn!(
+                "Ignoring request key from {:?} ({sender_ieee:?}) claiming source {source_ieee:?}",
+                nwk_frame.nwk_header.source
+            );
+            return;
+        }
+
         tracing::info!("Sending a new trust center link key to {source_ieee:?}");
 
         // The new key is delivered encrypted with the key it replaces
@@ -645,6 +664,30 @@ impl ZigbeeStack {
     fn handle_verify_key(&self, nwk_frame: &NwkFrame, verify: &ApsVerifyKeyCommandFrame) {
         if verify.standard_key_type != ApsStandardKeyType::TrustCenterLinkKey {
             tracing::warn!("Ignoring verify key for unsupported key type: {verify:?}");
+            return;
+        }
+
+        // Verify-Key is sent unencrypted, so its body `source_address` is attacker-
+        // controllable. Cross-check it against the NWK-resolved sender EUI64 when we
+        // know it and drop on mismatch: this rejects spoofed addresses and closes the
+        // entry-existence oracle (the encrypted-vs-unencrypted Confirm-Key reply would
+        // otherwise reveal whether a stored key exists for an arbitrary EUI64). When
+        // the sender's EUI64 is genuinely unknown (early join), fall back to the body
+        // value.
+        let sender_ieee = nwk_frame.nwk_header.source_ieee.or_else(|| {
+            self.core()
+                .nib
+                .address_map
+                .eui64_for(nwk_frame.nwk_header.source)
+        });
+
+        if let Some(sender_ieee) = sender_ieee
+            && sender_ieee != verify.source_address
+        {
+            tracing::warn!(
+                "Ignoring verify key from {sender_ieee:?} claiming mismatched source {:?}",
+                verify.source_address
+            );
             return;
         }
 
