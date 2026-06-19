@@ -8,7 +8,9 @@ use zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery}
 
 use spinel::client::TxPriority;
 use std::cmp;
+use std::collections::hash_map::Entry;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use super::{
     ApsAck, ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, ZigbeeStack,
@@ -85,6 +87,33 @@ impl ZigbeeStack {
             .remove(&ack_data);
         if let Some(tx) = tx {
             let _ = tx.send(());
+        }
+    }
+
+    /// Spec 2.2.8.4.2: record an inbound APS data frame and report whether it duplicates
+    /// one seen within the rejection window. Duplicates are still ACKed so the sender
+    /// stops retransmitting, but must not reach the application twice. Expired entries
+    /// are swept on each call.
+    pub(super) fn is_duplicate_aps_frame(&self, source: Nwk, counter: u8) -> bool {
+        let now = Instant::now();
+        let timeout = self.tunables.aps_duplicate_rejection_timeout;
+
+        let mut table = self
+            .state
+            .aps_duplicates
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap();
+        table.retain(|_, seen| now.duration_since(*seen) < timeout);
+
+        match table.entry((source, counter)) {
+            Entry::Occupied(mut slot) => {
+                slot.insert(now);
+                true
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(now);
+                false
+            }
         }
     }
 

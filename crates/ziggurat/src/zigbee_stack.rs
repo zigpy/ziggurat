@@ -358,6 +358,11 @@ pub struct State {
     pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
     pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
 
+    /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
+    /// the receipt time; an inbound data frame matching a live entry is a retransmission
+    /// to be acknowledged but not delivered to the application a second time.
+    pub aps_duplicates: Mutex<HashMap<(Nwk, u8), Instant>>,
+
     pub start_time: Instant,
 
     // We intentionally violate the spec with these options
@@ -455,6 +460,7 @@ impl State {
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_route_notifications: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
+            aps_duplicates: Mutex::new(HashMap::new()),
             start_time: Instant::now(),
 
             hack_ignore_broadcast_startup_wait_period: true,
@@ -738,14 +744,28 @@ impl ZigbeeStack {
 
                     tracing::debug!("Received APS data frame: {aps_frame:?}");
 
-                    // The ZDP commands that maintain stack state (the neighbor and
-                    // address tables live here, not in the client) are consumed by
-                    // the stack; the client still observes the frames
-                    self.handle_zdp_frame(&nwk_frame, &aps_frame);
+                    // Spec 2.2.8.4.2: a retransmission is still acknowledged so the
+                    // sender stops, but must not be delivered to the application twice.
+                    let duplicate =
+                        self.is_duplicate_aps_frame(nwk_frame.nwk_header.source, aps_frame.counter);
 
                     if aps_frame.frame_control.ack_request {
                         self.handle_aps_ack_request(&aps_frame, &nwk_frame, aps_source_eui64);
                     }
+
+                    if duplicate {
+                        tracing::debug!(
+                            "Dropping duplicate APS frame (counter {}) from {:?}",
+                            aps_frame.counter,
+                            nwk_frame.nwk_header.source
+                        );
+                        continue;
+                    }
+
+                    // The ZDP commands that maintain stack state (the neighbor and
+                    // address tables live here, not in the client) are consumed by
+                    // the stack; the client still observes the frames
+                    self.handle_zdp_frame(&nwk_frame, &aps_frame);
 
                     let notification = ZigbeeNotification::ReceivedApsCommand {
                         source: nwk_frame.nwk_header.source,

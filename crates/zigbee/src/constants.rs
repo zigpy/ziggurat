@@ -94,6 +94,10 @@ pub struct Tunables {
     /// [`Self::parent_annce_base_timer`].
     pub parent_annce_jitter_max: Duration,
 
+    /// Spec 2.2.8.4.2: how long an (originator, APS counter) pair is remembered for
+    /// duplicate rejection. Must cover the sender's full APS retransmission window.
+    pub aps_duplicate_rejection_timeout: Duration,
+
     pub aps_ack_timeout: Duration,
 
     /// APS acks from a sleepy child arrive only after it polls for the frame, so the
@@ -147,6 +151,7 @@ impl Tunables {
             end_device_timeout_default: EndDeviceTimeout::Minutes256,
             parent_annce_base_timer: Duration::from_secs(10),
             parent_annce_jitter_max: Duration::from_secs(10),
+            aps_duplicate_rejection_timeout: Duration::from_secs(9),
             aps_ack_timeout: Duration::from_millis(5000),
             aps_ack_timeout_indirect: Duration::from_millis(10000),
             mac_max_csma_backoffs: 2,
