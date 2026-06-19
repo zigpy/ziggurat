@@ -163,6 +163,8 @@ pub struct Neighbors {
     /// Neighbors silent for this long get their link costs reset
     max_age: Duration,
     table: HashMap<Eui64, TableEntry>,
+    /// LQI samples for senders that have no neighbor entry yet.
+    pending_lqas: HashMap<Nwk, VecDeque<u8>>,
 }
 
 impl Neighbors {
@@ -171,6 +173,7 @@ impl Neighbors {
             network_address,
             max_age,
             table: HashMap::new(),
+            pending_lqas: HashMap::new(),
         }
     }
 
@@ -187,6 +190,16 @@ impl Neighbors {
 
             if entry.lqas.len() > LINK_QUALITY_SAMPLES {
                 entry.lqas.pop_front();
+            }
+        } else {
+            // No neighbor entry yet (e.g. a sibling router that has not sent a link
+            // status command). Buffer the sample so the entry starts with usable link
+            // quality the moment it is created, rather than discarding it.
+            let buffer = self.pending_lqas.entry(sender_nwk).or_default();
+            buffer.push_back(lqi);
+
+            if buffer.len() > LINK_QUALITY_SAMPLES {
+                buffer.pop_front();
             }
         }
     }
@@ -617,6 +630,9 @@ impl Neighbors {
             })
             .collect::<HashSet<Nwk>>();
 
+        // Fold any LQI samples buffered for this address before its entry existed.
+        let buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();
+
         let neighbor_entry = self.table.entry(source_ieee).or_insert_with(|| {
             tracing::info!("Creating new neighbor entry for {source_ieee:?}");
 
@@ -646,9 +662,13 @@ impl Neighbors {
                 security_timer: 0,
             };
 
-            // Update the neighbor's LQI deque here, since we did not do so earlier
-            // when receiving the packet (since the entry was missing)
+            // Seed the LQI deque with samples buffered before the entry existed plus the
+            // current one (the receive path could not record them without an entry).
+            entry.lqas.extend(buffered_lqas);
             entry.lqas.push_back(lqi);
+            while entry.lqas.len() > LINK_QUALITY_SAMPLES {
+                entry.lqas.pop_front();
+            }
 
             entry
         });
