@@ -565,6 +565,9 @@ impl Neighbors {
     pub fn link_status_entries(&self) -> Vec<NwkLinkStatus> {
         self.table
             .values()
+            // Only include routers in the link status list. Otherwise, we advertise
+            // sleepy end devices that cannot be routed through.
+            .filter(|neighbor| neighbor.device_type == NwkDeviceType::Router)
             .filter_map(|neighbor| {
                 // We only calculate link statuses for neighbors for which we have
                 // seen more than a few packets
