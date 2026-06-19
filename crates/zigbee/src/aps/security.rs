@@ -71,6 +71,11 @@ struct DeviceState {
     /// The unique trust center link key negotiated with this device, if any. Absent
     /// when the device still uses the well-known key or a seed-derived one.
     key: Option<DeviceLinkKey>,
+    /// A freshly issued unique key awaiting a Verify-Key exchange. The current `key`
+    /// (a previously verified key, or the well-known/seed fallback) stays usable until
+    /// this is promoted, so a device that never verifies is never stranded without a
+    /// usable key (spec 4.7.3.3 / 4.7.3.8).
+    pending_key: Option<Key>,
     /// Incoming security frame counter, spec 4.4.1.2 steps 4 and 9: a frame secured
     /// with a unique link key must carry a counter no smaller than this stored value,
     /// which is one past the last accepted counter. Kept in memory only: losing it
@@ -123,6 +128,7 @@ impl ApsSecurity {
     fn prune_if_empty(&mut self, eui64: Eui64) {
         if let Some(entry) = self.devices.get(&eui64)
             && entry.key.is_none()
+            && entry.pending_key.is_none()
             && entry.incoming_frame_counter.is_none()
         {
             self.devices.remove(&eui64);
@@ -153,6 +159,10 @@ impl ApsSecurity {
     /// knows the well-known link key.
     pub fn begin_join(&mut self, eui64: Eui64) -> Option<Key> {
         let entry = self.devices.get_mut(&eui64)?;
+
+        // A key issued but not yet verified is stale once the device rejoins fresh.
+        entry.pending_key = None;
+
         match &entry.key {
             Some(link_key) if link_key.attributes == KeyAttributes::Provisional => {
                 Some(link_key.key.clone())
@@ -183,8 +193,9 @@ impl ApsSecurity {
             .filter_map(|(eui64, entry)| entry.key.as_ref().map(|key| (*eui64, key)))
     }
 
-    /// Issue a fresh unique link key for a device, replacing any previous one. The key
-    /// is unverified until the device proves possession via a Verify-Key exchange.
+    /// Issue a fresh unique link key for a device, held as *pending* until the device
+    /// proves possession via a Verify-Key exchange. The device's current key (if any)
+    /// stays usable until then, so a device that never verifies is not stranded.
     /// `fresh_key` is caller-generated randomness, used only when no TCLK seed is
     /// configured.
     pub fn issue_device_key(&mut self, eui64: Eui64, fresh_key: Key) -> Key {
@@ -193,10 +204,7 @@ impl ApsSecurity {
             .as_ref()
             .map_or(fresh_key, |seed| seed.derive(eui64));
 
-        self.devices.entry(eui64).or_default().key = Some(DeviceLinkKey {
-            key: key.clone(),
-            attributes: KeyAttributes::Unverified,
-        });
+        self.devices.entry(eui64).or_default().pending_key = Some(key.clone());
 
         key
     }
@@ -228,10 +236,25 @@ impl ApsSecurity {
     /// Zigbee spec 4.4.8.1: check a device's keyed hash proving possession of its link
     /// key, marking the key verified on success. `None` means no key is on record.
     pub fn verify_device_key(&mut self, eui64: Eui64, hash: &[u8; 16]) -> Option<bool> {
-        let entry = self.devices.get_mut(&eui64)?.key.as_mut()?;
+        let entry = self.devices.get_mut(&eui64)?;
 
-        if verify_key_hash(&entry.key).ct_eq(hash).into() {
-            entry.attributes = KeyAttributes::Verified;
+        // A just-issued pending key is verified first and, on success, promoted to the
+        // device's active key; otherwise the device is re-verifying its current key.
+        if let Some(pending) = entry.pending_key.clone() {
+            if verify_key_hash(&pending).ct_eq(hash).into() {
+                entry.key = Some(DeviceLinkKey {
+                    key: pending,
+                    attributes: KeyAttributes::Verified,
+                });
+                entry.pending_key = None;
+                return Some(true);
+            }
+            return Some(false);
+        }
+
+        let link_key = entry.key.as_mut()?;
+        if verify_key_hash(&link_key.key).ct_eq(hash).into() {
+            link_key.attributes = KeyAttributes::Verified;
             Some(true)
         } else {
             Some(false)
