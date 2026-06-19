@@ -119,6 +119,13 @@ impl NwkSecurity {
             return None;
         }
 
+        // Spec 4.3.1.2 step 1: a frame counter at its maximum value is rejected
+        // outright; the sender must rotate the network key before it wraps.
+        if frame_counter == u32::MAX {
+            tracing::debug!("Ignoring frame, frame counter is at its maximum value");
+            return None;
+        }
+
         match self.primary.incoming_frame_counter_set.get(&sender) {
             None => {
                 tracing::debug!("Unknown sender, not validating frame counter");
