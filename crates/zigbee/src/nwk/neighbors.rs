@@ -242,6 +242,17 @@ impl Neighbors {
         })
     }
 
+    /// The (EUI64, network address) of every rx-off-when-idle end-device child. A
+    /// 0xFFFF broadcast has to be delivered to each as a MAC unicast, since a sleeping
+    /// radio never hears the broadcast itself (spec 3.6.6).
+    pub fn sleepy_children(&self) -> Vec<(Eui64, Nwk)> {
+        self.table
+            .values()
+            .filter(|entry| !entry.rx_on_when_idle && entry.is_child())
+            .map(|entry| (entry.extended_address, entry.network_address))
+            .collect()
+    }
+
     pub fn contains(&self, eui64: Eui64) -> bool {
         self.table.contains_key(&eui64)
     }

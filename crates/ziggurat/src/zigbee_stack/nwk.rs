@@ -11,9 +11,10 @@ use zigbee::nwk::commands::{
     NwkCommandId, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
 };
 use zigbee::nwk::frame::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS, EncryptedNwkFrame,
-    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
-    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel, NwkSourceRoute,
+    BROADCAST_ALL_DEVICES, BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS,
+    EncryptedNwkFrame, NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader,
+    NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    NwkSourceRoute,
 };
 
 use super::routing::Route;
@@ -595,6 +596,52 @@ impl ZigbeeStack {
         Ok(())
     }
 
+    /// Spec 3.6.6: a coordinator/router with rx-off end-device children must re-deliver
+    /// every 0xFFFF broadcast to each of them as a MAC unicast through the indirect
+    /// queue, since a sleeping radio never hears the broadcast itself. The NWK source is
+    /// skipped (it already has the frame). Each copy is queued on its own task: it is
+    /// only handed to the radio when the child polls, or dropped when it expires.
+    fn fan_out_broadcast_to_sleepy_children(
+        &self,
+        nwk_frame: &NwkFrame,
+        security: NwkSecurityMode,
+    ) {
+        if nwk_frame.nwk_header.destination != BROADCAST_ALL_DEVICES {
+            return;
+        }
+
+        let sleepy_children: Vec<(Eui64, Nwk)> = self
+            .core()
+            .nib
+            .neighbors
+            .sleepy_children()
+            .into_iter()
+            .filter(|(_, child_nwk)| *child_nwk != nwk_frame.nwk_header.source)
+            .collect();
+
+        for (child_eui64, child_nwk) in sleepy_children {
+            let frame = nwk_frame.clone();
+            let arc_self = self
+                .self_weak
+                .upgrade()
+                .expect("Unable to upgrade self reference");
+
+            self.spawn_tracked(async move {
+                let finished = arc_self.finish_unicast_nwk_frame(frame, child_nwk, security);
+                arc_self.increment_tx_total();
+
+                if let Err(err) = arc_self
+                    .queue_indirect_frame(Ieee802154Address::Eui64(child_eui64), finished)
+                    .await
+                {
+                    tracing::debug!(
+                        "Broadcast not delivered to sleepy child {child_eui64:?}: {err}"
+                    );
+                }
+            });
+        }
+    }
+
     pub async fn send_broadcast_nwk_frame(
         &self,
         mut nwk_frame: NwkFrame,
@@ -602,6 +649,10 @@ impl ZigbeeStack {
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
+
+        // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
+        // for each (spec 3.6.6).
+        self.fan_out_broadcast_to_sleepy_children(&nwk_frame, security);
 
         let key = (
             nwk_frame.nwk_header.source,
@@ -897,6 +948,10 @@ impl ZigbeeStack {
         if nwk_frame.nwk_header.source == self.state.network_address {
             return;
         }
+
+        // Spec 3.6.6: deliver another device's 0xFFFF broadcast to our own sleepy
+        // children as MAC unicasts (a no-op for non-0xFFFF destinations).
+        self.fan_out_broadcast_to_sleepy_children(nwk_frame, NwkSecurityMode::NetworkKey);
 
         let mut relayed_frame = nwk_frame.clone();
 
