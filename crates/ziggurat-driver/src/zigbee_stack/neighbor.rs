@@ -2,8 +2,7 @@ use tokio::time::Instant;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_spinel::client::TxPriority;
 
-use ziggurat_zigbee::Command;
-use ziggurat_zigbee::nwk::commands::NwkLinkStatusCommand;
+use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::{NwkSecurityMode, ZigbeeStack};
@@ -52,15 +51,12 @@ impl ZigbeeStack {
         }
     }
 
-    pub(super) fn handle_link_status(&self, nwk_frame: &NwkFrame, lqi: u8) {
-        let link_status_cmd = match NwkLinkStatusCommand::deserialize(&nwk_frame.payload) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                tracing::warn!("Error parsing link status command: {e:?}");
-                return;
-            }
-        };
-
+    pub(super) fn handle_link_status(
+        &self,
+        nwk_frame: &NwkFrame,
+        link_status_cmd: NwkLinkStatusCommand,
+        lqi: u8,
+    ) {
         tracing::debug!("Link status command frame: {link_status_cmd:?}");
 
         self.maybe_age_neighbors();
@@ -128,13 +124,11 @@ impl ZigbeeStack {
             let link_status_frame = self
                 .nwk_command_frame(
                     BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                    NwkLinkStatusCommand {
+                    NwkCommand::LinkStatus(NwkLinkStatusCommand {
                         is_first_frame: start == 0,
                         is_last_frame: end == total,
                         link_statuses: link_statuses[start..end].to_vec(),
-                    }
-                    .serialize()
-                    .unwrap(),
+                    }),
                 )
                 .with_radius(1)
                 // Sent via `transmit_*`, which does not assign sequence numbers

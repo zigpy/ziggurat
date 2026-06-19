@@ -1,10 +1,32 @@
 #![allow(clippy::useless_conversion)]
 
 use crate::nwk::commands::NwkRejoinCapabilityInformation;
-use crate::{DeserializeError, MAC_PAYLOAD_MAX_LEN, SerializeError};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
+
+/// 802.15.4 mac layer has a maximum payload length of 104 bytes
+const MAC_PAYLOAD_MAX_LEN: usize = 104;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("Could not serialize {ty}")]
+pub struct SerializeError {
+    ty: &'static str,
+    #[source]
+    cause: abstract_bits::ToBytesError,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DeserializeError {
+    #[error("Could not deserialize payload to {ty}")]
+    Payload {
+        ty: &'static str,
+        #[source]
+        cause: abstract_bits::FromBytesError,
+    },
+    #[error("Got zero bytes, no valid command/request/response is zero bytes")]
+    ZeroBytes,
+}
 
 /// The Zigbee Device Profile: ZDP commands are APS data frames exchanged between
 /// endpoints 0 under this profile, with a transaction sequence number prefix.

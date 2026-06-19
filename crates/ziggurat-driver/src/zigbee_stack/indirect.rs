@@ -5,8 +5,7 @@ use ziggurat_spinel::client::TxPriority;
 
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
-use ziggurat_zigbee::Command;
-use ziggurat_zigbee::nwk::commands::NwkLeaveCommand;
+use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
 
 use ziggurat_zigbee::indirect::Delivery;
@@ -226,13 +225,11 @@ impl ZigbeeStack {
         let mut nwk_frame = self
             .nwk_command_frame(
                 nwk,
-                NwkLeaveCommand {
+                NwkCommand::Leave(NwkLeaveCommand {
                     rejoin: true,
                     request: true,
                     remove_children: false,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             .with_radius(1);
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();

@@ -22,9 +22,8 @@ use ziggurat_zigbee::nwk::frame::{
 };
 
 use tokio::time::{Duration, Instant};
-use ziggurat_zigbee::Command;
 use ziggurat_zigbee::nwk::commands::{
-    Nwk802154AssociationStatus, NwkCommandId, NwkEndDeviceTimeoutRequestCommand,
+    Nwk802154AssociationStatus, NwkCommand, NwkEndDeviceTimeoutRequestCommand,
     NwkEndDeviceTimeoutResponseCommand, NwkEndDeviceTimeoutResponseStatus, NwkLeaveCommand,
     NwkNetworkStatus, NwkNetworkStatusCommand, NwkRejoinCapabilityInformationDeviceType,
     NwkRejoinRequestCommand, NwkRejoinResponseCommand,
@@ -276,12 +275,10 @@ impl ZigbeeStack {
 
             let conflict_frame = arc_self.nwk_command_frame(
                 BROADCAST_RX_ON_WHEN_IDLE,
-                NwkNetworkStatusCommand {
+                NwkCommand::NetworkStatus(NwkNetworkStatusCommand {
                     status_code: NwkNetworkStatus::AddressConflict,
                     network_address: address,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             );
 
             arc_self.background_send_nwk_frame(
@@ -932,17 +929,15 @@ impl ZigbeeStack {
             return;
         }
 
-        if nwk_frame.payload.is_empty() {
-            tracing::warn!("Ignoring unencrypted NWK command frame with an empty payload");
-            return;
-        }
-
-        match NwkCommandId::try_from(nwk_frame.payload[0]) {
-            Ok(NwkCommandId::RejoinRequest) => {
-                self.handle_rejoin_request(nwk_frame, false);
+        match NwkCommand::from_bytes(&nwk_frame.payload) {
+            Ok(NwkCommand::RejoinRequest(cmd)) => {
+                self.handle_rejoin_request(nwk_frame, cmd, false);
             }
-            _ => {
-                tracing::debug!("Ignoring unencrypted NWK command: {}", nwk_frame.payload[0]);
+            Ok(other) => {
+                tracing::debug!("Ignoring unencrypted NWK command: {:?}", other.command_id());
+            }
+            Err(err) => {
+                tracing::debug!("Ignoring unparseable unencrypted NWK command: {err}");
             }
         }
     }
@@ -959,15 +954,12 @@ impl ZigbeeStack {
             || self.core().aib.aps_security.has_unique_link_key(eui64)
     }
 
-    pub(super) fn handle_rejoin_request(&self, nwk_frame: &NwkFrame, secured: bool) {
-        let rejoin_request = match NwkRejoinRequestCommand::deserialize(&nwk_frame.payload) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                tracing::warn!("Error parsing rejoin request command: {e:?}");
-                return;
-            }
-        };
-
+    pub(super) fn handle_rejoin_request(
+        &self,
+        nwk_frame: &NwkFrame,
+        rejoin_request: NwkRejoinRequestCommand,
+        secured: bool,
+    ) {
         tracing::info!("Rejoin request (secured: {secured}): {rejoin_request:#?}");
 
         let Some(source_ieee) = nwk_frame.nwk_header.source_ieee else {
@@ -1096,12 +1088,10 @@ impl ZigbeeStack {
         let mut response_frame = self
             .nwk_command_frame(
                 destination,
-                NwkRejoinResponseCommand {
+                NwkCommand::RejoinResponse(NwkRejoinResponseCommand {
                     network_address: assigned,
                     rejoin_status: status,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             .with_radius(1)
             .with_destination_ieee(Some(destination_ieee));
@@ -1119,15 +1109,7 @@ impl ZigbeeStack {
 
     /// Zigbee spec 3.6.1.10.3: a device announces that it is leaving the network, or
     /// asks us to leave (which a coordinator ignores).
-    pub(super) fn handle_leave(&self, nwk_frame: &NwkFrame) {
-        let leave_cmd = match NwkLeaveCommand::deserialize(&nwk_frame.payload) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                tracing::warn!("Error parsing leave command: {e:?}");
-                return;
-            }
-        };
-
+    pub(super) fn handle_leave(&self, nwk_frame: &NwkFrame, leave_cmd: NwkLeaveCommand) {
         let source = nwk_frame.nwk_header.source;
 
         if leave_cmd.request {
@@ -1166,21 +1148,12 @@ impl ZigbeeStack {
 
     /// Spec 3.6.10.2: an end device child negotiates its keepalive timeout. The
     /// response tells the device which keepalive method to use.
-    pub(super) fn handle_end_device_timeout_request(&self, nwk_frame: &NwkFrame) {
+    pub(super) fn handle_end_device_timeout_request(
+        &self,
+        nwk_frame: &NwkFrame,
+        request: NwkEndDeviceTimeoutRequestCommand,
+    ) {
         let source = nwk_frame.nwk_header.source;
-
-        let request = match NwkEndDeviceTimeoutRequestCommand::deserialize(&nwk_frame.payload) {
-            Ok(request) => request,
-            Err(e) => {
-                // An out-of-range timeout enumeration fails deserialization
-                tracing::warn!("Invalid end device timeout request from {source:?}: {e:?}");
-                self.send_end_device_timeout_response(
-                    source,
-                    NwkEndDeviceTimeoutResponseStatus::IncorrectValue,
-                );
-                return;
-            }
-        };
 
         // No end device configuration bits are defined yet, so any requested feature
         // is unknown and rejected
@@ -1219,7 +1192,7 @@ impl ZigbeeStack {
         self.send_end_device_timeout_response(source, NwkEndDeviceTimeoutResponseStatus::Success);
     }
 
-    fn send_end_device_timeout_response(
+    pub(super) fn send_end_device_timeout_response(
         &self,
         destination: Nwk,
         status: NwkEndDeviceTimeoutResponseStatus,
@@ -1229,15 +1202,13 @@ impl ZigbeeStack {
         let response_frame = self
             .nwk_command_frame(
                 destination,
-                NwkEndDeviceTimeoutResponseCommand {
+                NwkCommand::EndDeviceTimeoutResponse(NwkEndDeviceTimeoutResponseCommand {
                     status,
                     mac_data_poll_keepalive_supported: parent_information.mac_data_poll_keepalive,
                     end_device_timeout_request_keepalive_supported: parent_information
                         .end_device_timeout_request_keepalive,
                     power_negotation_support: parent_information.power_negotiation,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             .with_radius(1);
 

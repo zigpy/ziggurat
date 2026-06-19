@@ -6,9 +6,9 @@ use tokio::time::{Instant, timeout_at};
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_spinel::client::TxPriority;
-use ziggurat_zigbee::Command;
 use ziggurat_zigbee::nwk::commands::{
-    NwkCommandId, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
+    NwkCommand, NwkCommandError, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
+    NwkNetworkStatusCommand,
 };
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_DEVICES, BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS,
@@ -184,50 +184,47 @@ impl ZigbeeStack {
 
         // Handle NWK commands
         if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command {
-            match NwkCommandId::try_from(nwk_frame.payload[0]) {
-                Ok(NwkCommandId::LinkStatus) => {
-                    // TODO: Error handling for decoding?
-                    self.handle_link_status(nwk_frame, lqi);
+            let command = match NwkCommand::from_bytes(&nwk_frame.payload) {
+                Ok(command) => command,
+                // Spec 3.6.10.2: a request whose timeout enumeration is out of range still
+                // gets a courtesy response telling the child the value was incorrect
+                Err(NwkCommandError::Body {
+                    id: NwkCommandId::EndDeviceTimeoutRequest,
+                    ..
+                }) => {
+                    self.send_end_device_timeout_response(
+                        nwk_frame.nwk_header.source,
+                        NwkEndDeviceTimeoutResponseStatus::IncorrectValue,
+                    );
+                    return;
                 }
-                Ok(NwkCommandId::RouteReply) => {
-                    // TODO: Error handling for decoding?
-                    self.handle_route_reply(nwk_frame);
+                Err(err) => {
+                    tracing::warn!("Failed to parse NWK command: {err}");
+                    return;
                 }
-                Ok(NwkCommandId::RouteRecord) => {
-                    let route_record_cmd =
-                        match NwkRouteRecordCommand::deserialize(&nwk_frame.payload) {
-                            Ok(cmd) => cmd,
-                            Err(err) => {
-                                tracing::warn!("Failed to parse route record command: {err:?}");
-                                return;
-                            }
-                        };
-                    tracing::debug!("Route record command frame received: {route_record_cmd:?}");
+            };
+
+            match command {
+                NwkCommand::LinkStatus(cmd) => self.handle_link_status(nwk_frame, cmd, lqi),
+                NwkCommand::RouteReply(cmd) => self.handle_route_reply(nwk_frame, cmd),
+                NwkCommand::RouteRecord(cmd) => {
+                    tracing::debug!("Route record command frame received: {cmd:?}");
                     self.core()
                         .nib
                         .routing
-                        .store_route_record(nwk_frame.nwk_header.source, route_record_cmd.relays);
+                        .store_route_record(nwk_frame.nwk_header.source, cmd.relays);
                 }
-                Ok(NwkCommandId::RouteRequest) => {
-                    self.handle_route_request(nwk_frame, sender_nwk);
+                NwkCommand::RouteRequest(cmd) => {
+                    self.handle_route_request(nwk_frame, cmd, sender_nwk);
                 }
-                Ok(NwkCommandId::RejoinRequest) => {
-                    self.handle_rejoin_request(nwk_frame, true);
+                NwkCommand::RejoinRequest(cmd) => self.handle_rejoin_request(nwk_frame, cmd, true),
+                NwkCommand::Leave(cmd) => self.handle_leave(nwk_frame, cmd),
+                NwkCommand::NetworkStatus(cmd) => self.handle_network_status(nwk_frame, cmd),
+                NwkCommand::EndDeviceTimeoutRequest(cmd) => {
+                    self.handle_end_device_timeout_request(nwk_frame, cmd);
                 }
-                Ok(NwkCommandId::Leave) => {
-                    self.handle_leave(nwk_frame);
-                }
-                Ok(NwkCommandId::NetworkStatus) => {
-                    self.handle_network_status(nwk_frame);
-                }
-                Ok(NwkCommandId::EndDeviceTimeoutRequest) => {
-                    self.handle_end_device_timeout_request(nwk_frame);
-                }
-                Err(_) => {
-                    tracing::warn!("Unknown NWK command: {}", nwk_frame.payload[0]);
-                }
-                _ => {
-                    tracing::warn!("Unhandled NWK command: {:?}", nwk_frame.payload[0]);
+                other => {
+                    tracing::warn!("Unhandled NWK command: {:?}", other.command_id());
                 }
             }
         }
@@ -236,7 +233,7 @@ impl ZigbeeStack {
     /// A NWK command frame originated by us, with stack-wide defaults: secured, route
     /// discovery suppressed, radius `2 * max_depth`, sequence number assigned on send,
     /// our EUI64 as the extended source. Deviations chain `with_*` overrides.
-    pub(super) fn nwk_command_frame(&self, destination: Nwk, payload: Vec<u8>) -> NwkFrame {
+    pub(super) fn nwk_command_frame(&self, destination: Nwk, command: NwkCommand) -> NwkFrame {
         NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -261,7 +258,8 @@ impl ZigbeeStack {
                 source_route: None,
             },
             aux_header: None, // Applied at encryption time
-            payload: FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
+            payload: FrameBytes::from_slice(&command.to_bytes())
+                .expect("NWK command is frame-bounded"),
         }
     }
 
@@ -805,7 +803,8 @@ impl ZigbeeStack {
         let destination = nwk_frame.nwk_header.destination;
 
         // Spec 3.6.4.5.5: each relay appends its network address to a transiting
-        // route record command before forwarding it
+        // route record command before forwarding it. Other command types (and command
+        // ids we do not recognize) are relayed verbatim, untouched.
         if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command
             && matches!(
                 nwk_frame
@@ -815,9 +814,9 @@ impl ZigbeeStack {
                 Some(Ok(NwkCommandId::RouteRecord))
             )
         {
-            let mut route_record_cmd = match NwkRouteRecordCommand::deserialize(&nwk_frame.payload)
-            {
-                Ok(cmd) => cmd,
+            let mut route_record_cmd = match NwkCommand::from_bytes(&nwk_frame.payload) {
+                Ok(NwkCommand::RouteRecord(cmd)) => cmd,
+                Ok(_) => unreachable!("route record command id parses to a route record"),
                 Err(err) => {
                     tracing::warn!("Dropping malformed transiting route record: {err:?}");
                     return;
@@ -825,8 +824,9 @@ impl ZigbeeStack {
             };
 
             route_record_cmd.relays.push(self.state.network_address);
-            nwk_frame.payload = FrameBytes::from_slice(&route_record_cmd.serialize().unwrap())
-                .expect("a relayed route record is frame-bounded");
+            nwk_frame.payload =
+                FrameBytes::from_slice(&NwkCommand::RouteRecord(route_record_cmd).to_bytes())
+                    .expect("a relayed route record is frame-bounded");
         }
 
         let next_hop_address = if let Some(source_route) = &mut nwk_frame.nwk_header.source_route {
@@ -920,12 +920,10 @@ impl ZigbeeStack {
         let network_status_frame = self
             .nwk_command_frame(
                 source,
-                NwkNetworkStatusCommand {
+                NwkCommand::NetworkStatus(NwkNetworkStatusCommand {
                     status_code,
                     network_address: nwk_frame.nwk_header.destination,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             .with_destination_ieee(destination_ieee);
 

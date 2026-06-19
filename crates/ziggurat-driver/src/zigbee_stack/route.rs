@@ -5,10 +5,9 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_spinel::client::TxPriority;
 
-use ziggurat_zigbee::Command;
 use ziggurat_zigbee::nwk::commands::{
-    NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand, NwkRouteRequestCommand,
-    NwkRouteRequestManyToOne,
+    NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand,
+    NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -37,15 +36,11 @@ impl ZigbeeStack {
     }
 
     #[allow(clippy::significant_drop_tightening)]
-    pub(super) fn handle_route_reply(&self, nwk_frame: &NwkFrame) {
-        let route_reply_cmd = match NwkRouteReplyCommand::deserialize(&nwk_frame.payload) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                tracing::warn!("Error parsing route reply command: {e:?}");
-                return;
-            }
-        };
-
+    pub(super) fn handle_route_reply(
+        &self,
+        nwk_frame: &NwkFrame,
+        route_reply_cmd: NwkRouteReplyCommand,
+    ) {
         tracing::debug!("Route reply command frame: {route_reply_cmd:?}");
 
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
@@ -99,7 +94,7 @@ impl ZigbeeStack {
         let relayed_route_reply_frame = self
             .nwk_command_frame(
                 next_hop_nwk,
-                NwkRouteReplyCommand {
+                NwkCommand::RouteReply(NwkRouteReplyCommand {
                     route_request_identifier: route_reply_cmd.route_request_identifier,
                     originator_nwk: route_reply_cmd.originator_nwk,
                     responder_nwk: route_reply_cmd.responder_nwk,
@@ -110,9 +105,7 @@ impl ZigbeeStack {
                     )),
                     originator_eui64: route_reply_cmd.originator_eui64,
                     responder_eui64: route_reply_cmd.responder_eui64,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             // Spec 3.4.2.2: relays decrement the radius, but a reply received with a
             // radius of 1 is still forwarded with a radius of 1
@@ -128,15 +121,12 @@ impl ZigbeeStack {
     }
 
     #[allow(clippy::significant_drop_tightening)]
-    pub(super) fn handle_route_request(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) {
-        let route_request_cmd = match NwkRouteRequestCommand::deserialize(&nwk_frame.payload) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                tracing::warn!("Error parsing route request command: {e:?}");
-                return;
-            }
-        };
-
+    pub(super) fn handle_route_request(
+        &self,
+        nwk_frame: &NwkFrame,
+        route_request_cmd: NwkRouteRequestCommand,
+        sender_nwk: Nwk,
+    ) {
         tracing::debug!(
             "Route request command frame (sender {sender_nwk:?}): {route_request_cmd:?}"
         );
@@ -209,16 +199,14 @@ impl ZigbeeStack {
             let route_reply_frame = self
                 .nwk_command_frame(
                     sender_nwk,
-                    NwkRouteReplyCommand {
+                    NwkCommand::RouteReply(NwkRouteReplyCommand {
                         route_request_identifier: route_request_cmd.route_request_identifier,
                         originator_nwk: nwk_frame.nwk_header.source,
                         responder_nwk: route_request_cmd.destination_address,
                         path_cost: contributing_path_cost,
                         originator_eui64: nwk_frame.nwk_header.source_ieee,
                         responder_eui64: Some(responder_eui64),
-                    }
-                    .serialize()
-                    .unwrap(),
+                    }),
                 )
                 .with_destination_ieee(Some(sender_ieee));
 
@@ -253,15 +241,13 @@ impl ZigbeeStack {
         let relayed_route_request_cmd = self
             .nwk_command_frame(
                 nwk_frame.nwk_header.destination,
-                NwkRouteRequestCommand {
+                NwkCommand::RouteRequest(NwkRouteRequestCommand {
                     many_to_one: route_request_cmd.many_to_one,
                     route_request_identifier: route_request_cmd.route_request_identifier,
                     destination_address: route_request_cmd.destination_address,
                     path_cost: updated_path_cost, // We update only the path cost
                     destination_eui64: route_request_cmd.destination_eui64,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             .with_source(nwk_frame.nwk_header.source)
             .with_source_ieee(nwk_frame.nwk_header.source_ieee)
@@ -333,15 +319,13 @@ impl ZigbeeStack {
         let many_to_one_request_frame = self
             .nwk_command_frame(
                 BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                NwkRouteRequestCommand {
+                NwkCommand::RouteRequest(NwkRouteRequestCommand {
                     many_to_one: NwkRouteRequestManyToOne::ManyToOneSenderSupportsRouteRecordTable,
                     route_request_identifier,
                     destination_address: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
                     path_cost: 0,
                     destination_eui64: None,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             .with_radius(self.tunables.concentrator_radius)
             // Sent via `transmit_*`, which does not assign sequence numbers
@@ -433,15 +417,11 @@ impl ZigbeeStack {
 
     /// Zigbee spec 3.6.4.8.1: another router could not deliver a frame we originated;
     /// drop the route so the next transmission performs a fresh discovery.
-    pub(super) fn handle_network_status(&self, nwk_frame: &NwkFrame) {
-        let network_status_cmd = match NwkNetworkStatusCommand::deserialize(&nwk_frame.payload) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                tracing::warn!("Error parsing network status command: {e:?}");
-                return;
-            }
-        };
-
+    pub(super) fn handle_network_status(
+        &self,
+        nwk_frame: &NwkFrame,
+        network_status_cmd: NwkNetworkStatusCommand,
+    ) {
         tracing::info!(
             "Network status from {:?}: {network_status_cmd:?}",
             nwk_frame.nwk_header.source
@@ -624,15 +604,13 @@ impl ZigbeeStack {
         let route_request_frame = self
             .nwk_command_frame(
                 BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                NwkRouteRequestCommand {
+                NwkCommand::RouteRequest(NwkRouteRequestCommand {
                     many_to_one: NwkRouteRequestManyToOne::NotManyToOne,
                     route_request_identifier,
                     destination_address: destination,
                     path_cost: 0, // The path cost starts at 0, since we originate it
                     destination_eui64,
-                }
-                .serialize()
-                .unwrap(),
+                }),
             )
             // Retried broadcasts of a route request share one sequence number,
             // assigned now: `transmit_*` does not touch it
