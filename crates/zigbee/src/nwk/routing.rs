@@ -48,6 +48,11 @@ pub struct TableEntry {
     /// This is the routing table entry's primary purpose.
     pub next_hop_address: Nwk,
 
+    /// The accumulated path cost of this route, used to apply the spec 3.6.4.5.3
+    /// suitability rule: an ACTIVE route is only replaced by a strictly cheaper one.
+    /// `u8::MAX` means the cost is not yet known.
+    pub path_cost: u8,
+
     /// A 32-bit saturating counter, which is incremented whenever this routing table
     /// entry is used to forward a data packet towards its destination
     pub total_usage_count: u32,
@@ -70,9 +75,23 @@ impl TableEntry {
             route_record_required: false,
             expired: false,
             next_hop_address,
+            path_cost: u8::MAX,
             total_usage_count: 0,
             recent_activity: 0,
         }
+    }
+
+    /// Update this entry to route through `next_hop` at advertised `cost`, honoring the
+    /// spec 3.6.4.5.3 suitability rule: an ACTIVE entry is only replaced by a strictly
+    /// cheaper route, so a worse advertisement never clobbers a good route or forms a
+    /// loop.
+    fn consider_route(&mut self, next_hop: Nwk, cost: u8) {
+        if self.status == Status::Active && cost >= self.path_cost {
+            return;
+        }
+        self.status = Status::Active;
+        self.next_hop_address = next_hop;
+        self.path_cost = cost;
     }
 }
 
@@ -330,7 +349,7 @@ impl Routing {
                 source_address: self.network_address,
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
-                residual_cost: 0,
+                residual_cost: u8::MAX,
                 expiration_time: now + self.route_discovery_time,
                 destination_address: destination,
             });
@@ -357,7 +376,7 @@ impl Routing {
                 source_address: self.network_address,
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
-                residual_cost: 0,
+                residual_cost: u8::MAX,
                 expiration_time: now + self.route_discovery_time,
                 destination_address: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
             },
@@ -378,10 +397,11 @@ impl Routing {
     }
 
     /// Deduplicate a received route request and track the best path back to its
-    /// originator. Returns false for duplicates without a strictly better forward
-    /// cost (which also stops our own requests from echoing back at us); an accepted
-    /// request establishes the route back to the originator through the sending
-    /// device (spec 3.6.4.5.1.2).
+    /// originator. Returns false for duplicates with a strictly worse forward cost
+    /// (our own requests, seeded at cost 0, still never echo back); an equal-cost
+    /// request updates the reverse path to the latest sender, and any accepted request
+    /// establishes the route back to the originator through the sending device
+    /// (spec 3.6.4.5.1.2).
     #[allow(clippy::too_many_arguments)]
     pub fn accept_route_request(
         &mut self,
@@ -397,8 +417,8 @@ impl Routing {
 
         match self.discovery_table.get_mut(&(originator, request_id)) {
             Some(discovery_entry) => {
-                if updated_path_cost >= discovery_entry.forward_cost {
-                    tracing::debug!("Ignoring route request without a better cost");
+                if updated_path_cost > discovery_entry.forward_cost {
+                    tracing::debug!("Ignoring route request with a worse cost");
                     return false;
                 }
 
@@ -413,7 +433,7 @@ impl Routing {
                         source_address: originator,
                         sender_address: sender,
                         forward_cost: updated_path_cost,
-                        residual_cost: 0,
+                        residual_cost: u8::MAX,
                         expiration_time: now + self.route_discovery_time,
                         destination_address: destination,
                     },
@@ -421,12 +441,13 @@ impl Routing {
             }
         }
 
+        // Spec 3.6.4.5.1.2: the route back to the originator runs through the device we
+        // accepted the request from, subject to the 3.6.4.5.3 suitability rule.
         let originator_entry = self
             .route_table
             .entry(originator)
-            .or_insert_with(|| TableEntry::new(originator, Status::Active, sender));
-        originator_entry.status = Status::Active;
-        originator_entry.next_hop_address = sender;
+            .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
+        originator_entry.consider_route(sender, updated_path_cost);
 
         // Spec 3.6.4.5.1.2: a many-to-one request marks its originator as a
         // concentrator; spec 3.6.4.5.1.8: a later plain request never clears it
@@ -496,6 +517,7 @@ impl Routing {
 
             routing_entry.status = Status::Active;
             routing_entry.next_hop_address = sender;
+            routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = updated_path_cost;
 
             return RouteReplyDisposition::Established;
@@ -512,20 +534,23 @@ impl Routing {
             return RouteReplyDisposition::Drop;
         }
 
+        routing_entry.status = Status::Active;
         routing_entry.next_hop_address = sender;
+        routing_entry.path_cost = updated_path_cost;
         discovery_entry.residual_cost = updated_path_cost;
 
         // The reply travels back along the path the request came from
         let next_hop = discovery_entry.sender_address;
+        let forward_cost = discovery_entry.forward_cost;
 
         // Spec 3.6.4.5.2.1: relaying the reply also establishes the reverse route
-        // toward the originator of the route request
+        // toward the originator of the route request, subject to the 3.6.4.5.3
+        // suitability rule so a worse path never replaces a good ACTIVE route.
         let reverse_entry = self
             .route_table
             .entry(originator)
-            .or_insert_with(|| TableEntry::new(originator, Status::Active, next_hop));
-        reverse_entry.status = Status::Active;
-        reverse_entry.next_hop_address = next_hop;
+            .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
+        reverse_entry.consider_route(next_hop, forward_cost);
 
         RouteReplyDisposition::Relay {
             next_hop,
