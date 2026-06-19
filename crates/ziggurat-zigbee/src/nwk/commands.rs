@@ -1,7 +1,6 @@
 #![allow(clippy::useless_conversion)]
 
-use crate::{Command, Request, Response};
-use abstract_bits::abstract_bits;
+use abstract_bits::{AbstractBits, abstract_bits};
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 
@@ -53,14 +52,6 @@ pub struct NwkRouteRequestCommand {
     pub destination_eui64: Option<Eui64>,
 }
 
-impl Request for NwkRouteRequestCommand {
-    type REPLY = NwkRouteReplyCommand;
-}
-
-impl Command for NwkRouteRequestCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::RouteRequest;
-}
-
 /// Zigbee spec 3.4.2 Route Reply Command
 #[abstract_bits::abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -77,14 +68,6 @@ pub struct NwkRouteReplyCommand {
     pub path_cost: u8,
     pub originator_eui64: Option<Eui64>,
     pub responder_eui64: Option<Eui64>,
-}
-
-impl Response for NwkRouteReplyCommand {
-    type REQUEST = NwkRouteRequestCommand;
-}
-
-impl Command for NwkRouteReplyCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::RouteReply;
 }
 
 /// Zigbee spec 3.4.3: Network Status Command
@@ -161,10 +144,6 @@ pub struct NwkNetworkStatusCommand {
     pub network_address: Nwk,
 }
 
-impl Command for NwkNetworkStatusCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkStatus;
-}
-
 /// Zigbee spec 3.4.5: Route Record Command
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -172,10 +151,6 @@ pub struct NwkRouteRecordCommand {
     #[abstract_bits(length_of = relays)]
     reserved: u8,
     pub relays: Vec<Nwk>,
-}
-
-impl Command for NwkRouteRecordCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::RouteRecord;
 }
 
 /// Zigbee spec 3.4.7
@@ -231,14 +206,6 @@ pub struct NwkRejoinRequestCommand {
     pub capability_information: NwkRejoinCapabilityInformation,
 }
 
-impl Request for NwkRejoinRequestCommand {
-    type REPLY = NwkRejoinResponseCommand;
-}
-
-impl Command for NwkRejoinRequestCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::RejoinRequest;
-}
-
 /// Zigbee spec: 3.4.7 Rejoin Response Command
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[abstract_bits(bits = 8)]
@@ -260,14 +227,6 @@ pub struct NwkRejoinResponseCommand {
     pub rejoin_status: Nwk802154AssociationStatus,
 }
 
-impl Response for NwkRejoinResponseCommand {
-    type REQUEST = NwkRejoinRequestCommand;
-}
-
-impl Command for NwkRejoinResponseCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::RejoinResponse;
-}
-
 /// Zigbee spec compressed: 3.4.8.3
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -278,10 +237,6 @@ pub struct NwkLinkStatusCommand {
     pub is_last_frame: bool,
     reserved: u1,
     pub link_statuses: Vec<NwkLinkStatus>,
-}
-
-impl Command for NwkLinkStatusCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::LinkStatus;
 }
 
 /// Zigbee spec 3.4.8
@@ -303,10 +258,6 @@ pub struct NwkLeaveCommand {
     pub rejoin: bool,
     pub request: bool,
     pub remove_children: bool,
-}
-
-impl Command for NwkLeaveCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::Leave;
 }
 
 #[abstract_bits(bits = 8)]
@@ -363,10 +314,6 @@ pub struct NwkNetworkReportCommand {
     pub pan_ids: Vec<PanId>,
 }
 
-impl Command for NwkNetworkReportCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkReport;
-}
-
 /// Zigbee spec 3.4.10: Network Update Command
 #[abstract_bits(bits = 3)]
 #[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
@@ -389,10 +336,6 @@ pub struct NwkNetworkUpdateCommand {
     pub new_pan_id: Nwk,
 }
 
-impl Command for NwkNetworkUpdateCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkUpdate;
-}
-
 /// Zigbee spec 3.4.11 End Device Timeout Request Command
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -401,13 +344,6 @@ pub struct NwkEndDeviceTimeoutRequestCommand {
     /// A bitmask of requested end device features. No bits are defined by the spec yet;
     /// a parent SHALL reject nonzero values with UNSUPPORTED_FEATURE (spec 3.4.11.3.2).
     pub end_device_configuration: u8,
-}
-
-impl Request for NwkEndDeviceTimeoutRequestCommand {
-    type REPLY = NwkEndDeviceTimeoutResponseCommand;
-}
-impl Command for NwkEndDeviceTimeoutRequestCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutRequest;
 }
 
 #[abstract_bits(bits = 8)]
@@ -428,14 +364,6 @@ pub struct NwkEndDeviceTimeoutResponseCommand {
     pub end_device_timeout_request_keepalive_supported: bool,
     pub power_negotation_support: bool,
     reserved: u5,
-}
-
-impl Response for NwkEndDeviceTimeoutResponseCommand {
-    type REQUEST = NwkEndDeviceTimeoutRequestCommand;
-}
-
-impl Command for NwkEndDeviceTimeoutResponseCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::EndDeviceTimeoutResponse;
 }
 
 /// Zigbee spec 3.4.13: Link Power Delta Command
@@ -468,10 +396,6 @@ pub struct NwkLinkPowerDeltaCommand {
     pub power_list: Vec<NwkPowerListEntry>,
 }
 
-impl Command for NwkLinkPowerDeltaCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::LinkPowerDelta;
-}
-
 /// Zigbee spec 3.4.14: Network Commissioning Request Command
 #[abstract_bits(bits = 8)]
 #[derive(Debug, Eq, PartialEq, Clone, Copy, TryFromPrimitive)]
@@ -488,14 +412,6 @@ pub struct NwkNetworkCommissioningRequestCommand {
     pub capability_information: NwkRejoinCapabilityInformation,
 }
 
-impl Request for NwkNetworkCommissioningRequestCommand {
-    type REPLY = NwkNetworkCommissioningResponseCommand;
-}
-
-impl Command for NwkNetworkCommissioningRequestCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkCommissioningRequest;
-}
-
 /// Zigbee spec 3.4.15: Network Commissioning Response Command
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -507,12 +423,132 @@ pub struct NwkNetworkCommissioningResponseCommand {
     pub status: Nwk802154AssociationStatus,
 }
 
-impl Response for NwkNetworkCommissioningResponseCommand {
-    type REQUEST = NwkNetworkCommissioningRequestCommand;
+/// A decoded NWK command frame payload.
+///
+/// The command identifier byte and the typed body it selects. Holding the typed command
+/// lets the stack build and inspect commands without ever touching the wire bytes until
+/// [`NwkCommand::to_bytes`] at send time.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum NwkCommand {
+    RouteRequest(NwkRouteRequestCommand),
+    RouteReply(NwkRouteReplyCommand),
+    NetworkStatus(NwkNetworkStatusCommand),
+    Leave(NwkLeaveCommand),
+    RouteRecord(NwkRouteRecordCommand),
+    RejoinRequest(NwkRejoinRequestCommand),
+    RejoinResponse(NwkRejoinResponseCommand),
+    LinkStatus(NwkLinkStatusCommand),
+    NetworkReport(NwkNetworkReportCommand),
+    NetworkUpdate(NwkNetworkUpdateCommand),
+    EndDeviceTimeoutRequest(NwkEndDeviceTimeoutRequestCommand),
+    EndDeviceTimeoutResponse(NwkEndDeviceTimeoutResponseCommand),
+    LinkPowerDelta(NwkLinkPowerDeltaCommand),
+    NetworkCommissioningRequest(NwkNetworkCommissioningRequestCommand),
+    NetworkCommissioningResponse(NwkNetworkCommissioningResponseCommand),
 }
 
-impl Command for NwkNetworkCommissioningResponseCommand {
-    const COMMAND_ID: NwkCommandId = NwkCommandId::NetworkCommissioningResponse;
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum NwkCommandError {
+    #[error("NWK command frame has no command identifier byte")]
+    Empty,
+    #[error("unknown NWK command identifier {0:#04x}")]
+    UnknownId(u8),
+    #[error("could not parse the body of a {id:?} command")]
+    Body {
+        id: NwkCommandId,
+        #[source]
+        cause: abstract_bits::FromBytesError,
+    },
+}
+
+fn parse_body<T: AbstractBits>(id: NwkCommandId, body: &[u8]) -> Result<T, NwkCommandError> {
+    T::from_abstract_bits(body).map_err(|cause| NwkCommandError::Body { id, cause })
+}
+
+impl NwkCommand {
+    pub const fn command_id(&self) -> NwkCommandId {
+        match self {
+            Self::RouteRequest(_) => NwkCommandId::RouteRequest,
+            Self::RouteReply(_) => NwkCommandId::RouteReply,
+            Self::NetworkStatus(_) => NwkCommandId::NetworkStatus,
+            Self::Leave(_) => NwkCommandId::Leave,
+            Self::RouteRecord(_) => NwkCommandId::RouteRecord,
+            Self::RejoinRequest(_) => NwkCommandId::RejoinRequest,
+            Self::RejoinResponse(_) => NwkCommandId::RejoinResponse,
+            Self::LinkStatus(_) => NwkCommandId::LinkStatus,
+            Self::NetworkReport(_) => NwkCommandId::NetworkReport,
+            Self::NetworkUpdate(_) => NwkCommandId::NetworkUpdate,
+            Self::EndDeviceTimeoutRequest(_) => NwkCommandId::EndDeviceTimeoutRequest,
+            Self::EndDeviceTimeoutResponse(_) => NwkCommandId::EndDeviceTimeoutResponse,
+            Self::LinkPowerDelta(_) => NwkCommandId::LinkPowerDelta,
+            Self::NetworkCommissioningRequest(_) => NwkCommandId::NetworkCommissioningRequest,
+            Self::NetworkCommissioningResponse(_) => NwkCommandId::NetworkCommissioningResponse,
+        }
+    }
+
+    /// Decode a NWK command frame payload (the command identifier byte followed by the
+    /// command body) into a typed command.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, NwkCommandError> {
+        let [id_byte, body @ ..] = bytes else {
+            return Err(NwkCommandError::Empty);
+        };
+
+        let id =
+            NwkCommandId::try_from(*id_byte).map_err(|_| NwkCommandError::UnknownId(*id_byte))?;
+
+        Ok(match id {
+            NwkCommandId::RouteRequest => Self::RouteRequest(parse_body(id, body)?),
+            NwkCommandId::RouteReply => Self::RouteReply(parse_body(id, body)?),
+            NwkCommandId::NetworkStatus => Self::NetworkStatus(parse_body(id, body)?),
+            NwkCommandId::Leave => Self::Leave(parse_body(id, body)?),
+            NwkCommandId::RouteRecord => Self::RouteRecord(parse_body(id, body)?),
+            NwkCommandId::RejoinRequest => Self::RejoinRequest(parse_body(id, body)?),
+            NwkCommandId::RejoinResponse => Self::RejoinResponse(parse_body(id, body)?),
+            NwkCommandId::LinkStatus => Self::LinkStatus(parse_body(id, body)?),
+            NwkCommandId::NetworkReport => Self::NetworkReport(parse_body(id, body)?),
+            NwkCommandId::NetworkUpdate => Self::NetworkUpdate(parse_body(id, body)?),
+            NwkCommandId::EndDeviceTimeoutRequest => {
+                Self::EndDeviceTimeoutRequest(parse_body(id, body)?)
+            }
+            NwkCommandId::EndDeviceTimeoutResponse => {
+                Self::EndDeviceTimeoutResponse(parse_body(id, body)?)
+            }
+            NwkCommandId::LinkPowerDelta => Self::LinkPowerDelta(parse_body(id, body)?),
+            NwkCommandId::NetworkCommissioningRequest => {
+                Self::NetworkCommissioningRequest(parse_body(id, body)?)
+            }
+            NwkCommandId::NetworkCommissioningResponse => {
+                Self::NetworkCommissioningResponse(parse_body(id, body)?)
+            }
+        })
+    }
+
+    /// Encode the command into a NWK command frame payload: the command identifier byte
+    /// followed by the command body.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![self.command_id() as u8];
+
+        let body = match self {
+            Self::RouteRequest(c) => c.to_abstract_bits(),
+            Self::RouteReply(c) => c.to_abstract_bits(),
+            Self::NetworkStatus(c) => c.to_abstract_bits(),
+            Self::Leave(c) => c.to_abstract_bits(),
+            Self::RouteRecord(c) => c.to_abstract_bits(),
+            Self::RejoinRequest(c) => c.to_abstract_bits(),
+            Self::RejoinResponse(c) => c.to_abstract_bits(),
+            Self::LinkStatus(c) => c.to_abstract_bits(),
+            Self::NetworkReport(c) => c.to_abstract_bits(),
+            Self::NetworkUpdate(c) => c.to_abstract_bits(),
+            Self::EndDeviceTimeoutRequest(c) => c.to_abstract_bits(),
+            Self::EndDeviceTimeoutResponse(c) => c.to_abstract_bits(),
+            Self::LinkPowerDelta(c) => c.to_abstract_bits(),
+            Self::NetworkCommissioningRequest(c) => c.to_abstract_bits(),
+            Self::NetworkCommissioningResponse(c) => c.to_abstract_bits(),
+        };
+
+        bytes.extend(body.unwrap());
+        bytes
+    }
 }
 
 #[cfg(test)]
@@ -523,7 +559,7 @@ mod test {
     /// request (Table 3-71): bit 1 set means the device is a router.
     #[test]
     fn test_rejoin_request_round_trip() {
-        let command = NwkRejoinRequestCommand {
+        let command = NwkCommand::RejoinRequest(NwkRejoinRequestCommand {
             capability_information: NwkRejoinCapabilityInformation {
                 alternate_pan_coordinator: false,
                 device_type: NwkRejoinCapabilityInformationDeviceType::Router,
@@ -534,31 +570,25 @@ mod test {
                 security_capability: false,
                 allocate_address: true,
             },
-        };
+        });
 
-        let bytes = command.serialize().unwrap();
+        let bytes = command.to_bytes();
         assert_eq!(bytes, vec![NwkCommandId::RejoinRequest as u8, 0x8E]);
-        assert_eq!(
-            NwkRejoinRequestCommand::deserialize(&bytes).unwrap(),
-            command
-        );
+        assert_eq!(NwkCommand::from_bytes(&bytes).unwrap(), command);
     }
 
     #[test]
     fn test_rejoin_response_round_trip() {
-        let command = NwkRejoinResponseCommand {
+        let command = NwkCommand::RejoinResponse(NwkRejoinResponseCommand {
             network_address: Nwk(0x1234),
             rejoin_status: Nwk802154AssociationStatus::AssociationSuccessful,
-        };
+        });
 
-        let bytes = command.serialize().unwrap();
+        let bytes = command.to_bytes();
         assert_eq!(
             bytes,
             vec![NwkCommandId::RejoinResponse as u8, 0x34, 0x12, 0x00]
         );
-        assert_eq!(
-            NwkRejoinResponseCommand::deserialize(&bytes).unwrap(),
-            command
-        );
+        assert_eq!(NwkCommand::from_bytes(&bytes).unwrap(), command);
     }
 }
