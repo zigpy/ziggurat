@@ -50,6 +50,29 @@ pub struct ApsAckFrameControl {
     pub extended_header: bool,
 }
 
+/// Spec 2.2.5.1.8.2: the fragmentation sub-field of the APS extended frame control.
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[repr(u8)]
+pub enum ApsFragmentation {
+    /// The ASDU is not fragmented.
+    NotFragmented = 0b00,
+    /// The first block of a fragmented ASDU; the block number field is the block count.
+    FirstBlock = 0b01,
+    /// A subsequent block of a fragmented ASDU; the block number field is its index.
+    Block = 0b10,
+}
+
+/// Spec 2.2.5.1.8: the APS extended header's frame-control octet, present when the
+/// extended header bit is set in the APS frame control. A non-`NotFragmented`
+/// fragmentation field is followed by a one-octet block number.
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApsExtendedFrameControl {
+    pub fragmentation: ApsFragmentation,
+    reserved: u6,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApsAckFrame {
     pub frame_control: ApsAckFrameControl,
@@ -190,8 +213,32 @@ impl ApsDataFrame {
         let profile_id = u16::from_le_bytes([remaining[2], remaining[3]]);
         let source_endpoint = remaining[4];
         let counter = remaining[5];
-        let asdu = FrameBytes::from_slice(&remaining[6..])
-            .map_err(|_| ParseError::TooLong { ty: "ASDU" })?;
+        remaining = &remaining[6..];
+
+        // Spec 2.2.5.1.8: an extended header (present only for fragmentation) precedes
+        // the ASDU. We don't encounter fragmentation in the wild but if we ever do, we
+        // should not pass along a corrupted ASDU.
+        if frame_control.extended_header {
+            let extended_frame_control = ApsExtendedFrameControl::from_abstract_bits(remaining)?;
+
+            // The extended frame control is one octet; a fragmented block is followed by
+            // a one-octet block number (the block count on the first block).
+            let extended_header_len = match extended_frame_control.fragmentation {
+                ApsFragmentation::NotFragmented => 1,
+                ApsFragmentation::FirstBlock | ApsFragmentation::Block => 2,
+            };
+
+            if remaining.len() < extended_header_len {
+                return Err(ParseError::UnexpectedEnd {
+                    ty: "APS extended header",
+                });
+            }
+
+            return Err(ParseError::Unsupported("APS fragmentation"));
+        }
+
+        let asdu =
+            FrameBytes::from_slice(remaining).map_err(|_| ParseError::TooLong { ty: "ASDU" })?;
 
         Ok(Self {
             frame_control,
