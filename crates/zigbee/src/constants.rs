@@ -32,6 +32,11 @@ pub struct Tunables {
     /// knows that key (spec 4.7.3.6).
     pub allow_unsecured_rejoins: bool,
 
+    /// Trust center policy: accept an Update-Device command that is not APS-encrypted
+    /// from a router with which we share a unique trust center link key. Off by default
+    /// (spec Table 4-7 requires APS encryption in that case).
+    pub allow_unencrypted_router_device_update: bool,
+
     pub passive_ack_timeout: Duration,
 
     /// The maximum number of retries allowed after a broadcast transmission failure.
@@ -119,6 +124,7 @@ impl Tunables {
             broadcast_passive_ack_quorum: 8,
             max_children: 32,
             allow_unsecured_rejoins: false,
+            allow_unencrypted_router_device_update: false,
             max_source_route: 12,
             transaction_persistence_time: Duration::from_millis(7680),
             concentrator_radius: 10,

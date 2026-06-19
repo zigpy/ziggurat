@@ -387,7 +387,7 @@ impl ZigbeeStack {
     /// encrypted with the key-transport key derived from the device's link key. A
     /// factory-new joiner only knows the well-known key (or its provisional
     /// install-code key), while a rejoining device holds whatever key it was last
-    /// issued — possibly derived from a TCLK seed by the network's previous owner.
+    /// issued - possibly derived from a TCLK seed by the network's previous owner.
     fn build_encrypted_network_key_transport(
         &self,
         destination_eui64: Eui64,
@@ -518,7 +518,7 @@ impl ZigbeeStack {
                 tracing::warn!("Ignoring transport key from {source:?}: {cmd:?}");
             }
             ApsCommandFrameCommand::UpdateDevice(cmd) => {
-                self.handle_update_device(nwk_frame, cmd);
+                self.handle_update_device(nwk_frame, cmd, aps_source_ieee.is_some());
             }
             ApsCommandFrameCommand::RemoveDevice(cmd) => {
                 tracing::warn!("Remove device from {source:?} is not yet handled: {cmd:?}");
@@ -771,8 +771,36 @@ impl ZigbeeStack {
     /// Zigbee spec 4.6.3.2.2: a router notifies us that a device joined (or rejoined)
     /// through it. For unsecured joins, the network key is delivered through the router
     /// via a Tunnel command.
-    fn handle_update_device(&self, nwk_frame: &NwkFrame, update: &ApsUpdateDeviceCommandFrame) {
+    fn handle_update_device(
+        &self,
+        nwk_frame: &NwkFrame,
+        update: &ApsUpdateDeviceCommandFrame,
+        aps_encrypted: bool,
+    ) {
         let router_nwk = nwk_frame.nwk_header.source;
+
+        // Spec Table 4-7: Update-Device must be APS-encrypted when we share a unique link
+        // key with the relaying router. Drop an unencrypted one from such a router unless
+        // policy explicitly allows it.
+        if !aps_encrypted && !self.tunables.allow_unencrypted_router_device_update {
+            let router_ieee = nwk_frame
+                .nwk_header
+                .source_ieee
+                .or_else(|| self.core().nib.address_map.eui64_for(router_nwk));
+            if let Some(router_ieee) = router_ieee
+                && self
+                    .core()
+                    .aib
+                    .aps_security
+                    .has_unique_link_key(router_ieee)
+            {
+                tracing::warn!(
+                    "Dropping unencrypted Update-Device from router {router_nwk:?} \
+                     ({router_ieee:?}) that holds a unique link key"
+                );
+                return;
+            }
+        }
 
         tracing::info!(
             "Device {:?} ({:?}) update from router {router_nwk:?}: {:?}",
