@@ -104,7 +104,10 @@ impl ZigbeeStack {
                     originator_nwk: route_reply_cmd.originator_nwk,
                     responder_nwk: route_reply_cmd.responder_nwk,
                     // We increment the path cost
-                    path_cost: path_cost.saturating_add(next_hop_link.incoming_cost),
+                    path_cost: path_cost.saturating_add(cmp::max(
+                        next_hop_link.incoming_cost,
+                        next_hop_link.outgoing_cost,
+                    )),
                     originator_eui64: route_reply_cmd.originator_eui64,
                     responder_eui64: route_reply_cmd.responder_eui64,
                 }
