@@ -4,8 +4,8 @@ use crate::ziggurat_ieee_802154::commands::{
 };
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154AssociationStatus,
-    Ieee802154CommandFrame, Ieee802154CommandId, Ieee802154CommandPayload, Ieee802154Frame,
-    Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
+    Ieee802154CommandFrame, Ieee802154CommandPayload, Ieee802154Frame, Ieee802154FrameControl,
+    Ieee802154FrameHeader, Ieee802154FrameType,
 };
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
@@ -342,7 +342,6 @@ impl ZigbeeStack {
                 src_pan_id: None,
                 dest_pan_id: Some(pan_id),
             },
-            command_id: Ieee802154CommandId::AssociationResponse,
             command_payload: Ieee802154CommandPayload::AssociationResponse(
                 Ieee802154AssociationResponseCommand {
                     short_address,

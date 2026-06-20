@@ -1,16 +1,12 @@
 pub mod commands;
 pub mod types;
 
-use crate::commands::Ieee802154Command;
 use crate::types::{Eui64, Nwk, PanId, format_hex};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
 use num_enum::TryFromPrimitive;
 
 /// `aMaxPhyPacketSize`: a full 802.15.4 frame, FCS included, fits in 127 bytes
 pub const MAX_PHY_PACKET_SIZE: usize = 127;
-
-/// Maximum 802.15.4 MAC payload length
-const MAC_COMMAND_MAX_LEN: usize = MAX_PHY_PACKET_SIZE - 2 - 23; // FCS and maximum header
 
 /// Frame-bounded byte storage: an owned, inline buffer for payloads and ciphertexts.
 ///
@@ -176,7 +172,6 @@ pub struct Ieee802154AckFrame {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Ieee802154CommandFrame {
     pub header: Ieee802154FrameHeader,
-    pub command_id: Ieee802154CommandId,
     pub command_payload: Ieee802154CommandPayload,
     pub fcs: u16,
 }
@@ -208,36 +203,6 @@ impl<P: FramePayload> core::fmt::Debug for PayloadDebug<'_, P> {
     }
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("Could not serialize {ty}")]
-pub struct SerializeError {
-    ty: &'static str,
-    #[source]
-    cause: abstract_bits::ToBytesError,
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum DeserializeError {
-    #[error("Could not deserialize payload to {ty}")]
-    Payload {
-        ty: &'static str,
-        #[source]
-        cause: abstract_bits::FromBytesError,
-    },
-    #[error(
-        "Could not deserialize incorrect Id. \
-        Expected {expected_discriminant} (which represents {expected_variant:?}), \
-        found: {found_discriminant:?} instead"
-    )]
-    IncorrectId {
-        expected_variant: Ieee802154CommandId,
-        expected_discriminant: u8,
-        found_discriminant: u8,
-    },
-    #[error("Got zero bytes, no valid command is zero bytes")]
-    ZeroBytes,
-}
-
 /// Failure to parse a frame or one of its fields off the wire.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ParseError {
@@ -253,8 +218,6 @@ pub enum ParseError {
     Unsupported(&'static str),
     #[error(transparent)]
     Bits(#[from] abstract_bits::FromBytesError),
-    #[error(transparent)]
-    Command(#[from] DeserializeError),
 }
 
 /// Append a structure's serialized form to `bytes`.
@@ -270,47 +233,6 @@ pub fn extend_abstract_bits<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) {
     bytes.extend_from_slice(&buffer[..written]);
 }
 
-fn serialize_command<T: AbstractBits>(
-    thing: &T,
-    id: Ieee802154CommandId,
-) -> Result<Vec<u8>, SerializeError> {
-    let mut bytes = vec![0u8; MAC_COMMAND_MAX_LEN];
-    bytes[0] = id as u8;
-    let mut writer = abstract_bits::BitWriter::from(&mut bytes[1..]);
-    thing
-        .write_abstract_bits(&mut writer)
-        .map_err(|cause| SerializeError {
-            ty: core::any::type_name::<T>(),
-            cause,
-        })?;
-    let len = writer.bytes_written();
-    bytes.truncate(len + 1); // +1 for id
-    Ok(bytes)
-}
-
-fn deserialize_command<T: AbstractBits>(
-    bytes: &[u8],
-    correct_id: Ieee802154CommandId,
-) -> Result<T, DeserializeError> {
-    let [command_id, payload @ ..] = bytes else {
-        return Err(DeserializeError::ZeroBytes);
-    };
-
-    if *command_id != correct_id as u8 {
-        return Err(DeserializeError::IncorrectId {
-            expected_variant: correct_id,
-            expected_discriminant: correct_id as u8,
-            found_discriminant: *command_id,
-        });
-    }
-
-    let mut reader = BitReader::from(payload);
-    T::read_abstract_bits(&mut reader).map_err(|cause| DeserializeError::Payload {
-        ty: core::any::type_name::<T>(),
-        cause,
-    })
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Ieee802154CommandPayload {
     AssociationRequest(commands::Ieee802154AssociationRequestCommand),
@@ -318,8 +240,85 @@ pub enum Ieee802154CommandPayload {
     DisassociationNotification(commands::Ieee802154DisassociationNotificationCommand),
     DataRequest(commands::Ieee802154DataRequestCommand),
     BeaconRequest(commands::Ieee802154BeaconRequestCommand),
-    // Stub implementations for other commands
+    /// A command we could not decode (unknown id, or a body that failed to parse), kept
+    /// verbatim (command id byte included) so it round-trips.
     Unknown(Vec<u8>),
+}
+
+impl Ieee802154CommandPayload {
+    /// The command identifier, or `None` for an [`Ieee802154CommandPayload::Unknown`]
+    /// payload whose leading byte is not a recognized command id.
+    pub fn command_id(&self) -> Option<Ieee802154CommandId> {
+        Some(match self {
+            Self::AssociationRequest(_) => Ieee802154CommandId::AssociationRequest,
+            Self::AssociationResponse(_) => Ieee802154CommandId::AssociationResponse,
+            Self::DisassociationNotification(_) => Ieee802154CommandId::DisassociationNotification,
+            Self::DataRequest(_) => Ieee802154CommandId::DataRequest,
+            Self::BeaconRequest(_) => Ieee802154CommandId::BeaconRequest,
+            Self::Unknown(raw) => {
+                return raw
+                    .first()
+                    .and_then(|&b| Ieee802154CommandId::try_from(b).ok());
+            }
+        })
+    }
+
+    /// Decode a MAC command frame payload (the command id byte followed by the command
+    /// body). An unknown id or a body that fails to parse is preserved verbatim as
+    /// [`Ieee802154CommandPayload::Unknown`].
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self::try_parse(bytes).unwrap_or_else(|| Self::Unknown(bytes.to_vec()))
+    }
+
+    fn try_parse(bytes: &[u8]) -> Option<Self> {
+        let (&id_byte, body) = bytes.split_first()?;
+        let id = Ieee802154CommandId::try_from(id_byte).ok()?;
+
+        Some(match id {
+            Ieee802154CommandId::AssociationRequest => {
+                Self::AssociationRequest(AbstractBits::from_abstract_bits(body).ok()?)
+            }
+            Ieee802154CommandId::AssociationResponse => {
+                Self::AssociationResponse(AbstractBits::from_abstract_bits(body).ok()?)
+            }
+            Ieee802154CommandId::DisassociationNotification => {
+                Self::DisassociationNotification(AbstractBits::from_abstract_bits(body).ok()?)
+            }
+            Ieee802154CommandId::DataRequest => {
+                Self::DataRequest(AbstractBits::from_abstract_bits(body).ok()?)
+            }
+            Ieee802154CommandId::BeaconRequest => {
+                Self::BeaconRequest(AbstractBits::from_abstract_bits(body).ok()?)
+            }
+            // Known command ids the stack does not implement are kept verbatim
+            _ => return None,
+        })
+    }
+
+    /// Encode into a MAC command frame payload: the command id byte followed by the body.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let (id, body) = match self {
+            Self::AssociationRequest(c) => (
+                Ieee802154CommandId::AssociationRequest,
+                c.to_abstract_bits(),
+            ),
+            Self::AssociationResponse(c) => (
+                Ieee802154CommandId::AssociationResponse,
+                c.to_abstract_bits(),
+            ),
+            Self::DisassociationNotification(c) => (
+                Ieee802154CommandId::DisassociationNotification,
+                c.to_abstract_bits(),
+            ),
+            Self::DataRequest(c) => (Ieee802154CommandId::DataRequest, c.to_abstract_bits()),
+            Self::BeaconRequest(c) => (Ieee802154CommandId::BeaconRequest, c.to_abstract_bits()),
+            Self::Unknown(raw) => return raw.clone(),
+        };
+
+        let mut bytes = vec![id as u8];
+        bytes.extend(body.unwrap());
+        bytes
+    }
 }
 
 impl Ieee802154Frame<FrameBytes> {
@@ -462,55 +461,13 @@ impl Ieee802154Frame<FrameBytes> {
                         ty: "Ieee802154 command ID",
                     });
                 }
-                let command_id = Ieee802154CommandId::try_from(remaining[0]).map_err(|_| {
-                    ParseError::InvalidDiscriminant {
-                        ty: "Ieee802154CommandId",
-                        got: remaining[0],
-                    }
-                })?;
-                let command_payload = Self::parse_command_payload(command_id, &remaining[1..])?;
 
                 Ok(Self::Command(Ieee802154CommandFrame {
                     header,
-                    command_id,
-                    command_payload,
+                    command_payload: Ieee802154CommandPayload::from_bytes(remaining),
                     fcs,
                 }))
             }
-        }
-    }
-
-    fn parse_command_payload(
-        command_id: Ieee802154CommandId,
-        payload: &[u8],
-    ) -> Result<Ieee802154CommandPayload, ParseError> {
-        // Reconstruct the full command bytes (command ID + payload)
-        let mut full_command = Vec::with_capacity(payload.len() + 1);
-        full_command.push(command_id as u8);
-        full_command.extend_from_slice(payload);
-
-        match command_id {
-            Ieee802154CommandId::AssociationRequest => Ok(
-                commands::Ieee802154AssociationRequestCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::AssociationRequest)?,
-            ),
-            Ieee802154CommandId::AssociationResponse => Ok(
-                commands::Ieee802154AssociationResponseCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::AssociationResponse)?,
-            ),
-            Ieee802154CommandId::DisassociationNotification => Ok(
-                commands::Ieee802154DisassociationNotificationCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::DisassociationNotification)?,
-            ),
-            Ieee802154CommandId::DataRequest => Ok(
-                commands::Ieee802154DataRequestCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::DataRequest)?,
-            ),
-            Ieee802154CommandId::BeaconRequest => Ok(
-                commands::Ieee802154BeaconRequestCommand::deserialize(&full_command)
-                    .map(Ieee802154CommandPayload::BeaconRequest)?,
-            ),
-            _ => Ok(Ieee802154CommandPayload::Unknown(payload.to_vec())),
         }
     }
 
@@ -577,8 +534,7 @@ impl<P: FramePayload> Ieee802154Frame<P> {
                 // ACK frames have no payload
             }
             Self::Command(frame) => {
-                data.push(frame.command_id as u8);
-                data.extend(&Self::serialize_command_payload(&frame.command_payload));
+                data.extend(frame.command_payload.to_bytes());
             }
         }
 
@@ -607,42 +563,6 @@ impl<P: FramePayload> Ieee802154Frame<P> {
             Self::Data(frame) => frame.fcs,
             Self::Ack(frame) => frame.fcs,
             Self::Command(frame) => frame.fcs,
-        }
-    }
-
-    fn serialize_command_payload(payload: &Ieee802154CommandPayload) -> Vec<u8> {
-        match payload {
-            Ieee802154CommandPayload::AssociationRequest(cmd) => cmd
-                .serialize()
-                .unwrap_or_default()
-                .get(1..)
-                .unwrap_or_default()
-                .to_vec(),
-            Ieee802154CommandPayload::AssociationResponse(cmd) => cmd
-                .serialize()
-                .unwrap_or_default()
-                .get(1..)
-                .unwrap_or_default()
-                .to_vec(),
-            Ieee802154CommandPayload::DisassociationNotification(cmd) => cmd
-                .serialize()
-                .unwrap_or_default()
-                .get(1..)
-                .unwrap_or_default()
-                .to_vec(),
-            Ieee802154CommandPayload::DataRequest(cmd) => cmd
-                .serialize()
-                .unwrap_or_default()
-                .get(1..)
-                .unwrap_or_default()
-                .to_vec(),
-            Ieee802154CommandPayload::BeaconRequest(cmd) => cmd
-                .serialize()
-                .unwrap_or_default()
-                .get(1..)
-                .unwrap_or_default()
-                .to_vec(),
-            Ieee802154CommandPayload::Unknown(data) => data.clone(),
         }
     }
 
@@ -929,7 +849,6 @@ mod test {
                 src_pan_id: None,
                 src_address: None,
             },
-            command_id: Ieee802154CommandId::BeaconRequest,
             command_payload: Ieee802154CommandPayload::BeaconRequest(
                 commands::Ieee802154BeaconRequestCommand {},
             ),
@@ -968,7 +887,6 @@ mod test {
                     "bc:02:6e:ff:fe:49:4a:31",
                 ))),
             },
-            command_id: Ieee802154CommandId::AssociationRequest,
             command_payload: Ieee802154CommandPayload::AssociationRequest(
                 commands::Ieee802154AssociationRequestCommand {
                     alternate_pan_coordinator: false,
@@ -991,44 +909,44 @@ mod test {
     fn test_command_serialization() {
         use crate::commands::*;
 
-        // Test BeaconRequest command (no payload)
-        let beacon_req = Ieee802154BeaconRequestCommand;
-        let serialized = beacon_req.serialize().unwrap();
-        assert_eq!(serialized, vec![0x07]); // Command ID only
+        // BeaconRequest command (no payload)
+        let beacon_req = Ieee802154CommandPayload::BeaconRequest(Ieee802154BeaconRequestCommand);
+        assert_eq!(beacon_req.to_bytes(), vec![0x07]); // Command ID only
+        assert_eq!(Ieee802154CommandPayload::from_bytes(&[0x07]), beacon_req);
 
-        let deserialized = Ieee802154BeaconRequestCommand::deserialize(&serialized).unwrap();
-        assert_eq!(beacon_req, deserialized);
+        // DataRequest command (no payload)
+        let data_req = Ieee802154CommandPayload::DataRequest(Ieee802154DataRequestCommand);
+        assert_eq!(data_req.to_bytes(), vec![0x04]); // Command ID only
+        assert_eq!(Ieee802154CommandPayload::from_bytes(&[0x04]), data_req);
 
-        // Test DataRequest command (no payload)
-        let data_req = Ieee802154DataRequestCommand;
-        let serialized = data_req.serialize().unwrap();
-        assert_eq!(serialized, vec![0x04]); // Command ID only
+        // DisassociationNotification command with typed reason
+        let disassoc_notif = Ieee802154CommandPayload::DisassociationNotification(
+            Ieee802154DisassociationNotificationCommand {
+                disassociation_reason: Ieee802154DisassociationReason::CoordinatorWishesToLeave,
+            },
+        );
+        assert_eq!(disassoc_notif.to_bytes(), vec![0x03, 0x01]); // Command ID + reason code
+        assert_eq!(
+            Ieee802154CommandPayload::from_bytes(&[0x03, 0x01]),
+            disassoc_notif
+        );
 
-        let deserialized = Ieee802154DataRequestCommand::deserialize(&serialized).unwrap();
-        assert_eq!(data_req, deserialized);
+        // The other reason code
+        let disassoc_notif2 = Ieee802154CommandPayload::DisassociationNotification(
+            Ieee802154DisassociationNotificationCommand {
+                disassociation_reason: Ieee802154DisassociationReason::DeviceWishesToLeave,
+            },
+        );
+        assert_eq!(disassoc_notif2.to_bytes(), vec![0x03, 0x02]); // Command ID + reason code
+        assert_eq!(
+            Ieee802154CommandPayload::from_bytes(&[0x03, 0x02]),
+            disassoc_notif2
+        );
 
-        // Test DisassociationNotification command with typed reason
-        let disassoc_notif = commands::Ieee802154DisassociationNotificationCommand {
-            disassociation_reason: Ieee802154DisassociationReason::CoordinatorWishesToLeave,
-        };
-        let serialized = disassoc_notif.serialize().unwrap();
-        assert_eq!(serialized, vec![0x03, 0x01]); // Command ID + reason code
-
-        let deserialized =
-            commands::Ieee802154DisassociationNotificationCommand::deserialize(&serialized)
-                .unwrap();
-        assert_eq!(disassoc_notif, deserialized);
-
-        // Test the other reason code
-        let disassoc_notif2 = commands::Ieee802154DisassociationNotificationCommand {
-            disassociation_reason: Ieee802154DisassociationReason::DeviceWishesToLeave,
-        };
-        let serialized2 = disassoc_notif2.serialize().unwrap();
-        assert_eq!(serialized2, vec![0x03, 0x02]); // Command ID + reason code
-
-        let deserialized2 =
-            commands::Ieee802154DisassociationNotificationCommand::deserialize(&serialized2)
-                .unwrap();
-        assert_eq!(disassoc_notif2, deserialized2);
+        // An unrecognized command id round-trips verbatim
+        let unknown = Ieee802154CommandPayload::from_bytes(&[0xFF, 0xAA]);
+        assert_eq!(unknown, Ieee802154CommandPayload::Unknown(vec![0xFF, 0xAA]));
+        assert_eq!(unknown.command_id(), None);
+        assert_eq!(unknown.to_bytes(), vec![0xFF, 0xAA]);
     }
 }

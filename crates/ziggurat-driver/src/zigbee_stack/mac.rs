@@ -19,13 +19,11 @@ impl ZigbeeStack {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
         tracing::debug!(
             "Received 802.15.4 command frame: {:?}",
-            command_frame.command_id
+            command_frame.command_payload.command_id()
         );
 
         match &command_frame.command_payload {
-            ziggurat_ieee_802154::Ieee802154CommandPayload::BeaconRequest(
-                _ieee802154_beacon_request_command,
-            ) => {
+            ziggurat_ieee_802154::Ieee802154CommandPayload::BeaconRequest(_) => {
                 self.send_802154_beacon();
             }
             ziggurat_ieee_802154::Ieee802154CommandPayload::AssociationRequest(
@@ -142,7 +140,6 @@ impl ZigbeeStack {
                 src_pan_id: None,
                 src_address: None,
             },
-            command_id: ziggurat_ieee_802154::Ieee802154CommandId::BeaconRequest,
             command_payload: ziggurat_ieee_802154::Ieee802154CommandPayload::BeaconRequest(
                 ziggurat_ieee_802154::commands::Ieee802154BeaconRequestCommand,
             ),
