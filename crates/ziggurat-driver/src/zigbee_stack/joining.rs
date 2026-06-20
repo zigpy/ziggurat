@@ -11,7 +11,7 @@ use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_zigbee::aps::frame::{
     APS_STATUS_SECURITY_FAIL, APS_STATUS_SUCCESS, ApsCommandFrame, ApsCommandFrameCommand,
-    ApsCommandId, ApsConfirmKeyCommandFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType,
+    ApsConfirmKeyCommandFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType,
     ApsNetworkKeyDescriptor, ApsRequestKeyCommandFrame, ApsRequestKeyType, ApsStandardKeyType,
     ApsTransportKeyCommandFrame, ApsTransportKeyDescriptor, ApsTrustCenterLinkKeyDescriptor,
     ApsTunnelCommandFrame, ApsUpdateDeviceCommandFrame, ApsUpdateDeviceStatus,
@@ -408,7 +408,6 @@ impl ZigbeeStack {
                 extended_header: false,
             },
             counter: self.next_aps_counter(),
-            command_id: ApsCommandId::TransportKey,
             command: ApsCommandFrameCommand::TransportKey(ApsTransportKeyCommandFrame {
                 standard_key_type: ApsStandardKeyType::StandardNetworkKey,
                 key_descriptor: ApsTransportKeyDescriptor::NetworkKey(ApsNetworkKeyDescriptor {
@@ -628,7 +627,6 @@ impl ZigbeeStack {
                 extended_header: false,
             },
             counter: self.next_aps_counter(),
-            command_id: ApsCommandId::TransportKey,
             command: ApsCommandFrameCommand::TransportKey(ApsTransportKeyCommandFrame {
                 standard_key_type: ApsStandardKeyType::TrustCenterLinkKey,
                 key_descriptor: ApsTransportKeyDescriptor::TrustCenterLinkKey(
@@ -743,7 +741,6 @@ impl ZigbeeStack {
                 extended_header: false,
             },
             counter: self.next_aps_counter(),
-            command_id: ApsCommandId::ConfirmKey,
             command: ApsCommandFrameCommand::ConfirmKey(ApsConfirmKeyCommandFrame {
                 status,
                 standard_key_type: ApsStandardKeyType::TrustCenterLinkKey,
@@ -909,7 +906,6 @@ impl ZigbeeStack {
                 extended_header: false,
             },
             counter: self.next_aps_counter(),
-            command_id: ApsCommandId::Tunnel,
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: device_eui64,
                 tunneled_frame: FrameBytes::from_slice(&encrypted_transport_key.to_bytes())
