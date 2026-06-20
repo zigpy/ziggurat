@@ -13,8 +13,10 @@ const TX_POWER_DBM: f32 = 8.0;
 const REFERENCE_LOSS_DBM: f32 = 40.0;
 const PATH_LOSS_EXPONENT: f32 = 3.0;
 const RX_SENSITIVITY_DBM: f32 = -95.0;
+/// RSSI at and above which the link is full quality (LQI 255).
+const RSSI_FULL_QUALITY_DBM: f32 = -75.0;
 /// dB above sensitivity at which the noise-driven reception probability crosses 50%.
-const NOISE_TRANSITION_DB: f32 = 5.0;
+const NOISE_TRANSITION_DB: f32 = 2.0;
 
 /// Log-distance path loss: `Some((rssi, lqi))` if `rx` is in range of `tx`, else `None`.
 fn link_quality(tx: Position, rx: Position) -> Option<(i8, u8)> {
@@ -24,7 +26,8 @@ fn link_quality(tx: Position, rx: Position) -> Option<(i8, u8)> {
     if rssi < RX_SENSITIVITY_DBM {
         return None;
     }
-    let lqi = ((rssi - RX_SENSITIVITY_DBM) / -RX_SENSITIVITY_DBM).clamp(0.0, 1.0) * 255.0;
+    let quality_span = RSSI_FULL_QUALITY_DBM - RX_SENSITIVITY_DBM;
+    let lqi = ((rssi - RX_SENSITIVITY_DBM) / quality_span).clamp(0.0, 1.0) * 255.0;
     Some((rssi.clamp(-128.0, 0.0) as i8, lqi as u8))
 }
 

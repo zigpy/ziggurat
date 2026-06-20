@@ -10,6 +10,7 @@ use ziggurat_zigbee::beacon::ZigbeeBeacon;
 
 use thiserror::Error;
 use tokio::time::error::Elapsed;
+use tracing::Instrument;
 
 use parking_lot::{Mutex, MutexGuard};
 use std::collections::HashMap;
@@ -1099,7 +1100,8 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             }
         }
 
-        tasks.spawn(future);
+        let span = tracing::info_span!("node", nwk = self.state.network_address.0);
+        tasks.spawn(future.instrument(span));
     }
 
     /// Spawns a tracked task that needs an owned handle to the stack.
