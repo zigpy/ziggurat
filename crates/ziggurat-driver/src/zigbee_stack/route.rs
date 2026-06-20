@@ -3,7 +3,7 @@ use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use ziggurat_ieee_802154::types::Nwk;
-use ziggurat_spinel::client::TxPriority;
+use ziggurat_phy::{RadioPhy, TxPriority};
 
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand,
@@ -17,7 +17,7 @@ use super::{
     ZigbeeStackError,
 };
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     fn notify_routing_change(&self, nwk: &Nwk) {
         let tx = {
             let pending_route_notifications = self

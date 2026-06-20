@@ -18,10 +18,11 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
-    WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
-use ziggurat_spinel::client::{SpinelClient, TxPriority};
+use ziggurat_radio_spinel::SpinelPhy;
+use ziggurat_spinel::client::SpinelClient;
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -315,7 +316,7 @@ pub struct ZigguratServer {
     /// opened lazily by the first command that needs it and never reopened, so stack
     /// replacement cannot race a straggling port handle (`EBUSY`)
     spinel: Mutex<Option<Arc<SpinelClient>>>,
-    stack: Mutex<Option<Arc<ZigbeeStack>>>,
+    stack: Mutex<Option<Arc<ZigbeeStack<SpinelPhy>>>>,
     /// The server-level notification hub: connections subscribe to it, and it
     /// survives stack replacement (the forwarder task is swapped instead)
     notification_tx: broadcast::Sender<ZigbeeNotification>,
@@ -388,7 +389,7 @@ impl ZigguratServer {
         });
     }
 
-    fn current_stack(&self) -> Option<Arc<ZigbeeStack>> {
+    fn current_stack(&self) -> Option<Arc<ZigbeeStack<SpinelPhy>>> {
         self.stack.lock().unwrap().clone()
     }
 
@@ -590,7 +591,7 @@ impl ZigguratServer {
         };
 
         let (stack, mut stack_notification_rx) = ZigbeeStack::new(
-            spinel,
+            Arc::new(SpinelPhy::new(spinel)),
             NetworkConfig {
                 role: request.role.into(),
                 channel: request.channel,

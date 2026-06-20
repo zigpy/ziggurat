@@ -1,6 +1,6 @@
 use tokio::time::Instant;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_spinel::client::TxPriority;
+use ziggurat_phy::{RadioPhy, TxPriority};
 
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
@@ -10,7 +10,7 @@ use super::{NwkSecurityMode, ZigbeeStack};
 /// Maximum number of link status entries that can be carried in a single frame.
 const MAX_LINK_STATUSES: usize = 7;
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
         self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
     }

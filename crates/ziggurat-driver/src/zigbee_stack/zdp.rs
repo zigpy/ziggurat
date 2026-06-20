@@ -1,5 +1,5 @@
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_spinel::client::TxPriority;
+use ziggurat_phy::{RadioPhy, TxPriority};
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -25,7 +25,7 @@ const MGMT_LQI_DESCRIPTORS_PER_FRAME: usize = 2;
 /// Routing records per Mgmt_Rtg_rsp, keeping the ASDU within the NWK payload budget.
 const MGMT_RTG_DESCRIPTORS_PER_FRAME: usize = 10;
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     /// Dispatch the ZDP commands the stack itself consumes: the neighbor table they
     /// maintain lives here. The client still observes the frames.
     pub(super) fn handle_zdp_frame(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {

@@ -1,7 +1,6 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_spinel::SpinelPropertyId;
-use ziggurat_spinel::client::TxPriority;
+use ziggurat_phy::{RadioPhy, TxPriority};
 
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout_at};
@@ -24,7 +23,7 @@ const fn set_frame_pending(frame: &mut Ieee802154Frame<EncryptedNwkFrame>) {
     }
 }
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     /// Queue a finished 802.15.4 frame for indirect delivery and wait for the
     /// destination to extract it with a MAC Data Request, or for the transaction to
     /// expire (802.15.4 spec 6.7.3). There is no retry loop here: the destination
@@ -282,26 +281,10 @@ impl ZigbeeStack {
             table.extended_addresses
         );
 
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacSrcMatchShortAddresses,
-                table
-                    .short_addresses
-                    .iter()
-                    .flat_map(|nwk| nwk.to_bytes())
-                    .collect(),
-            )
-            .await?;
-
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacSrcMatchExtendedAddresses,
-                table
-                    .extended_addresses
-                    .iter()
-                    .flat_map(|&eui64| ziggurat_spinel::eui64_to_spinel_bytes(eui64))
-                    .collect(),
-            )
+        let short: Vec<Nwk> = table.short_addresses.iter().copied().collect();
+        let extended: Vec<Eui64> = table.extended_addresses.iter().copied().collect();
+        self.radio
+            .set_frame_pending_table(&short, &extended)
             .await?;
 
         *self

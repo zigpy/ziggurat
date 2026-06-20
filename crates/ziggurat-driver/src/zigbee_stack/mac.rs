@@ -5,8 +5,7 @@ use crate::ziggurat_ieee_802154::{
 use abstract_bits::AbstractBits;
 use arbitrary_int::u24;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
-use ziggurat_spinel::SpinelStatus;
-use ziggurat_spinel::client::{SpinelTxFrame, TxPriority};
+use ziggurat_phy::{RadioPhy, TxFrame, TxPriority, TxResult};
 use ziggurat_zigbee::beacon::{RenamedU24, ZigbeeBeacon};
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
@@ -15,7 +14,7 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::{NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
         tracing::debug!(
             "Received 802.15.4 command frame: {:?}",
@@ -115,7 +114,7 @@ impl ZigbeeStack {
         self.background_send_802154_frame(beacon_frame, TxPriority::USER_NORMAL);
     }
 
-    pub(super) fn beacon_request_frame(&self, channel: u8) -> SpinelTxFrame {
+    pub(super) fn beacon_request_psdu(&self) -> Vec<u8> {
         let sequence_number = {
             let mut core = self.core();
             core.mac.ieee802154_sequence_number =
@@ -150,20 +149,7 @@ impl ZigbeeStack {
             fcs: 0x0000,
         });
 
-        SpinelTxFrame {
-            psdu: frame.to_bytes(),
-            channel: Some(channel),
-            max_csma_backoffs: Some(self.tunables.mac_max_csma_backoffs),
-            max_frame_retries: Some(self.tunables.mac_max_frame_retries),
-            enable_csma_ca: Some(true),
-            is_header_updated: Some(true),
-            is_a_retransmit: Some(false),
-            is_security_processed: Some(true),
-            tx_delay: None,
-            tx_delay_base_time: None,
-            rx_channel_after_tx: None,
-            tx_power: None,
-        }
+        frame.to_bytes()
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -314,9 +300,9 @@ impl ZigbeeStack {
         Some(decrypted_nwk_frame)
     }
 
-    pub(super) async fn send_802154_frame<P: ziggurat_ieee_802154::FramePayload>(
+    pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
-        frame: Ieee802154Frame<P>,
+        frame: Ieee802154Frame<Payload>,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         // Increment the 802.15.4 sequence number
@@ -362,38 +348,29 @@ impl ZigbeeStack {
             return Ok(());
         }
 
-        let status = self
-            .spinel
-            .transmit_frame(
-                &SpinelTxFrame {
+        let channel = self.core().mac.channel;
+        let result = self
+            .radio
+            .transmit(
+                TxFrame {
                     psdu: final_frame.to_bytes(),
-                    channel: { Some(self.core().mac.channel) },
-                    max_csma_backoffs: Some(self.tunables.mac_max_csma_backoffs),
-                    max_frame_retries: Some(self.tunables.mac_max_frame_retries),
-                    enable_csma_ca: Some(true),
-                    is_header_updated: Some(true),
-                    is_a_retransmit: Some(false),
-                    is_security_processed: Some(true),
-                    // Omit subsequent fields to reduce serial traffic
-                    tx_delay: None,            // Some(0 as u32),
-                    tx_delay_base_time: None,  // Some(0 as u32),
-                    rx_channel_after_tx: None, // Some(channel),
-                    tx_power: None,            // Some(8),
+                    channel: Some(channel),
+                    csma_ca: true,
+                    max_frame_retries: self.tunables.mac_max_frame_retries,
+                    max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
+                    security_processed: true,
                 },
                 priority,
             )
             .await?;
 
-        if status == SpinelStatus::Ok {
-            Ok(())
-        } else if status == SpinelStatus::NoAck {
-            Err(ZigbeeStackError::NwkNoAck {
+        match result {
+            TxResult::Acked => Ok(()),
+            TxResult::NoAck => Err(ZigbeeStackError::NwkNoAck {
                 next_hop: final_frame.header().dest_address.unwrap(),
-            })
-        } else if status == SpinelStatus::CcaFailure {
-            Err(ZigbeeStackError::CcaFailure)
-        } else {
-            Err(ZigbeeStackError::SpinelTransmitFailure(status))
+            }),
+            TxResult::ChannelAccessFailure => Err(ZigbeeStackError::CcaFailure),
+            other => Err(ZigbeeStackError::TransmitFailed(other)),
         }
     }
 
