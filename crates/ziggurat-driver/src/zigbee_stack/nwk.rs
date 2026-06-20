@@ -7,14 +7,14 @@ use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_spinel::client::TxPriority;
 use ziggurat_zigbee::nwk::commands::{
-    NwkCommand, NwkCommandError, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
+    NwkCommand, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
     NwkNetworkStatusCommand,
 };
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_DEVICES, BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS,
     EncryptedNwkFrame, NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader,
-    NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
-    NwkSourceRoute,
+    NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId,
+    NwkSecurityLevel, NwkSourceRoute,
 };
 
 use super::routing::Route;
@@ -136,24 +136,13 @@ impl ZigbeeStack {
         self.maybe_age_neighbors();
         self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
 
-        // Network input may never panic: a command frame with no command byte is
-        // malformed and dropped
-        if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command
-            && nwk_frame.payload.is_empty()
-        {
-            tracing::warn!("Ignoring NWK command frame with an empty payload");
-            return;
-        }
-
         // Spec 3.6.6: link status and route request broadcasts bypass the broadcast
         // transaction table; route requests have their own cost-comparing dedup logic
         // and relayed copies share the originator's sequence number
-        let bypasses_transaction_table = nwk_frame.nwk_header.frame_control.frame_type
-            == NwkFrameType::Command
-            && matches!(
-                NwkCommandId::try_from(nwk_frame.payload[0]),
-                Ok(NwkCommandId::RouteRequest | NwkCommandId::LinkStatus)
-            );
+        let bypasses_transaction_table = matches!(
+            &nwk_frame.payload,
+            NwkPayload::Command(NwkCommand::RouteRequest(_) | NwkCommand::LinkStatus(_))
+        );
 
         if nwk_frame.nwk_header.destination.as_u16()
             >= BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
@@ -183,45 +172,43 @@ impl ZigbeeStack {
         }
 
         // Handle NWK commands
-        if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command {
-            let command = match NwkCommand::from_bytes(&nwk_frame.payload) {
-                Ok(command) => command,
-                // Spec 3.6.10.2: a request whose timeout enumeration is out of range still
-                // gets a courtesy response telling the child the value was incorrect
-                Err(NwkCommandError::Body {
-                    id: NwkCommandId::EndDeviceTimeoutRequest,
-                    ..
-                }) => {
-                    self.send_end_device_timeout_response(
-                        nwk_frame.nwk_header.source,
-                        NwkEndDeviceTimeoutResponseStatus::IncorrectValue,
-                    );
-                    return;
-                }
-                Err(err) => {
-                    tracing::warn!("Failed to parse NWK command: {err}");
-                    return;
-                }
-            };
-
+        if let NwkPayload::Command(command) = &nwk_frame.payload {
             match command {
-                NwkCommand::LinkStatus(cmd) => self.handle_link_status(nwk_frame, cmd, lqi),
-                NwkCommand::RouteReply(cmd) => self.handle_route_reply(nwk_frame, cmd),
+                NwkCommand::LinkStatus(cmd) => self.handle_link_status(nwk_frame, cmd.clone(), lqi),
+                NwkCommand::RouteReply(cmd) => self.handle_route_reply(nwk_frame, cmd.clone()),
                 NwkCommand::RouteRecord(cmd) => {
                     tracing::debug!("Route record command frame received: {cmd:?}");
                     self.core()
                         .nib
                         .routing
-                        .store_route_record(nwk_frame.nwk_header.source, cmd.relays);
+                        .store_route_record(nwk_frame.nwk_header.source, cmd.relays.clone());
                 }
                 NwkCommand::RouteRequest(cmd) => {
-                    self.handle_route_request(nwk_frame, cmd, sender_nwk);
+                    self.handle_route_request(nwk_frame, cmd.clone(), sender_nwk);
                 }
-                NwkCommand::RejoinRequest(cmd) => self.handle_rejoin_request(nwk_frame, cmd, true),
-                NwkCommand::Leave(cmd) => self.handle_leave(nwk_frame, cmd),
-                NwkCommand::NetworkStatus(cmd) => self.handle_network_status(nwk_frame, cmd),
+                NwkCommand::RejoinRequest(cmd) => {
+                    self.handle_rejoin_request(nwk_frame, cmd.clone(), true);
+                }
+                NwkCommand::Leave(cmd) => self.handle_leave(nwk_frame, cmd.clone()),
+                NwkCommand::NetworkStatus(cmd) => {
+                    self.handle_network_status(nwk_frame, cmd.clone())
+                }
                 NwkCommand::EndDeviceTimeoutRequest(cmd) => {
-                    self.handle_end_device_timeout_request(nwk_frame, cmd);
+                    self.handle_end_device_timeout_request(nwk_frame, cmd.clone());
+                }
+                // Spec 3.6.10.2: a timeout request whose enumeration is out of range fails
+                // to parse, but still gets a courtesy response naming the incorrect value
+                NwkCommand::Unparsed(raw)
+                    if raw.first().copied().map(NwkCommandId::try_from)
+                        == Some(Ok(NwkCommandId::EndDeviceTimeoutRequest)) =>
+                {
+                    self.send_end_device_timeout_response(
+                        nwk_frame.nwk_header.source,
+                        NwkEndDeviceTimeoutResponseStatus::IncorrectValue,
+                    );
+                }
+                NwkCommand::Unparsed(raw) => {
+                    tracing::warn!("Ignoring unparseable NWK command: {raw:02x?}");
                 }
                 other => {
                     tracing::warn!("Unhandled NWK command: {:?}", other.command_id());
@@ -233,7 +220,11 @@ impl ZigbeeStack {
     /// A NWK command frame originated by us, with stack-wide defaults: secured, route
     /// discovery suppressed, radius `2 * max_depth`, sequence number assigned on send,
     /// our EUI64 as the extended source. Deviations chain `with_*` overrides.
-    pub(super) fn nwk_command_frame(&self, destination: Nwk, command: NwkCommand) -> NwkFrame {
+    pub(super) const fn nwk_command_frame(
+        &self,
+        destination: Nwk,
+        command: NwkCommand,
+    ) -> NwkFrame {
         NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
@@ -258,8 +249,7 @@ impl ZigbeeStack {
                 source_route: None,
             },
             aux_header: None, // Applied at encryption time
-            payload: FrameBytes::from_slice(&command.to_bytes())
-                .expect("NWK command is frame-bounded"),
+            payload: NwkPayload::Command(command),
         }
     }
 
@@ -290,7 +280,9 @@ impl ZigbeeStack {
                 source_route: None,
             },
             aux_header: None, // Applied at encryption time
-            payload: FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
+            payload: NwkPayload::Opaque(
+                FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
+            ),
         }
     }
 
@@ -364,7 +356,7 @@ impl ZigbeeStack {
             NwkSecurityMode::Unsecured => EncryptedNwkFrame {
                 nwk_header: nwk_frame.nwk_header.clone(),
                 aux_header: None,
-                ciphertext: nwk_frame.payload.clone(),
+                ciphertext: nwk_frame.payload.to_bytes(),
             },
         }
     }
@@ -802,31 +794,31 @@ impl ZigbeeStack {
 
         let destination = nwk_frame.nwk_header.destination;
 
-        // Spec 3.6.4.5.5: each relay appends its network address to a transiting
-        // route record command before forwarding it. Other command types (and command
-        // ids we do not recognize) are relayed verbatim, untouched.
-        if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Command
-            && matches!(
-                nwk_frame
-                    .payload
-                    .first()
-                    .map(|&id| NwkCommandId::try_from(id)),
-                Some(Ok(NwkCommandId::RouteRecord))
-            )
-        {
-            let mut route_record_cmd = match NwkCommand::from_bytes(&nwk_frame.payload) {
-                Ok(NwkCommand::RouteRecord(cmd)) => cmd,
-                Ok(_) => unreachable!("route record command id parses to a route record"),
-                Err(err) => {
-                    tracing::warn!("Dropping malformed transiting route record: {err:?}");
+        // Spec 3.6.4.5.5: each relay appends its network address to a transiting route
+        // record command before forwarding it. Other command types (and frames we could
+        // not decode) are relayed verbatim.
+        if let NwkPayload::Command(command) = &mut nwk_frame.payload {
+            match command {
+                NwkCommand::RouteRecord(route_record) => {
+                    // Spec 3.6.4.5.5: with no room left for our address the route record
+                    // is discarded rather than overflowing the frame.
+                    if route_record.relays.len() >= usize::from(self.tunables.max_source_route) {
+                        tracing::warn!("Dropping transiting route record: relay list is full");
+                        return;
+                    }
+                    route_record.relays.push(self.state.network_address);
+                }
+                // A relay SHALL append its address to a transiting route record; one we
+                // could not parse cannot have it appended, so it is discarded rather than
+                // forwarded with an incomplete relay list (spec 3.6.4.5.5).
+                NwkCommand::Unparsed(raw)
+                    if raw.first().copied() == Some(NwkCommandId::RouteRecord as u8) =>
+                {
+                    tracing::warn!("Dropping malformed transiting route record");
                     return;
                 }
-            };
-
-            route_record_cmd.relays.push(self.state.network_address);
-            nwk_frame.payload =
-                FrameBytes::from_slice(&NwkCommand::RouteRecord(route_record_cmd).to_bytes())
-                    .expect("a relayed route record is frame-bounded");
+                _ => {}
+            }
         }
 
         let next_hop_address = if let Some(source_route) = &mut nwk_frame.nwk_header.source_route {

@@ -18,7 +18,7 @@ use ziggurat_zigbee::aps::frame::{
     ApsVerifyKeyCommandFrame, EncryptedApsCommandFrame,
 };
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkFrameType, NwkSecurityHeaderKeyId,
+    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkSecurityHeaderKeyId,
 };
 
 use tokio::time::{Duration, Instant};
@@ -924,20 +924,15 @@ impl ZigbeeStack {
     /// Process the rare NWK frames that arrive without encryption. The only one we
     /// accept is a trust center rejoin request from a device that lost the network key.
     pub(super) fn handle_unsecured_nwk_frame(&self, nwk_frame: &NwkFrame) {
-        if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Command {
-            tracing::debug!("Ignoring unencrypted non-command NWK frame");
-            return;
-        }
-
-        match NwkCommand::from_bytes(&nwk_frame.payload) {
-            Ok(NwkCommand::RejoinRequest(cmd)) => {
-                self.handle_rejoin_request(nwk_frame, cmd, false);
+        match &nwk_frame.payload {
+            NwkPayload::Command(NwkCommand::RejoinRequest(cmd)) => {
+                self.handle_rejoin_request(nwk_frame, cmd.clone(), false);
             }
-            Ok(other) => {
+            NwkPayload::Command(other) => {
                 tracing::debug!("Ignoring unencrypted NWK command: {:?}", other.command_id());
             }
-            Err(err) => {
-                tracing::debug!("Ignoring unparseable unencrypted NWK command: {err}");
+            NwkPayload::Opaque(_) => {
+                tracing::debug!("Ignoring unencrypted non-command NWK frame");
             }
         }
     }
