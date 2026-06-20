@@ -181,6 +181,7 @@ pub struct NwkCapabilityInformation {
 /// contrast to the spec-defaulted [`Tunables`].
 #[derive(Debug)]
 pub struct NetworkConfig {
+    pub role: NwkDeviceType,
     pub channel: u8,
     pub update_id: u8,
     pub pan_id: PanId,
@@ -379,6 +380,7 @@ pub struct State {
     /// much slower but ensures that routing logic is always followed.
     pub hack_force_route_discovery: bool,
 
+    pub role: NwkDeviceType,
     pub capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
 
@@ -466,9 +468,15 @@ impl State {
             hack_disable_tx: false,
             hack_force_route_discovery: false,
 
+            role: config.role,
             capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
-                device_type: NwkCapabilityInformationDeviceType::EndDevice,
+                device_type: match config.role {
+                    NwkDeviceType::EndDevice => NwkCapabilityInformationDeviceType::EndDevice,
+                    NwkDeviceType::Coordinator | NwkDeviceType::Router => {
+                        NwkCapabilityInformationDeviceType::Router
+                    }
+                },
                 power_source: NwkCapabilityInformationPowerSource::MainsPower,
                 receiver_on_when_idle: true,
                 reserved1: false,
