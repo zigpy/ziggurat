@@ -11,7 +11,6 @@ use ziggurat_spinel::{
 };
 use ziggurat_zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
-use ziggurat_zigbee::nwk::frame::NwkFrameType;
 
 use thiserror::Error;
 use tokio::time::error::Elapsed;
@@ -699,11 +698,11 @@ impl ZigbeeStack {
 
                     let nwk_frame = maybe_nwk_frame.unwrap();
 
-                    if nwk_frame.nwk_header.frame_control.frame_type != NwkFrameType::Data {
+                    let Some(aps_payload) = nwk_frame.payload.as_opaque() else {
                         continue;
-                    }
+                    };
 
-                    let (aps_frame, aps_source_eui64) = match parse_aps_frame(&nwk_frame.payload) {
+                    let (aps_frame, aps_source_eui64) = match parse_aps_frame(aps_payload) {
                         Ok(ApsFrame::Data(data)) => (data, None),
                         Ok(ApsFrame::EncryptedData(encrypted)) => {
                             match self.decrypt_aps_data_frame(&nwk_frame, &encrypted) {

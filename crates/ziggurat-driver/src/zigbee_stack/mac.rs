@@ -9,8 +9,8 @@ use ziggurat_spinel::SpinelStatus;
 use ziggurat_spinel::client::{SpinelTxFrame, TxPriority};
 use ziggurat_zigbee::beacon::{RenamedU24, ZigbeeBeacon};
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkSecurityHeaderKeyId,
-    NwkSecurityLevel,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
+    NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
 use super::{PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
@@ -232,10 +232,14 @@ impl ZigbeeStack {
 
         // The only unencrypted NWK frames we accept are trust center rejoin requests
         if !nwk_frame.nwk_header.frame_control.security {
+            let payload = NwkPayload::from_bytes(
+                nwk_frame.nwk_header.frame_control.frame_type,
+                nwk_frame.ciphertext,
+            );
             self.handle_unsecured_nwk_frame(&NwkFrame {
                 nwk_header: nwk_frame.nwk_header,
                 aux_header: None,
-                payload: nwk_frame.ciphertext,
+                payload,
             });
             return None;
         }

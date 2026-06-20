@@ -11,6 +11,7 @@ use num_enum::TryFromPrimitive;
 use educe::Educe;
 
 use crate::ParseError;
+use crate::nwk::commands::NwkCommand;
 
 use crate::crypto::{DecryptionError, decrypt_ccm, encrypt_ccm};
 
@@ -309,13 +310,69 @@ pub struct EncryptedNwkFrame {
     pub ciphertext: FrameBytes,
 }
 
+/// The body of a decrypted NWK frame.
+///
+/// Either a typed command the NWK layer owns, or the bytes it forwards without
+/// interpreting (an APS frame for data frames, an inter-PAN frame for inter-PAN frames).
+/// Serialized into wire bytes only at encryption time.
+#[derive(Clone, PartialEq, Eq)]
+pub enum NwkPayload {
+    /// A payload the NWK layer does not interpret, forwarded verbatim.
+    Opaque(FrameBytes),
+    /// A NWK command the NWK layer owns.
+    Command(NwkCommand),
+}
+
+impl core::fmt::Debug for NwkPayload {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Opaque(bytes) => {
+                write!(f, "Opaque(")?;
+                format_hex(bytes, f)?;
+                write!(f, ")")
+            }
+            Self::Command(command) => f.debug_tuple("Command").field(command).finish(),
+        }
+    }
+}
+
+impl NwkPayload {
+    /// The serialized command/opaque bytes that form the (to-be-encrypted) frame body.
+    pub fn to_bytes(&self) -> FrameBytes {
+        match self {
+            Self::Opaque(bytes) => bytes.clone(),
+            Self::Command(command) => {
+                FrameBytes::from_slice(&command.to_bytes()).expect("a NWK command is frame-bounded")
+            }
+        }
+    }
+
+    /// Decode a decrypted frame body, using the frame type to decide whether it is a NWK
+    /// command or a payload the NWK layer forwards without interpreting.
+    pub fn from_bytes(frame_type: NwkFrameType, bytes: FrameBytes) -> Self {
+        match frame_type {
+            NwkFrameType::Command => Self::Command(NwkCommand::from_bytes(&bytes)),
+            // Data and inter-PAN payloads are opaque to the NWK layer
+            NwkFrameType::Data | NwkFrameType::Interpan => Self::Opaque(bytes),
+        }
+    }
+
+    /// The forwarded payload bytes (an APS frame for a data frame), or `None` for a NWK
+    /// command.
+    pub const fn as_opaque(&self) -> Option<&FrameBytes> {
+        match self {
+            Self::Opaque(bytes) => Some(bytes),
+            Self::Command(_) => None,
+        }
+    }
+}
+
 #[derive(Educe, Clone, PartialEq, Eq)]
 #[educe(Debug)]
 pub struct NwkFrame {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
-    #[educe(Debug(method(format_hex)))]
-    pub payload: FrameBytes,
+    pub payload: NwkPayload,
 }
 
 /// Chainable overrides for the rare frames that deviate from the defaults set by
@@ -440,7 +497,9 @@ impl EncryptedNwkFrame {
         self.nwk_header.serialize_into(&mut auth_data);
         aux_header.serialize_into(&mut auth_data);
 
-        let payload = decrypt_ccm(key, &nonce, &auth_data, self.ciphertext)?;
+        let payload_bytes = decrypt_ccm(key, &nonce, &auth_data, self.ciphertext)?;
+        let payload =
+            NwkPayload::from_bytes(self.nwk_header.frame_control.frame_type, payload_bytes);
 
         Ok(NwkFrame {
             nwk_header: self.nwk_header,
@@ -510,7 +569,7 @@ impl NwkFrame {
         EncryptedNwkFrame {
             nwk_header: self.nwk_header.clone(),
             aux_header: self.aux_header.clone(),
-            ciphertext: encrypt_ccm(key, &nonce, &auth_data, self.payload.clone()),
+            ciphertext: encrypt_ccm(key, &nonce, &auth_data, self.payload.to_bytes()),
         }
     }
 }
@@ -571,7 +630,9 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: FrameBytes::from_slice(&hex!("00010600040101a9015701")).unwrap(),
+            payload: NwkPayload::Opaque(
+                FrameBytes::from_slice(&hex!("00010600040101a9015701")).unwrap(),
+            ),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
@@ -637,7 +698,7 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: FrameBytes::from_slice(&hex!("020106000401405b")).unwrap(),
+            payload: NwkPayload::Opaque(FrameBytes::from_slice(&hex!("020106000401405b")).unwrap()),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);

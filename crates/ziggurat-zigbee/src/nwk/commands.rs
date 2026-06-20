@@ -2,6 +2,7 @@
 
 use abstract_bits::{AbstractBits, abstract_bits};
 use num_enum::TryFromPrimitive;
+use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 
 /// Zigbee spec 3.4
@@ -427,7 +428,9 @@ pub struct NwkNetworkCommissioningResponseCommand {
 ///
 /// The command identifier byte and the typed body it selects. Holding the typed command
 /// lets the stack build and inspect commands without ever touching the wire bytes until
-/// [`NwkCommand::to_bytes`] at send time.
+/// [`NwkCommand::to_bytes`] at send time. A frame we cannot decode (an unknown command
+/// id, or a recognized id whose body fails to parse) is preserved verbatim as
+/// [`NwkCommand::Unparsed`] so it can still be relayed and logged.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum NwkCommand {
     RouteRequest(NwkRouteRequestCommand),
@@ -445,29 +448,15 @@ pub enum NwkCommand {
     LinkPowerDelta(NwkLinkPowerDeltaCommand),
     NetworkCommissioningRequest(NwkNetworkCommissioningRequestCommand),
     NetworkCommissioningResponse(NwkNetworkCommissioningResponseCommand),
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum NwkCommandError {
-    #[error("NWK command frame has no command identifier byte")]
-    Empty,
-    #[error("unknown NWK command identifier {0:#04x}")]
-    UnknownId(u8),
-    #[error("could not parse the body of a {id:?} command")]
-    Body {
-        id: NwkCommandId,
-        #[source]
-        cause: abstract_bits::FromBytesError,
-    },
-}
-
-fn parse_body<T: AbstractBits>(id: NwkCommandId, body: &[u8]) -> Result<T, NwkCommandError> {
-    T::from_abstract_bits(body).map_err(|cause| NwkCommandError::Body { id, cause })
+    /// An undecodable command frame payload, kept verbatim (command id byte included).
+    Unparsed(FrameBytes),
 }
 
 impl NwkCommand {
-    pub const fn command_id(&self) -> NwkCommandId {
-        match self {
+    /// The command identifier, or `None` for an [`NwkCommand::Unparsed`] payload whose
+    /// leading byte is not a recognized command id.
+    pub fn command_id(&self) -> Option<NwkCommandId> {
+        Some(match self {
             Self::RouteRequest(_) => NwkCommandId::RouteRequest,
             Self::RouteReply(_) => NwkCommandId::RouteReply,
             Self::NetworkStatus(_) => NwkCommandId::NetworkStatus,
@@ -483,42 +472,50 @@ impl NwkCommand {
             Self::LinkPowerDelta(_) => NwkCommandId::LinkPowerDelta,
             Self::NetworkCommissioningRequest(_) => NwkCommandId::NetworkCommissioningRequest,
             Self::NetworkCommissioningResponse(_) => NwkCommandId::NetworkCommissioningResponse,
-        }
+            Self::Unparsed(raw) => {
+                return raw.first().and_then(|&b| NwkCommandId::try_from(b).ok());
+            }
+        })
     }
 
     /// Decode a NWK command frame payload (the command identifier byte followed by the
-    /// command body) into a typed command.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, NwkCommandError> {
-        let [id_byte, body @ ..] = bytes else {
-            return Err(NwkCommandError::Empty);
-        };
+    /// command body) into a typed command. An unknown id or a body that fails to parse
+    /// is preserved verbatim as [`NwkCommand::Unparsed`].
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self::try_parse(bytes).unwrap_or_else(|| {
+            Self::Unparsed(
+                FrameBytes::from_slice(bytes).expect("a NWK command payload is frame-bounded"),
+            )
+        })
+    }
 
-        let id =
-            NwkCommandId::try_from(*id_byte).map_err(|_| NwkCommandError::UnknownId(*id_byte))?;
+    fn try_parse(bytes: &[u8]) -> Option<Self> {
+        let (&id_byte, body) = bytes.split_first()?;
+        let id = NwkCommandId::try_from(id_byte).ok()?;
 
-        Ok(match id {
-            NwkCommandId::RouteRequest => Self::RouteRequest(parse_body(id, body)?),
-            NwkCommandId::RouteReply => Self::RouteReply(parse_body(id, body)?),
-            NwkCommandId::NetworkStatus => Self::NetworkStatus(parse_body(id, body)?),
-            NwkCommandId::Leave => Self::Leave(parse_body(id, body)?),
-            NwkCommandId::RouteRecord => Self::RouteRecord(parse_body(id, body)?),
-            NwkCommandId::RejoinRequest => Self::RejoinRequest(parse_body(id, body)?),
-            NwkCommandId::RejoinResponse => Self::RejoinResponse(parse_body(id, body)?),
-            NwkCommandId::LinkStatus => Self::LinkStatus(parse_body(id, body)?),
-            NwkCommandId::NetworkReport => Self::NetworkReport(parse_body(id, body)?),
-            NwkCommandId::NetworkUpdate => Self::NetworkUpdate(parse_body(id, body)?),
+        Some(match id {
+            NwkCommandId::RouteRequest => Self::RouteRequest(parse_body(body)?),
+            NwkCommandId::RouteReply => Self::RouteReply(parse_body(body)?),
+            NwkCommandId::NetworkStatus => Self::NetworkStatus(parse_body(body)?),
+            NwkCommandId::Leave => Self::Leave(parse_body(body)?),
+            NwkCommandId::RouteRecord => Self::RouteRecord(parse_body(body)?),
+            NwkCommandId::RejoinRequest => Self::RejoinRequest(parse_body(body)?),
+            NwkCommandId::RejoinResponse => Self::RejoinResponse(parse_body(body)?),
+            NwkCommandId::LinkStatus => Self::LinkStatus(parse_body(body)?),
+            NwkCommandId::NetworkReport => Self::NetworkReport(parse_body(body)?),
+            NwkCommandId::NetworkUpdate => Self::NetworkUpdate(parse_body(body)?),
             NwkCommandId::EndDeviceTimeoutRequest => {
-                Self::EndDeviceTimeoutRequest(parse_body(id, body)?)
+                Self::EndDeviceTimeoutRequest(parse_body(body)?)
             }
             NwkCommandId::EndDeviceTimeoutResponse => {
-                Self::EndDeviceTimeoutResponse(parse_body(id, body)?)
+                Self::EndDeviceTimeoutResponse(parse_body(body)?)
             }
-            NwkCommandId::LinkPowerDelta => Self::LinkPowerDelta(parse_body(id, body)?),
+            NwkCommandId::LinkPowerDelta => Self::LinkPowerDelta(parse_body(body)?),
             NwkCommandId::NetworkCommissioningRequest => {
-                Self::NetworkCommissioningRequest(parse_body(id, body)?)
+                Self::NetworkCommissioningRequest(parse_body(body)?)
             }
             NwkCommandId::NetworkCommissioningResponse => {
-                Self::NetworkCommissioningResponse(parse_body(id, body)?)
+                Self::NetworkCommissioningResponse(parse_body(body)?)
             }
         })
     }
@@ -526,29 +523,43 @@ impl NwkCommand {
     /// Encode the command into a NWK command frame payload: the command identifier byte
     /// followed by the command body.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![self.command_id() as u8];
-
-        let body = match self {
-            Self::RouteRequest(c) => c.to_abstract_bits(),
-            Self::RouteReply(c) => c.to_abstract_bits(),
-            Self::NetworkStatus(c) => c.to_abstract_bits(),
-            Self::Leave(c) => c.to_abstract_bits(),
-            Self::RouteRecord(c) => c.to_abstract_bits(),
-            Self::RejoinRequest(c) => c.to_abstract_bits(),
-            Self::RejoinResponse(c) => c.to_abstract_bits(),
-            Self::LinkStatus(c) => c.to_abstract_bits(),
-            Self::NetworkReport(c) => c.to_abstract_bits(),
-            Self::NetworkUpdate(c) => c.to_abstract_bits(),
-            Self::EndDeviceTimeoutRequest(c) => c.to_abstract_bits(),
-            Self::EndDeviceTimeoutResponse(c) => c.to_abstract_bits(),
-            Self::LinkPowerDelta(c) => c.to_abstract_bits(),
-            Self::NetworkCommissioningRequest(c) => c.to_abstract_bits(),
-            Self::NetworkCommissioningResponse(c) => c.to_abstract_bits(),
+        let (id, body) = match self {
+            Self::RouteRequest(c) => (NwkCommandId::RouteRequest, c.to_abstract_bits()),
+            Self::RouteReply(c) => (NwkCommandId::RouteReply, c.to_abstract_bits()),
+            Self::NetworkStatus(c) => (NwkCommandId::NetworkStatus, c.to_abstract_bits()),
+            Self::Leave(c) => (NwkCommandId::Leave, c.to_abstract_bits()),
+            Self::RouteRecord(c) => (NwkCommandId::RouteRecord, c.to_abstract_bits()),
+            Self::RejoinRequest(c) => (NwkCommandId::RejoinRequest, c.to_abstract_bits()),
+            Self::RejoinResponse(c) => (NwkCommandId::RejoinResponse, c.to_abstract_bits()),
+            Self::LinkStatus(c) => (NwkCommandId::LinkStatus, c.to_abstract_bits()),
+            Self::NetworkReport(c) => (NwkCommandId::NetworkReport, c.to_abstract_bits()),
+            Self::NetworkUpdate(c) => (NwkCommandId::NetworkUpdate, c.to_abstract_bits()),
+            Self::EndDeviceTimeoutRequest(c) => {
+                (NwkCommandId::EndDeviceTimeoutRequest, c.to_abstract_bits())
+            }
+            Self::EndDeviceTimeoutResponse(c) => {
+                (NwkCommandId::EndDeviceTimeoutResponse, c.to_abstract_bits())
+            }
+            Self::LinkPowerDelta(c) => (NwkCommandId::LinkPowerDelta, c.to_abstract_bits()),
+            Self::NetworkCommissioningRequest(c) => (
+                NwkCommandId::NetworkCommissioningRequest,
+                c.to_abstract_bits(),
+            ),
+            Self::NetworkCommissioningResponse(c) => (
+                NwkCommandId::NetworkCommissioningResponse,
+                c.to_abstract_bits(),
+            ),
+            Self::Unparsed(raw) => return raw.to_vec(),
         };
 
+        let mut bytes = vec![id as u8];
         bytes.extend(body.unwrap());
         bytes
     }
+}
+
+fn parse_body<T: AbstractBits>(body: &[u8]) -> Option<T> {
+    T::from_abstract_bits(body).ok()
 }
 
 #[cfg(test)]
@@ -574,7 +585,7 @@ mod test {
 
         let bytes = command.to_bytes();
         assert_eq!(bytes, vec![NwkCommandId::RejoinRequest as u8, 0x8E]);
-        assert_eq!(NwkCommand::from_bytes(&bytes).unwrap(), command);
+        assert_eq!(NwkCommand::from_bytes(&bytes), command);
     }
 
     #[test]
@@ -589,6 +600,34 @@ mod test {
             bytes,
             vec![NwkCommandId::RejoinResponse as u8, 0x34, 0x12, 0x00]
         );
-        assert_eq!(NwkCommand::from_bytes(&bytes).unwrap(), command);
+        assert_eq!(NwkCommand::from_bytes(&bytes), command);
+    }
+
+    /// An unknown command id is preserved verbatim so the frame can still be relayed.
+    #[test]
+    fn test_unknown_command_round_trips_as_unparsed() {
+        let bytes = vec![0xFF, 0x01, 0x02, 0x03];
+        let command = NwkCommand::from_bytes(&bytes);
+        assert_eq!(
+            command,
+            NwkCommand::Unparsed(FrameBytes::from_slice(&bytes).unwrap())
+        );
+        assert_eq!(command.command_id(), None);
+        assert_eq!(command.to_bytes(), bytes);
+    }
+
+    /// A recognized id with a truncated body is also preserved verbatim, while still
+    /// reporting its command id.
+    #[test]
+    fn test_malformed_body_round_trips_as_unparsed() {
+        // A rejoin response is 3 body bytes; one byte is too short to parse
+        let bytes = vec![NwkCommandId::RejoinResponse as u8, 0x34];
+        let command = NwkCommand::from_bytes(&bytes);
+        assert_eq!(
+            command,
+            NwkCommand::Unparsed(FrameBytes::from_slice(&bytes).unwrap())
+        );
+        assert_eq!(command.command_id(), Some(NwkCommandId::RejoinResponse));
+        assert_eq!(command.to_bytes(), bytes);
     }
 }
