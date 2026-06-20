@@ -549,12 +549,26 @@ pub enum ApsCommandFrameCommand {
     ConfirmKey(ApsConfirmKeyCommandFrame),
 }
 
+impl ApsCommandFrameCommand {
+    pub const fn command_id(&self) -> ApsCommandId {
+        match self {
+            Self::TransportKey(_) => ApsCommandId::TransportKey,
+            Self::UpdateDevice(_) => ApsCommandId::UpdateDevice,
+            Self::RemoveDevice(_) => ApsCommandId::RemoveDevice,
+            Self::RequestKey(_) => ApsCommandId::RequestKey,
+            Self::SwitchKey(_) => ApsCommandId::SwitchKey,
+            Self::Tunnel(_) => ApsCommandId::Tunnel,
+            Self::VerifyKey(_) => ApsCommandId::VerifyKey,
+            Self::ConfirmKey(_) => ApsCommandId::ConfirmKey,
+        }
+    }
+}
+
 // Main command frame struct
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApsCommandFrame {
     pub frame_control: ApsFrameControl,
     pub counter: u8,
-    pub command_id: ApsCommandId,
     pub command: ApsCommandFrameCommand,
 }
 
@@ -611,7 +625,6 @@ impl ApsCommandFrame {
         Ok(Self {
             frame_control,
             counter,
-            command_id,
             command,
         })
     }
@@ -619,7 +632,7 @@ impl ApsCommandFrame {
     /// The APS command identifier and command payload, i.e. the portion of the frame
     /// that is encrypted when APS security is applied.
     pub fn payload_to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![self.command_id as u8];
+        let mut bytes = vec![self.command.command_id() as u8];
 
         bytes.extend(match &self.command {
             ApsCommandFrameCommand::TransportKey(cmd) => cmd.to_bytes(),
@@ -1009,6 +1022,7 @@ impl EncryptedApsAckFrame {
     }
 }
 
+#[derive(Debug)]
 pub enum ApsFrame {
     Data(ApsDataFrame),
     EncryptedData(EncryptedApsDataFrame),
@@ -1144,7 +1158,6 @@ mod test {
                 extended_header: false,
             },
             counter: 5,
-            command_id: ApsCommandId::TransportKey,
             command: ApsCommandFrameCommand::TransportKey(ApsTransportKeyCommandFrame {
                 standard_key_type: ApsStandardKeyType::StandardNetworkKey,
                 key_descriptor: ApsTransportKeyDescriptor::NetworkKey(ApsNetworkKeyDescriptor {
@@ -1289,7 +1302,6 @@ mod test {
                 extended_header: false,
             },
             counter: 5,
-            command_id: ApsCommandId::TransportKey,
             command: ApsCommandFrameCommand::TransportKey(ApsTransportKeyCommandFrame {
                 standard_key_type: ApsStandardKeyType::StandardNetworkKey,
                 key_descriptor: ApsTransportKeyDescriptor::NetworkKey(ApsNetworkKeyDescriptor {
@@ -1327,7 +1339,6 @@ mod test {
                 extended_header: false,
             },
             counter: 12,
-            command_id: ApsCommandId::TransportKey,
             command: ApsCommandFrameCommand::TransportKey(ApsTransportKeyCommandFrame {
                 standard_key_type: ApsStandardKeyType::StandardNetworkKey,
                 key_descriptor: ApsTransportKeyDescriptor::NetworkKey(ApsNetworkKeyDescriptor {
@@ -1364,7 +1375,6 @@ mod test {
                 extended_header: false,
             },
             counter: 13,
-            command_id: ApsCommandId::Tunnel,
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: Eui64::from_hex("bc:02:6e:ff:fe:49:4a:31"),
                 tunneled_frame: FrameBytes::from_slice(&encrypted_inner.to_bytes()).unwrap(),
@@ -1400,7 +1410,6 @@ mod test {
                 extended_header: false,
             },
             counter: 3,
-            command_id: ApsCommandId::ConfirmKey,
             command: ApsCommandFrameCommand::ConfirmKey(ApsConfirmKeyCommandFrame {
                 status: APS_STATUS_SUCCESS,
                 standard_key_type: ApsStandardKeyType::TrustCenterLinkKey,
