@@ -916,19 +916,23 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     /// Program the radio with our network parameters. A radio reset wipes all of this,
     /// so it must be re-applied after every reset.
     async fn apply_radio_configuration(&self) -> Result<(), ZigbeeStackError> {
-        let table = {
+        let (channel, pan_id, table) = {
             let core = self.core();
-            core.mac
-                .indirect_queue
-                .queued_addresses(core.nib.address_map.map())
+            (
+                core.mac.channel,
+                core.mac.pan_id,
+                core.mac
+                    .indirect_queue
+                    .queued_addresses(core.nib.address_map.map()),
+            )
         };
 
         let config = RadioConfig {
-            channel: self.core().mac.channel,
+            channel,
             tx_power: self.config.tx_power,
             short_address: self.state.network_address,
             extended_address: self.state.ieee_address,
-            pan_id: self.core().mac.pan_id,
+            pan_id,
             promiscuous: self.state.hack_disable_tx,
             rx_on_when_idle: true,
             frame_pending_short: table.short_addresses.iter().copied().collect(),

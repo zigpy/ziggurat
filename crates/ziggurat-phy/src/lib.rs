@@ -4,7 +4,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
+pub use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 
 /// Transmit scheduling priority. Higher transmits first when the radio is contended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

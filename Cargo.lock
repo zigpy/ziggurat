@@ -1724,6 +1724,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ziggurat-radio-sim"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "ziggurat-phy",
+]
+
+[[package]]
 name = "ziggurat-radio-spinel"
 version = "0.1.0"
 dependencies = [
@@ -1752,6 +1761,18 @@ dependencies = [
  "ziggurat-radio-spinel",
  "ziggurat-spinel",
  "ziggurat-zigbee",
+]
+
+[[package]]
+name = "ziggurat-sim-server"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ziggurat-driver",
+ "ziggurat-radio-sim",
 ]
 
 [[package]]

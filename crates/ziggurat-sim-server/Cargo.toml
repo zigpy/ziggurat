@@ -1,0 +1,25 @@
+[package]
+name = "ziggurat-sim-server"
+version.workspace = true
+description = "Virtual 802.15.4 radio medium: fans transmitted frames out to nodes on the same channel"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ziggurat-radio-sim.workspace = true
+
+parking_lot = "0.12.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "net", "sync", "io-util", "macros"] }
+
+[dev-dependencies]
+ziggurat-driver.workspace = true
+ziggurat-radio-sim.workspace = true
+
+[[bin]]
+name = "ziggurat-sim-server"
+path = "src/bin/server.rs"
