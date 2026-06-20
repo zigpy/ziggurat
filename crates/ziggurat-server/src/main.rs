@@ -17,7 +17,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, TclkSeed, Tunables,
+    ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
     WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -119,8 +119,27 @@ struct KeyTableEntry {
     key: Key,
 }
 
+#[derive(Deserialize, Debug, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum NodeRole {
+    #[default]
+    Coordinator,
+    Router,
+}
+
+impl From<NodeRole> for NwkDeviceType {
+    fn from(role: NodeRole) -> Self {
+        match role {
+            NodeRole::Coordinator => Self::Coordinator,
+            NodeRole::Router => Self::Router,
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 struct ConfigureRequest {
+    #[serde(default)]
+    role: NodeRole,
     channel: u8,
     nwk_update_id: u8,
     pan_id: PanId,
@@ -573,6 +592,7 @@ impl ZigguratServer {
         let (stack, mut stack_notification_rx) = ZigbeeStack::new(
             spinel,
             NetworkConfig {
+                role: request.role.into(),
                 channel: request.channel,
                 update_id: request.nwk_update_id,
                 pan_id: request.pan_id,

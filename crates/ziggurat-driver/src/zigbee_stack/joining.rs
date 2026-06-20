@@ -513,13 +513,21 @@ impl ZigbeeStack {
                 tracing::warn!("Ignoring transport key from {source:?}: {cmd:?}");
             }
             ApsCommandFrameCommand::UpdateDevice(cmd) => {
-                self.handle_update_device(nwk_frame, cmd, aps_source_ieee.is_some());
+                if self.state.role == NwkDeviceType::Coordinator {
+                    self.handle_update_device(nwk_frame, cmd, aps_source_ieee.is_some());
+                } else {
+                    tracing::debug!("Ignoring update-device from {source:?}: not the trust center");
+                }
             }
             ApsCommandFrameCommand::RemoveDevice(cmd) => {
                 tracing::warn!("Remove device from {source:?} is not yet handled: {cmd:?}");
             }
             ApsCommandFrameCommand::RequestKey(cmd) => {
-                self.handle_request_key(nwk_frame, command_frame, cmd, aps_source_ieee);
+                if self.state.role == NwkDeviceType::Coordinator {
+                    self.handle_request_key(nwk_frame, command_frame, cmd, aps_source_ieee);
+                } else {
+                    tracing::debug!("Ignoring request-key from {source:?}: not the trust center");
+                }
             }
             ApsCommandFrameCommand::SwitchKey(cmd) => {
                 tracing::warn!("Ignoring switch key from {source:?}: {cmd:?}");
@@ -528,7 +536,11 @@ impl ZigbeeStack {
                 tracing::warn!("Tunnel command from {source:?} is not yet handled: {cmd:?}");
             }
             ApsCommandFrameCommand::VerifyKey(cmd) => {
-                self.handle_verify_key(nwk_frame, cmd);
+                if self.state.role == NwkDeviceType::Coordinator {
+                    self.handle_verify_key(nwk_frame, cmd);
+                } else {
+                    tracing::debug!("Ignoring verify-key from {source:?}: not the trust center");
+                }
             }
             ApsCommandFrameCommand::ConfirmKey(cmd) => {
                 tracing::warn!("Ignoring confirm key from {source:?}: {cmd:?}");

@@ -13,7 +13,7 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
-use super::{PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
+use super::{NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
 
 impl ZigbeeStack {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
@@ -29,10 +29,14 @@ impl ZigbeeStack {
             ziggurat_ieee_802154::Ieee802154CommandPayload::AssociationRequest(
                 ieee802154_association_request_command,
             ) => {
-                self.process_802154_association_request(
-                    command_frame,
-                    ieee802154_association_request_command,
-                );
+                if self.state.role == NwkDeviceType::Coordinator {
+                    self.process_802154_association_request(
+                        command_frame,
+                        ieee802154_association_request_command,
+                    );
+                } else {
+                    tracing::debug!("Ignoring association request: not the coordinator");
+                }
             }
             ziggurat_ieee_802154::Ieee802154CommandPayload::DataRequest(_) => {
                 self.handle_data_request(command_frame);
@@ -86,7 +90,7 @@ impl ZigbeeStack {
                 final_cap_slot: 15,
                 battery_extension: false,
                 reserved1: 0,
-                pan_coordinator: self.state.network_address == Nwk(0x0000),
+                pan_coordinator: self.state.role == NwkDeviceType::Coordinator,
                 association_permit: permitting_joins,
             },
             beacon_payload: ZigbeeBeacon {
