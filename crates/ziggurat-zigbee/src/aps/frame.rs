@@ -1022,6 +1022,7 @@ impl EncryptedApsAckFrame {
     }
 }
 
+#[derive(Debug)]
 pub enum ApsFrame {
     Data(ApsDataFrame),
     EncryptedData(EncryptedApsDataFrame),
