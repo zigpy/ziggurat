@@ -9,6 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ziggurat-ieee-802154.workspace = true
 ziggurat-radio-sim.workspace = true
 
 parking_lot = "0.12.4"

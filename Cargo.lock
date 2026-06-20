@@ -1773,6 +1773,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ziggurat-driver",
+ "ziggurat-ieee-802154",
  "ziggurat-radio-sim",
 ]
 

@@ -12,8 +12,9 @@ pub struct Position {
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeMsg {
     SetPosition(Position),
+    SetAddresses { short: u16, extended: [u8; 8] },
     Listen { channel: u8 },
-    Transmit { channel: u8, psdu: Vec<u8> },
+    Transmit { id: u32, channel: u8, psdu: Vec<u8> },
 }
 
 /// A message from the medium server to a node.
@@ -26,22 +27,30 @@ pub enum HubMsg {
         lqi: u8,
         psdu: Vec<u8>,
     },
+    /// The MAC-level outcome of the transmit with this id: `acked` for a unicast whose
+    /// addressed next hop received it, always true for a broadcast.
+    TxResult { id: u32, acked: bool },
 }
 
 impl NodeMsg {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Self::SetPosition(position) => {
-                let mut out = Vec::with_capacity(9);
-                out.push(0);
+                let mut out = vec![0];
                 out.extend_from_slice(&position.x.to_le_bytes());
                 out.extend_from_slice(&position.y.to_le_bytes());
                 out
             }
-            Self::Listen { channel } => vec![1, *channel],
-            Self::Transmit { channel, psdu } => {
-                let mut out = Vec::with_capacity(2 + psdu.len());
-                out.push(2);
+            Self::SetAddresses { short, extended } => {
+                let mut out = vec![1];
+                out.extend_from_slice(&short.to_le_bytes());
+                out.extend_from_slice(extended);
+                out
+            }
+            Self::Listen { channel } => vec![2, *channel],
+            Self::Transmit { id, channel, psdu } => {
+                let mut out = vec![3];
+                out.extend_from_slice(&id.to_le_bytes());
                 out.push(*channel);
                 out.extend_from_slice(psdu);
                 out
@@ -55,8 +64,13 @@ impl NodeMsg {
                 x: f32::from_le_bytes(rest[0..4].try_into().ok()?),
                 y: f32::from_le_bytes(rest[4..8].try_into().ok()?),
             })),
-            (1, [channel]) => Some(Self::Listen { channel: *channel }),
-            (2, [channel, psdu @ ..]) => Some(Self::Transmit {
+            (1, rest) if rest.len() == 10 => Some(Self::SetAddresses {
+                short: u16::from_le_bytes(rest[0..2].try_into().ok()?),
+                extended: rest[2..10].try_into().ok()?,
+            }),
+            (2, [channel]) => Some(Self::Listen { channel: *channel }),
+            (3, [a, b, c, d, channel, psdu @ ..]) => Some(Self::Transmit {
+                id: u32::from_le_bytes([*a, *b, *c, *d]),
                 channel: *channel,
                 psdu: psdu.to_vec(),
             }),
@@ -74,23 +88,30 @@ impl HubMsg {
                 lqi,
                 psdu,
             } => {
-                let mut out = Vec::with_capacity(3 + psdu.len());
-                out.push(*channel);
-                out.push(*rssi as u8);
-                out.push(*lqi);
+                let mut out = vec![0, *channel, *rssi as u8, *lqi];
                 out.extend_from_slice(psdu);
+                out
+            }
+            Self::TxResult { id, acked } => {
+                let mut out = vec![1];
+                out.extend_from_slice(&id.to_le_bytes());
+                out.push(u8::from(*acked));
                 out
             }
         }
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        match bytes {
-            [channel, rssi, lqi, psdu @ ..] => Some(Self::Frame {
+        match bytes.split_first()? {
+            (0, [channel, rssi, lqi, psdu @ ..]) => Some(Self::Frame {
                 channel: *channel,
                 rssi: *rssi as i8,
                 lqi: *lqi,
                 psdu: psdu.to_vec(),
+            }),
+            (1, [a, b, c, d, acked]) => Some(Self::TxResult {
+                id: u32::from_le_bytes([*a, *b, *c, *d]),
+                acked: *acked != 0,
             }),
             _ => None,
         }

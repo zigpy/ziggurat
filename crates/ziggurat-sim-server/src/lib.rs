@@ -6,6 +6,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 use ziggurat_radio_sim::proto::{HubMsg, NodeMsg, Position, read_frame, write_frame};
 
 const TX_POWER_DBM: f32 = 8.0;
@@ -36,10 +37,32 @@ fn reception_probability(rssi: i8) -> f32 {
 struct Node {
     channel: Option<u8>,
     position: Option<Position>,
+    short: Option<u16>,
+    extended: Option<[u8; 8]>,
     outbound: mpsc::Sender<HubMsg>,
 }
 
+impl Node {
+    fn is_addressed_by(&self, dest: Option<Ieee802154Address>) -> bool {
+        match dest {
+            Some(Ieee802154Address::Nwk(nwk)) => self.short == Some(nwk.0),
+            Some(Ieee802154Address::Eui64(eui64)) => self.extended == Some(eui64.0),
+            None => false,
+        }
+    }
+}
+
 type Medium = Arc<Mutex<HashMap<u64, Node>>>;
+
+/// A candidate receiver gathered for one transmit: its channel, position, and whether
+/// the frame's MAC destination addresses it.
+type Recipient = (mpsc::Sender<HubMsg>, Position, bool);
+
+/// Whether a frame survives the link: in range and not lost to noise this attempt.
+fn delivered(source: Position, destination: Position) -> Option<(i8, u8)> {
+    let (rssi, lqi) = link_quality(source, destination)?;
+    (rand::random::<f32>() < reception_probability(rssi)).then_some((rssi, lqi))
+}
 
 /// Serve the medium until the listener errors. Each accepted node runs independently.
 pub async fn serve(listener: TcpListener) -> std::io::Result<()> {
@@ -54,6 +77,7 @@ pub async fn serve(listener: TcpListener) -> std::io::Result<()> {
     }
 }
 
+#[allow(clippy::significant_drop_tightening)]
 async fn handle_node(id: u64, stream: TcpStream, medium: Medium) {
     let (mut read_half, mut write_half) = stream.into_split();
 
@@ -66,11 +90,14 @@ async fn handle_node(id: u64, stream: TcpStream, medium: Medium) {
         }
     });
 
+    let reply_to = outbound.clone();
     medium.lock().insert(
         id,
         Node {
             channel: None,
             position: None,
+            short: None,
+            extended: None,
             outbound,
         },
     );
@@ -85,40 +112,97 @@ async fn handle_node(id: u64, stream: TcpStream, medium: Medium) {
                     node.position = Some(position);
                 }
             }
+            NodeMsg::SetAddresses { short, extended } => {
+                if let Some(node) = medium.lock().get_mut(&id) {
+                    node.short = Some(short);
+                    node.extended = Some(extended);
+                }
+            }
             NodeMsg::Listen { channel } => {
                 if let Some(node) = medium.lock().get_mut(&id) {
                     node.channel = Some(channel);
                 }
             }
-            NodeMsg::Transmit { channel, psdu } => {
-                let recipients: Vec<(mpsc::Sender<HubMsg>, (i8, u8))> = {
-                    let medium = medium.lock();
-                    let Some(source) = medium.get(&id).and_then(|node| node.position) else {
-                        continue;
-                    };
-                    medium
-                        .iter()
-                        .filter(|(other, node)| **other != id && node.channel == Some(channel))
-                        .filter_map(|(_, node)| Some((node.outbound.clone(), node.position?)))
-                        .filter_map(|(tx, position)| {
-                            link_quality(source, position).map(|link| (tx, link))
-                        })
-                        .collect()
-                };
-
-                for (outbound, (rssi, lqi)) in recipients {
-                    if rand::random::<f32>() >= reception_probability(rssi) {
-                        continue;
-                    }
-                    let _ = outbound
-                        .send(HubMsg::Frame {
-                            channel,
-                            rssi,
-                            lqi,
-                            psdu: psdu.clone(),
+            NodeMsg::Transmit {
+                id: tx_id,
+                channel,
+                psdu,
+            } => {
+                let Ok(frame) = Ieee802154Frame::from_bytes_without_fcs(&psdu) else {
+                    let _ = reply_to
+                        .send(HubMsg::TxResult {
+                            id: tx_id,
+                            acked: false,
                         })
                         .await;
-                }
+                    continue;
+                };
+                let ack_request = frame.header().frame_control.ack_request;
+                let dest = frame.header().dest_address;
+
+                let (source, recipients) = {
+                    let medium = medium.lock();
+                    let source = medium.get(&id).and_then(|node| node.position);
+                    let recipients: Vec<Recipient> = medium
+                        .iter()
+                        .filter(|(other, node)| **other != id && node.channel == Some(channel))
+                        .filter_map(|(_, node)| {
+                            Some((
+                                node.outbound.clone(),
+                                node.position?,
+                                node.is_addressed_by(dest),
+                            ))
+                        })
+                        .collect();
+                    (source, recipients)
+                };
+                let Some(source) = source else {
+                    let _ = reply_to
+                        .send(HubMsg::TxResult {
+                            id: tx_id,
+                            acked: false,
+                        })
+                        .await;
+                    continue;
+                };
+
+                // A unicast is acked only if its addressed next hop receives it; a
+                // broadcast reaches every in-range listener and is never acked.
+                let acked = if ack_request {
+                    match recipients.into_iter().find(|(_, _, addressed)| *addressed) {
+                        Some((outbound, position, _)) => match delivered(source, position) {
+                            Some((rssi, lqi)) => {
+                                let _ = outbound
+                                    .send(HubMsg::Frame {
+                                        channel,
+                                        rssi,
+                                        lqi,
+                                        psdu,
+                                    })
+                                    .await;
+                                true
+                            }
+                            None => false,
+                        },
+                        None => false,
+                    }
+                } else {
+                    for (outbound, position, _) in recipients {
+                        if let Some((rssi, lqi)) = delivered(source, position) {
+                            let _ = outbound
+                                .send(HubMsg::Frame {
+                                    channel,
+                                    rssi,
+                                    lqi,
+                                    psdu: psdu.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    true
+                };
+
+                let _ = reply_to.send(HubMsg::TxResult { id: tx_id, acked }).await;
             }
         }
     }

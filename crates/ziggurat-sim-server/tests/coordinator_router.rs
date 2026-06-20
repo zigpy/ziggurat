@@ -6,12 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{sleep, timeout};
 use ziggurat_driver::zigbee_stack::{
-    NetworkConfig, NwkDeviceType, Tunables, WELL_KNOWN_LINK_KEY, ZigbeeStack,
+    ApsAck, NetworkConfig, NwkDeviceType, Tunables, TxPriority, WELL_KNOWN_LINK_KEY,
+    ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
+use ziggurat_driver::ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat_radio_sim::SimPhy;
 use ziggurat_radio_sim::proto::Position;
 use ziggurat_sim_server::serve;
@@ -37,18 +39,28 @@ fn config(role: NwkDeviceType, network_address: Nwk, ieee_address: Eui64) -> Net
     }
 }
 
+const fn fast_tunables() -> Tunables {
+    Tunables {
+        link_status_period: Duration::from_millis(200),
+        ..Tunables::new()
+    }
+}
+
 async fn spawn_stack(
     addr: std::net::SocketAddr,
     position: Position,
     config: NetworkConfig,
-) -> Arc<ZigbeeStack<SimPhy>> {
+) -> (
+    Arc<ZigbeeStack<SimPhy>>,
+    broadcast::Receiver<ZigbeeNotification>,
+) {
     let phy = Arc::new(SimPhy::connect(addr, position).await.unwrap());
-    let (stack, _notifications) = ZigbeeStack::new(phy, config, Tunables::new());
+    let (stack, notifications) = ZigbeeStack::new(phy, config, fast_tunables());
     stack.start_network().await.unwrap();
 
     let run_handle = Arc::clone(&stack);
     stack.spawn_tracked(async move { run_handle.run().await });
-    stack
+    (stack, notifications)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -57,13 +69,13 @@ async fn router_hears_coordinator_beacon() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { serve(listener).await });
 
-    let _coordinator = spawn_stack(
+    let (_coordinator, _) = spawn_stack(
         addr,
         Position { x: 0.0, y: 0.0 },
         config(NwkDeviceType::Coordinator, Nwk(0x0000), Eui64([1; 8])),
     )
     .await;
-    let router = spawn_stack(
+    let (router, _) = spawn_stack(
         addr,
         Position { x: 10.0, y: 0.0 },
         config(NwkDeviceType::Router, Nwk(0x1234), Eui64([2; 8])),
@@ -93,13 +105,13 @@ async fn router_out_of_range_hears_nothing() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { serve(listener).await });
 
-    let _coordinator = spawn_stack(
+    let (_coordinator, _) = spawn_stack(
         addr,
         Position { x: 0.0, y: 0.0 },
         config(NwkDeviceType::Coordinator, Nwk(0x0000), Eui64([1; 8])),
     )
     .await;
-    let router = spawn_stack(
+    let (router, _) = spawn_stack(
         addr,
         Position { x: 500.0, y: 0.0 },
         config(NwkDeviceType::Router, Nwk(0x1234), Eui64([2; 8])),
@@ -115,4 +127,72 @@ async fn router_out_of_range_hears_nothing() {
         .unwrap();
 
     assert!(found_rx.recv().await.is_none());
+}
+
+// Coordinator (0,0), relay (60,0), far node (130,0): the far node is out of the
+// coordinator's direct range, so an APS unicast to it must be relayed via the middle
+// router. Proves MAC-ack-driven routing across a multi-hop topology.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multi_hop_unicast_relays_to_far_node() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { serve(listener).await });
+
+    let (coordinator, _) = spawn_stack(
+        addr,
+        Position { x: 0.0, y: 0.0 },
+        config(NwkDeviceType::Coordinator, Nwk(0x0000), Eui64([1; 8])),
+    )
+    .await;
+    let (_relay, _) = spawn_stack(
+        addr,
+        Position { x: 60.0, y: 0.0 },
+        config(NwkDeviceType::Router, Nwk(0x0001), Eui64([2; 8])),
+    )
+    .await;
+    let (_far, mut far_events) = spawn_stack(
+        addr,
+        Position { x: 130.0, y: 0.0 },
+        config(NwkDeviceType::Router, Nwk(0x0002), Eui64([3; 8])),
+    )
+    .await;
+
+    // Let several link-status rounds establish bidirectional neighbor costs.
+    sleep(Duration::from_secs(2)).await;
+
+    coordinator
+        .send_aps_command(
+            ApsDeliveryMode::Unicast,
+            Nwk(0x0002),
+            0x0104,
+            0x0006,
+            1,
+            1,
+            ApsAck::None,
+            30,
+            0,
+            vec![0xab, 0xcd],
+            None,
+            TxPriority::USER_NORMAL,
+        )
+        .await
+        .unwrap();
+
+    let received = timeout(Duration::from_secs(5), async {
+        loop {
+            match far_events.recv().await {
+                Ok(ZigbeeNotification::ReceivedApsCommand { source, data, .. }) => {
+                    return (source, data);
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => panic!("notifications closed"),
+            }
+        }
+    })
+    .await
+    .expect("far node did not receive the relayed APS frame");
+
+    assert_eq!(received.0, Nwk(0x0000));
+    assert_eq!(received.1, vec![0xab, 0xcd]);
 }
