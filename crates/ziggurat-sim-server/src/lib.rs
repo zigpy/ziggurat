@@ -12,6 +12,8 @@ const TX_POWER_DBM: f32 = 8.0;
 const REFERENCE_LOSS_DBM: f32 = 40.0;
 const PATH_LOSS_EXPONENT: f32 = 3.0;
 const RX_SENSITIVITY_DBM: f32 = -95.0;
+/// dB above sensitivity at which the noise-driven reception probability crosses 50%.
+const NOISE_TRANSITION_DB: f32 = 5.0;
 
 /// Log-distance path loss: `Some((rssi, lqi))` if `rx` is in range of `tx`, else `None`.
 fn link_quality(tx: Position, rx: Position) -> Option<(i8, u8)> {
@@ -23,6 +25,12 @@ fn link_quality(tx: Position, rx: Position) -> Option<(i8, u8)> {
     }
     let lqi = ((rssi - RX_SENSITIVITY_DBM) / -RX_SENSITIVITY_DBM).clamp(0.0, 1.0) * 255.0;
     Some((rssi.clamp(-128.0, 0.0) as i8, lqi as u8))
+}
+
+/// Logistic packet reception rate: marginal links drop frames, strong links don't.
+fn reception_probability(rssi: i8) -> f32 {
+    let margin = f32::from(rssi) - RX_SENSITIVITY_DBM - NOISE_TRANSITION_DB;
+    1.0 / (1.0 + (-margin).exp())
 }
 
 struct Node {
@@ -99,6 +107,9 @@ async fn handle_node(id: u64, stream: TcpStream, medium: Medium) {
                 };
 
                 for (outbound, (rssi, lqi)) in recipients {
+                    if rand::random::<f32>() >= reception_probability(rssi) {
+                        continue;
+                    }
                     let _ = outbound
                         .send(HubMsg::Frame {
                             channel,

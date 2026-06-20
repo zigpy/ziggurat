@@ -1768,6 +1768,7 @@ name = "ziggurat-sim-server"
 version = "0.1.0"
 dependencies = [
  "parking_lot",
+ "rand 0.10.1",
  "tokio",
  "tracing",
  "tracing-subscriber",
