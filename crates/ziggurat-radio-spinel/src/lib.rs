@@ -29,22 +29,12 @@ const ENERGY_SCAN_RESULT_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct SpinelPhy {
     client: Arc<SpinelClient>,
     home_channel: Mutex<u8>,
-    sinks: Mutex<Sinks>,
+    rx_sink: Sink<RxFrame>,
+    reset_sink: Sink<ResetEvent>,
     energy_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
-    inbound: Mutex<Option<Inbound>>,
 }
 
-#[derive(Default)]
-struct Sinks {
-    rx: Option<mpsc::Sender<RxFrame>>,
-    reset: Option<mpsc::Sender<ResetEvent>>,
-}
-
-/// The RCP receivers consumed once by [`RadioPhy::start`] to drive the forward tasks.
-struct Inbound {
-    raw: mpsc::Receiver<SpinelFramePropValueIs>,
-    reset: mpsc::Receiver<SpinelStatus>,
-}
+type Sink<T> = Arc<Mutex<Option<mpsc::Sender<T>>>>;
 
 impl SpinelPhy {
     pub fn new(client: Arc<SpinelClient>) -> Self {
@@ -55,18 +45,64 @@ impl SpinelPhy {
         client.set_property_update_receiver(SpinelPropertyId::StreamRaw, raw_tx);
         client.set_property_update_receiver(SpinelPropertyId::MacEnergyScanResult, energy_tx);
         client.set_reset_notification_receiver(reset_tx);
+        client.spawn_reader();
+
+        let rx_sink: Sink<RxFrame> = Arc::new(Mutex::new(None));
+        let reset_sink: Sink<ResetEvent> = Arc::new(Mutex::new(None));
+        spawn_rx_forwarder(raw_rx, Arc::clone(&rx_sink));
+        spawn_reset_forwarder(reset_rx, Arc::clone(&reset_sink));
 
         Self {
             client,
             home_channel: Mutex::new(11),
-            sinks: Mutex::new(Sinks::default()),
+            rx_sink,
+            reset_sink,
             energy_rx: AsyncMutex::new(energy_rx),
-            inbound: Mutex::new(Some(Inbound {
-                raw: raw_rx,
-                reset: reset_rx,
-            })),
         }
     }
+
+    /// The radio's factory-programmed EUI64, readable before any network is configured.
+    pub async fn hw_address(&self) -> Result<Eui64, RadioError> {
+        self.client.get_hw_address().await.map_err(map_err)
+    }
+}
+
+fn spawn_rx_forwarder(mut raw: mpsc::Receiver<SpinelFramePropValueIs>, sink: Sink<RxFrame>) {
+    tokio::spawn(async move {
+        while let Some(update) = raw.recv().await {
+            let Ok(frame) = SpinelRxFrame::from_bytes(&update.value) else {
+                continue;
+            };
+            if frame.psdu.len() < 2 {
+                continue;
+            }
+            let rx = RxFrame {
+                psdu: frame.psdu[..frame.psdu.len() - 2].to_vec(),
+                channel: frame.channel,
+                rssi: frame.rssi,
+                lqi: frame.lqi,
+                timestamp_us: frame.timestamp_us,
+            };
+            let current = sink.lock().clone();
+            if let Some(current) = current {
+                let _ = current.send(rx).await;
+            }
+        }
+    });
+}
+
+fn spawn_reset_forwarder(mut reset: mpsc::Receiver<SpinelStatus>, sink: Sink<ResetEvent>) {
+    tokio::spawn(async move {
+        while let Some(status) = reset.recv().await {
+            let event = ResetEvent {
+                reason: format!("{status:?}"),
+            };
+            let current = sink.lock().clone();
+            if let Some(current) = current {
+                let _ = current.send(event).await;
+            }
+        }
+    });
 }
 
 fn map_err(err: SpinelError) -> RadioError {
@@ -334,50 +370,10 @@ impl RadioPhy for SpinelPhy {
     }
 
     fn set_rx_sink(&self, sink: mpsc::Sender<RxFrame>) {
-        self.sinks.lock().rx = Some(sink);
+        *self.rx_sink.lock() = Some(sink);
     }
 
     fn set_reset_sink(&self, sink: mpsc::Sender<ResetEvent>) {
-        self.sinks.lock().reset = Some(sink);
-    }
-
-    fn start(&self) {
-        let Inbound { mut raw, mut reset } =
-            self.inbound.lock().take().expect("start called twice");
-
-        let rx_sink = self.sinks.lock().rx.clone().expect("rx sink not set");
-        tokio::spawn(async move {
-            while let Some(update) = raw.recv().await {
-                let Ok(frame) = SpinelRxFrame::from_bytes(&update.value) else {
-                    continue;
-                };
-                if frame.psdu.len() < 2 {
-                    continue;
-                }
-                let psdu = frame.psdu[..frame.psdu.len() - 2].to_vec();
-                let rx = RxFrame {
-                    psdu,
-                    channel: frame.channel,
-                    rssi: frame.rssi,
-                    lqi: frame.lqi,
-                    timestamp_us: frame.timestamp_us,
-                };
-                if rx_sink.send(rx).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let reset_sink = self.sinks.lock().reset.clone().expect("reset sink not set");
-        tokio::spawn(async move {
-            while let Some(status) = reset.recv().await {
-                let event = ResetEvent {
-                    reason: format!("{status:?}"),
-                };
-                if reset_sink.send(event).await.is_err() {
-                    break;
-                }
-            }
-        });
+        *self.reset_sink.lock() = Some(sink);
     }
 }

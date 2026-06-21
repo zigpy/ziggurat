@@ -816,7 +816,6 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     }
 
     pub async fn start_network(&self) -> Result<(), ZigbeeStackError> {
-        self.radio.start();
         self.reset_radio().await?;
         self.apply_radio_configuration().await?;
 

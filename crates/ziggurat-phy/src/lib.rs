@@ -125,12 +125,9 @@ pub trait RadioPhy: Send + Sync + 'static {
         dwell: Duration,
     ) -> impl Future<Output = Result<(), RadioError>> + Send;
 
-    /// Where received frames are delivered; set before [`RadioPhy::start`].
+    /// Where received frames are delivered.
     fn set_rx_sink(&self, sink: mpsc::Sender<RxFrame>);
 
     /// Where spontaneous reset notifications are delivered.
     fn set_reset_sink(&self, sink: mpsc::Sender<ResetEvent>);
-
-    /// Begin receiving and delivering frames to the sink.
-    fn start(&self);
 }
