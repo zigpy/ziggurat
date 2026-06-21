@@ -5,7 +5,7 @@ use crate::ziggurat_ieee_802154::{
 use tokio::time::{Instant, timeout_at};
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_spinel::client::TxPriority;
+use ziggurat_phy::{RadioPhy, TxPriority};
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
     NwkNetworkStatusCommand,
@@ -23,7 +23,7 @@ use super::{
     ZigbeeStackError,
 };
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
         let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
 
@@ -453,11 +453,11 @@ impl ZigbeeStack {
 
     /// Wrap an encrypted NWK payload in a unicast 802.15.4 data frame. The sequence
     /// number is assigned at transmit time.
-    fn build_unicast_802154_data_frame<P>(
+    fn build_unicast_802154_data_frame<Payload>(
         &self,
         next_hop_address: Nwk,
-        payload: P,
-    ) -> Ieee802154Frame<P> {
+        payload: Payload,
+    ) -> Ieee802154Frame<Payload> {
         let (ieee802154_sequence_number, pan_id) = {
             let core = self.core();
             (core.mac.ieee802154_sequence_number, core.mac.pan_id)

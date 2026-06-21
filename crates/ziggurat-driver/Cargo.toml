@@ -10,7 +10,7 @@ repository.workspace = true
 
 [dependencies]
 ziggurat-ieee-802154.workspace = true
-ziggurat-spinel.workspace = true
+ziggurat-phy.workspace = true
 ziggurat-zigbee.workspace = true
 
 abstract-bits = "0.2.0"

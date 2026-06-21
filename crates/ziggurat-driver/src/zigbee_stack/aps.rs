@@ -10,14 +10,14 @@ use std::cmp;
 use std::collections::hash_map::Entry;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
-use ziggurat_spinel::client::TxPriority;
+use ziggurat_phy::{RadioPhy, TxPriority};
 
 use super::{
     ApsAck, ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, ZigbeeStack,
     ZigbeeStackError,
 };
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     /// The EUI64 an inbound secured APS frame was encrypted by: the auxiliary header's
     /// extended source when present, otherwise resolved from the NWK frame (spec
     /// 4.4.1.2 step 2).

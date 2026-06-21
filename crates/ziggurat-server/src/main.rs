@@ -18,10 +18,11 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
-    WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
-use ziggurat_spinel::client::{SpinelClient, TxPriority};
+use ziggurat_phy_spinel::SpinelPhy;
+use ziggurat_spinel::client::SpinelClient;
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -311,11 +312,11 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
 
 pub struct ZigguratServer {
     serial: SerialConfig,
-    /// The Spinel client owns the serial port for the lifetime of the process: it is
+    /// The radio transport owns the serial port for the lifetime of the process: it is
     /// opened lazily by the first command that needs it and never reopened, so stack
     /// replacement cannot race a straggling port handle (`EBUSY`)
-    spinel: Mutex<Option<Arc<SpinelClient>>>,
-    stack: Mutex<Option<Arc<ZigbeeStack>>>,
+    phy: Mutex<Option<Arc<SpinelPhy>>>,
+    stack: Mutex<Option<Arc<ZigbeeStack<SpinelPhy>>>>,
     /// The server-level notification hub: connections subscribe to it, and it
     /// survives stack replacement (the forwarder task is swapped instead)
     notification_tx: broadcast::Sender<ZigbeeNotification>,
@@ -330,7 +331,7 @@ impl ZigguratServer {
 
         Self {
             serial,
-            spinel: Mutex::new(None),
+            phy: Mutex::new(None),
             stack: Mutex::new(None),
             notification_tx,
             notification_forwarder: Mutex::new(None),
@@ -388,16 +389,16 @@ impl ZigguratServer {
         });
     }
 
-    fn current_stack(&self) -> Option<Arc<ZigbeeStack>> {
+    fn current_stack(&self) -> Option<Arc<ZigbeeStack<SpinelPhy>>> {
         self.stack.lock().unwrap().clone()
     }
 
-    /// The process-lifetime Spinel client, opening the serial port on first use.
-    fn spinel_client(&self) -> Result<Arc<SpinelClient>, tokio_serial::Error> {
-        let mut spinel = self.spinel.lock().unwrap();
+    /// The process-lifetime radio transport, opening the serial port on first use.
+    fn phy(&self) -> Result<Arc<SpinelPhy>, tokio_serial::Error> {
+        let mut phy = self.phy.lock().unwrap();
 
-        if let Some(spinel) = &*spinel {
-            return Ok(spinel.clone());
+        if let Some(phy) = &*phy {
+            return Ok(phy.clone());
         }
 
         // Without flow control the RCP's UART drops bytes under load, corrupting
@@ -406,12 +407,11 @@ impl ZigguratServer {
             .flow_control(self.serial.flow_control.into())
             .open_native_async()?;
 
-        let client = Arc::new(SpinelClient::new(port));
-        client.spawn_reader();
-        *spinel = Some(client.clone());
-        drop(spinel);
+        let new_phy = Arc::new(SpinelPhy::new(Arc::new(SpinelClient::new(port))));
+        *phy = Some(new_phy.clone());
+        drop(phy);
 
-        Ok(client)
+        Ok(new_phy)
     }
 
     async fn handle_connection<S>(
@@ -584,13 +584,13 @@ impl ZigguratServer {
         }
 
         tracing::info!("Initializing Zigbee stack with new settings...");
-        let spinel = match self.spinel_client() {
-            Ok(s) => s,
+        let phy = match self.phy() {
+            Ok(p) => p,
             Err(e) => return error_response(id, "serial_port_error", e),
         };
 
         let (stack, mut stack_notification_rx) = ZigbeeStack::new(
-            spinel,
+            phy,
             NetworkConfig {
                 role: request.role.into(),
                 channel: request.channel,
@@ -738,12 +738,12 @@ impl ZigguratServer {
     /// Reads the radio's factory-programmed EUI64, which a client needs before it can
     /// form a network with `configure`.
     async fn handle_get_hw_address(&self, id: u64) -> serde_json::Value {
-        let spinel = match self.spinel_client() {
-            Ok(s) => s,
+        let phy = match self.phy() {
+            Ok(p) => p,
             Err(e) => return error_response(id, "serial_port_error", e),
         };
 
-        match spinel.get_hw_address().await {
+        match phy.hw_address().await {
             Ok(ieee) => response(id, json!({"ieee_address": eui64_to_string(ieee)})),
             Err(e) => error_response(id, "hw_address_failed", e),
         }

@@ -31,10 +31,10 @@ use ziggurat_zigbee::nwk::commands::{
 
 use super::{
     AddrConflictSource, DeviceLeaveReason, JoinKind, LOCK_ACQUIRE_TIMEOUT, NwkDeviceType,
-    NwkSecurityMode, SendMode, ZigbeeNotification, ZigbeeStack, neighbors,
+    NwkSecurityMode, RadioPhy, SendMode, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     #[allow(clippy::significant_drop_tightening)]
     pub fn process_802154_association_request(
         &self,
@@ -310,12 +310,12 @@ impl ZigbeeStack {
         );
     }
 
-    fn build_802154_association_response<P>(
+    fn build_802154_association_response<Payload>(
         &self,
         destination_eui64: Eui64,
         short_address: Nwk,
         association_status: Ieee802154AssociationStatus,
-    ) -> Ieee802154Frame<P> {
+    ) -> Ieee802154Frame<Payload> {
         let (sequence_number, pan_id) = {
             let core = self.core();
             (core.mac.ieee802154_sequence_number, core.mac.pan_id)

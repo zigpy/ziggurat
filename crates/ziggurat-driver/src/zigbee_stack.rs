@@ -4,10 +4,8 @@ use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
 use tokio::time::{sleep, timeout};
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
-use ziggurat_spinel::client::{SpinelClient, SpinelError, SpinelRxFrame};
-use ziggurat_spinel::{
-    SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelMacScanState, SpinelPropertyId,
-    SpinelResetReason, SpinelStatus,
+use ziggurat_phy::{
+    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, ResetEvent, RxFrame, TxFrame, TxResult,
 };
 use ziggurat_zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
@@ -33,6 +31,7 @@ mod nwk;
 mod route;
 mod zdp;
 
+pub use ziggurat_phy::TxPriority;
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use ziggurat_zigbee::constants::{
@@ -55,9 +54,6 @@ const RESET_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(2);
 const RESET_ATTEMPTS: u32 = 5;
 const RADIO_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long after the scan period elapses the RCP gets to deliver a scan result.
-const ENERGY_SCAN_RESULT_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// How often (in frames) the client is notified of the outgoing NWK security frame
 /// counter, so that its persisted copy never lags far behind.
 const FRAME_COUNTER_NOTIFY_INTERVAL: u32 = 100;
@@ -75,7 +71,7 @@ pub enum ZigbeeStackError {
     #[error("transmit rejected due to CCA failure")]
     CcaFailure,
     #[error("unexpected transmit failure: {0:?}")]
-    SpinelTransmitFailure(SpinelStatus),
+    TransmitFailed(TxResult),
     #[error("aps ack timeout")]
     ApsAckTimeout,
     #[error("payload does not fit in a single frame")]
@@ -84,10 +80,8 @@ pub enum ZigbeeStackError {
     ApsSecurityFailed,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
-    #[error("malformed energy scan result from the RCP: {value:02X?}")]
-    InvalidEnergyScanResult { value: Vec<u8> },
-    #[error("spinel error: {0}")]
-    SpinelError(#[from] SpinelError),
+    #[error("radio error: {0}")]
+    Radio(#[from] RadioError),
 }
 
 /// How an outgoing NWK frame is secured. Frames carrying the network key to a joining
@@ -581,19 +575,16 @@ pub struct NetworkBeacon {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStack {
+pub struct ZigbeeStack<P: RadioPhy> {
     self_weak: Weak<Self>,
 
     pub state: State,
     pub config: NetworkConfig,
     pub tunables: Tunables,
-    /// Shared with the server, which owns the serial port for the process lifetime:
-    /// a replaced stack only stops its tasks, the port is never reopened
-    pub spinel: Arc<SpinelClient>,
+    pub radio: Arc<P>,
     pub notification_tx: broadcast::Sender<ZigbeeNotification>,
-    pub raw_frame_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
-    pub reset_rx: AsyncMutex<mpsc::Receiver<SpinelStatus>>,
-    pub energy_scan_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
+    pub raw_frame_rx: AsyncMutex<mpsc::Receiver<RxFrame>>,
+    pub reset_rx: AsyncMutex<mpsc::Receiver<ResetEvent>>,
     /// Installed for the duration of a network scan; the receive loop forwards decoded
     /// beacons here while it is set.
     network_scan_tx: Mutex<Option<mpsc::Sender<NetworkBeacon>>>,
@@ -628,7 +619,7 @@ pub struct ZigbeeStack {
     background_tasks: Mutex<JoinSet<()>>,
 }
 
-impl ZigbeeStack {
+impl<P: RadioPhy> ZigbeeStack<P> {
     /// Briefly lock the protocol core. See [`CoreGuard`] for the locking discipline the
     /// returned guard encodes.
     fn core(&self) -> CoreGuard<'_> {
@@ -636,30 +627,27 @@ impl ZigbeeStack {
     }
 
     pub fn new(
-        spinel: Arc<SpinelClient>,
+        radio: Arc<P>,
         config: NetworkConfig,
         tunables: Tunables,
     ) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
-        let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<SpinelFramePropValueIs>(32);
-        spinel.set_property_update_receiver(SpinelPropertyId::StreamRaw, raw_frame_tx);
 
-        let (reset_tx, reset_rx) = mpsc::channel::<SpinelStatus>(8);
-        spinel.set_reset_notification_receiver(reset_tx);
+        let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<RxFrame>(32);
+        radio.set_rx_sink(raw_frame_tx);
 
-        let (energy_scan_tx, energy_scan_rx) = mpsc::channel::<SpinelFramePropValueIs>(8);
-        spinel.set_property_update_receiver(SpinelPropertyId::MacEnergyScanResult, energy_scan_tx);
+        let (reset_tx, reset_rx) = mpsc::channel::<ResetEvent>(8);
+        radio.set_reset_sink(reset_tx);
 
         let arc_stack = Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
             state: State::new(&config, &tunables),
             config,
             tunables,
-            spinel,
+            radio,
             notification_tx,
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
-            energy_scan_rx: AsyncMutex::new(energy_scan_rx),
             network_scan_tx: Mutex::new(None),
             src_match_sync: Notify::new(),
             src_match_written: Mutex::new(SrcMatchTable::default()),
@@ -805,35 +793,18 @@ impl ZigbeeStack {
     // We intentionally hold the receiver lock for the entire duration of this function
     // to ensure exclusive access to the raw frame receiver.
     #[allow(clippy::significant_drop_tightening)]
-    async fn recv_frame(&self) -> (SpinelRxFrame, Ieee802154Frame) {
+    async fn recv_frame(&self) -> (RxFrame, Ieee802154Frame) {
         let mut receiver = self
             .raw_frame_rx
             .try_lock()
             .expect("Raw frame receiver is locked");
 
         loop {
-            // The sender lives in the Spinel protocol state and outlives the stack: it
-            // hanging up means the transport is gone, not a recoverable condition
-            let Some(spinel_frame) = receiver.recv().await else {
-                panic!("Spinel raw frame sender hung up");
+            let Some(packet) = receiver.recv().await else {
+                panic!("Radio frame sender hung up");
             };
 
-            let packet = match SpinelRxFrame::from_bytes(&spinel_frame.value) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("Error parsing spinel frame: {e:?}");
-                    continue;
-                }
-            };
-
-            if packet.psdu.len() < 2 {
-                tracing::warn!("Packet too short to contain FCS");
-                continue;
-            }
-
-            let frame_data = &packet.psdu[..packet.psdu.len() - 2];
-
-            match Ieee802154Frame::from_bytes_without_fcs(frame_data) {
+            match Ieee802154Frame::from_bytes_without_fcs(&packet.psdu) {
                 Ok(frame) => {
                     tracing::debug!("Received 802.15.4 frame: {frame:?}");
                     return (packet, frame);
@@ -847,15 +818,8 @@ impl ZigbeeStack {
     }
 
     pub async fn start_network(&self) -> Result<(), ZigbeeStackError> {
-        // Never inherit whatever state the RCP was left in. The radio lock is held so
-        // that a concurrent transmit or scan cannot interleave with the reset and
-        // reprogramming; it must be released before the link status broadcast below,
-        // which takes it to transmit.
-        {
-            let _radio_lock = self.spinel.lock_radio().await;
-            self.reset_radio().await?;
-            self.apply_radio_configuration().await?;
-        }
+        self.reset_radio().await?;
+        self.apply_radio_configuration().await?;
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will
         // "respond" to empty link status broadcasts proactively, independent of the
@@ -934,109 +898,61 @@ impl ZigbeeStack {
         let mut reset_rx = self.reset_rx.try_lock().expect("Reset receiver is locked");
 
         for attempt in 1..=RESET_ATTEMPTS {
-            self.spinel.send_reset(SpinelResetReason::Stack).await?;
+            self.radio.reset().await?;
 
             match timeout(RESET_NOTIFICATION_TIMEOUT, reset_rx.recv()).await {
-                Ok(Some(status)) => {
-                    tracing::info!("RCP reset complete: {status:?}");
+                Ok(Some(event)) => {
+                    tracing::info!("Radio reset complete: {:?}", event.reason);
                     return Ok(());
                 }
-                Ok(None) => return Err(SpinelError::TransportClosed.into()),
+                Ok(None) => return Err(RadioError::TransportClosed.into()),
                 Err(_) => {
                     tracing::warn!("No reset notification, attempt {attempt}/{RESET_ATTEMPTS}");
                 }
             }
         }
 
-        Err(ZigbeeStackError::SpinelError(SpinelError::Timeout))
+        Err(RadioError::Timeout.into())
     }
 
-    /// Program the radio with our network parameters. An RCP reset wipes all of this,
+    /// Program the radio with our network parameters. A radio reset wipes all of this,
     /// so it must be re-applied after every reset.
     async fn apply_radio_configuration(&self) -> Result<(), ZigbeeStackError> {
-        self.spinel
-            .prop_value_set(SpinelPropertyId::PhyEnabled, vec![true as u8])
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
+        let (config, table) = {
+            let core = self.core();
+            let table = core
+                .mac
+                .indirect_queue
+                .queued_addresses(core.nib.address_map.map());
 
-        let channel = self.core().mac.channel;
-        self.spinel
-            .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
+            let config = RadioConfig {
+                channel: core.mac.channel,
+                tx_power: self.config.tx_power,
+                short_address: self.state.network_address,
+                extended_address: self.state.ieee_address,
+                pan_id: core.mac.pan_id,
+                promiscuous: self.state.hack_disable_tx,
+                rx_on_when_idle: true,
+                frame_pending_short: table.short_addresses.iter().copied().collect(),
+                frame_pending_extended: table.extended_addresses.iter().copied().collect(),
+            };
 
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::PhyTxPower,
-                vec![self.config.tx_power as u8],
-            )
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
+            drop(core);
 
-        // RAIL only auto-acknowledges frames that pass address filtering, and
-        // promiscuous mode bypasses the filter: with it enabled the radio ACKs nothing
-        // and every unicast exchange fails at the MAC layer. Receive-only monitoring
-        // still wants every frame.
-        let promiscuous_mode = if self.state.hack_disable_tx {
-            SpinelMacPromiscuousMode::Full
-        } else {
-            SpinelMacPromiscuousMode::Off
+            (config, table)
         };
 
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::MacPromiscuousMode,
-                vec![promiscuous_mode as u8],
-            )
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
+        self.radio.reconfigure(&config).await?;
 
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::Mac154Laddr,
-                ziggurat_spinel::eui64_to_spinel_bytes(self.state.ieee_address).to_vec(),
-            )
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
-
-        self.spinel
-            .prop_value_set(
-                SpinelPropertyId::Mac154Saddr,
-                self.state.network_address.to_bytes().to_vec(),
-            )
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
-
-        let pan_id = self.core().mac.pan_id;
-        self.spinel
-            .prop_value_set(SpinelPropertyId::Mac154Panid, pan_id.to_bytes().to_vec())
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
-
-        self.spinel
-            .prop_value_set(SpinelPropertyId::MacRxOnWhenIdleMode, vec![true as u8])
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
-
-        self.spinel
-            .prop_value_set(SpinelPropertyId::MacRawStreamEnabled, vec![true as u8])
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
-
-        // The frame pending bit in auto-ACKs to MAC Data Requests comes from the
-        // source address match table: with matching enabled, FP=1 only for devices
-        // with queued indirect transactions. A reset wipes the table, so it is
-        // rebuilt from the queue state rather than merely re-enabled.
-        self.spinel
-            .prop_value_set(SpinelPropertyId::MacSrcMatchEnabled, vec![true as u8])
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
-        self.write_src_match_table().await?;
+        *self
+            .src_match_written
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap() = table;
 
         Ok(())
     }
 
-    /// Watches for RCP resets (announced or synthesized from persistent command
+    /// Watches for radio resets (announced or synthesized from persistent command
     /// timeouts) and reprograms the radio. Mesh state survives a radio reset; only the
     /// radio configuration needs to be re-applied.
     #[allow(clippy::significant_drop_tightening)]
@@ -1044,16 +960,14 @@ impl ZigbeeStack {
         let mut reset_rx = self.reset_rx.try_lock().expect("Reset receiver is locked");
 
         loop {
-            let Some(status) = reset_rx.recv().await else {
-                panic!("Spinel reset notification sender hung up");
+            let Some(event) = reset_rx.recv().await else {
+                panic!("Radio reset notification sender hung up");
             };
 
-            tracing::error!("RCP reset detected ({status:?}), reprogramming the radio");
-
-            // The reset failed every in-flight command, so current lock holders
-            // release promptly; holding the lock keeps new transmits and scans off
-            // the radio until it is fully reprogrammed
-            let _radio_lock = self.spinel.lock_radio().await;
+            tracing::error!(
+                "Radio reset detected ({:?}), reinitializing the radio",
+                event.reason
+            );
 
             while let Err(err) = self.apply_radio_configuration().await {
                 tracing::error!("Failed to reprogram the radio: {err}, retrying");
@@ -1110,11 +1024,7 @@ impl ZigbeeStack {
         });
     }
 
-    /// Active scan: broadcast a beacon request on each channel and collect the beacons
-    /// that answer, sent to `found` as they arrive. The radio is owned per channel (like
-    /// [`Self::energy_scan`]) so queued transmits slip out between channels; the receive
-    /// loop keeps running throughout and feeds the collector.
-    #[allow(clippy::significant_drop_tightening)]
+    /// Active scan: broadcast a beacon request on each channel and collect the beacons.
     pub async fn network_scan(
         &self,
         channels: &[u8],
@@ -1123,171 +1033,60 @@ impl ZigbeeStack {
     ) -> Result<(), ZigbeeStackError> {
         *self.network_scan_tx.lock() = Some(found);
 
-        let scan = async {
+        let beacon_request = self.beacon_request_psdu();
+        let home_channel = self.core().mac.channel;
+
+        let result: Result<(), RadioError> = async {
+            let radio = self.radio.lock().await;
             for &channel in channels {
-                let radio = self.spinel.lock_radio().await;
-
-                self.spinel
-                    .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
-                    .await?;
-
+                radio.set_channel(channel).await?;
                 radio
-                    .transmit_frame(&self.beacon_request_frame(channel))
+                    .transmit(TxFrame {
+                        psdu: beacon_request.clone(),
+                        channel: None,
+                        csma_ca: true,
+                        max_frame_retries: 0,
+                        max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
+                        security_processed: true,
+                    })
                     .await?;
-
                 sleep(duration_per_channel).await;
             }
-            Ok(())
-        };
-        let result = scan.await;
+            // Leave the radio on the home channel before releasing it.
+            radio.set_channel(home_channel).await
+        }
+        .await;
 
         *self.network_scan_tx.lock() = None;
 
-        // The sweep leaves the radio on the last scanned channel, even on failure
-        let network_channel = self.core().mac.channel;
-        self.spinel
-            .prop_value_set(SpinelPropertyId::PhyChan, vec![network_channel])
-            .await?;
-
-        result
+        result.map_err(Into::into)
     }
 
     /// Performs an energy detect scan, sending the maximum RSSI seen on each channel to
-    /// `results` as that channel completes. The RCP only scans a single channel per
-    /// request, so channels are scanned sequentially; reception is suspended throughout.
-    #[allow(clippy::significant_drop_tightening)]
+    /// `results` as that channel completes.
     pub async fn energy_scan(
         &self,
         channels: &[u8],
         duration_per_channel: Duration,
         results: mpsc::Sender<(u8, i8)>,
     ) -> Result<(), ZigbeeStackError> {
-        let mut energy_scan_rx = self
-            .energy_scan_rx
-            .try_lock()
-            .expect("Energy scan receiver is locked");
+        for &channel in channels {
+            let max_rssi = self
+                .radio
+                .energy_detect(channel, duration_per_channel)
+                .await?;
+            let _ = results.send((channel, max_rssi)).await;
+        }
 
-        // Discard results of an earlier scan that failed after starting a channel
-        while energy_scan_rx.try_recv().is_ok() {}
-
-        let scan_period_ms = u16::try_from(duration_per_channel.as_millis())
-            .expect("Scan duration does not fit into a u16");
-
-        let scan = async {
-            for &channel in channels {
-                // The RCP rejects a scan start while a transmit is in flight, so the
-                // radio is owned exclusively for each channel's scan. Taking the (fair)
-                // lock per channel lets transmissions queued during one channel slip
-                // out before the next, instead of blacking out transmission for the
-                // whole sweep. The lock is dropped before the result is sent so a slow
-                // consumer never stalls transmits.
-                let max_rssi = {
-                    let _radio_lock = self.spinel.lock_radio().await;
-
-                    self.spinel
-                        .prop_value_set(SpinelPropertyId::MacScanMask, vec![channel])
-                        .await?;
-                    self.spinel
-                        .prop_value_set(
-                            SpinelPropertyId::MacScanPeriod,
-                            scan_period_ms.to_le_bytes().to_vec(),
-                        )
-                        .await?;
-
-                    // A rejected scan start is answered with a `LastStatus` instead of
-                    // the scan state, and no result would ever arrive
-                    let (response_property, response_value) = self
-                        .spinel
-                        .prop_value_set(
-                            SpinelPropertyId::MacScanState,
-                            vec![SpinelMacScanState::Energy as u8],
-                        )
-                        .await?;
-
-                    if response_property != SpinelPropertyId::MacScanState {
-                        tracing::warn!(
-                            "Energy scan of channel {channel} was rejected: \
-                             {response_property:?}={response_value:02X?}"
-                        );
-                        return Err(ZigbeeStackError::SpinelError(
-                            SpinelError::UnexpectedResponseProperty {
-                                expected: SpinelPropertyId::MacScanState,
-                                got: response_property,
-                            },
-                        ));
-                    }
-
-                    // The single scan result update doubles as the completion notification
-                    let update = timeout(
-                        duration_per_channel + ENERGY_SCAN_RESULT_TIMEOUT,
-                        energy_scan_rx.recv(),
-                    )
-                    .await
-                    .map_err(|_| ZigbeeStackError::SpinelError(SpinelError::Timeout))?
-                    .expect("Spinel energy scan sender hung up");
-
-                    let [scanned_channel, max_rssi] = update.value[..] else {
-                        return Err(ZigbeeStackError::InvalidEnergyScanResult {
-                            value: update.value,
-                        });
-                    };
-                    if scanned_channel != channel {
-                        return Err(ZigbeeStackError::InvalidEnergyScanResult {
-                            value: update.value,
-                        });
-                    }
-
-                    max_rssi as i8
-                };
-
-                let _ = results.send((channel, max_rssi)).await;
-            }
-
-            Ok(())
-        };
-        let result = scan.await;
-
-        // The scan leaves the radio tuned to the last scanned channel, even on failure
-        let network_channel = self.core().mac.channel;
-        self.spinel
-            .prop_value_set(SpinelPropertyId::PhyChan, vec![network_channel])
-            .await?;
-
-        result
+        Ok(())
     }
 
     /// Retune the radio to a new channel, the coordinator's half of a network-wide
     /// channel migration. Mesh state is untouched; subsequent resets and energy scans
     /// return to the new channel.
-    #[allow(clippy::significant_drop_tightening)]
     pub async fn set_channel(&self, channel: u8) -> Result<(), ZigbeeStackError> {
-        // The lock keeps transmits and scans off the radio mid-retune; the state
-        // update happens under it so a concurrent reset recovery cannot reprogram
-        // the old channel
-        let _radio_lock = self.spinel.lock_radio().await;
-
-        let (rsp_property, rsp_value) = self
-            .spinel
-            .prop_value_set(SpinelPropertyId::PhyChan, vec![channel])
-            .await
-            .map_err(ZigbeeStackError::SpinelError)?;
-
-        // A rejected change (e.g. an out-of-range channel) is answered with a
-        // `LastStatus` instead of the property
-        if rsp_property != SpinelPropertyId::PhyChan {
-            tracing::warn!(
-                "Channel change to {channel} was rejected: {rsp_property:?}={rsp_value:02X?}"
-            );
-            return Err(ZigbeeStackError::SpinelError(
-                SpinelError::UnexpectedResponseProperty {
-                    expected: SpinelPropertyId::PhyChan,
-                    got: rsp_property,
-                },
-            ));
-        }
-
+        self.radio.lock().await.set_channel(channel).await?;
         self.core().mac.channel = channel;
-
         Ok(())
     }
 

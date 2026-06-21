@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 ziggurat-spinel.workspace = true
+ziggurat-phy-spinel.workspace = true
 ziggurat-driver.workspace = true
 ziggurat-zigbee.workspace = true
 

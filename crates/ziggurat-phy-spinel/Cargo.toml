@@ -1,0 +1,17 @@
+[package]
+name = "ziggurat-phy-spinel"
+version.workspace = true
+description = "Spinel/OpenThread-RCP backend implementing the ziggurat-phy RadioPhy trait"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ziggurat-ieee-802154.workspace = true
+ziggurat-phy.workspace = true
+ziggurat-spinel.workspace = true
+
+parking_lot = "0.12.4"
+tokio = { version = "1.43.0", features = ["rt", "time", "sync"] }

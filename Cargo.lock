@@ -1696,7 +1696,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ziggurat-ieee-802154",
- "ziggurat-spinel",
+ "ziggurat-phy",
  "ziggurat-zigbee",
 ]
 
@@ -1715,6 +1715,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ziggurat-phy"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "ziggurat-ieee-802154",
+]
+
+[[package]]
+name = "ziggurat-phy-spinel"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "ziggurat-ieee-802154",
+ "ziggurat-phy",
+ "ziggurat-spinel",
+]
+
+[[package]]
 name = "ziggurat-server"
 version = "0.1.0"
 dependencies = [
@@ -1729,6 +1749,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ziggurat-driver",
+ "ziggurat-phy-spinel",
  "ziggurat-spinel",
  "ziggurat-zigbee",
 ]
