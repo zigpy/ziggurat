@@ -167,7 +167,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             sender_nwk,
             updated_path_cost,
             route_request_cmd.many_to_one,
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         if !accepted {
@@ -312,7 +312,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .core()
             .nib
             .routing
-            .begin_many_to_one_advertisement(Instant::now().into_std());
+            .begin_many_to_one_advertisement(self.core_now());
 
         tracing::debug!("Sending many-to-one route request {route_request_identifier}");
 
@@ -554,11 +554,11 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 .core()
                 .nib
                 .routing
-                .discovery_deadline(destination, Instant::now().into_std());
+                .discovery_deadline(destination, self.core_now());
 
             // One should exist
             match deadline {
-                Some(deadline) => deadline - Instant::now().into_std(),
+                Some(deadline) => deadline.saturating_duration_since(self.core_now()),
                 None => {
                     tracing::warn!("No route discovery entry found for {destination:?}");
                     return Err(ZigbeeStackError::RouteDiscoveryNoEntry);
@@ -596,7 +596,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .core()
             .nib
             .routing
-            .begin_discovery(destination, Instant::now().into_std());
+            .begin_discovery(destination, self.core_now());
 
         // If we know the EUI64 corresponding to the NWK, use it
         let destination_eui64 = self.core().nib.address_map.eui64_for(destination);

@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
+use crate::Instant;
 use crate::nwk::commands::NwkRouteRequestManyToOne;
-use std::time::{Duration, Instant};
+use core::time::Duration;
 use ziggurat_ieee_802154::types::Nwk;
 
 use crate::nwk::frame::BROADCAST_ALL_ROUTERS_AND_COORDINATOR;
@@ -162,9 +164,9 @@ pub struct Routing {
     mtorr_route_error_threshold: u8,
     mtorr_delivery_failure_threshold: u8,
 
-    route_table: HashMap<Nwk, TableEntry>,
-    discovery_table: HashMap<(Nwk, RequestId), DiscoveryEntry>,
-    route_record_table: HashMap<Nwk, Vec<Nwk>>,
+    route_table: BTreeMap<Nwk, TableEntry>,
+    discovery_table: BTreeMap<(Nwk, RequestId), DiscoveryEntry>,
+    route_record_table: BTreeMap<Nwk, Vec<Nwk>>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
@@ -174,7 +176,7 @@ pub struct Routing {
 }
 
 impl Routing {
-    pub fn new(
+    pub const fn new(
         network_address: Nwk,
         route_discovery_time: Duration,
         mtorr_route_error_threshold: u8,
@@ -187,9 +189,9 @@ impl Routing {
             mtorr_delivery_failures: 0,
             mtorr_route_error_threshold,
             mtorr_delivery_failure_threshold,
-            route_table: HashMap::new(),
-            discovery_table: HashMap::new(),
-            route_record_table: HashMap::new(),
+            route_table: BTreeMap::new(),
+            discovery_table: BTreeMap::new(),
+            route_record_table: BTreeMap::new(),
             request_sequence_number: 0,
         }
     }

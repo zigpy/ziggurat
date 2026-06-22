@@ -1,4 +1,6 @@
 use abstract_bits::{AbstractBits, abstract_bits};
+use alloc::vec;
+use alloc::vec::Vec;
 use educe::Educe;
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, format_hex};

@@ -1,5 +1,10 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use alloc::vec::Vec;
+use core::time::Duration;
+
+use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BTreeSet};
+
+use crate::Instant;
 
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
@@ -47,8 +52,8 @@ pub struct PollOutcome<C> {
 /// tell whether the auto-ACK of a given poll advertised frame-pending=1.
 #[derive(Debug, Default)]
 pub struct SrcMatchTable {
-    pub short_addresses: HashSet<Nwk>,
-    pub extended_addresses: HashSet<Eui64>,
+    pub short_addresses: BTreeSet<Nwk>,
+    pub extended_addresses: BTreeSet<Eui64>,
 }
 
 impl SrcMatchTable {
@@ -69,14 +74,14 @@ impl SrcMatchTable {
 pub struct IndirectQueue<C> {
     /// How long a transaction awaits a poll before expiring
     persistence_time: Duration,
-    queue: HashMap<Ieee802154Address, VecDeque<Transaction<C>>>,
+    queue: BTreeMap<Ieee802154Address, VecDeque<Transaction<C>>>,
 }
 
 impl<C> IndirectQueue<C> {
-    pub fn new(persistence_time: Duration) -> Self {
+    pub const fn new(persistence_time: Duration) -> Self {
         Self {
             persistence_time,
-            queue: HashMap::new(),
+            queue: BTreeMap::new(),
         }
     }
 
@@ -234,7 +239,7 @@ impl<C> IndirectQueue<C> {
 
     /// The source address match table the RCP should hold: every device with queued
     /// transactions, under both its address forms (the device may poll with either).
-    pub fn queued_addresses(&self, address_map: &HashMap<Eui64, Nwk>) -> SrcMatchTable {
+    pub fn queued_addresses(&self, address_map: &BTreeMap<Eui64, Nwk>) -> SrcMatchTable {
         let mut table = SrcMatchTable::default();
 
         for key in self.queue.keys() {

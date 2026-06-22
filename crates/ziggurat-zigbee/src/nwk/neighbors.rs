@@ -1,8 +1,11 @@
-use std::cmp;
-use std::collections::{HashMap, HashSet, VecDeque};
+use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
+use core::cmp;
 
+use crate::Instant;
 use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
-use std::time::{Duration, Instant};
+use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 
 use super::NwkDeviceType;
@@ -162,18 +165,18 @@ pub struct Neighbors {
     network_address: Nwk,
     /// Neighbors silent for this long get their link costs reset
     max_age: Duration,
-    table: HashMap<Eui64, TableEntry>,
+    table: BTreeMap<Eui64, TableEntry>,
     /// LQI samples for senders that have no neighbor entry yet.
-    pending_lqas: HashMap<Nwk, VecDeque<u8>>,
+    pending_lqas: BTreeMap<Nwk, VecDeque<u8>>,
 }
 
 impl Neighbors {
-    pub fn new(network_address: Nwk, max_age: Duration) -> Self {
+    pub const fn new(network_address: Nwk, max_age: Duration) -> Self {
         Self {
             network_address,
             max_age,
-            table: HashMap::new(),
-            pending_lqas: HashMap::new(),
+            table: BTreeMap::new(),
+            pending_lqas: BTreeMap::new(),
         }
     }
 
@@ -628,7 +631,7 @@ impl Neighbors {
                     None
                 }
             })
-            .collect::<HashSet<Nwk>>();
+            .collect::<BTreeSet<Nwk>>();
 
         // Fold any LQI samples buffered for this address before its entry existed.
         let buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();

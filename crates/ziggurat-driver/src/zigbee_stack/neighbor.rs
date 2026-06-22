@@ -1,4 +1,3 @@
-use tokio::time::Instant;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioPhy, TxPriority};
 
@@ -44,7 +43,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     pub(super) fn maybe_age_neighbors(&self) {
         // TODO: this function should be replaced by real timers
-        let stale_neighbors = self.core().nib.neighbors.age(Instant::now().into_std());
+        let stale_neighbors = self.core().nib.neighbors.age(self.core_now());
 
         for neighbor_nwk in stale_neighbors {
             self.invalidate_routes_via(neighbor_nwk);
@@ -71,7 +70,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             nwk_frame.nwk_header.source,
             lqi,
             &link_status_cmd,
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         // Spec 3.6.4.4.2: when the outgoing cost collapses to zero the link is

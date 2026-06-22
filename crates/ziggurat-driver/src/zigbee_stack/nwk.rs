@@ -55,7 +55,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             nwk_frame.nwk_header.sequence_number,
             sender_nwk,
             audience,
-            now.into_std(),
+            self.to_core_instant(now),
         );
         drop(core);
 
@@ -657,12 +657,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             let mut core = self.core();
             let audience = core.nib.neighbors.expected_broadcast_relayers();
 
-            core.nib.broadcasts.record_transmission(
-                key.0,
-                key.1,
-                audience,
-                Instant::now().into_std(),
-            );
+            core.nib
+                .broadcasts
+                .record_transmission(key.0, key.1, audience, self.core_now());
         }
 
         // Spec 3.6.6: retransmit only while the passive ack quorum has not been

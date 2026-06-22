@@ -21,7 +21,7 @@ pub const MAX_PHY_PACKET_SIZE: usize = 127;
 /// is ignored for now.
 pub type FrameBytes = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
 
-#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone, PartialOrd, Ord)]
 pub enum Ieee802154Address {
     Nwk(Nwk),
     Eui64(Eui64),

@@ -1,4 +1,5 @@
 #![allow(clippy::useless_conversion)]
+use alloc::vec::Vec;
 
 use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
@@ -577,6 +578,7 @@ impl NwkFrame {
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::vec;
     use hex_literal::hex;
 
     #[test]

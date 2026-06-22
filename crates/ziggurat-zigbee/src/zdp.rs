@@ -1,4 +1,6 @@
 #![allow(clippy::useless_conversion)]
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::nwk::commands::NwkRejoinCapabilityInformation;
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};

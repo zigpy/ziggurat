@@ -16,12 +16,12 @@ aes = "0.9.1"
 arbitrary-int = "2.1.1"
 ccm = { version = "0.6.0-rc.3", default-features = false }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
-hex = "0.4.3"
-tracing = "0.1"
-num_enum = "0.7.3"
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+tracing = { version = "0.1", default-features = false }
+num_enum = { version = "0.7.3", default-features = false }
 serde = { version = "1.0.219", default-features = false, features = ["alloc", "derive"] }
-subtle = "2"
-thiserror = "2.0.12"
+subtle = { version = "2", default-features = false }
+thiserror = { version = "2.0.12", default-features = false }
 
 [dev-dependencies]
 hex-literal = "1.1.0"

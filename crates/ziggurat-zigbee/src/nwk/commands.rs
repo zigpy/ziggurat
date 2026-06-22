@@ -1,4 +1,6 @@
 #![allow(clippy::useless_conversion)]
+use alloc::vec;
+use alloc::vec::Vec;
 
 use abstract_bits::{AbstractBits, abstract_bits};
 use num_enum::TryFromPrimitive;

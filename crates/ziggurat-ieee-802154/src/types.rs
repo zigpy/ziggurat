@@ -55,7 +55,7 @@ deserialize_via_try_from_hex!(PanId);
 deserialize_via_try_from_hex!(Key);
 
 #[abstract_bits::abstract_bits]
-#[derive(Eq, Hash, Copy, Clone, PartialEq)]
+#[derive(Eq, Hash, Copy, Clone, PartialEq, PartialOrd, Ord)]
 pub struct Nwk(pub u16);
 
 impl Nwk {
@@ -93,7 +93,7 @@ impl fmt::Debug for Nwk {
 }
 
 #[abstract_bits::abstract_bits]
-#[derive(Eq, PartialEq, Hash, Copy, Clone)]
+#[derive(Eq, PartialEq, Hash, Copy, Clone, PartialOrd, Ord)]
 pub struct Eui64(pub [u8; 8]);
 
 impl Eui64 {
@@ -149,7 +149,7 @@ pub enum Address {
 }
 
 #[abstract_bits::abstract_bits]
-#[derive(Eq, Hash, Copy, Clone, PartialEq)]
+#[derive(Eq, Hash, Copy, Clone, PartialEq, PartialOrd, Ord)]
 pub struct PanId(pub u16);
 
 impl PanId {

@@ -110,7 +110,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 device_timeout,
                 relationship: neighbors::Relationship::Child,
             },
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         // A new child deadline may precede everything the maintenance task knows
@@ -1040,7 +1040,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                     neighbors::Relationship::UnauthenticatedChild
                 },
             },
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         // A new child deadline may precede everything the maintenance task knows
@@ -1177,7 +1177,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             source,
             timeout,
             u16::from(request.end_device_configuration),
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         // Requests from devices that are not our end device children are dropped

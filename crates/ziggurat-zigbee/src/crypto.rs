@@ -2,6 +2,7 @@ use aes::Aes128;
 use aes::Block;
 use aes::cipher::BlockCipherEncrypt;
 use aes::cipher::KeyInit;
+use alloc::vec::Vec;
 use ccm::Ccm;
 use ccm::aead::AeadInOut;
 use ccm::consts::{U4, U13};
@@ -84,7 +85,7 @@ pub fn verify_key_hash(link_key: &Key) -> [u8; 16] {
 /// in practice, so keys are issued with a shift of 0.
 pub fn zstack_tclk(seed: &Key, eui64: Eui64, shift: usize) -> Key {
     let eui64 = eui64.to_bytes();
-    Key(std::array::from_fn(|i| {
+    Key(core::array::from_fn(|i| {
         seed.0[(i + shift) % 16] ^ eui64[i % 8]
     }))
 }

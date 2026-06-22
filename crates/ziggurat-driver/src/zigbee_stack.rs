@@ -7,6 +7,7 @@ use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult,
 };
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 
@@ -624,6 +625,24 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     /// returned guard encodes.
     fn core(&self) -> CoreGuard<'_> {
         CoreGuard(self.state.core.try_lock_for(LOCK_ACQUIRE_TIMEOUT).unwrap())
+    }
+
+    /// The sans-io core's clock reads as microseconds since this stack started. These
+    /// convert between it and the tokio `Instant` our timers use, at the one boundary
+    /// where the driver hands time into (or receives deadlines back from) the core.
+    fn to_core_instant(&self, t: Instant) -> CoreInstant {
+        let micros = t
+            .saturating_duration_since(self.state.start_time)
+            .as_micros();
+        CoreInstant::from_micros(micros as u64)
+    }
+
+    fn core_now(&self) -> CoreInstant {
+        self.to_core_instant(Instant::now())
+    }
+
+    fn to_tokio_instant(&self, t: CoreInstant) -> Instant {
+        self.state.start_time + Duration::from_micros(t.as_micros())
     }
 
     pub fn new(

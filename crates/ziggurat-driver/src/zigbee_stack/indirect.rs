@@ -35,12 +35,10 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     ) -> Result<(), ZigbeeStackError> {
         let (completion, result_rx) = oneshot::channel();
 
-        self.core().mac.indirect_queue.push(
-            destination,
-            frame,
-            completion,
-            Instant::now().into_std(),
-        );
+        self.core()
+            .mac
+            .indirect_queue
+            .push(destination, frame, completion, self.core_now());
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
@@ -77,7 +75,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         let known_device = self.core().nib.neighbors.refresh_child_timeout(
             source_eui64,
             source_nwk,
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         // The RCP only told the device to keep listening (frame-pending=1 in the
@@ -113,11 +111,11 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         source_eui64: Option<Eui64>,
         source_nwk: Option<Nwk>,
     ) -> bool {
-        let outcome = self.core().mac.indirect_queue.extract(
-            source_eui64,
-            source_nwk,
-            Instant::now().into_std(),
-        );
+        let outcome =
+            self.core()
+                .mac
+                .indirect_queue
+                .extract(source_eui64, source_nwk, self.core_now());
 
         for (destination, transaction) in outcome.expired {
             let _ = transaction
@@ -170,7 +168,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             }
             // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
             // so a failed transmit goes back to the head of the queue for the next poll
-            Err(err) if Instant::now().into_std() < transaction.expires_at => {
+            Err(err) if self.core_now() < transaction.expires_at => {
                 tracing::warn!("Indirect transmit to {destination:?} failed ({err}), requeueing");
                 self.core()
                     .mac
@@ -321,24 +319,20 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .mac
             .indirect_queue
             .next_expiry()
-            .map(Instant::from_std);
+            .map(|t| self.to_tokio_instant(t));
 
         let next_eviction = self
             .core()
             .nib
             .neighbors
             .next_child_timeout()
-            .map(Instant::from_std);
+            .map(|t| self.to_tokio_instant(t));
 
         [next_expiry, next_eviction].into_iter().flatten().min()
     }
 
     fn expire_indirect_transactions(&self) {
-        let expired = self
-            .core()
-            .mac
-            .indirect_queue
-            .expire(Instant::now().into_std());
+        let expired = self.core().mac.indirect_queue.expire(self.core_now());
 
         if expired.is_empty() {
             return;
@@ -359,7 +353,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .core()
             .nib
             .neighbors
-            .evict_timed_out_children(Instant::now().into_std());
+            .evict_timed_out_children(self.core_now());
 
         for (eui64, nwk) in evicted {
             tracing::warn!("Child {eui64:?} ({nwk:?}) timed out without a keepalive, evicting");

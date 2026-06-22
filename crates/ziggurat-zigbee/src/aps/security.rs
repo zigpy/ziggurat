@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec;
 
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
@@ -91,7 +92,7 @@ pub struct ApsSecurity {
     global_link_key: Key,
     local_eui64: Eui64,
     /// Per-device link keys and replay counters, keyed by peer EUI64
-    devices: HashMap<Eui64, DeviceState>,
+    devices: BTreeMap<Eui64, DeviceState>,
     /// When set, unique link keys are derived from this seed instead of generated
     /// randomly, mirroring the stack the network was taken over from
     tclk_seed: Option<TclkSeed>,
@@ -101,11 +102,15 @@ pub struct ApsSecurity {
 }
 
 impl ApsSecurity {
-    pub fn new(global_link_key: Key, local_eui64: Eui64, tclk_seed: Option<TclkSeed>) -> Self {
+    pub const fn new(
+        global_link_key: Key,
+        local_eui64: Eui64,
+        tclk_seed: Option<TclkSeed>,
+    ) -> Self {
         Self {
             global_link_key,
             local_eui64,
-            devices: HashMap::new(),
+            devices: BTreeMap::new(),
             tclk_seed,
             outgoing_frame_counter: 0,
         }
