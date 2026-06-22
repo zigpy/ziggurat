@@ -1,0 +1,27 @@
+[package]
+name = "ziggurat-phy-esp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "esp-radio (ESP32-C6/H2) backend implementing the ziggurat-phy RadioPhy trait"
+license = "Apache-2.0"
+
+[dependencies]
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+
+# Path deps to the local esp-hal checkout (~/Projects/esp-hal) while we track its API.
+esp-hal = { path = "../../../esp-hal/esp-hal", features = ["esp32c6", "unstable"] }
+esp-radio = { path = "../../../esp-hal/esp-radio", features = [
+    "esp32c6",
+    "ieee802154",
+    "unstable",
+] }
+
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+
+# Excluded from the workspace, so the root's patch doesn't reach us: repeat it, or the
+# protocol crates pull the unpatched (std-only) abstract-bits and bitvec fails for no_std.
+[patch.crates-io]
+abstract-bits = { path = "../../../abstract-bits" }
