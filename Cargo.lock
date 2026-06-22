@@ -1719,7 +1719,6 @@ name = "ziggurat-phy"
 version = "0.1.0"
 dependencies = [
  "thiserror",
- "tokio",
  "ziggurat-ieee-802154",
 ]
 

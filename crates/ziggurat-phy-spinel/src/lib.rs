@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
-    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, ResetEvent, RxFrame, TxFrame, TxPriority,
-    TxResult,
+    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
+    TxPriority, TxResult,
 };
 use ziggurat_spinel::client::{
     ExclusiveRadio as SpinelRadioGuard, SpinelClient, SpinelError, SpinelRxFrame, SpinelTxFrame,
@@ -26,12 +26,23 @@ const ENERGY_SCAN_RESULT_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct SpinelPhy {
     client: Arc<SpinelClient>,
     home_channel: Mutex<u8>,
-    rx_sink: Sink<RxFrame>,
-    reset_sink: Sink<ResetEvent>,
+    rx_slot: Slot<RxFrame>,
+    reset_slot: Slot<ResetEvent>,
     energy_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
 }
 
-type Sink<T> = Arc<Mutex<Option<mpsc::Sender<T>>>>;
+/// The sender half of the currently-subscribed stream. `subscribe_*` swaps a fresh
+/// channel in here; the forwarder tasks read it each time they have an item to deliver.
+type Slot<T> = Arc<Mutex<Option<mpsc::Sender<T>>>>;
+
+/// A subscribed stream, returned by `subscribe_*` and pulled by the driver.
+pub struct TokioRx<T>(mpsc::Receiver<T>);
+
+impl<T: Send> Receiver<T> for TokioRx<T> {
+    async fn recv(&mut self) -> Option<T> {
+        self.0.recv().await
+    }
+}
 
 impl SpinelPhy {
     pub fn new(client: Arc<SpinelClient>) -> Self {
@@ -44,16 +55,16 @@ impl SpinelPhy {
         client.set_reset_notification_receiver(reset_tx);
         client.spawn_reader();
 
-        let rx_sink: Sink<RxFrame> = Arc::new(Mutex::new(None));
-        let reset_sink: Sink<ResetEvent> = Arc::new(Mutex::new(None));
-        spawn_rx_forwarder(raw_rx, Arc::clone(&rx_sink));
-        spawn_reset_forwarder(reset_rx, Arc::clone(&reset_sink));
+        let rx_slot: Slot<RxFrame> = Arc::new(Mutex::new(None));
+        let reset_slot: Slot<ResetEvent> = Arc::new(Mutex::new(None));
+        spawn_rx_forwarder(raw_rx, Arc::clone(&rx_slot));
+        spawn_reset_forwarder(reset_rx, Arc::clone(&reset_slot));
 
         Self {
             client,
             home_channel: Mutex::new(11),
-            rx_sink,
-            reset_sink,
+            rx_slot,
+            reset_slot,
             energy_rx: AsyncMutex::new(energy_rx),
         }
     }
@@ -95,7 +106,7 @@ impl ExclusiveRadio for SpinelExclusive<'_> {
     }
 }
 
-fn spawn_rx_forwarder(mut raw: mpsc::Receiver<SpinelFramePropValueIs>, sink: Sink<RxFrame>) {
+fn spawn_rx_forwarder(mut raw: mpsc::Receiver<SpinelFramePropValueIs>, slot: Slot<RxFrame>) {
     tokio::spawn(async move {
         while let Some(update) = raw.recv().await {
             let Ok(frame) = SpinelRxFrame::from_bytes(&update.value) else {
@@ -111,23 +122,23 @@ fn spawn_rx_forwarder(mut raw: mpsc::Receiver<SpinelFramePropValueIs>, sink: Sin
                 lqi: frame.lqi,
                 timestamp_us: frame.timestamp_us,
             };
-            let current = sink.lock().clone();
-            if let Some(current) = current {
-                let _ = current.send(rx).await;
+            let tx = slot.lock().clone();
+            if let Some(tx) = tx {
+                let _ = tx.try_send(rx);
             }
         }
     });
 }
 
-fn spawn_reset_forwarder(mut reset: mpsc::Receiver<SpinelStatus>, sink: Sink<ResetEvent>) {
+fn spawn_reset_forwarder(mut reset: mpsc::Receiver<SpinelStatus>, slot: Slot<ResetEvent>) {
     tokio::spawn(async move {
         while let Some(status) = reset.recv().await {
             let event = ResetEvent {
                 reason: format!("{status:?}"),
             };
-            let current = sink.lock().clone();
-            if let Some(current) = current {
-                let _ = current.send(event).await;
+            let tx = slot.lock().clone();
+            if let Some(tx) = tx {
+                let _ = tx.try_send(event);
             }
         }
     });
@@ -259,6 +270,8 @@ fn tx_frame_to_spinel(frame: TxFrame, channel: u8) -> SpinelTxFrame {
 
 impl RadioPhy for SpinelPhy {
     type Exclusive<'a> = SpinelExclusive<'a>;
+    type RxStream = TokioRx<RxFrame>;
+    type ResetStream = TokioRx<ResetEvent>;
 
     async fn reset(&self) -> Result<(), RadioError> {
         self.client
@@ -355,11 +368,15 @@ impl RadioPhy for SpinelPhy {
         Ok(max_rssi)
     }
 
-    fn set_rx_sink(&self, sink: mpsc::Sender<RxFrame>) {
-        *self.rx_sink.lock() = Some(sink);
+    fn subscribe_rx(&self) -> TokioRx<RxFrame> {
+        let (tx, rx) = mpsc::channel(32);
+        *self.rx_slot.lock() = Some(tx);
+        TokioRx(rx)
     }
 
-    fn set_reset_sink(&self, sink: mpsc::Sender<ResetEvent>) {
-        *self.reset_sink.lock() = Some(sink);
+    fn subscribe_reset(&self) -> TokioRx<ResetEvent> {
+        let (tx, rx) = mpsc::channel(8);
+        *self.reset_slot.lock() = Some(tx);
+        TokioRx(rx)
     }
 }

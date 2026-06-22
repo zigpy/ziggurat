@@ -5,7 +5,7 @@ use arbitrary_int::prelude::*;
 use tokio::time::{sleep, timeout};
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{
-    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, ResetEvent, RxFrame, TxFrame, TxResult,
+    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult,
 };
 use ziggurat_zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
@@ -583,8 +583,8 @@ pub struct ZigbeeStack<P: RadioPhy> {
     pub tunables: Tunables,
     pub radio: Arc<P>,
     pub notification_tx: broadcast::Sender<ZigbeeNotification>,
-    pub raw_frame_rx: AsyncMutex<mpsc::Receiver<RxFrame>>,
-    pub reset_rx: AsyncMutex<mpsc::Receiver<ResetEvent>>,
+    pub raw_frame_rx: AsyncMutex<P::RxStream>,
+    pub reset_rx: AsyncMutex<P::ResetStream>,
     /// Installed for the duration of a network scan; the receive loop forwards decoded
     /// beacons here while it is set.
     network_scan_tx: Mutex<Option<mpsc::Sender<NetworkBeacon>>>,
@@ -633,11 +633,8 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     ) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
         let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
 
-        let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<RxFrame>(32);
-        radio.set_rx_sink(raw_frame_tx);
-
-        let (reset_tx, reset_rx) = mpsc::channel::<ResetEvent>(8);
-        radio.set_reset_sink(reset_tx);
+        let raw_frame_rx = radio.subscribe_rx();
+        let reset_rx = radio.subscribe_reset();
 
         let arc_stack = Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
