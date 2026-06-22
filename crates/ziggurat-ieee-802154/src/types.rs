@@ -1,5 +1,7 @@
+use core::fmt;
+
+use alloc::string::String;
 use hex;
-use std::fmt;
 
 use crate::ParseError;
 
@@ -8,7 +10,13 @@ pub enum FromHexError {
     #[error("invalid length, expected {expected} hex characters, got {got}")]
     InvalidLength { expected: usize, got: usize },
     #[error("invalid hex")]
-    InvalidHex(#[from] hex::FromHexError),
+    InvalidHex(hex::FromHexError),
+}
+
+impl From<hex::FromHexError> for FromHexError {
+    fn from(err: hex::FromHexError) -> Self {
+        Self::InvalidHex(err)
+    }
 }
 
 fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], FromHexError> {

@@ -1,5 +1,12 @@
+#![no_std]
+
+extern crate alloc;
+
 pub mod commands;
 pub mod types;
+
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::types::{Eui64, Nwk, PanId, format_hex};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
