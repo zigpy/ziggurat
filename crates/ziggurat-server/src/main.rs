@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -414,6 +414,69 @@ impl ZigguratServer {
         Ok(new_phy)
     }
 
+    /// The greeting sent to every client on connect, advertising the protocol version
+    /// and whether the stack is already configured.
+    fn hello_message(&self) -> serde_json::Value {
+        let state = if self.current_stack().is_some() {
+            "running"
+        } else {
+            "awaiting_configuration"
+        };
+        json!({"type": "hello", "version": PROTOCOL_VERSION, "state": state})
+    }
+
+    /// Fan hub notifications out to one connection's outbound queue until it closes.
+    fn spawn_notification_forwarder(
+        self: &Arc<Self>,
+        outbound: mpsc::Sender<serde_json::Value>,
+        addr: String,
+    ) -> JoinHandle<()> {
+        let mut notification_rx = self.notification_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match notification_rx.recv().await {
+                    Ok(event) => {
+                        if outbound.send(notification_to_message(event)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!("Client {addr} lagged {count} notifications");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    }
+
+    /// Parse one inbound JSON request (a WebSocket text frame or a serial line) and
+    /// dispatch it. Returns `false` once the outbound queue is gone and the connection
+    /// should be torn down.
+    async fn handle_request_text(
+        self: &Arc<Self>,
+        text: &str,
+        addr: &str,
+        outbound: &mpsc::Sender<serde_json::Value>,
+    ) -> bool {
+        let request = match serde_json::from_str::<Request>(text) {
+            Ok(request) => request,
+            Err(e) => {
+                tracing::warn!("Invalid request from {addr}: {e}");
+                return outbound
+                    .send(error_response(0, "invalid_request", e))
+                    .await
+                    .is_ok();
+            }
+        };
+
+        tracing::debug!("Request from {addr}: {request:?}");
+        if outbound.send(event(request.id, "accepted")).await.is_err() {
+            return false;
+        }
+        self.dispatch(request, outbound.clone());
+        true
+    }
+
     async fn handle_connection<S>(
         self: &Arc<Self>,
         socket: S,
@@ -442,54 +505,16 @@ impl ZigguratServer {
             let _ = sink.close().await;
         });
 
-        let state = if self.current_stack().is_some() {
-            "running"
-        } else {
-            "awaiting_configuration"
-        };
-        outbound_tx
-            .send(json!({"type": "hello", "version": PROTOCOL_VERSION, "state": state}))
-            .await?;
-
-        // Forward hub notifications to this connection
-        let mut notification_rx = self.notification_tx.subscribe();
-        let notification_outbound = outbound_tx.clone();
-        let forwarder_addr = addr.to_owned();
-        let notification_forwarder = tokio::spawn(async move {
-            loop {
-                match notification_rx.recv().await {
-                    Ok(event) => {
-                        let message = notification_to_message(event);
-
-                        if notification_outbound.send(message).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!("Client {forwarder_addr} lagged {count} notifications");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        outbound_tx.send(self.hello_message()).await?;
+        let notification_forwarder =
+            self.spawn_notification_forwarder(outbound_tx.clone(), addr.to_owned());
 
         while let Some(message) = stream.next().await {
             match message {
                 Ok(Message::Text(text)) => {
-                    let request = match serde_json::from_str::<Request>(&text) {
-                        Ok(request) => request,
-                        Err(e) => {
-                            tracing::warn!("Invalid request from {addr}: {e}");
-                            let _ = outbound_tx
-                                .send(error_response(0, "invalid_request", e))
-                                .await;
-                            continue;
-                        }
-                    };
-
-                    tracing::debug!("Request from {addr}: {request:?}");
-                    outbound_tx.send(event(request.id, "accepted")).await?;
-                    self.dispatch(request, outbound_tx.clone());
+                    if !self.handle_request_text(&text, addr, &outbound_tx).await {
+                        break;
+                    }
                 }
                 Ok(Message::Close(_)) => break,
                 Ok(_) => {} // Pings and pongs are handled by tungstenite itself
@@ -505,6 +530,63 @@ impl ZigguratServer {
         let _ = writer.await;
 
         Ok(())
+    }
+
+    /// Serve the line-delimited JSON API over any byte stream (stdio, or a serial port
+    /// on the eventual embedded target). One request per inbound line; one JSON object
+    /// per outbound line. The dispatch and notification machinery is shared verbatim
+    /// with the WebSocket transport.
+    async fn handle_line_connection<R, W>(
+        self: &Arc<Self>,
+        reader: R,
+        mut writer: W,
+        addr: &str,
+    ) -> std::io::Result<()>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        tracing::info!("Client {addr} connected");
+
+        let (outbound_tx, mut outbound_rx) =
+            mpsc::channel::<serde_json::Value>(OUTBOUND_QUEUE_DEPTH);
+
+        let writer_task = tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                let mut line = message.to_string();
+                line.push('\n');
+                if writer.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                let _ = writer.flush().await;
+            }
+        });
+
+        let _ = outbound_tx.send(self.hello_message()).await;
+        let notification_forwarder =
+            self.spawn_notification_forwarder(outbound_tx.clone(), addr.to_owned());
+
+        let mut lines = BufReader::new(reader).lines();
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if !self.handle_request_text(&line, addr, &outbound_tx).await {
+                break;
+            }
+        }
+
+        notification_forwarder.abort();
+        drop(outbound_tx);
+        let _ = writer_task.await;
+
+        Ok(())
+    }
+
+    async fn run_stdio(self: Arc<Self>) -> std::io::Result<()> {
+        tracing::info!("Serving line-delimited JSON API on stdin/stdout");
+        self.handle_line_connection(tokio::io::stdin(), tokio::io::stdout(), "stdio")
+            .await
     }
 
     /// Dispatches a request, spawning everything that can block on network activity:
@@ -989,12 +1071,25 @@ pub struct SerialConfig {
     flow_control: FlowControlMode,
 }
 
+/// How the Zigbee API is exposed to clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ApiMode {
+    /// JSON-RPC over WebSocket on `--listen`
+    Ws,
+    /// Line-delimited JSON over stdin/stdout (logs go to stderr)
+    Stdio,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     version,
     about = "Host-side Zigbee stack speaking Spinel to an 802.15.4 RCP"
 )]
 struct Args {
+    /// How to expose the Zigbee API to clients
+    #[arg(long, value_enum, default_value_t = ApiMode::Ws)]
+    api: ApiMode,
+
     /// Serial device of the 802.15.4 RCP
     #[arg(long)]
     device: String,
@@ -1024,9 +1119,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rt.block_on(async {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(args.log_level.to_string()));
-        tracing_subscriber::registry()
-            .with(fmt::layer().with_filter(filter))
-            .init();
+
+        // In stdio mode stdout carries the JSON API, so logs must not touch it
+        if args.api == ApiMode::Stdio {
+            tracing_subscriber::registry()
+                .with(
+                    fmt::layer()
+                        .with_writer(std::io::stderr)
+                        .with_filter(filter),
+                )
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(fmt::layer().with_filter(filter))
+                .init();
+        }
 
         let server = Arc::new(ZigguratServer::new(SerialConfig {
             device: args.device,
@@ -1034,7 +1141,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             flow_control: args.flow_control,
         }));
 
-        server.run(&args.listen).await?;
+        match args.api {
+            ApiMode::Ws => server.run(&args.listen).await?,
+            ApiMode::Stdio => server.run_stdio().await?,
+        }
 
         Ok(())
     })
