@@ -15,6 +15,7 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
+use ziggurat_driver::runtime::TokioSpawner;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
@@ -690,6 +691,7 @@ impl ZigguratServer {
                 source_routing: request.source_routing,
             },
             Tunables::new(),
+            TokioSpawner::default(),
         );
 
         // Restore unique trust center link keys negotiated in earlier sessions

@@ -1,6 +1,6 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
-use crate::runtime::{Elapsed, RtInstant, Runtime};
+use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
 use crate::signal::{Signal, SignalWaiter};
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
@@ -24,7 +24,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::task::JoinSet;
 use ziggurat_zigbee::nwk::frame::NwkFrame;
 
 mod aps;
@@ -735,10 +734,10 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     /// Monotonic tiebreaker giving equal-priority sends FIFO order in `send_queue`.
     pub(crate) send_seq: AtomicU64,
 
-    /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
-    /// a leaked background task would keep the replaced stack processing frames and
-    /// transmitting alongside its successor
-    background_tasks: Mutex<JoinSet<()>>,
+    /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
+    /// stopped: a leaked background task would keep the replaced stack processing frames
+    /// and transmitting alongside its successor.
+    spawner: R::Spawner,
 }
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -780,7 +779,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         R::timeout(deadline.saturating_duration_since(self.core_now()), future).await
     }
 
-    pub fn new(radio: Arc<P>, config: NetworkConfig, tunables: Tunables) -> Arc<Self> {
+    pub fn new(
+        radio: Arc<P>,
+        config: NetworkConfig,
+        tunables: Tunables,
+        spawner: R::Spawner,
+    ) -> Arc<Self> {
         let raw_frame_rx = radio.subscribe_rx();
         let reset_rx = radio.subscribe_reset();
 
@@ -809,7 +813,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             send_wake: Notify::new(),
             pending_route_wake: Notify::new(),
             send_seq: AtomicU64::new(0),
-            background_tasks: Mutex::new(JoinSet::new()),
+            spawner,
         })
     }
 
@@ -1314,25 +1318,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.core().nib.update_id = update_id;
     }
 
-    /// Spawns a task tied to the stack's lifetime: it is aborted on `shutdown`.
+    /// Spawns a task tied to the stack's lifetime: it is stopped on `shutdown`.
     pub fn spawn_tracked<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut tasks = self.background_tasks.lock();
-
-        // A completed task's entire cell is retained until it is reaped from the
-        // set: drain here so the set tracks live tasks instead of growing by one
-        // dead entry per spawn
-        while let Some(result) = tasks.try_join_next() {
-            if let Err(e) = result
-                && e.is_panic()
-            {
-                tracing::error!("Background task panicked: {e}");
-            }
-        }
-
-        tasks.spawn(future);
+        self.spawner.spawn(Box::pin(future));
     }
 
     /// Spawns a tracked task that needs an owned handle to the stack.
@@ -1353,10 +1344,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// replaced stack provably stops processing frames and transmitting before its
     /// successor takes over the shared Spinel client.
     pub async fn shutdown(&self) {
-        let mut tasks = std::mem::take(&mut *self.background_tasks.lock());
-
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
+        self.spawner.shutdown().await;
     }
 
     pub fn next_aps_counter(&self) -> u8 {
