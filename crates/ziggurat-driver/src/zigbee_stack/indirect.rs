@@ -379,7 +379,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.drop_indirect_transactions(Some(eui64), nwk);
             self.core().nib.routing.remove_route(nwk);
 
-            let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
+            self.push_notification(ZigbeeNotification::DeviceLeft {
                 nwk,
                 ieee: Some(eui64),
                 reason: DeviceLeaveReason::KeepaliveTimeout,

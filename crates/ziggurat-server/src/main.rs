@@ -671,7 +671,7 @@ impl ZigguratServer {
             Err(e) => return error_response(id, "serial_port_error", e),
         };
 
-        let (stack, mut stack_notification_rx) = ZigbeeStack::new(
+        let stack = ZigbeeStack::new(
             phy,
             NetworkConfig {
                 role: request.role.into(),
@@ -721,12 +721,17 @@ impl ZigguratServer {
             stack_clone.run().await;
         });
 
-        // Pump the stack's notifications into the server-level hub
+        // Drain the stack's notification outbox into the server-level hub. The task is
+        // aborted when the stack is replaced (see `handle_configure`), so it doesn't
+        // need to observe a closed channel to stop.
         let hub_tx = self.notification_tx.clone();
+        let notification_stack = stack.clone();
         let forwarder = tokio::spawn(async move {
-            while let Ok(event) = stack_notification_rx.recv().await {
-                // Send errors just mean no client is connected right now
-                let _ = hub_tx.send(event);
+            loop {
+                for event in notification_stack.next_notifications().await {
+                    // Send errors just mean no client is connected right now
+                    let _ = hub_tx.send(event);
+                }
             }
         });
 

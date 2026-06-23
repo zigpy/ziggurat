@@ -376,9 +376,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if let Some(key) = provisional_key {
             tracing::info!("Device {ieee:?} is joining with its provisional link key");
 
-            let _ = self
-                .notification_tx
-                .send(ZigbeeNotification::LinkKeyUpdate { ieee, key });
+            self.push_notification(ZigbeeNotification::LinkKeyUpdate { ieee, key });
         }
     }
 
@@ -450,7 +448,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.background_send_nwk_frame(nwk_frame, NwkSecurityMode::Unsecured, SendMode::Direct);
 
-        let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
+        self.push_notification(ZigbeeNotification::DeviceJoined {
             nwk: destination,
             ieee: destination_eui64,
             parent: self.state.network_address,
@@ -488,17 +486,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     nwk_frame.nwk_header.source,
                     extended_source
                 );
-                let _ = self
-                    .notification_tx
-                    .send(ZigbeeNotification::ApsDecryptionFailure {
-                        source: nwk_frame.nwk_header.source,
-                        source_ieee: extended_source,
-                        frame_counter: encrypted_command_frame.aux_header.frame_counter,
-                        key_id: format!(
-                            "{:?}",
-                            encrypted_command_frame.aux_header.security_control.key_id
-                        ),
-                    });
+                self.push_notification(ZigbeeNotification::ApsDecryptionFailure {
+                    source: nwk_frame.nwk_header.source,
+                    source_ieee: extended_source,
+                    frame_counter: encrypted_command_frame.aux_header.frame_counter,
+                    key_id: format!(
+                        "{:?}",
+                        encrypted_command_frame.aux_header.security_control.key_id
+                    ),
+                });
             }
         }
     }
@@ -725,12 +721,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 // Persist only now that the device has proven possession (spec 4.7.3.3):
                 // the pending key has been promoted to the device's active key.
                 let key = self.core().aib.aps_security.device_link_key(source_ieee);
-                let _ = self
-                    .notification_tx
-                    .send(ZigbeeNotification::LinkKeyUpdate {
-                        ieee: source_ieee,
-                        key,
-                    });
+                self.push_notification(ZigbeeNotification::LinkKeyUpdate {
+                    ieee: source_ieee,
+                    key,
+                });
 
                 APS_STATUS_SUCCESS
             }
@@ -852,7 +846,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
                 self.send_tunneled_network_key(router_nwk, update.device_address, JoinKind::New);
 
-                let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
+                self.push_notification(ZigbeeNotification::DeviceJoined {
                     nwk: update.device_short_address,
                     ieee: update.device_address,
                     parent: router_nwk,
@@ -873,7 +867,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
                 self.send_tunneled_network_key(router_nwk, update.device_address, JoinKind::Rejoin);
 
-                let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
+                self.push_notification(ZigbeeNotification::DeviceJoined {
                     nwk: update.device_short_address,
                     ieee: update.device_address,
                     parent: router_nwk,
@@ -882,7 +876,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             ApsUpdateDeviceStatus::StandardDeviceSecuredRejoin => {
                 self.update_nwk_eui64_mapping(update.device_short_address, update.device_address);
 
-                let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
+                self.push_notification(ZigbeeNotification::DeviceJoined {
                     nwk: update.device_short_address,
                     ieee: update.device_address,
                     parent: router_nwk,
@@ -896,7 +890,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .source_ieee
                     .or_else(|| self.core().nib.address_map.eui64_for(router_nwk));
 
-                let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
+                self.push_notification(ZigbeeNotification::DeviceLeft {
                     nwk: update.device_short_address,
                     ieee: Some(update.device_address),
                     reason: DeviceLeaveReason::RouterReported {
@@ -1076,7 +1070,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // `send_network_key` also emits the join notification
             self.send_network_key(assigned_nwk, source_ieee, JoinKind::Rejoin);
         } else {
-            let _ = self.notification_tx.send(ZigbeeNotification::DeviceJoined {
+            self.push_notification(ZigbeeNotification::DeviceJoined {
                 nwk: assigned_nwk,
                 ieee: source_ieee,
                 parent: self.state.network_address,
@@ -1146,7 +1140,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.drop_indirect_transactions(source_ieee, source);
         self.core().nib.routing.remove_route(source);
 
-        let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
+        self.push_notification(ZigbeeNotification::DeviceLeft {
             nwk: source,
             ieee: source_ieee,
             reason: DeviceLeaveReason::Announced {

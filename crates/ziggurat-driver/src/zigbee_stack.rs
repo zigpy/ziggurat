@@ -16,13 +16,13 @@ use thiserror::Error;
 
 use parking_lot::{Mutex, MutexGuard};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinSet;
 use ziggurat_zigbee::nwk::frame::NwkFrame;
 
@@ -694,7 +694,8 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     pub config: NetworkConfig,
     pub tunables: Tunables,
     pub radio: Arc<P>,
-    pub notification_tx: broadcast::Sender<ZigbeeNotification>,
+    notifications: Mutex<VecDeque<ZigbeeNotification>>,
+    notification_wake: Notify,
     pub raw_frame_rx: AsyncMutex<P::RxStream>,
     pub reset_rx: AsyncMutex<P::ResetStream>,
     /// Installed for the duration of a network scan; the receive loop forwards decoded
@@ -781,24 +782,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         R::timeout(deadline.saturating_duration_since(self.core_now()), future).await
     }
 
-    pub fn new(
-        radio: Arc<P>,
-        config: NetworkConfig,
-        tunables: Tunables,
-    ) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
-        let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
-
+    pub fn new(radio: Arc<P>, config: NetworkConfig, tunables: Tunables) -> Arc<Self> {
         let raw_frame_rx = radio.subscribe_rx();
         let reset_rx = radio.subscribe_reset();
 
-        let arc_stack = Arc::new_cyclic(|weak_self| Self {
+        Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
             start_time: R::now(),
             state: State::new(&config, &tunables),
             config,
             tunables,
             radio,
-            notification_tx,
+            notifications: Mutex::new(VecDeque::new()),
+            notification_wake: Notify::new(),
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
             network_scan_tx: Mutex::new(None),
@@ -814,9 +810,32 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             pending_route_wake: Notify::new(),
             send_seq: AtomicU64::new(0),
             background_tasks: Mutex::new(JoinSet::new()),
-        });
+        })
+    }
 
-        (arc_stack, notification_rx)
+    /// Queue a network event and wake the notification drainer.
+    pub(crate) fn push_notification(&self, notification: ZigbeeNotification) {
+        self.notifications
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .push_back(notification);
+        self.notification_wake.notify_one();
+    }
+
+    /// Wait for and take all queued network events.
+    pub async fn next_notifications(&self) -> Vec<ZigbeeNotification> {
+        loop {
+            let batch: Vec<ZigbeeNotification> = self
+                .notifications
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+                .unwrap()
+                .drain(..)
+                .collect();
+            if !batch.is_empty() {
+                return batch;
+            }
+            self.notification_wake.notified().await;
+        }
     }
 
     // This function intentionally holds locks across await points to maintain
@@ -934,7 +953,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         rssi: packet.rssi,
                         data: aps_frame.asdu.to_vec(),
                     };
-                    let _ = self.notification_tx.send(notification);
+                    self.push_notification(notification);
                 }
                 ziggurat_ieee_802154::Ieee802154Frame::Ack(_ack_frame) => {}
                 ziggurat_ieee_802154::Ieee802154Frame::Beacon(beacon_frame) => {
@@ -1351,11 +1370,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let advance = self.core().nib.nwk_security.next_outgoing_frame_counter();
 
         if advance.should_persist {
-            let _ = self
-                .notification_tx
-                .send(ZigbeeNotification::FrameCounterUpdate {
-                    frame_counter: advance.value,
-                });
+            self.push_notification(ZigbeeNotification::FrameCounterUpdate {
+                frame_counter: advance.value,
+            });
         }
 
         advance.value
