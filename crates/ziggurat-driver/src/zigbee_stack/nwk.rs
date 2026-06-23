@@ -1,4 +1,4 @@
-use crate::runtime::Runtime;
+use crate::runtime::{Elapsed, Runtime};
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
@@ -20,11 +20,34 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityLevel, NwkSourceRoute,
 };
 
-use super::routing::Route;
+use super::routing::{Route, Status as RouteStatus};
 use super::{
     AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION,
-    SendKind, SendMode, SendRequest, TxPriority, ZigbeeStack, ZigbeeStackError,
+    PendingFrame, PendingRoute, SendKind, SendMode, SendRequest, TxCompletion, TxPriority,
+    ZigbeeStack, ZigbeeStackError,
 };
+
+/// The outcome of resolving a unicast's MAC next hop without blocking (see
+/// [`ZigbeeStack::resolve_next_hop`]).
+enum NextHop {
+    /// Transmit to this next hop now.
+    Resolved(Nwk),
+    /// No route known; the frame must wait for route discovery.
+    NeedDiscovery,
+    /// No route known and the frame's `discover_route` flag forbids discovering one.
+    Discard,
+}
+
+/// Where a queued destination's route discovery stands when the reactor inspects it (see
+/// [`ZigbeeStack::discovery_state`]).
+enum DiscoveryState {
+    /// A route is active; the queued frames can be sent.
+    Resolved,
+    /// Discovery is not progressing: its window elapsed, it failed, or no entry exists.
+    Lapsed,
+    /// Discovery is still in flight with time remaining.
+    InFlight,
+}
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
@@ -292,34 +315,118 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
+    /// Fire-and-forget originate of a unicast NWK frame at normal priority. Nothing is
+    /// awaited, so a failed transmit is handled by the sender, not reported back here.
+    /// Unicast only; broadcasts go through [`Self::send_broadcast_nwk_frame`].
     pub fn background_send_nwk_frame(
         &self,
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        route_directly: SendMode,
+        mode: SendMode,
     ) {
-        self.spawn_tracked_self(|arc_self| async move {
-            arc_self
-                .send_nwk_frame(nwk_frame, security, route_directly, TxPriority::USER_NORMAL)
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::error!("Failed to send NWK frame: {err}");
+        debug_assert!(
+            nwk_frame.nwk_header.destination.as_u16() < BROADCAST_LOW_POWER_ROUTERS.as_u16(),
+            "background_send_nwk_frame is unicast only; got broadcast {:?}",
+            nwk_frame.nwk_header.destination
+        );
+        self.originate_unicast(nwk_frame, security, mode, TxPriority::USER_NORMAL, None);
+    }
+
+    /// Originate a unicast: assign its NWK sequence number, resolve a next hop, and
+    /// either enqueue it, queue it awaiting route discovery, or drop it
+    /// (discovery suppressed).
+    fn originate_unicast(
+        &self,
+        mut nwk_frame: NwkFrame,
+        security: NwkSecurityMode,
+        mode: SendMode,
+        priority: TxPriority,
+        completion: Option<TxCompletion>,
+    ) {
+        let destination = nwk_frame.nwk_header.destination;
+        nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
+
+        match self.resolve_next_hop(&mut nwk_frame, mode) {
+            NextHop::Resolved(next_hop) => {
+                self.enqueue_unicast(nwk_frame, next_hop, security, priority, completion);
+            }
+            NextHop::NeedDiscovery => {
+                self.enqueue_awaiting_route(nwk_frame, security, priority, completion)
+            }
+            NextHop::Discard => {
+                tracing::debug!(
+                    "Dropping frame to {destination:?}: no route and discovery suppressed"
+                );
+                if let Some(completion) = completion {
+                    let _ = completion.send(Err(ZigbeeStackError::RouteDiscoverySuppressed));
+                }
+            }
+        }
+    }
+
+    /// Resolve the MAC next hop for a unicast without ever blocking. A source-routed
+    /// result rewrites `nwk_frame`'s header in place (spec 3.6.4.3.1). When no route is
+    /// known the frame's `discover_route` flag decides between discovery and discard.
+    fn resolve_next_hop(&self, nwk_frame: &mut NwkFrame, mode: SendMode) -> NextHop {
+        let destination = nwk_frame.nwk_header.destination;
+
+        if mode == SendMode::Direct {
+            return NextHop::Resolved(destination);
+        }
+
+        // End device children never route-discover; their parent delivers directly.
+        if self.end_device_child_eui64(destination).is_some() {
+            return NextHop::Resolved(destination);
+        }
+
+        // A stored source route (concentrator behavior) wins over the routing table.
+        match self.outbound_route(destination) {
+            Some(Route::NextHop(next_hop)) => return NextHop::Resolved(next_hop),
+            Some(Route::SourceRouted(relays)) => {
+                // Spec 3.6.4.3.1: the MAC destination is the relay closest to us, listed
+                // last; the relay index starts one below the relay count.
+                let next_hop = *relays.last().unwrap();
+                nwk_frame.nwk_header.frame_control.source_route = true;
+                nwk_frame.nwk_header.frame_control.discover_route = NwkRouteDiscovery::Suppress;
+                nwk_frame.nwk_header.source_route = Some(NwkSourceRoute {
+                    relay_index: relays.len() as u8 - 1,
+                    relays,
                 });
-        });
+                return NextHop::Resolved(next_hop);
+            }
+            None => {}
+        }
+
+        // An active ad-hoc route, unless we are deliberately forcing rediscovery.
+        if !self.state.hack_force_route_discovery {
+            let core = self.core();
+            if core.nib.routing.route_status(destination) == Some(RouteStatus::Active)
+                && let Some(next_hop) = core.nib.routing.next_hop(destination)
+            {
+                return NextHop::Resolved(next_hop);
+            }
+        }
+
+        // No usable route. Spec 3.6.3.3: only initiate discovery if the frame allows it.
+        if nwk_frame.nwk_header.frame_control.discover_route == NwkRouteDiscovery::Suppress {
+            NextHop::Discard
+        } else {
+            NextHop::NeedDiscovery
+        }
     }
 
     pub async fn send_nwk_frame(
         &self,
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        route_directly: SendMode,
+        mode: SendMode,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             self.send_broadcast_nwk_frame(nwk_frame, security, priority)
                 .await
         } else {
-            self.send_unicast_nwk_frame(nwk_frame, security, route_directly, priority)
+            self.send_unicast_nwk_frame(nwk_frame, security, mode, priority)
                 .await
         }
     }
@@ -399,62 +506,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .route_to(destination, self.tunables.max_source_route)
     }
 
+    /// Originate a unicast and await its delivery result. The completion resolves once
+    /// the frame leaves the radio (or, for a sleepy child, once it polls), or with an
+    /// error on transmit failure, route-discovery failure, or discovery being
+    /// suppressed.
     pub async fn send_unicast_nwk_frame(
         &self,
-        mut nwk_frame: NwkFrame,
+        nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        route_directly: SendMode,
+        mode: SendMode,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
-        let destination = nwk_frame.nwk_header.destination;
-
-        // Compute a next-hop address
-        let next_hop_address = if route_directly == SendMode::Direct {
-            destination
-        } else {
-            match self.outbound_route(destination) {
-                Some(Route::NextHop(next_hop)) => next_hop,
-                Some(Route::SourceRouted(relays)) => {
-                    // Spec 3.6.4.3.1: the MAC destination is the relay closest to
-                    // us, which is listed last; the relay index starts at one less
-                    // than the relay count
-                    let next_hop = *relays.last().unwrap();
-                    nwk_frame.nwk_header.frame_control.source_route = true;
-                    nwk_frame.nwk_header.frame_control.discover_route = NwkRouteDiscovery::Suppress;
-                    nwk_frame.nwk_header.source_route = Some(NwkSourceRoute {
-                        relay_index: relays.len() as u8 - 1,
-                        relays,
-                    });
-                    next_hop
-                }
-                None => self.discover_route(destination).await?,
-            }
-        };
-
-        nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
-
-        let result = self
-            .transmit_unicast_nwk_frame(nwk_frame, next_hop_address, security, priority)
-            .await;
-
-        // A dead next hop invalidates every route through it and any stored source
-        // route to the destination; the next transmission will rediscover
-        if result.is_err() {
-            self.invalidate_routes_via(next_hop_address);
-
-            if self.core().nib.routing.remove_route_record(destination) {
-                tracing::info!("Removed source route to {destination:?} after delivery failure");
-            }
-
-            // Failed deliveries push the MTORR scheduler toward an early
-            // advertisement; expired indirect transactions to our own sleepy
-            // children are not routing failures
-            if self.sleepy_child_eui64(next_hop_address).is_none() {
-                self.note_delivery_failure();
-            }
-        }
-
-        result
+        let (completion_tx, completion_rx) = oneshot::channel();
+        self.originate_unicast(nwk_frame, security, mode, priority, Some(completion_tx));
+        completion_rx
+            .await
+            .unwrap_or(Err(ZigbeeStackError::TransmitFailed(TxResult::Aborted)))
     }
 
     /// Wrap an encrypted NWK payload in a unicast 802.15.4 data frame. The sequence
@@ -508,50 +575,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame)
     }
 
-    /// Queue a fully-formed NWK frame for unicast to the given next hop. The frame is
-    /// encrypted and transmitted (with retries) by the single sender task at dequeue, so
-    /// the frame counter is assigned in transmit order. Unlike [`Self::send_unicast_nwk_frame`],
-    /// the sequence number is not touched: relayed frames keep the originator's sequence
-    /// number (spec 3.6.4.3).
-    pub(super) async fn transmit_unicast_nwk_frame(
-        &self,
-        nwk_frame: NwkFrame,
-        next_hop_address: Nwk,
-        security: NwkSecurityMode,
-        priority: TxPriority,
-    ) -> Result<(), ZigbeeStackError> {
-        // Sleepy children cannot hear direct transmissions: the finished frame waits
-        // in the indirect queue until the child polls for it. No retry loop applies;
-        // the child re-polling is the retry mechanism and expiry the failure signal.
-        // (Indirect delivery bypasses the sender queue: it is latency-critical, and a
-        // sleepy child only ever hears indirect frames, so its counters stay ordered.)
-        if let Some(child_eui64) = self.sleepy_child_eui64(next_hop_address) {
-            let frame = self.finish_unicast_nwk_frame(nwk_frame, next_hop_address, security);
-
-            self.increment_tx_total();
-
-            return self
-                .queue_indirect_frame(Ieee802154Address::Eui64(child_eui64), frame)
-                .await;
-        }
-
-        self.send(
-            SendKind::Unicast {
-                nwk_frame,
-                next_hop: next_hop_address,
-                security,
-            },
-            priority,
-        )
-        .await
-    }
-
-    /// Enqueue a send into the queue and wake the sender task.
-    pub(super) fn background_send(
+    /// Enqueue a send into the priority queue and wake the sender task.
+    pub(super) fn enqueue_send(
         &self,
         kind: SendKind,
         priority: TxPriority,
-        completion: Option<oneshot::Sender<Result<(), ZigbeeStackError>>>,
+        completion: Option<TxCompletion>,
     ) {
         let seq = self.send_seq.fetch_add(1, AtomicOrdering::Relaxed);
         self.send_queue
@@ -566,6 +595,43 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.send_wake.notify_one();
     }
 
+    /// Enqueue a unicast whose next hop is already resolved. A sleepy child goes to the
+    /// indirect queue. Everything else goes to the sender, which encrypts and retries
+    /// at dequeue so frame-counter order matches on-air order. The NWK sequence number
+    /// is left untouched: relayed frames keep the originator's (spec 3.6.4.3). A
+    /// `completion`, if supplied, is resolved by whichever queue takes the frame: the
+    /// sender on transmit, or the indirect queue on the child's poll or expiry.
+    pub(super) fn enqueue_unicast(
+        &self,
+        nwk_frame: NwkFrame,
+        next_hop: Nwk,
+        security: NwkSecurityMode,
+        priority: TxPriority,
+        completion: Option<TxCompletion>,
+    ) {
+        if let Some(child_eui64) = self.sleepy_child_eui64(next_hop) {
+            let frame = self.finish_unicast_nwk_frame(nwk_frame, next_hop, security);
+            self.increment_tx_total();
+
+            let destination = Ieee802154Address::Eui64(child_eui64);
+            match completion {
+                Some(completion) => self.enqueue_indirect_frame(destination, frame, completion),
+                None => drop(self.push_indirect_frame(destination, frame)),
+            }
+            return;
+        }
+
+        self.enqueue_send(
+            SendKind::Unicast {
+                nwk_frame,
+                next_hop,
+                security,
+            },
+            priority,
+            completion,
+        );
+    }
+
     /// Push a frame for the sender task and await its transmit result.
     pub(super) async fn send(
         &self,
@@ -573,10 +639,223 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         let (completion_tx, completion_rx) = oneshot::channel();
-        self.background_send(kind, priority, Some(completion_tx));
+        self.enqueue_send(kind, priority, Some(completion_tx));
         completion_rx
             .await
             .unwrap_or(Err(ZigbeeStackError::TransmitFailed(TxResult::Aborted)))
+    }
+
+    /// Enqueue a unicast awaiting a route and start discovery if necessary.
+    fn enqueue_awaiting_route(
+        &self,
+        nwk_frame: NwkFrame,
+        security: NwkSecurityMode,
+        priority: TxPriority,
+        completion: Option<TxCompletion>,
+    ) {
+        let destination = nwk_frame.nwk_header.destination;
+
+        let start_discovery = {
+            let mut pending = self
+                .state
+                .pending_routes
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+                .unwrap();
+            let is_new = !pending.contains_key(&destination);
+            pending
+                .entry(destination)
+                .or_insert_with(|| PendingRoute {
+                    frames: Vec::new(),
+                    attempts_remaining: self.tunables.pending_route_discovery_attempts,
+                })
+                .frames
+                .push(PendingFrame {
+                    nwk_frame,
+                    security,
+                    priority,
+                    completion,
+                });
+            is_new
+        };
+
+        if start_discovery {
+            tracing::debug!("Queuing frame and starting route discovery for {destination:?}");
+            self.send_route_discovery(destination);
+        }
+        self.pending_route_wake.notify_one();
+    }
+
+    /// The pending-route reactor: a single long-lived task that owns every in-flight
+    /// route discovery. It sleeps until the nearest discovery deadline (or a wake
+    /// signal), then sends the frames whose route resolved and retries or discards
+    /// those whose discovery lapsed.
+    pub(super) async fn pending_route_task(&self) {
+        loop {
+            let next_deadline = self.earliest_discovery_deadline();
+
+            match next_deadline {
+                Some(deadline) => {
+                    let _ = self
+                        .timeout_at_core(deadline, self.pending_route_wake.notified())
+                        .await;
+                }
+                None => self.pending_route_wake.notified().await,
+            }
+
+            self.drive_pending_routes();
+        }
+    }
+
+    /// The soonest live discovery deadline across all queued destinations, or `None`
+    /// when nothing is waiting on a deadline (the reactor then sleeps on its wake
+    /// signal).
+    fn earliest_discovery_deadline(&self) -> Option<CoreInstant> {
+        let destinations: Vec<Nwk> = self
+            .state
+            .pending_routes
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+
+        let now = self.core_now();
+        let core = self.core();
+        destinations
+            .iter()
+            .filter_map(|destination| core.nib.routing.discovery_deadline(*destination, now))
+            .min()
+    }
+
+    /// One reactor pass: classify each queued destination and act on it.
+    fn drive_pending_routes(&self) {
+        let destinations: Vec<Nwk> = self
+            .state
+            .pending_routes
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+
+        for destination in destinations {
+            match self.discovery_state(destination) {
+                DiscoveryState::Resolved => self.release_queued_frames(destination),
+                DiscoveryState::Lapsed => self.retry_or_fail_discovery(destination),
+                DiscoveryState::InFlight => {}
+            }
+        }
+    }
+
+    /// Where `destination`'s route discovery currently stands, read from the routing
+    /// table.
+    fn discovery_state(&self, destination: Nwk) -> DiscoveryState {
+        let now = self.core_now();
+        let core = self.core();
+        match core.nib.routing.route_status(destination) {
+            Some(RouteStatus::Active) => DiscoveryState::Resolved,
+            Some(RouteStatus::DiscoveryUnderway) => {
+                // `discovery_deadline` only returns a live (future) deadline, so its
+                // absence means the discovery window has elapsed.
+                if core
+                    .nib
+                    .routing
+                    .discovery_deadline(destination, now)
+                    .is_some()
+                {
+                    DiscoveryState::InFlight
+                } else {
+                    DiscoveryState::Lapsed
+                }
+            }
+            // DiscoveryFailed / Inactive / no entry: nothing in flight.
+            _ => DiscoveryState::Lapsed,
+        }
+    }
+
+    /// A route exists: re-resolve each queued frame and enqueue it. A frame whose route
+    /// vanished in the race is dropped with an error.
+    fn release_queued_frames(&self, destination: Nwk) {
+        let bucket = self
+            .state
+            .pending_routes
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .remove(&destination);
+
+        let Some(bucket) = bucket else {
+            return;
+        };
+
+        tracing::debug!(
+            "Releasing {} queued frame(s) to {destination:?}",
+            bucket.frames.len()
+        );
+
+        for queued in bucket.frames {
+            let PendingFrame {
+                mut nwk_frame,
+                security,
+                priority,
+                completion,
+            } = queued;
+
+            match self.resolve_next_hop(&mut nwk_frame, SendMode::Route) {
+                NextHop::Resolved(next_hop) => {
+                    self.enqueue_unicast(nwk_frame, next_hop, security, priority, completion);
+                }
+                NextHop::NeedDiscovery | NextHop::Discard => {
+                    if let Some(completion) = completion {
+                        let _ = completion.send(Err(ZigbeeStackError::RouteInactiveAfterDiscovery));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A discovery window lapsed: retry the discovery if the destination has attempts
+    /// left, otherwise mark it failed and discard every frame waiting on it.
+    fn retry_or_fail_discovery(&self, destination: Nwk) {
+        let discarded = {
+            let mut pending = self
+                .state
+                .pending_routes
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+                .unwrap();
+
+            let Some(bucket) = pending.get_mut(&destination) else {
+                return;
+            };
+
+            bucket.attempts_remaining = bucket.attempts_remaining.saturating_sub(1);
+
+            if bucket.attempts_remaining > 0 {
+                None
+            } else {
+                Some(pending.remove(&destination).unwrap().frames)
+            }
+        };
+
+        match discarded {
+            None => {
+                tracing::debug!("Route discovery to {destination:?} timed out, retrying");
+                self.send_route_discovery(destination);
+                self.pending_route_wake.notify_one();
+            }
+            Some(frames) => {
+                self.core().nib.routing.mark_discovery_failed(destination);
+                tracing::debug!(
+                    "Route discovery to {destination:?} failed, dropping {} frame(s)",
+                    frames.len()
+                );
+                for PendingFrame { completion, .. } in frames {
+                    if let Some(completion) = completion {
+                        let _ =
+                            completion.send(Err(ZigbeeStackError::RouteDiscoveryTimeout(Elapsed)));
+                    }
+                }
+            }
+        }
     }
 
     /// The single transmit task: drains [`send_queue`](ZigbeeStack::send_queue) highest
@@ -680,6 +959,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                     if attempt + 1 > self.tunables.unicast_retries {
                         tracing::error!("Failed to send unicast frame after {attempt} attempts");
+                        self.handle_unicast_send_failure(&nwk_frame, next_hop_address);
                         return Err(e);
                     }
                     tracing::debug!(
@@ -696,11 +976,35 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(())
     }
 
+    /// A unicast exhausted its retries at the sender. The next hop is dead: invalidate
+    /// routes through it. A frame we originated also drops any stored source route and
+    /// pushes the MTORR scheduler; a frame we were relaying reports the failure back
+    /// to its originator (spec 3.6.4.8.1).
+    fn handle_unicast_send_failure(&self, nwk_frame: &NwkFrame, next_hop: Nwk) {
+        if nwk_frame.nwk_header.source != self.state.network_address {
+            self.handle_relay_failure(nwk_frame, next_hop);
+            return;
+        }
+
+        let destination = nwk_frame.nwk_header.destination;
+        self.invalidate_routes_via(next_hop);
+
+        if self.core().nib.routing.remove_route_record(destination) {
+            tracing::info!("Removed source route to {destination:?} after delivery failure");
+        }
+
+        // Expired indirect transactions to our own sleepy children are not routing
+        // failures, so they do not push the MTORR scheduler.
+        if self.sleepy_child_eui64(next_hop).is_none() {
+            self.note_delivery_failure();
+        }
+    }
+
     /// Spec 3.6.6: a coordinator/router with rx-off end-device children must re-deliver
     /// every 0xFFFF broadcast to each of them as a MAC unicast through the indirect
     /// queue, since a sleeping radio never hears the broadcast itself. The NWK source is
-    /// skipped (it already has the frame). Each copy is queued on its own task: it is
-    /// only handed to the radio when the child polls, or dropped when it expires.
+    /// skipped (it already has the frame). Each copy is queued without waiting: it is only
+    /// handed to the radio when the child polls, or dropped when it expires.
     fn fan_out_broadcast_to_sleepy_children(
         &self,
         nwk_frame: &NwkFrame,
@@ -720,25 +1024,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .collect();
 
         for (child_eui64, child_nwk) in sleepy_children {
-            let frame = nwk_frame.clone();
-            let arc_self = self
-                .self_weak
-                .upgrade()
-                .expect("Unable to upgrade self reference");
+            let finished = self.finish_unicast_nwk_frame(nwk_frame.clone(), child_nwk, security);
+            self.increment_tx_total();
 
-            self.spawn_tracked(async move {
-                let finished = arc_self.finish_unicast_nwk_frame(frame, child_nwk, security);
-                arc_self.increment_tx_total();
-
-                if let Err(err) = arc_self
-                    .queue_indirect_frame(Ieee802154Address::Eui64(child_eui64), finished)
-                    .await
-                {
-                    tracing::debug!(
-                        "Broadcast not delivered to sleepy child {child_eui64:?}: {err}"
-                    );
-                }
-            });
+            // We don't await the result
+            let _result_rx =
+                self.push_indirect_frame(Ieee802154Address::Eui64(child_eui64), finished);
         }
     }
 
@@ -994,23 +1285,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source
         );
 
-        self.spawn_tracked_self(|arc_self| async move {
-            // The originator's sequence number is preserved when relaying
-            if let Err(err) = arc_self
-                .transmit_unicast_nwk_frame(
-                    nwk_frame.clone(),
-                    next_hop_address,
-                    NwkSecurityMode::NetworkKey,
-                    TxPriority::USER_NORMAL,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Failed to relay frame to {destination:?} via {next_hop_address:?}: {err}"
-                );
-                arc_self.handle_relay_failure(&nwk_frame, next_hop_address);
-            }
-        });
+        // The originator's sequence number is preserved when relaying. The transmit and
+        // any failure handling (route invalidation, the network status back to the
+        // originator) happen in the sender; nothing is awaited here.
+        self.enqueue_unicast(
+            nwk_frame,
+            next_hop_address,
+            NwkSecurityMode::NetworkKey,
+            TxPriority::USER_NORMAL,
+            None,
+        );
     }
 
     /// Zigbee spec 3.6.4.8.1: when relaying fails, the routes through the dead link are
@@ -1030,6 +1314,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             NwkNetworkStatus::LinkFailure
         };
 
+        // The originator may be several hops away with no route cached; allow this
+        // report to discover one.
         let network_status_frame = self
             .nwk_command_frame(
                 source,
@@ -1038,7 +1324,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     network_address: nwk_frame.nwk_header.destination,
                 }),
             )
-            .with_destination_ieee(destination_ieee);
+            .with_destination_ieee(destination_ieee)
+            .with_discover_route(NwkRouteDiscovery::Enable);
 
         self.background_send_nwk_frame(
             network_status_frame,

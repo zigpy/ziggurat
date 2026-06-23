@@ -68,6 +68,8 @@ pub enum ZigbeeStackError {
     RouteDiscoveryNoEntry,
     #[error("route not active after discovery completed")]
     RouteInactiveAfterDiscovery,
+    #[error("no route to destination and route discovery is suppressed")]
+    RouteDiscoverySuppressed,
     #[error("next hop {next_hop:?} did not ACK")]
     NwkNoAck { next_hop: Ieee802154Address },
     #[error("transmit rejected due to CCA failure")]
@@ -245,9 +247,13 @@ impl ApsAckData {
     }
 }
 
-/// Resolves an indirect transaction with its transmit result on extraction, or an
-/// error on expiry or drop.
-pub type IndirectCompletion = oneshot::Sender<Result<(), ZigbeeStackError>>;
+/// The pending half of a transmit's outcome.
+///
+/// Resolved `Ok` once the frame leaves the radio (or, for an indirect transaction, once
+/// the child extracts it), or `Err` on transmit failure, expiry, or drop. Shared by the
+/// sender queue, the indirect queue, and queued frames, since a completion can hand off
+/// between them.
+pub type TxCompletion = oneshot::Sender<Result<(), ZigbeeStackError>>;
 
 /// The end-to-end delivery confirmation of a transmitted APS frame, pending until the
 /// destination's APS ack arrives. Resolved via [`ZigbeeStack::wait_aps_ack`].
@@ -266,7 +272,7 @@ pub(crate) struct SendRequest {
     seq: u64,
     priority: TxPriority,
     pub(crate) kind: SendKind,
-    pub(crate) completion: Option<oneshot::Sender<Result<(), ZigbeeStackError>>>,
+    pub(crate) completion: Option<TxCompletion>,
 }
 
 #[derive(Debug)]
@@ -283,6 +289,30 @@ pub(crate) enum SendKind {
     /// An already-finished 802.15.4 frame (a beacon response, or an indirect poll
     /// delivery): transmitted as-is, only the MAC sequence number assigned at dequeue.
     Raw { frame: Ieee802154Frame },
+}
+
+/// A unicast frame queued because its destination has no known route.
+///
+/// Held in [`State::pending_routes`] until route discovery resolves. The NWK sequence
+/// number is already assigned; the frame counter is still assigned at dequeue.
+#[derive(Debug)]
+pub struct PendingFrame {
+    pub(crate) nwk_frame: NwkFrame,
+    pub(crate) security: NwkSecurityMode,
+    pub(crate) priority: TxPriority,
+    pub(crate) completion: Option<TxCompletion>,
+}
+
+/// All frames waiting on one destination's route discovery.
+///
+/// Discovery is started once per destination and the whole bucket is released or
+/// discarded together, so ten frames to one device ride a single discovery.
+#[derive(Debug)]
+pub struct PendingRoute {
+    pub(crate) frames: Vec<PendingFrame>,
+    /// Discoveries left before the bucket is discarded. Seeded from
+    /// `Tunables::pending_route_discovery_attempts` and decremented on each timeout.
+    pub(crate) attempts_remaining: u8,
 }
 
 impl PartialEq for SendRequest {
@@ -354,7 +384,7 @@ pub struct MacState {
     pub pan_id: PanId,
     /// Frames awaiting extraction by a polling device. Completions are resolved
     /// with the transmit result on extraction, or an error on expiry or drop.
-    pub indirect_queue: IndirectQueue<IndirectCompletion>,
+    pub indirect_queue: IndirectQueue<TxCompletion>,
 }
 
 /// The driver's unified mutable protocol state, behind a single lock.
@@ -409,10 +439,8 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    /// Async I/O bookkeeping, kept out of the core so transmit completions and client
-    /// notifications never contend with protocol work:
     pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
-    pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
+    pub pending_routes: Mutex<HashMap<Nwk, PendingRoute>>,
     pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
 
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
@@ -514,7 +542,7 @@ impl State {
                 trust_center_joins_until: None,
             }),
             pending_aps_acks: Mutex::new(HashMap::new()),
-            pending_route_notifications: Mutex::new(HashMap::new()),
+            pending_routes: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
             aps_duplicates: Mutex::new(HashMap::new()),
 
@@ -682,6 +710,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     pub(crate) send_queue: Mutex<BinaryHeap<SendRequest>>,
     /// Wakes the sender task when a frame is enqueued.
     pub(crate) send_wake: Notify,
+    /// Wakes the pending-route reactor when a frame is queued awaiting a route, or when a
+    /// route is established for a destination with queued frames.
+    pub(crate) pending_route_wake: Notify,
     /// Monotonic tiebreaker giving equal-priority sends FIFO order in `send_queue`.
     pub(crate) send_seq: AtomicU64,
 
@@ -760,6 +791,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             maintenance_wake: Notify::new(),
             send_queue: Mutex::new(BinaryHeap::new()),
             send_wake: Notify::new(),
+            pending_route_wake: Notify::new(),
             send_seq: AtomicU64::new(0),
             background_tasks: Mutex::new(JoinSet::new()),
         });
@@ -936,6 +968,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.spawn_tracked(async move {
             arc_self.sender_task().await;
+        });
+
+        // Drains frames queued awaiting route discovery, and discards them when discovery
+        // is exhausted. Must run before anything can queue one.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.pending_route_task().await;
         });
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will

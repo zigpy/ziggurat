@@ -13,7 +13,7 @@ pub trait RtInstant: Copy + Send + Sync + 'static + Add<Duration, Output = Self>
 
 impl RtInstant for tokio::time::Instant {
     fn saturating_duration_since(self, earlier: Self) -> Duration {
-        tokio::time::Instant::saturating_duration_since(&self, earlier)
+        Self::saturating_duration_since(&self, earlier)
     }
 }
 

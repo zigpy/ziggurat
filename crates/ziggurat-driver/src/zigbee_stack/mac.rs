@@ -123,7 +123,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             TxPriority::BACKGROUND
         };
 
-        self.background_send(
+        self.enqueue_send(
             SendKind::Raw {
                 frame: beacon_frame,
             },

@@ -1,7 +1,6 @@
 use crate::runtime::Runtime;
 use std::cmp;
 use std::time::Duration;
-use tokio::sync::broadcast;
 
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
@@ -12,30 +11,10 @@ use ziggurat_zigbee::nwk::commands::{
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
-use super::routing::{RouteReplyDisposition, Status};
-use super::{
-    AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, TxPriority, ZigbeeStack,
-    ZigbeeStackError,
-};
+use super::routing::RouteReplyDisposition;
+use super::{AddrConflictSource, NwkSecurityMode, SendMode, TxPriority, ZigbeeStack};
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    fn notify_routing_change(&self, nwk: &Nwk) {
-        let tx = {
-            let pending_route_notifications = self
-                .state
-                .pending_route_notifications
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap();
-
-            if !pending_route_notifications.contains_key(nwk) {
-                return;
-            }
-
-            pending_route_notifications.get(nwk).unwrap().clone()
-        };
-        let _ = tx.send(());
-    }
-
     #[allow(clippy::significant_drop_tightening)]
     pub(super) fn handle_route_reply(
         &self,
@@ -74,7 +53,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let (next_hop_nwk, path_cost) = match disposition {
             RouteReplyDisposition::Drop => return,
             RouteReplyDisposition::Established => {
-                self.notify_routing_change(&route_reply_cmd.responder_nwk);
+                self.pending_route_wake.notify_one();
                 return;
             }
             RouteReplyDisposition::Relay {
@@ -83,7 +62,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             } => (next_hop, path_cost),
         };
 
-        self.notify_routing_change(&route_reply_cmd.responder_nwk);
+        self.pending_route_wake.notify_one();
 
         let next_hop_link = self.core().nib.neighbors.link(next_hop_nwk);
 
@@ -175,7 +154,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        self.notify_routing_change(&nwk_frame.nwk_header.source);
+        self.pending_route_wake.notify_one();
 
         // TODO: what do we do if the address and the EUI64 don't agree? This would be
         // an error, some device on the network is storing invalid information about
@@ -484,114 +463,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
+    /// Begin or restart ad-hoc route discovery toward a destination: the routing entry
+    /// enters `DiscoveryUnderway` and a route request is broadcast. The waiting is
+    /// owned by the pending-route reactor, not the caller; this only kicks off the
+    /// discovery.
     #[allow(clippy::significant_drop_tightening)]
-    pub async fn discover_route(&self, destination: Nwk) -> Result<Nwk, ZigbeeStackError> {
-        // End device children do not participate in route discovery (they could never
-        // answer a route request); their parent always delivers directly
-        if self.end_device_child_eui64(destination).is_some() {
-            return Ok(destination);
-        }
-
-        if self.state.hack_force_route_discovery
-            || self.core().nib.routing.route_status(destination).is_none()
-        {
-            tracing::debug!("Starting route discovery for NWK {destination:?}");
-            self.send_route_discovery(destination).await;
-        }
-
-        // The entry just ensured above can be torn down concurrently (e.g. a
-        // link-failure network status removing the route), so a missing entry is
-        // treated like an inactive route and discovery starts over
-        let route_entry_status = self
-            .core()
-            .nib
-            .routing
-            .route_status(destination)
-            .unwrap_or(Status::Inactive);
-
-        tracing::debug!("Routing table status for {destination:?}: {route_entry_status:?}");
-
-        match route_entry_status {
-            Status::Active => {
-                let next_hop = self.core().nib.routing.next_hop(destination);
-
-                // The same concurrent teardown can strike between the two reads
-                if let Some(next_hop) = next_hop {
-                    tracing::debug!(
-                        "Using existing next hop for NWK {destination:?}: {next_hop:?}"
-                    );
-                    return Ok(next_hop);
-                }
-
-                self.send_route_discovery(destination).await;
-            }
-            Status::DiscoveryUnderway => {
-                // Do nothing
-            }
-            Status::DiscoveryFailed | Status::Inactive => {
-                self.send_route_discovery(destination).await;
-            }
-        }
-
-        // Create a pending route notification
-        let mut rx = {
-            let mut pending_route_notifications = self
-                .state
-                .pending_route_notifications
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap();
-            let tx = pending_route_notifications
-                .entry(destination)
-                .or_insert_with(|| {
-                    let (tx, _) = broadcast::channel(1);
-                    tx
-                });
-
-            tx.subscribe()
-        };
-
-        // Pull the current route discovery entry for the device to determine the timeout
-        let discovery_timeout = {
-            let deadline = self
-                .core()
-                .nib
-                .routing
-                .discovery_deadline(destination, self.core_now());
-
-            // One should exist
-            match deadline {
-                Some(deadline) => deadline.saturating_duration_since(self.core_now()),
-                None => {
-                    tracing::warn!("No route discovery entry found for {destination:?}");
-                    return Err(ZigbeeStackError::RouteDiscoveryNoEntry);
-                }
-            }
-        };
-
-        tracing::debug!(
-            "Waiting for route discovery notification for NWK {destination:?} with timeout {discovery_timeout:?}"
-        );
-
-        match R::timeout(discovery_timeout, rx.recv()).await {
-            Ok(_) => {
-                tracing::debug!("Route discovery completed for NWK {destination:#?}");
-            }
-            Err(err) => {
-                tracing::debug!("Route discovery timed out");
-                self.core().nib.routing.mark_discovery_failed(destination);
-                return Err(ZigbeeStackError::RouteDiscoveryTimeout(err));
-            }
-        };
-
-        self.core()
-            .nib
-            .routing
-            .next_hop(destination)
-            .ok_or(ZigbeeStackError::RouteInactiveAfterDiscovery)
-    }
-
-    #[allow(clippy::significant_drop_tightening)]
-    pub async fn send_route_discovery(&self, destination: Nwk) {
+    pub(super) fn send_route_discovery(&self, destination: Nwk) {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
 
         let route_request_identifier = self

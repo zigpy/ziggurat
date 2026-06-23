@@ -11,22 +11,23 @@ use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
 use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
-    DeviceLeaveReason, IndirectCompletion, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendKind,
-    TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    DeviceLeaveReason, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendKind, TxCompletion, TxPriority,
+    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    /// Queue a finished 802.15.4 frame for indirect delivery and wait for the
-    /// destination to extract it with a MAC Data Request, or for the transaction to
-    /// expire (802.15.4 spec 6.7.3). There is no retry loop here: the destination
-    /// re-polling is the retry mechanism, expiry is the failure signal.
-    pub(super) async fn queue_indirect_frame(
+    /// Queue a finished 802.15.4 frame for a polling device, resolving `completion` with
+    /// the transmit result when the destination extracts it (802.15.4 spec 6.7.3), or
+    /// with an error on expiry or eviction. There is no retry loop: the destination
+    /// re-polling is the retry mechanism, expiry is the failure signal. Whoever wants the
+    /// outcome — an awaiting unicast originator, or nobody — owns the completion's
+    /// receiving half.
+    pub(super) fn enqueue_indirect_frame(
         &self,
         destination: Ieee802154Address,
         frame: Ieee802154Frame<EncryptedNwkFrame>,
-    ) -> Result<(), ZigbeeStackError> {
-        let (completion, result_rx) = oneshot::channel();
-
+        completion: TxCompletion,
+    ) {
         self.core()
             .mac
             .indirect_queue
@@ -34,10 +35,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
+    }
 
+    /// Queue a frame for a polling device without waiting on its delivery; the returned
+    /// receiver resolves like [`Self::enqueue_indirect_frame`]'s completion. Fire-and-forget
+    /// callers drop it.
+    pub(super) fn push_indirect_frame(
+        &self,
+        destination: Ieee802154Address,
+        frame: Ieee802154Frame<EncryptedNwkFrame>,
+    ) -> oneshot::Receiver<Result<(), ZigbeeStackError>> {
+        let (completion, result_rx) = oneshot::channel();
+        self.enqueue_indirect_frame(destination, frame, completion);
+        result_rx
+    }
+
+    pub(super) async fn queue_indirect_frame(
+        &self,
+        destination: Ieee802154Address,
+        frame: Ieee802154Frame<EncryptedNwkFrame>,
+    ) -> Result<(), ZigbeeStackError> {
         // Every transaction is eventually resolved by delivery, the expiry sweep, or
         // child eviction; a dropped sender means the stack is shutting down
-        result_rx
+        self.push_indirect_frame(destination, frame)
             .await
             .unwrap_or(Err(ZigbeeStackError::IndirectExpired { destination }))
     }
@@ -136,7 +156,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         true
     }
 
-    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectCompletion>) {
+    async fn transmit_indirect_transaction(&self, delivery: Delivery<TxCompletion>) {
         let Delivery {
             destination,
             transaction,

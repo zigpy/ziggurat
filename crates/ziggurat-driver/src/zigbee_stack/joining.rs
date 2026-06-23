@@ -19,7 +19,7 @@ use ziggurat_zigbee::aps::frame::{
     ApsVerifyKeyCommandFrame, EncryptedApsCommandFrame,
 };
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkSecurityHeaderKeyId,
+    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
 };
 
 use std::time::Duration;
@@ -32,7 +32,7 @@ use ziggurat_zigbee::nwk::commands::{
 
 use super::{
     AddrConflictSource, DeviceLeaveReason, JoinKind, LOCK_ACQUIRE_TIMEOUT, NwkDeviceType,
-    NwkSecurityMode, RadioPhy, SendMode, ZigbeeNotification, ZigbeeStack, neighbors,
+    NwkSecurityMode, RadioPhy, SendMode, TxPriority, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -282,11 +282,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }),
             );
 
-            arc_self.background_send_nwk_frame(
-                conflict_frame,
-                NwkSecurityMode::NetworkKey,
-                SendMode::Route,
-            );
+            // A broadcast keeps the passive-ack retransmit loop, so it is awaited here in
+            // the conflict task rather than fire-and-forget enqueued.
+            if let Err(err) = arc_self
+                .send_broadcast_nwk_frame(
+                    conflict_frame,
+                    NwkSecurityMode::NetworkKey,
+                    TxPriority::USER_NORMAL,
+                )
+                .await
+            {
+                tracing::warn!("Failed to broadcast address conflict for {address:?}: {err}");
+            }
         });
     }
 
@@ -552,7 +559,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Send a serialized APS frame to an on-network device, with NWK security. Direct
     /// children do not participate in route discovery, so they are addressed directly.
     fn send_secured_aps_payload(&self, destination: Nwk, payload: Vec<u8>) {
-        let nwk_frame = self.nwk_data_frame(destination, payload);
+        // Routed delivery to a non-neighbor must be allowed to discover a route (NWK data
+        // frames default to suppressing discovery).
+        let nwk_frame = self
+            .nwk_data_frame(destination, payload)
+            .with_discover_route(NwkRouteDiscovery::Enable);
 
         self.background_send_nwk_frame(
             nwk_frame,
