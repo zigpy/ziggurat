@@ -315,6 +315,22 @@ pub struct PendingRoute {
     pub(crate) attempts_remaining: u8,
 }
 
+/// A broadcast awaiting retransmission, held by the broadcast-retransmit reactor.
+///
+/// Spec 3.6.6: a broadcast is rebroadcast until its passive-ack quorum is heard or its
+/// attempts run out. This holds the frame to retransmit and the schedule; the passive-ack
+/// contract itself lives in the sans-io [`Broadcasts`] table.
+#[derive(Debug)]
+pub struct PendingBroadcast {
+    pub(crate) nwk_frame: NwkFrame,
+    pub(crate) security: NwkSecurityMode,
+    pub(crate) priority: TxPriority,
+    /// Retransmissions left before the broadcast is given up on.
+    pub(crate) attempts_remaining: u8,
+    /// When the next retransmission is due, unless the quorum is heard first.
+    pub(crate) next_attempt: CoreInstant,
+}
+
 impl PartialEq for SendRequest {
     fn eq(&self, other: &Self) -> bool {
         self.priority == other.priority && self.seq == other.seq
@@ -441,6 +457,8 @@ pub struct State {
 
     pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
     pub pending_routes: Mutex<HashMap<Nwk, PendingRoute>>,
+    /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
+    pub pending_broadcasts: Mutex<HashMap<(Nwk, u8), PendingBroadcast>>,
     pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
 
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
@@ -543,6 +561,7 @@ impl State {
             }),
             pending_aps_acks: Mutex::new(HashMap::new()),
             pending_routes: Mutex::new(HashMap::new()),
+            pending_broadcasts: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
             aps_duplicates: Mutex::new(HashMap::new()),
 
@@ -698,9 +717,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
     pub(crate) link_status_received: Notify,
-    /// Signaled on every recorded broadcast passive ack, so retransmission loops can
-    /// re-evaluate completeness reactively instead of sleeping out the window
-    pub(crate) broadcast_acked: Notify,
+    /// Wakes the broadcast-retransmit reactor: signaled on every recorded passive ack
+    /// and whenever a broadcast is queued for retransmission.
+    pub(crate) broadcast_retransmit_wake: Notify,
     /// Wakes the maintenance task when a new indirect transaction or child entry
     /// could move the earliest expiry deadline closer
     pub(crate) maintenance_wake: Notify,
@@ -787,7 +806,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             parent_annce_received: Mutex::new(None),
             mtorr_kick: Notify::new(),
             link_status_received: Notify::new(),
-            broadcast_acked: Notify::new(),
+            broadcast_retransmit_wake: Notify::new(),
             maintenance_wake: Notify::new(),
             send_queue: Mutex::new(BinaryHeap::new()),
             send_wake: Notify::new(),
@@ -979,6 +998,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.spawn_tracked(async move {
             arc_self.pending_route_task().await;
+        });
+
+        // Retransmits broadcasts until their passive-ack quorum is heard or attempts run
+        // out. Must run before anything can queue a broadcast.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.broadcast_retransmit_task().await;
         });
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will

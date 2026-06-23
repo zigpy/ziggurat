@@ -4,6 +4,7 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
 use std::sync::atomic::Ordering as AtomicOrdering;
+use std::time::Duration;
 use tokio::sync::oneshot;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
@@ -23,8 +24,8 @@ use ziggurat_zigbee::nwk::frame::{
 use super::routing::{Route, Status as RouteStatus};
 use super::{
     AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION,
-    PendingFrame, PendingRoute, SendKind, SendMode, SendRequest, TxCompletion, TxPriority,
-    ZigbeeStack, ZigbeeStackError,
+    PendingBroadcast, PendingFrame, PendingRoute, SendKind, SendMode, SendRequest, TxCompletion,
+    TxPriority, ZigbeeStack, ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -86,34 +87,157 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         drop(core);
 
         if duplicate {
-            // A duplicate is its sender's passive ack: retransmission loops
-            // re-evaluate completeness
-            self.broadcast_acked.notify_waiters();
+            // A duplicate is its sender's passive ack: wake the retransmit reactor so it
+            // re-evaluates completeness and can drop a now-acknowledged broadcast early
+            self.broadcast_retransmit_wake.notify_one();
         }
 
         duplicate
     }
 
-    /// Wait until the broadcast is passively acknowledged or the ack collection
-    /// window closes, waking on every recorded ack. Returns whether the broadcast
-    /// is acknowledged.
-    async fn await_broadcast_passive_acks(&self, key: (Nwk, u8)) -> bool {
-        let deadline = self.core_now() + self.tunables.passive_ack_timeout;
-
+    /// The broadcast-retransmit reactor: a single long-lived task that owns every
+    /// in-flight broadcast's retransmission.
+    pub(super) async fn broadcast_retransmit_task(&self) {
         loop {
-            if self.broadcast_passively_acked(key) {
-                return true;
+            match self.earliest_broadcast_retransmit() {
+                Some(deadline) => {
+                    let _ = self
+                        .timeout_at_core(deadline, self.broadcast_retransmit_wake.notified())
+                        .await;
+                }
+                None => self.broadcast_retransmit_wake.notified().await,
             }
 
-            if self
-                .timeout_at_core(deadline, self.broadcast_acked.notified())
-                .await
-                .is_err()
-            {
-                // The window closed; an ack recorded at the boundary still counts
-                return self.broadcast_passively_acked(key);
+            self.drive_broadcast_retransmits();
+        }
+    }
+
+    /// The soonest retransmit deadline across all pending broadcasts, or `None` when none
+    /// are pending (the reactor then sleeps on its wake signal).
+    fn earliest_broadcast_retransmit(&self) -> Option<CoreInstant> {
+        self.state
+            .pending_broadcasts
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .values()
+            .map(|pending| pending.next_attempt)
+            .min()
+    }
+
+    /// One reactor pass: for each pending broadcast, drop it if its quorum is now heard,
+    /// otherwise retransmit a copy if it is due (and not out of attempts).
+    #[allow(clippy::significant_drop_tightening)]
+    fn drive_broadcast_retransmits(&self) {
+        let keys: Vec<(Nwk, u8)> = self
+            .state
+            .pending_broadcasts
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+
+        let now = self.core_now();
+
+        for key in keys {
+            if self.broadcast_passively_acked(key) {
+                tracing::debug!("Broadcast {key:?} passively acknowledged");
+                self.state
+                    .pending_broadcasts
+                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+                    .unwrap()
+                    .remove(&key);
+                continue;
+            }
+
+            // Fresh jitter, computed before taking the lock so nothing non-trivial runs
+            // under it.
+            let next_attempt = now + self.tunables.passive_ack_timeout + self.broadcast_jitter();
+
+            // Decide under the lock; if a copy is due, extract it to transmit after release.
+            let retransmit = {
+                let mut pending = self
+                    .state
+                    .pending_broadcasts
+                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+                    .unwrap();
+                let Some(broadcast) = pending.get_mut(&key) else {
+                    continue;
+                };
+
+                if broadcast.next_attempt > now {
+                    None
+                } else if broadcast.attempts_remaining == 0 {
+                    tracing::debug!("Broadcast {key:?} out of retransmit attempts");
+                    pending.remove(&key);
+
+                    None
+                } else {
+                    broadcast.attempts_remaining -= 1;
+                    broadcast.next_attempt = next_attempt;
+
+                    Some((
+                        broadcast.nwk_frame.clone(),
+                        broadcast.security,
+                        broadcast.priority,
+                    ))
+                }
+            };
+
+            if let Some((nwk_frame, security, priority)) = retransmit {
+                tracing::debug!("Retransmitting broadcast {key:?}");
+                self.enqueue_send(
+                    SendKind::Broadcast {
+                        nwk_frame,
+                        security,
+                    },
+                    priority,
+                    None,
+                );
             }
         }
+    }
+
+    /// Insert a broadcast into the pending-retransmit map and wake the reactor.
+    fn schedule_broadcast(
+        &self,
+        key: (Nwk, u8),
+        nwk_frame: NwkFrame,
+        security: NwkSecurityMode,
+        priority: TxPriority,
+        first_delay: Duration,
+        attempts: u8,
+    ) {
+        if attempts == 0 {
+            return;
+        }
+
+        self.state
+            .pending_broadcasts
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .insert(
+                key,
+                PendingBroadcast {
+                    nwk_frame,
+                    security,
+                    priority,
+                    attempts_remaining: attempts,
+                    next_attempt: self.core_now() + first_delay,
+                },
+            );
+        self.broadcast_retransmit_wake.notify_one();
+    }
+
+    /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
+    ///
+    // TODO: `no_std` randomness source. This and the other `rand::random` sites
+    // (RREQ relay jitter in route.rs, the address-conflict and parent-annce jitters,
+    // plus address/key allocation) call the std global thread RNG directly.
+    fn broadcast_jitter(&self) -> Duration {
+        self.tunables
+            .max_broadcast_jitter
+            .mul_f32(rand::random::<f32>())
     }
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience
@@ -423,8 +547,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-            self.send_broadcast_nwk_frame(nwk_frame, security, priority)
-                .await
+            // Broadcasts are fire-and-forget: the retransmit reactor owns delivery, and
+            // there is no end-to-end result to await.
+            self.send_broadcast_nwk_frame(nwk_frame, security, priority);
+            Ok(())
         } else {
             self.send_unicast_nwk_frame(nwk_frame, security, mode, priority)
                 .await
@@ -1033,12 +1159,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    pub async fn send_broadcast_nwk_frame(
+    /// Originate a broadcast: assign its sequence number, fan it out to sleepy children,
+    /// form the passive-ack contract, transmit the first copy now, and hand any
+    /// retransmissions to the broadcast-retransmit reactor (spec 3.6.6). Fire-and-forget:
+    /// a broadcast has no end-to-end result to await.
+    pub fn send_broadcast_nwk_frame(
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         priority: TxPriority,
-    ) -> Result<(), ZigbeeStackError> {
+    ) {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
@@ -1061,44 +1191,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .record_transmission(key.0, key.1, audience, self.core_now());
         }
 
-        // Spec 3.6.6: retransmit only while the passive ack quorum has not been
-        // heard within the ack collection window
-        for attempt in 0..=self.tunables.max_broadcast_retries {
-            if attempt > 0 {
-                if self.await_broadcast_passive_acks(key).await {
-                    tracing::debug!("Broadcast {key:?} passively acknowledged");
-                    return Ok(());
-                }
-
-                // Fresh jitter decorrelates the retransmission wave: every router
-                // that missed its acks hits the same deadline together, preserving
-                // the relative timing (and collisions) of the original wave
-                R::sleep(
-                    self.tunables
-                        .max_broadcast_jitter
-                        .mul_f32(rand::random::<f32>()),
-                )
-                .await;
-
-                // Acks may have trickled in during the jitter sleep
-                if self.broadcast_passively_acked(key) {
-                    tracing::debug!("Broadcast {key:?} passively acknowledged");
-                    return Ok(());
-                }
-
-                tracing::debug!(
-                    "Broadcast {key:?} is missing passive acks, retransmitting \
-                     (attempt {attempt} of {})",
-                    self.tunables.max_broadcast_retries,
-                );
-            }
-
-            let _ = self
-                .transmit_broadcast_nwk_frame(nwk_frame.clone(), security, priority)
-                .await;
-        }
-
-        Ok(())
+        // Transmit the first copy immediately; the reactor makes any retransmissions,
+        // each after an ack-collection window plus fresh jitter.
+        self.enqueue_send(
+            SendKind::Broadcast {
+                nwk_frame: nwk_frame.clone(),
+                security,
+            },
+            priority,
+            None,
+        );
+        self.schedule_broadcast(
+            key,
+            nwk_frame,
+            security,
+            priority,
+            self.tunables.passive_ack_timeout + self.broadcast_jitter(),
+            self.tunables.max_broadcast_retries,
+        );
     }
 
     /// Queue a fully-formed NWK frame for a single broadcast copy, encrypted and sent by
@@ -1334,8 +1444,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
     }
 
-    /// Zigbee spec 3.6.6: re-broadcast a newly seen broadcast frame after a random
-    /// jitter, preserving the originator's source address and sequence number.
+    /// Zigbee spec 3.6.6: re-broadcast a newly seen broadcast frame, preserving the
+    /// originator's source address and sequence number. The first relay is jittered to
+    /// decorrelate from the originator's wave; the broadcast-retransmit reactor then
+    /// retransmits until the passive-ack quorum is heard or attempts run out.
     fn maybe_relay_broadcast(&self, nwk_frame: &NwkFrame) {
         // Broadcast NWK commands are not generically relayed: link status and leave
         // frames have a radius of 1, and route requests accumulate path cost in their
@@ -1366,58 +1478,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             relayed_frame.nwk_header.sequence_number,
         );
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
-            // The relay is jittered to avoid synchronized rebroadcasts (spec 3.6.6)
-            R::sleep(
-                arc_self
-                    .tunables
-                    .max_broadcast_jitter
-                    .mul_f32(rand::random::<f32>()),
-            )
-            .await;
-
-            // Retransmissions follow the same passive acknowledgment rule as our own
-            // broadcasts; the neighbor we heard the frame from is already counted
-            for attempt in 0..=arc_self.tunables.max_broadcast_retries {
-                if attempt > 0 {
-                    if arc_self.await_broadcast_passive_acks(key).await {
-                        tracing::debug!("Relayed broadcast {key:?} passively acknowledged");
-                        return;
-                    }
-
-                    // Fresh jitter decorrelates the retransmission wave, which is
-                    // synchronized by the shared ack deadline
-                    R::sleep(
-                        arc_self
-                            .tunables
-                            .max_broadcast_jitter
-                            .mul_f32(rand::random::<f32>()),
-                    )
-                    .await;
-
-                    // Acks may have trickled in during the jitter sleep
-                    if arc_self.broadcast_passively_acked(key) {
-                        tracing::debug!("Relayed broadcast {key:?} passively acknowledged");
-                        return;
-                    }
-                }
-
-                if let Err(err) = arc_self
-                    .transmit_broadcast_nwk_frame(
-                        relayed_frame.clone(),
-                        NwkSecurityMode::NetworkKey,
-                        TxPriority::USER_NORMAL,
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to relay broadcast: {err}");
-                }
-            }
-        });
+        // Unlike an originated broadcast, the first relay is also scheduled (after jitter)
+        // rather than sent inline, so the attempt count includes it. The passive-ack
+        // contract was recorded when we received the frame, so the reactor's quorum check
+        // already covers relayed broadcasts.
+        self.schedule_broadcast(
+            key,
+            relayed_frame,
+            NwkSecurityMode::NetworkKey,
+            TxPriority::USER_NORMAL,
+            self.broadcast_jitter(),
+            self.tunables.max_broadcast_retries + 1,
+        );
     }
 }

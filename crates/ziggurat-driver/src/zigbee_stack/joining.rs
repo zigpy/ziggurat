@@ -282,18 +282,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }),
             );
 
-            // A broadcast keeps the passive-ack retransmit loop, so it is awaited here in
-            // the conflict task rather than fire-and-forget enqueued.
-            if let Err(err) = arc_self
-                .send_broadcast_nwk_frame(
-                    conflict_frame,
-                    NwkSecurityMode::NetworkKey,
-                    TxPriority::USER_NORMAL,
-                )
-                .await
-            {
-                tracing::warn!("Failed to broadcast address conflict for {address:?}: {err}");
-            }
+            // The retransmit reactor owns the rebroadcasts; this task only applies the
+            // jittered delay and the cancel-if-already-reported check above.
+            arc_self.send_broadcast_nwk_frame(
+                conflict_frame,
+                NwkSecurityMode::NetworkKey,
+                TxPriority::USER_NORMAL,
+            );
         });
     }
 

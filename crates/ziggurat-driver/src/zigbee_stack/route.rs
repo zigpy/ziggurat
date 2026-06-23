@@ -250,6 +250,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Broadcast a route request `attempts` times, separated by the RREQ retry
     /// interval. The frame's sequence number must already be assigned: route request
     /// retries and relays are not new frames.
+    ///
+    // TODO: this is the last per-broadcast spawn. Route requests are a distinct
+    // retransmit regime from data broadcasts: no passive-ack, a fixed count at a fixed
+    // interval when originated (spec 3.6.4.5.1.4) and jittered per-retransmission when
+    // relayed. They were left out of the broadcast-retransmit reactor. Fold them in
+    // (as a non-passive-ack schedule variant) to remove this spawn.
     fn background_broadcast_route_request(
         &self,
         nwk_frame: NwkFrame,
