@@ -1,3 +1,4 @@
+use crate::runtime::Runtime;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioPhy, TxPriority};
 
@@ -9,7 +10,7 @@ use super::{NwkSecurityMode, ZigbeeStack};
 /// Maximum number of link status entries that can be carried in a single frame.
 const MAX_LINK_STATUSES: usize = 7;
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
         self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
     }
@@ -158,7 +159,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            tokio::time::sleep(self.tunables.link_status_period).await;
+            R::sleep(self.tunables.link_status_period).await;
 
             self.send_link_status_broadcast(false).await;
         }

@@ -1,8 +1,8 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
+use crate::runtime::{Elapsed, RtInstant, Runtime};
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
-use tokio::time::{sleep, timeout};
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult,
@@ -12,16 +12,15 @@ use ziggurat_zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 
 use thiserror::Error;
-use tokio::time::error::Elapsed;
 
 use parking_lot::{Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant};
 
 mod aps;
 mod indirect;
@@ -204,7 +203,7 @@ pub struct NetworkConfig {
 /// cancelled when another device reported the same conflict first.
 #[derive(Debug, Clone, Copy)]
 pub struct AddressConflict {
-    pub handled_at: Instant,
+    pub handled_at: CoreInstant,
     pub heard_from_network: bool,
 }
 
@@ -312,13 +311,13 @@ pub struct ZigbeeCore {
     /// Deadline until which the coordinator advertises `association_permit` in its
     /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
     /// renewals extend the window. `None` or past means direct joins are denied.
-    pub permitting_joins_until: Option<Instant>,
+    pub permitting_joins_until: Option<CoreInstant>,
 
     /// Deadline until which the trust center authorizes new devices joining through a
     /// router. Opened on every permit, independent of the beacon window, so a steered
     /// join completes while the coordinator's own beacon stays closed. Rejoins are
     /// never gated by this.
-    pub trust_center_joins_until: Option<Instant>,
+    pub trust_center_joins_until: Option<CoreInstant>,
 }
 
 /// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It exists
@@ -356,9 +355,7 @@ pub struct State {
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
     /// the receipt time; an inbound data frame matching a live entry is a retransmission
     /// to be acknowledged but not delivered to the application a second time.
-    pub aps_duplicates: Mutex<HashMap<(Nwk, u8), Instant>>,
-
-    pub start_time: Instant,
+    pub aps_duplicates: Mutex<HashMap<(Nwk, u8), CoreInstant>>,
 
     // We intentionally violate the spec with these options
     //
@@ -457,7 +454,6 @@ impl State {
             pending_route_notifications: Mutex::new(HashMap::new()),
             address_conflicts: Mutex::new(HashMap::new()),
             aps_duplicates: Mutex::new(HashMap::new()),
-            start_time: Instant::now(),
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
@@ -576,8 +572,12 @@ pub struct NetworkBeacon {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStack<P: RadioPhy> {
+pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     self_weak: Weak<Self>,
+
+    /// The runtime clock baseline. `now` is converted to the sans-io [`CoreInstant`]
+    /// (microseconds since this instant) at the one boundary that reads the clock.
+    start_time: R::Instant,
 
     pub state: State,
     pub config: NetworkConfig,
@@ -598,7 +598,7 @@ pub struct ZigbeeStack<P: RadioPhy> {
     pub(crate) src_match_written: Mutex<SrcMatchTable>,
     /// When the last parent announcement was received; ours is deferred to avoid a
     /// network-wide broadcast storm (spec 2.4.3.1.12.2)
-    pub(crate) parent_annce_received: Mutex<Option<Instant>>,
+    pub(crate) parent_annce_received: Mutex<Option<CoreInstant>>,
 
     /// Wakes the MTORR scheduler before its max interval when accumulated route
     /// errors or delivery failures cross their thresholds
@@ -620,29 +620,39 @@ pub struct ZigbeeStack<P: RadioPhy> {
     background_tasks: Mutex<JoinSet<()>>,
 }
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Briefly lock the protocol core. See [`CoreGuard`] for the locking discipline the
     /// returned guard encodes.
     fn core(&self) -> CoreGuard<'_> {
         CoreGuard(self.state.core.try_lock_for(LOCK_ACQUIRE_TIMEOUT).unwrap())
     }
 
-    /// The sans-io core's clock reads as microseconds since this stack started. These
-    /// convert between it and the tokio `Instant` our timers use, at the one boundary
-    /// where the driver hands time into (or receives deadlines back from) the core.
-    fn to_core_instant(&self, t: Instant) -> CoreInstant {
-        let micros = t
-            .saturating_duration_since(self.state.start_time)
-            .as_micros();
+    /// The sans-io core's clock reads as microseconds since this stack started. This
+    /// converts the runtime clock to it, at the one boundary where the driver reads the
+    /// clock; every driver-side deadline is then a [`CoreInstant`] and no reverse
+    /// conversion is needed (deadlines are slept as a duration-from-now).
+    fn to_core_instant(&self, t: R::Instant) -> CoreInstant {
+        let micros = t.saturating_duration_since(self.start_time).as_micros();
         CoreInstant::from_micros(micros as u64)
     }
 
     fn core_now(&self) -> CoreInstant {
-        self.to_core_instant(Instant::now())
+        self.to_core_instant(R::now())
     }
 
-    fn to_tokio_instant(&self, t: CoreInstant) -> Instant {
-        self.state.start_time + Duration::from_micros(t.as_micros())
+    /// Sleep until a [`CoreInstant`] deadline, computed as the remaining duration from
+    /// now. Past deadlines resolve immediately.
+    async fn sleep_until_core(&self, deadline: CoreInstant) {
+        R::sleep(deadline.saturating_duration_since(self.core_now())).await;
+    }
+
+    /// Run `future`, failing with [`Elapsed`] if a [`CoreInstant`] deadline passes first.
+    async fn timeout_at_core<F>(&self, deadline: CoreInstant, future: F) -> Result<F::Output, Elapsed>
+    where
+        F: Future + Send,
+        F::Output: Send,
+    {
+        R::timeout(deadline.saturating_duration_since(self.core_now()), future).await
     }
 
     pub fn new(
@@ -657,6 +667,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
         let arc_stack = Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
+            start_time: R::now(),
             state: State::new(&config, &tunables),
             config,
             tunables,
@@ -916,7 +927,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         for attempt in 1..=RESET_ATTEMPTS {
             self.radio.reset().await?;
 
-            match timeout(RESET_NOTIFICATION_TIMEOUT, reset_rx.recv()).await {
+            match R::timeout(RESET_NOTIFICATION_TIMEOUT, reset_rx.recv()).await {
                 Ok(Some(event)) => {
                     tracing::info!("Radio reset complete: {:?}", event.reason);
                     return Ok(());
@@ -987,7 +998,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
             while let Err(err) = self.apply_radio_configuration().await {
                 tracing::error!("Failed to reprogram the radio: {err}, retrying");
-                sleep(RADIO_RECOVERY_RETRY_INTERVAL).await;
+                R::sleep(RADIO_RECOVERY_RETRY_INTERVAL).await;
             }
 
             tracing::info!("Radio reprogrammed, resuming normal operation");
@@ -1066,7 +1077,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                         security_processed: true,
                     })
                     .await?;
-                sleep(duration_per_channel).await;
+                R::sleep(duration_per_channel).await;
             }
             // Leave the radio on the home channel before releasing it.
             radio.set_channel(home_channel).await

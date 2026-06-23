@@ -1,3 +1,4 @@
+use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::commands::{
     AssociationRequestDeviceType, Ieee802154AssociationRequestCommand,
     Ieee802154AssociationResponseCommand,
@@ -21,7 +22,7 @@ use ziggurat_zigbee::nwk::frame::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkSecurityHeaderKeyId,
 };
 
-use tokio::time::{Duration, Instant};
+use std::time::Duration;
 use ziggurat_zigbee::nwk::commands::{
     Nwk802154AssociationStatus, NwkCommand, NwkEndDeviceTimeoutRequestCommand,
     NwkEndDeviceTimeoutResponseCommand, NwkEndDeviceTimeoutResponseStatus, NwkLeaveCommand,
@@ -34,7 +35,7 @@ use super::{
     NwkSecurityMode, RadioPhy, SendMode, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
     pub fn process_802154_association_request(
         &self,
@@ -194,7 +195,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
                 .unwrap();
 
-            let now = Instant::now();
+            let now = self.core_now();
             let window = self.tunables.broadcast_delivery_time;
 
             // Detection re-triggers on every frame from the conflicted devices, so a
@@ -250,7 +251,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            tokio::time::sleep(
+            R::sleep(
                 arc_self
                     .tunables
                     .max_broadcast_jitter
@@ -1228,7 +1229,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     /// direct-association window only follows it when `accept_direct_joins` is set,
     /// leaving a steered join authorized without advertising us as a parent.
     pub fn permit_joins(&self, duration: u64, accept_direct_joins: bool) {
-        let deadline = (duration != 0).then(|| Instant::now() + Duration::from_secs(duration));
+        let deadline = (duration != 0).then(|| self.core_now() + Duration::from_secs(duration));
 
         tracing::info!(
             "Permitting joins for {duration} seconds (accept_direct_joins: {accept_direct_joins})"
@@ -1245,13 +1246,13 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     pub(super) fn permitting_joins(&self) -> bool {
         self.core()
             .permitting_joins_until
-            .is_some_and(|deadline| deadline > Instant::now())
+            .is_some_and(|deadline| deadline > self.core_now())
     }
 
     /// Whether the trust center authorizes new joins through a router right now.
     pub(super) fn trust_center_permitting_joins(&self) -> bool {
         self.core()
             .trust_center_joins_until
-            .is_some_and(|deadline| deadline > Instant::now())
+            .is_some_and(|deadline| deadline > self.core_now())
     }
 }

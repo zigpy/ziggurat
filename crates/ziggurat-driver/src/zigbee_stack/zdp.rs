@@ -1,9 +1,9 @@
+use crate::runtime::Runtime;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioPhy, TxPriority};
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
-use tokio::time::Instant;
 use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
     ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
@@ -25,7 +25,7 @@ const MGMT_LQI_DESCRIPTORS_PER_FRAME: usize = 2;
 /// Routing records per Mgmt_Rtg_rsp, keeping the ASDU within the NWK payload budget.
 const MGMT_RTG_DESCRIPTORS_PER_FRAME: usize = 10;
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Dispatch the ZDP commands the stack itself consumes: the neighbor table they
     /// maintain lives here. The client still observes the frames.
     pub(super) fn handle_zdp_frame(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
@@ -241,7 +241,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         *self
             .parent_annce_received
             .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap() = Some(Instant::now());
+            .unwrap() = Some(self.core_now());
 
         let (claimed, removed) = self
             .core()
@@ -339,8 +339,8 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 .tunables
                 .parent_annce_jitter_max
                 .mul_f32(rand::random::<f32>());
-            let slept_at = Instant::now();
-            tokio::time::sleep(self.tunables.parent_annce_base_timer + jitter).await;
+            let slept_at = self.core_now();
+            R::sleep(self.tunables.parent_annce_base_timer + jitter).await;
 
             // Spec 2.4.3.1.12.2: an announcement from another router restarts the
             // countdown

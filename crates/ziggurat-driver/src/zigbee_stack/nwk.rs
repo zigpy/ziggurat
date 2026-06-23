@@ -1,8 +1,9 @@
+use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
-use tokio::time::{Instant, timeout_at};
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioPhy, TxPriority};
@@ -23,7 +24,7 @@ use super::{
     ZigbeeStackError,
 };
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
         let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
 
@@ -34,12 +35,12 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     /// Filter broadcast frames based on the NWK broadcast transaction table
     pub fn filter_broadcast(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) -> bool {
-        let now = Instant::now();
+        let now = self.core_now();
 
         // We cannot handle broadcasts until the network has been running for at least
-        // the time it takes to deliver one broadcast
+        // the time it takes to deliver one broadcast (core time starts at zero).
         if !self.state.hack_ignore_broadcast_startup_wait_period
-            && (self.state.start_time + self.tunables.broadcast_delivery_time > now)
+            && (CoreInstant::from_micros(0) + self.tunables.broadcast_delivery_time > now)
         {
             tracing::debug!("Filtering broadcast, network started too recently.");
             return true;
@@ -55,7 +56,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             nwk_frame.nwk_header.sequence_number,
             sender_nwk,
             audience,
-            self.to_core_instant(now),
+            now,
         );
         drop(core);
 
@@ -72,14 +73,15 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     /// window closes, waking on every recorded ack. Returns whether the broadcast
     /// is acknowledged.
     async fn await_broadcast_passive_acks(&self, key: (Nwk, u8)) -> bool {
-        let deadline = Instant::now() + self.tunables.passive_ack_timeout;
+        let deadline = self.core_now() + self.tunables.passive_ack_timeout;
 
         loop {
             if self.broadcast_passively_acked(key) {
                 return true;
             }
 
-            if timeout_at(deadline, self.broadcast_acked.notified())
+            if self
+                .timeout_at_core(deadline, self.broadcast_acked.notified())
                 .await
                 .is_err()
             {
@@ -158,7 +160,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             // reach this point: the send path pre-fills the transaction table. The
             // frame is discarded instead of relayed (3.6.1.10).
             if nwk_frame.nwk_header.source == self.state.network_address {
-                if self.state.start_time + self.tunables.broadcast_delivery_time < Instant::now() {
+                if CoreInstant::from_micros(0) + self.tunables.broadcast_delivery_time
+                    < self.core_now()
+                {
                     self.handle_address_conflict(
                         self.state.network_address,
                         AddrConflictSource::Local,
@@ -580,7 +584,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                         self.tunables.unicast_retries
                     );
 
-                    tokio::time::sleep(self.tunables.unicast_retry_delay).await;
+                    R::sleep(self.tunables.unicast_retry_delay).await;
                 }
             }
         }
@@ -674,7 +678,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 // Fresh jitter decorrelates the retransmission wave: every router
                 // that missed its acks hits the same deadline together, preserving
                 // the relative timing (and collisions) of the original wave
-                tokio::time::sleep(
+                R::sleep(
                     self.tunables
                         .max_broadcast_jitter
                         .mul_f32(rand::random::<f32>()),
@@ -962,7 +966,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
         self.spawn_tracked(async move {
             // The relay is jittered to avoid synchronized rebroadcasts (spec 3.6.6)
-            tokio::time::sleep(
+            R::sleep(
                 arc_self
                     .tunables
                     .max_broadcast_jitter
@@ -981,7 +985,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
                     // Fresh jitter decorrelates the retransmission wave, which is
                     // synchronized by the shared ack deadline
-                    tokio::time::sleep(
+                    R::sleep(
                         arc_self
                             .tunables
                             .max_broadcast_jitter

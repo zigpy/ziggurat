@@ -1,9 +1,10 @@
+use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioPhy, TxPriority};
 
 use tokio::sync::oneshot;
-use tokio::time::{Instant, timeout_at};
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
 
@@ -23,7 +24,7 @@ const fn set_frame_pending(frame: &mut Ieee802154Frame<EncryptedNwkFrame>) {
     }
 }
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Queue a finished 802.15.4 frame for indirect delivery and wait for the
     /// destination to extract it with a MAC Data Request, or for the transaction to
     /// expire (802.15.4 spec 6.7.3). There is no retry loop here: the destination
@@ -304,7 +305,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
             match self.next_maintenance_deadline() {
                 Some(deadline) => {
-                    let _ = timeout_at(deadline, self.maintenance_wake.notified()).await;
+                    let _ = self
+                        .timeout_at_core(deadline, self.maintenance_wake.notified())
+                        .await;
                 }
                 None => self.maintenance_wake.notified().await,
             }
@@ -313,20 +316,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     /// The earliest deadline the maintenance task has to act on: an indirect
     /// transaction expiry or a child keepalive timeout.
-    fn next_maintenance_deadline(&self) -> Option<Instant> {
-        let next_expiry = self
-            .core()
-            .mac
-            .indirect_queue
-            .next_expiry()
-            .map(|t| self.to_tokio_instant(t));
-
-        let next_eviction = self
-            .core()
-            .nib
-            .neighbors
-            .next_child_timeout()
-            .map(|t| self.to_tokio_instant(t));
+    fn next_maintenance_deadline(&self) -> Option<CoreInstant> {
+        let next_expiry = self.core().mac.indirect_queue.next_expiry();
+        let next_eviction = self.core().nib.neighbors.next_child_timeout();
 
         [next_expiry, next_eviction].into_iter().flatten().min()
     }

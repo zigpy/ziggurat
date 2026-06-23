@@ -1,6 +1,7 @@
+use crate::runtime::Runtime;
 use std::cmp;
+use std::time::Duration;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::{RadioPhy, TxPriority};
@@ -17,7 +18,7 @@ use super::{
     ZigbeeStackError,
 };
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn notify_routing_change(&self, nwk: &Nwk) {
         let tx = {
             let pending_route_notifications = self
@@ -282,11 +283,11 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            tokio::time::sleep(initial_delay).await;
+            R::sleep(initial_delay).await;
 
             for attempt in 0..attempts {
                 if attempt > 0 {
-                    tokio::time::sleep(arc_self.tunables.rreq_retry_interval).await;
+                    R::sleep(arc_self.tunables.rreq_retry_interval).await;
                 }
 
                 if let Err(err) = arc_self
@@ -348,14 +349,15 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         // Receivers drop route requests from senders with a zero outgoing cost, so
         // the first advertisement waits until link status exchanges establish a
         // neighbor link, bounded by a fixed ceiling in case the network is silent
-        let startup_deadline = Instant::now() + 2 * self.tunables.link_status_period;
+        let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period;
 
         loop {
             if self.core().nib.neighbors.any_live_router_link() {
                 break;
             }
 
-            if timeout_at(startup_deadline, self.link_status_received.notified())
+            if self
+                .timeout_at_core(startup_deadline, self.link_status_received.notified())
                 .await
                 .is_err()
             {
@@ -368,16 +370,16 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
             self.core().nib.routing.reset_mtorr_triggers();
 
-            let min_deadline = Instant::now() + self.tunables.mtorr_min_interval;
-            let max_deadline = Instant::now() + self.tunables.mtorr_max_interval;
+            let min_deadline = self.core_now() + self.tunables.mtorr_min_interval;
+            let max_deadline = self.core_now() + self.tunables.mtorr_max_interval;
 
             // Avertise every max interval, sooner when accumulated route errors or
             // delivery failures signal that routes toward us have gone bad, but never
             // within the min interval
             tokio::select! {
-                () = tokio::time::sleep_until(max_deadline) => {}
+                () = self.sleep_until_core(max_deadline) => {}
                 () = self.mtorr_kick.notified() => {
-                    tokio::time::sleep_until(min_deadline).await;
+                    self.sleep_until_core(min_deadline).await;
                 }
             }
         }
@@ -570,7 +572,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             "Waiting for route discovery notification for NWK {destination:?} with timeout {discovery_timeout:?}"
         );
 
-        match timeout(discovery_timeout, rx.recv()).await {
+        match R::timeout(discovery_timeout, rx.recv()).await {
             Ok(_) => {
                 tracing::debug!("Route discovery completed for NWK {destination:#?}");
             }

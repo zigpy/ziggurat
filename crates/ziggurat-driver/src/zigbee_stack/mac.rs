@@ -1,3 +1,4 @@
+use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154CommandFrame, Ieee802154DataFrame,
     Ieee802154Frame, Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
@@ -14,7 +15,7 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::{NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
         tracing::debug!(
             "Received 802.15.4 command frame: {:?}",

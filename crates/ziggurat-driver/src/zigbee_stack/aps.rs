@@ -1,3 +1,4 @@
+use crate::runtime::Runtime;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_zigbee::aps::frame::{
@@ -9,7 +10,6 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteD
 use std::cmp;
 use std::collections::hash_map::Entry;
 use tokio::sync::oneshot;
-use tokio::time::Instant;
 use ziggurat_phy::{RadioPhy, TxPriority};
 
 use super::{
@@ -17,7 +17,7 @@ use super::{
     ZigbeeStackError,
 };
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// The EUI64 an inbound secured APS frame was encrypted by: the auxiliary header's
     /// extended source when present, otherwise resolved from the NWK frame (spec
     /// 4.4.1.2 step 2).
@@ -95,7 +95,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     /// stops retransmitting, but must not reach the application twice. Expired entries
     /// are swept on each call.
     pub(super) fn is_duplicate_aps_frame(&self, source: Nwk, counter: u8) -> bool {
-        let now = Instant::now();
+        let now = self.core_now();
         let timeout = self.tunables.aps_duplicate_rejection_timeout;
 
         let mut table = self
@@ -103,7 +103,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .aps_duplicates
             .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
             .unwrap();
-        table.retain(|_, seen| now.duration_since(*seen) < timeout);
+        table.retain(|_, seen| now.saturating_duration_since(*seen) < timeout);
 
         match table.entry((source, counter)) {
             Entry::Occupied(mut slot) => {
@@ -348,7 +348,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     /// Wait for the end-to-end APS ack of a previously transmitted frame.
     pub async fn wait_aps_ack(&self, waiter: ApsAckWaiter) -> Result<(), ZigbeeStackError> {
-        match tokio::time::timeout(waiter.timeout, waiter.receiver).await {
+        match R::timeout(waiter.timeout, waiter.receiver).await {
             Ok(Ok(())) => {
                 tracing::debug!("APS ACK received");
                 Ok(())
