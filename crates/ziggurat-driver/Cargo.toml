@@ -21,3 +21,20 @@ parking_lot = "0.12.4"
 rand = "0.10.1"
 thiserror = "2.0.12"
 tokio = { version = "1.43.0", features = ["rt", "macros", "time", "sync", "io-util"] }
+
+# The embassy runtime adapter, host-runnable via arch-std so it can stand in for tokio.
+embassy-executor = { version = "0.7", features = [
+    "arch-std",
+    "executor-thread",
+], optional = true }
+embassy-time = { version = "0.4", features = ["std"], optional = true }
+embassy-sync = { version = "0.6", optional = true }
+spin = { version = "0.9", default-features = false, features = [
+    "spin_mutex",
+], optional = true }
+
+[features]
+default = []
+# Select the embassy runtime adapter (and its no_std-friendly sync primitives) instead of
+# the default tokio one. Mutually overrides tokio at the `sync`/`runtime` seam.
+embassy = ["dep:embassy-executor", "dep:embassy-time", "dep:embassy-sync", "dep:spin"]

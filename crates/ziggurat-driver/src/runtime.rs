@@ -153,3 +153,92 @@ impl Spawn for TokioSpawner {
         while tasks.join_next().await.is_some() {}
     }
 }
+
+/// The embassy runtime adapter. Host-runnable through `arch-std` so it can stand in for
+/// tokio, and the same impl drives the MCU once an esp PHY backs it.
+#[cfg(feature = "embassy")]
+pub use embassy_impl::{EmbassyRuntime, EmbassySpawner};
+
+#[cfg(feature = "embassy")]
+mod embassy_impl {
+    use super::{RtInstant, Runtime, Spawn, SpawnedTask};
+    use core::future::Future;
+    use core::ops::Add;
+    use core::time::Duration;
+
+    const fn to_embassy(duration: Duration) -> embassy_time::Duration {
+        embassy_time::Duration::from_micros(duration.as_micros() as u64)
+    }
+
+    const fn from_embassy(duration: embassy_time::Duration) -> Duration {
+        Duration::from_micros(duration.as_micros())
+    }
+
+    /// Wraps `embassy_time::Instant` so the trait's `core::time::Duration` arithmetic
+    /// works against embassy's own `Duration` type.
+    #[derive(Copy, Clone)]
+    pub struct EmbassyInstant(embassy_time::Instant);
+
+    impl Add<Duration> for EmbassyInstant {
+        type Output = Self;
+
+        fn add(self, rhs: Duration) -> Self {
+            Self(self.0 + to_embassy(rhs))
+        }
+    }
+
+    impl RtInstant for EmbassyInstant {
+        fn saturating_duration_since(self, earlier: Self) -> Duration {
+            from_embassy(self.0.saturating_duration_since(earlier.0))
+        }
+    }
+
+    pub struct EmbassyRuntime;
+
+    impl Runtime for EmbassyRuntime {
+        type Instant = EmbassyInstant;
+        type Spawner = EmbassySpawner;
+
+        fn now() -> Self::Instant {
+            EmbassyInstant(embassy_time::Instant::now())
+        }
+
+        fn sleep(duration: Duration) -> impl Future<Output = ()> + Send {
+            embassy_time::Timer::after(to_embassy(duration))
+        }
+
+        fn sleep_until(deadline: Self::Instant) -> impl Future<Output = ()> + Send {
+            embassy_time::Timer::at(deadline.0)
+        }
+    }
+
+    /// Each detached task runs in one slot of this fixed pool — embassy has no dynamic
+    /// spawn, so the size bounds the stack's concurrent background tasks (long-lived
+    /// reactors plus the transient ZDP/indirect/route-request ones).
+    #[embassy_executor::task(pool_size = 24)]
+    async fn task_runner(task: SpawnedTask) {
+        task.await;
+    }
+
+    /// Spawns into the embassy executor. Holds a [`SendSpawner`](embassy_executor::SendSpawner)
+    /// so it is `Send + Sync`; obtained from the executor at startup.
+    pub struct EmbassySpawner(embassy_executor::SendSpawner);
+
+    impl EmbassySpawner {
+        pub const fn new(spawner: embassy_executor::SendSpawner) -> Self {
+            Self(spawner)
+        }
+    }
+
+    impl Spawn for EmbassySpawner {
+        fn spawn(&self, task: SpawnedTask) {
+            if self.0.spawn(task_runner(task)).is_err() {
+                tracing::error!("embassy task pool exhausted; background task dropped");
+            }
+        }
+
+        // Embassy cannot cancel spawned tasks; the MCU stack is never replaced, so there
+        // is nothing to stop.
+        async fn shutdown(&self) {}
+    }
+}
