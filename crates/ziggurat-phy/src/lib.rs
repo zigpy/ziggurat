@@ -17,19 +17,6 @@ pub trait Receiver<T>: Send {
     fn recv(&mut self) -> impl Future<Output = Option<T>> + Send;
 }
 
-/// Transmit scheduling priority. Higher transmits first when the radio is contended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TxPriority(pub i8);
-
-impl TxPriority {
-    pub const BACKGROUND: Self = Self(-2);
-    pub const USER_LOW: Self = Self(-1);
-    pub const USER_NORMAL: Self = Self(0);
-    pub const USER_HIGH: Self = Self(1);
-    pub const USER_CRITICAL: Self = Self(2);
-    pub const STACK_CRITICAL: Self = Self(3);
-}
-
 /// A frame to transmit. `psdu` is the serialized 802.15.4 frame; the backend supplies
 /// or recomputes the FCS. `channel` overrides the current channel for this frame only.
 #[derive(Debug, Clone)]
@@ -123,11 +110,8 @@ pub trait RadioPhy: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), RadioError>> + Send;
 
     /// Transmit a frame, blocking while the radio is held exclusively (see [`lock`]).
-    fn transmit(
-        &self,
-        frame: TxFrame,
-        priority: TxPriority,
-    ) -> impl Future<Output = Result<TxResult, RadioError>> + Send;
+    fn transmit(&self, frame: TxFrame)
+    -> impl Future<Output = Result<TxResult, RadioError>> + Send;
 
     /// Energy-detect one channel for `duration`, returning peak RSSI in dBm. Exclusive;
     /// returns to the home channel when done.

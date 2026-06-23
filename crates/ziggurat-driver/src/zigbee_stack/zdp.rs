@@ -1,6 +1,6 @@
 use crate::runtime::Runtime;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -11,8 +11,8 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkDeviceType, ZigbeeStack, ZigbeeStackError,
-    neighbors, routing,
+    ApsAck, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkDeviceType, TxPriority, ZigbeeStack,
+    ZigbeeStackError, neighbors, routing,
 };
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.

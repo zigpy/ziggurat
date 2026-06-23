@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use ziggurat_ieee_802154::types::Nwk;
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::RadioPhy;
 
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand,
@@ -14,7 +14,7 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 
 use super::routing::{RouteReplyDisposition, Status};
 use super::{
-    AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, ZigbeeStack,
+    AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, TxPriority, ZigbeeStack,
     ZigbeeStackError,
 };
 

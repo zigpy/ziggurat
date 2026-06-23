@@ -6,14 +6,17 @@ use crate::ziggurat_ieee_802154::{
 use abstract_bits::AbstractBits;
 use arbitrary_int::u24;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
-use ziggurat_phy::{RadioPhy, TxFrame, TxPriority, TxResult};
+use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::{RenamedU24, ZigbeeBeacon};
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
-use super::{NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
+use super::{
+    NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxPriority, ZigbeeStack,
+    ZigbeeStackError,
+};
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
@@ -112,7 +115,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             fcs: 0x0000,
         });
 
-        self.background_send_802154_frame(beacon_frame, TxPriority::USER_NORMAL);
+        let tx_priority = if permitting_joins {
+            // We should try to win any beacon races during joins
+            TxPriority::STACK_CRITICAL
+        } else {
+            // Otherwise, unexpected beacon requests should never compete with normal traffic
+            TxPriority::BACKGROUND
+        };
+
+        self.background_send(
+            SendKind::Raw {
+                frame: beacon_frame,
+            },
+            tx_priority,
+            None,
+        );
     }
 
     pub(super) fn beacon_request_psdu(&self) -> Vec<u8> {
@@ -304,7 +321,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
         frame: Ieee802154Frame<Payload>,
-        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         // Increment the 802.15.4 sequence number
         let final_frame = if !frame.header().frame_control.sequence_number_suppression {
@@ -313,6 +329,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 let mut core = self.core();
                 core.mac.ieee802154_sequence_number =
                     core.mac.ieee802154_sequence_number.wrapping_add(1);
+
                 core.mac.ieee802154_sequence_number
             };
 
@@ -352,17 +369,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let channel = self.core().mac.channel;
         let result = self
             .radio
-            .transmit(
-                TxFrame {
-                    psdu: final_frame.to_bytes(),
-                    channel: Some(channel),
-                    csma_ca: true,
-                    max_frame_retries: self.tunables.mac_max_frame_retries,
-                    max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
-                    security_processed: true,
-                },
-                priority,
-            )
+            .transmit(TxFrame {
+                psdu: final_frame.to_bytes(),
+                channel: Some(channel),
+                csma_ca: true,
+                max_frame_retries: self.tunables.mac_max_frame_retries,
+                max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
+                security_processed: true,
+            })
             .await?;
 
         match result {
@@ -373,16 +387,5 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             TxResult::ChannelAccessFailure => Err(ZigbeeStackError::CcaFailure),
             other => Err(ZigbeeStackError::TransmitFailed(other)),
         }
-    }
-
-    pub fn background_send_802154_frame(&self, frame: Ieee802154Frame, priority: TxPriority) {
-        self.spawn_tracked_self(|arc_self| async move {
-            arc_self
-                .send_802154_frame(frame, priority)
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::error!("Failed to send 802.15.4 frame: {err}");
-                });
-        });
     }
 }

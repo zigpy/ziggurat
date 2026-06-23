@@ -10,11 +10,10 @@ use tokio::time::timeout;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
-    TxPriority, TxResult,
+    TxResult,
 };
 use ziggurat_spinel::client::{
     ExclusiveRadio as SpinelRadioGuard, SpinelClient, SpinelError, SpinelRxFrame, SpinelTxFrame,
-    TxPriority as SpinelTxPriority,
 };
 use ziggurat_spinel::{
     SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelMacScanState, SpinelPropertyId,
@@ -300,12 +299,12 @@ impl RadioPhy for SpinelPhy {
         write_frame_pending(&self.client, short, extended).await
     }
 
-    async fn transmit(&self, frame: TxFrame, priority: TxPriority) -> Result<TxResult, RadioError> {
+    async fn transmit(&self, frame: TxFrame) -> Result<TxResult, RadioError> {
         let home = *self.home_channel.lock();
         let spinel_frame = tx_frame_to_spinel(frame, home);
         let status = self
             .client
-            .transmit_frame(&spinel_frame, SpinelTxPriority(priority.0))
+            .transmit_frame(&spinel_frame)
             .await
             .map_err(map_err)?;
         Ok(map_status(status))

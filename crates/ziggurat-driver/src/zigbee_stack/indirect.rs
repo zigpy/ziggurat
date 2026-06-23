@@ -1,7 +1,7 @@
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::RadioPhy;
 
 use tokio::sync::oneshot;
 use ziggurat_zigbee::Instant as CoreInstant;
@@ -11,18 +11,9 @@ use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
 use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
-    DeviceLeaveReason, IndirectCompletion, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode,
-    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    DeviceLeaveReason, IndirectCompletion, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendKind,
+    TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
-
-const fn set_frame_pending(frame: &mut Ieee802154Frame<EncryptedNwkFrame>) {
-    match frame {
-        Ieee802154Frame::Data(f) => f.header.frame_control.frame_pending = true,
-        Ieee802154Frame::Ack(f) => f.header.frame_control.frame_pending = true,
-        Ieee802154Frame::Beacon(f) => f.header.frame_control.frame_pending = true,
-        Ieee802154Frame::Command(f) => f.header.frame_control.frame_pending = true,
-    }
-}
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Queue a finished 802.15.4 frame for indirect delivery and wait for the
@@ -153,14 +144,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         } = delivery;
 
         let mut frame = transaction.frame.clone();
+
         if more_pending {
-            set_frame_pending(&mut frame);
+            match frame {
+                Ieee802154Frame::Data(ref mut f) => f.header.frame_control.frame_pending = true,
+                Ieee802154Frame::Ack(ref mut f) => f.header.frame_control.frame_pending = true,
+                Ieee802154Frame::Beacon(ref mut f) => f.header.frame_control.frame_pending = true,
+                Ieee802154Frame::Command(ref mut f) => f.header.frame_control.frame_pending = true,
+            }
         }
 
-        // Indirect delivery answers a sleepy child's poll within macResponseWaitTime — a
-        // deadline-bound path, so it takes the radio ahead of the baseline backlog.
+        // Indirect delivery answers a sleepy child's poll within `macResponseWaitTime`
+        let raw_frame = Ieee802154Frame::from_bytes_without_fcs(&frame.to_bytes_without_fcs())
+            .expect("a built indirect frame round-trips through bytes");
+
         match self
-            .send_802154_frame(frame, TxPriority::STACK_CRITICAL)
+            .send(
+                SendKind::Raw { frame: raw_frame },
+                TxPriority::STACK_CRITICAL,
+            )
             .await
         {
             Ok(()) => {

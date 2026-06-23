@@ -10,11 +10,11 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteD
 use std::cmp;
 use std::collections::hash_map::Entry;
 use tokio::sync::oneshot;
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::RadioPhy;
 
 use super::{
-    ApsAck, ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, ZigbeeStack,
-    ZigbeeStackError,
+    ApsAck, ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, TxPriority,
+    ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {

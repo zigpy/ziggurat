@@ -3,10 +3,12 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
-use ziggurat_zigbee::Instant as CoreInstant;
+use std::sync::atomic::Ordering as AtomicOrdering;
+use tokio::sync::oneshot;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::{RadioPhy, TxResult};
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
     NwkNetworkStatusCommand,
@@ -20,8 +22,8 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::Route;
 use super::{
-    AddrConflictSource, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, SendMode, ZigbeeStack,
-    ZigbeeStackError,
+    AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION,
+    SendKind, SendMode, SendRequest, TxPriority, ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -506,12 +508,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame)
     }
 
-    /// Encrypt a fully-formed NWK frame and unicast it to the given next hop, with
-    /// retries. Unlike [`Self::send_unicast_nwk_frame`], the sequence number is not
-    /// touched: relayed frames keep the originator's sequence number (spec 3.6.4.3).
+    /// Queue a fully-formed NWK frame for unicast to the given next hop. The frame is
+    /// encrypted and transmitted (with retries) by the single sender task at dequeue, so
+    /// the frame counter is assigned in transmit order. Unlike [`Self::send_unicast_nwk_frame`],
+    /// the sequence number is not touched: relayed frames keep the originator's sequence
+    /// number (spec 3.6.4.3).
     pub(super) async fn transmit_unicast_nwk_frame(
         &self,
-        mut nwk_frame: NwkFrame,
+        nwk_frame: NwkFrame,
         next_hop_address: Nwk,
         security: NwkSecurityMode,
         priority: TxPriority,
@@ -519,6 +523,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Sleepy children cannot hear direct transmissions: the finished frame waits
         // in the indirect queue until the child polls for it. No retry loop applies;
         // the child re-polling is the retry mechanism and expiry the failure signal.
+        // (Indirect delivery bypasses the sender queue: it is latency-critical, and a
+        // sleepy child only ever hears indirect frames, so its counters stay ordered.)
         if let Some(child_eui64) = self.sleepy_child_eui64(next_hop_address) {
             let frame = self.finish_unicast_nwk_frame(nwk_frame, next_hop_address, security);
 
@@ -529,6 +535,106 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .await;
         }
 
+        self.send(
+            SendKind::Unicast {
+                nwk_frame,
+                next_hop: next_hop_address,
+                security,
+            },
+            priority,
+        )
+        .await
+    }
+
+    /// Enqueue a send into the queue and wake the sender task.
+    pub(super) fn background_send(
+        &self,
+        kind: SendKind,
+        priority: TxPriority,
+        completion: Option<oneshot::Sender<Result<(), ZigbeeStackError>>>,
+    ) {
+        let seq = self.send_seq.fetch_add(1, AtomicOrdering::Relaxed);
+        self.send_queue
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .push(SendRequest {
+                seq,
+                priority,
+                kind,
+                completion,
+            });
+        self.send_wake.notify_one();
+    }
+
+    /// Push a frame for the sender task and await its transmit result.
+    pub(super) async fn send(
+        &self,
+        kind: SendKind,
+        priority: TxPriority,
+    ) -> Result<(), ZigbeeStackError> {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        self.background_send(kind, priority, Some(completion_tx));
+        completion_rx
+            .await
+            .unwrap_or(Err(ZigbeeStackError::TransmitFailed(TxResult::Aborted)))
+    }
+
+    /// The single transmit task: drains [`send_queue`](ZigbeeStack::send_queue) highest
+    /// priority first, encrypting each frame as it is sent so frame-counter order
+    /// always matches on-air order. Serializing all transmits here is what keeps the
+    /// counter monotonic; concurrent senders would race it and risk replay rejection.
+    pub(super) async fn sender_task(&self) {
+        loop {
+            loop {
+                let request = self
+                    .send_queue
+                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+                    .unwrap()
+                    .pop();
+
+                let Some(request) = request else {
+                    break;
+                };
+
+                let result = match request.kind {
+                    SendKind::Unicast {
+                        nwk_frame,
+                        next_hop,
+                        security,
+                    } => {
+                        self.process_unicast_send(nwk_frame, next_hop, security)
+                            .await
+                    }
+                    SendKind::Broadcast {
+                        nwk_frame,
+                        security,
+                    } => self.process_broadcast_send(nwk_frame, security).await,
+                    SendKind::Raw { frame } => self.send_802154_frame(frame).await,
+                };
+
+                match request.completion {
+                    Some(completion) => {
+                        let _ = completion.send(result);
+                    }
+                    None => {
+                        if let Err(err) = result {
+                            tracing::warn!("Background send failed: {err}");
+                        }
+                    }
+                }
+            }
+
+            self.send_wake.notified().await;
+        }
+    }
+
+    /// Encrypt and unicast a dequeued frame to the next hop, with NWK retries.
+    async fn process_unicast_send(
+        &self,
+        mut nwk_frame: NwkFrame,
+        next_hop_address: Nwk,
+        security: NwkSecurityMode,
+    ) -> Result<(), ZigbeeStackError> {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
 
         for attempt in 0..=self.tunables.unicast_retries {
@@ -537,8 +643,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame);
 
             // When forwarding packets to another node, update the counters for the neighbor
-            // TODO: maybe wrap the send state into some sort of struct to avoid
-            // needing to do this?
             {
                 let mut core = self.core();
                 let relaying_ieee = core.nib.address_map.eui64_for(next_hop_address);
@@ -555,7 +659,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             self.increment_tx_total();
 
-            match self.send_802154_frame(ieee802154_frame, priority).await {
+            match self.send_802154_frame(ieee802154_frame).await {
                 Ok(_) => {
                     break;
                 }
@@ -706,14 +810,30 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(())
     }
 
-    /// Encrypt a fully-formed NWK frame and broadcast a single copy of it. The sequence
-    /// number is not touched: relayed broadcasts and route request retries keep their
-    /// original sequence number.
+    /// Queue a fully-formed NWK frame for a single broadcast copy, encrypted and sent by
+    /// the sender task at dequeue. The sequence number is not touched: relayed broadcasts
+    /// and route request retries keep their original sequence number.
     pub(super) async fn transmit_broadcast_nwk_frame(
+        &self,
+        nwk_frame: NwkFrame,
+        security: NwkSecurityMode,
+        priority: TxPriority,
+    ) -> Result<(), ZigbeeStackError> {
+        self.send(
+            SendKind::Broadcast {
+                nwk_frame,
+                security,
+            },
+            priority,
+        )
+        .await
+    }
+
+    /// Encrypt and broadcast a single dequeued copy of a frame.
+    async fn process_broadcast_send(
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
 
@@ -753,7 +873,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.increment_tx_total();
 
-        self.send_802154_frame(ieee802154_frame, priority).await
+        self.send_802154_frame(ieee802154_frame).await
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.

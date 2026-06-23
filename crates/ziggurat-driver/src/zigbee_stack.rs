@@ -14,13 +14,16 @@ use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use thiserror::Error;
 
 use parking_lot::{Mutex, MutexGuard};
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
+use ziggurat_zigbee::nwk::frame::NwkFrame;
 
 mod aps;
 mod indirect;
@@ -31,7 +34,6 @@ mod nwk;
 mod route;
 mod zdp;
 
-pub use ziggurat_phy::TxPriority;
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use ziggurat_zigbee::constants::{
@@ -82,6 +84,19 @@ pub enum ZigbeeStackError {
     IndirectExpired { destination: Ieee802154Address },
     #[error("radio error: {0}")]
     Radio(#[from] RadioError),
+}
+
+/// Transmit scheduling priority. Higher transmits first when the radio is contended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TxPriority(pub i8);
+
+impl TxPriority {
+    pub const BACKGROUND: Self = Self(-2);
+    pub const USER_LOW: Self = Self(-1);
+    pub const USER_NORMAL: Self = Self(0);
+    pub const USER_HIGH: Self = Self(1);
+    pub const USER_CRITICAL: Self = Self(2);
+    pub const STACK_CRITICAL: Self = Self(3);
 }
 
 /// How an outgoing NWK frame is secured. Frames carrying the network key to a joining
@@ -241,6 +256,54 @@ pub struct ApsAckWaiter {
     pub(crate) receiver: oneshot::Receiver<()>,
     pub(crate) timeout: Duration,
     pub(crate) ack_data: ApsAckData,
+}
+
+/// A transmit queued for the single sender task ([`ZigbeeStack::sender_task`]). The NWK
+/// frame is unencrypted: the sender assigns the frame counter at dequeue, so on-air order
+/// always matches frame-counter order regardless of priority reordering in the queue.
+#[derive(Debug)]
+pub(crate) struct SendRequest {
+    seq: u64,
+    priority: TxPriority,
+    pub(crate) kind: SendKind,
+    pub(crate) completion: Option<oneshot::Sender<Result<(), ZigbeeStackError>>>,
+}
+
+#[derive(Debug)]
+pub(crate) enum SendKind {
+    Unicast {
+        nwk_frame: NwkFrame,
+        next_hop: Nwk,
+        security: NwkSecurityMode,
+    },
+    Broadcast {
+        nwk_frame: NwkFrame,
+        security: NwkSecurityMode,
+    },
+    /// An already-finished 802.15.4 frame (a beacon response, or an indirect poll
+    /// delivery): transmitted as-is, only the MAC sequence number assigned at dequeue.
+    Raw { frame: Ieee802154Frame },
+}
+
+impl PartialEq for SendRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.seq == other.seq
+    }
+}
+impl Eq for SendRequest {}
+impl Ord for SendRequest {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Max-heap: higher priority first; within a priority, the earlier (lower) seq
+        // wins, so equal-priority frames drain in FIFO order.
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+impl PartialOrd for SendRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// The NWK Information Base (spec Table 3-66): the network layer's mutable attributes
@@ -614,6 +677,14 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     /// could move the earliest expiry deadline closer
     pub(crate) maintenance_wake: Notify,
 
+    /// Outgoing frames awaiting the single sender task, ordered by priority then FIFO.
+    /// The sender encrypts at dequeue, so frame-counter order matches on-air order.
+    pub(crate) send_queue: Mutex<BinaryHeap<SendRequest>>,
+    /// Wakes the sender task when a frame is enqueued.
+    pub(crate) send_wake: Notify,
+    /// Monotonic tiebreaker giving equal-priority sends FIFO order in `send_queue`.
+    pub(crate) send_seq: AtomicU64,
+
     /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
     /// a leaked background task would keep the replaced stack processing frames and
     /// transmitting alongside its successor
@@ -647,7 +718,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Run `future`, failing with [`Elapsed`] if a [`CoreInstant`] deadline passes first.
-    async fn timeout_at_core<F>(&self, deadline: CoreInstant, future: F) -> Result<F::Output, Elapsed>
+    async fn timeout_at_core<F>(
+        &self,
+        deadline: CoreInstant,
+        future: F,
+    ) -> Result<F::Output, Elapsed>
     where
         F: Future + Send,
         F::Output: Send,
@@ -683,6 +758,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             link_status_received: Notify::new(),
             broadcast_acked: Notify::new(),
             maintenance_wake: Notify::new(),
+            send_queue: Mutex::new(BinaryHeap::new()),
+            send_wake: Notify::new(),
+            send_seq: AtomicU64::new(0),
             background_tasks: Mutex::new(JoinSet::new()),
         });
 
@@ -847,6 +925,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub async fn start_network(&self) -> Result<(), ZigbeeStackError> {
         self.reset_radio().await?;
         self.apply_radio_configuration().await?;
+
+        // The single sender task drains the transmit queue; it must run before anything
+        // enqueues a frame (the initial link status broadcast below would otherwise
+        // block on a completion nobody resolves).
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.sender_task().await;
+        });
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will
         // "respond" to empty link status broadcasts proactively, independent of the
