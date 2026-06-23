@@ -14,7 +14,8 @@ use ziggurat_zigbee::beacon::ZigbeeBeacon;
 
 use thiserror::Error;
 
-use parking_lot::{Mutex, MutexGuard};
+use crate::sync::Notify;
+use crate::sync::{Mutex, MutexGuard};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::future::Future;
@@ -22,7 +23,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
 use ziggurat_zigbee::nwk::frame::NwkFrame;
 
@@ -48,9 +49,6 @@ pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
 pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
-
-/// Hard deadline for acquiring a lock. Anything exceeding this is an error.
-const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(10);
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
 const RESET_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -430,11 +428,9 @@ pub struct ZigbeeCore {
     pub trust_center_joins_until: Option<CoreInstant>,
 }
 
-/// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It exists
-/// to encode the single-lock discipline in one place:
-///
-/// - It is `!Send` so holding it across an `.await` is a compile-time error.
-/// - It is acquired with a [`LOCK_ACQUIRE_TIMEOUT`] so we fail at runtime if this lapses.
+/// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It encodes
+/// the single-lock discipline: it is `!Send`, so holding it across an `.await` is a
+/// compile-time error.
 pub struct CoreGuard<'a>(MutexGuard<'a, ZigbeeCore>);
 
 impl Deref for CoreGuard<'_> {
@@ -749,7 +745,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Briefly lock the protocol core. See [`CoreGuard`] for the locking discipline the
     /// returned guard encodes.
     fn core(&self) -> CoreGuard<'_> {
-        CoreGuard(self.state.core.try_lock_for(LOCK_ACQUIRE_TIMEOUT).unwrap())
+        CoreGuard(self.state.core.lock())
     }
 
     /// The sans-io core's clock reads as microseconds since this stack started. This
@@ -819,22 +815,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Queue a network event and wake the notification drainer.
     pub(crate) fn push_notification(&self, notification: ZigbeeNotification) {
-        self.notifications
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .push_back(notification);
+        self.notifications.lock().push_back(notification);
         self.notification_wake.notify_one();
     }
 
     /// Wait for and take all queued network events.
     pub async fn next_notifications(&self) -> Vec<ZigbeeNotification> {
         loop {
-            let batch: Vec<ZigbeeNotification> = self
-                .notifications
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
-                .drain(..)
-                .collect();
+            let batch: Vec<ZigbeeNotification> = self.notifications.lock().drain(..).collect();
             if !batch.is_empty() {
                 return batch;
             }
@@ -1158,10 +1146,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.radio.reconfigure(&config).await?;
 
-        *self
-            .src_match_written
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap() = table;
+        *self.src_match_written.lock() = table;
 
         Ok(())
     }
@@ -1239,19 +1224,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             rssi,
         };
 
-        self.scan_beacons
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .push_back(network_beacon);
+        self.scan_beacons.lock().push_back(network_beacon);
         self.scan_beacon_wake.notify_one();
     }
 
     /// Open the beacon-collection window for an active scan.
     pub fn begin_network_scan(&self) {
-        self.scan_beacons
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .clear();
+        self.scan_beacons.lock().clear();
         self.scan_active.store(true, AtomicOrdering::Relaxed);
     }
 
@@ -1298,12 +1277,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// the window is closed.
     pub async fn next_scan_beacons(&self) -> Vec<NetworkBeacon> {
         loop {
-            let batch: Vec<NetworkBeacon> = self
-                .scan_beacons
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
-                .drain(..)
-                .collect();
+            let batch: Vec<NetworkBeacon> = self.scan_beacons.lock().drain(..).collect();
             if !batch.is_empty() {
                 return batch;
             }
@@ -1345,10 +1319,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut tasks = self
-            .background_tasks
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap();
+        let mut tasks = self.background_tasks.lock();
 
         // A completed task's entire cell is retained until it is reaped from the
         // set: drain here so the set tracks live tasks instead of growing by one
@@ -1382,12 +1353,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// replaced stack provably stops processing frames and transmitting before its
     /// successor takes over the shared Spinel client.
     pub async fn shutdown(&self) {
-        let mut tasks = std::mem::take(
-            &mut *self
-                .background_tasks
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap(),
-        );
+        let mut tasks = std::mem::take(&mut *self.background_tasks.lock());
 
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}

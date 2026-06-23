@@ -23,9 +23,9 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION,
-    PendingBroadcast, PendingFrame, PendingRoute, SendKind, SendMode, SendRequest, TxCompletion,
-    TxPriority, ZigbeeStack, ZigbeeStackError,
+    AddrConflictSource, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast,
+    PendingFrame, PendingRoute, SendKind, SendMode, SendRequest, TxCompletion, TxPriority,
+    ZigbeeStack, ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -117,8 +117,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn earliest_broadcast_retransmit(&self) -> Option<CoreInstant> {
         self.state
             .pending_broadcasts
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
+            .lock()
             .values()
             .map(|pending| pending.next_attempt)
             .min()
@@ -131,8 +130,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let keys: Vec<(Nwk, u8)> = self
             .state
             .pending_broadcasts
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
+            .lock()
             .keys()
             .copied()
             .collect();
@@ -142,11 +140,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for key in keys {
             if self.broadcast_passively_acked(key) {
                 tracing::debug!("Broadcast {key:?} passively acknowledged");
-                self.state
-                    .pending_broadcasts
-                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                    .unwrap()
-                    .remove(&key);
+                self.state.pending_broadcasts.lock().remove(&key);
                 continue;
             }
 
@@ -156,11 +150,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             // Decide under the lock; if a copy is due, extract it to transmit after release.
             let retransmit = {
-                let mut pending = self
-                    .state
-                    .pending_broadcasts
-                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                    .unwrap();
+                let mut pending = self.state.pending_broadcasts.lock();
                 let Some(broadcast) = pending.get_mut(&key) else {
                     continue;
                 };
@@ -212,20 +202,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        self.state
-            .pending_broadcasts
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .insert(
-                key,
-                PendingBroadcast {
-                    nwk_frame,
-                    security,
-                    priority,
-                    attempts_remaining: attempts,
-                    next_attempt: self.core_now() + first_delay,
-                },
-            );
+        self.state.pending_broadcasts.lock().insert(
+            key,
+            PendingBroadcast {
+                nwk_frame,
+                security,
+                priority,
+                attempts_remaining: attempts,
+                next_attempt: self.core_now() + first_delay,
+            },
+        );
         self.broadcast_retransmit_wake.notify_one();
     }
 
@@ -710,15 +696,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         completion: Option<TxCompletion>,
     ) {
         let seq = self.send_seq.fetch_add(1, AtomicOrdering::Relaxed);
-        self.send_queue
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .push(SendRequest {
-                seq,
-                priority,
-                kind,
-                completion,
-            });
+        self.send_queue.lock().push(SendRequest {
+            seq,
+            priority,
+            kind,
+            completion,
+        });
         self.send_wake.notify_one();
     }
 
@@ -784,11 +767,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let destination = nwk_frame.nwk_header.destination;
 
         let start_discovery = {
-            let mut pending = self
-                .state
-                .pending_routes
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap();
+            let mut pending = self.state.pending_routes.lock();
             let is_new = !pending.contains_key(&destination);
             pending
                 .entry(destination)
@@ -838,14 +817,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// when nothing is waiting on a deadline (the reactor then sleeps on its wake
     /// signal).
     fn earliest_discovery_deadline(&self) -> Option<CoreInstant> {
-        let destinations: Vec<Nwk> = self
-            .state
-            .pending_routes
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .keys()
-            .copied()
-            .collect();
+        let destinations: Vec<Nwk> = self.state.pending_routes.lock().keys().copied().collect();
 
         let now = self.core_now();
         let core = self.core();
@@ -857,14 +829,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// One reactor pass: classify each queued destination and act on it.
     fn drive_pending_routes(&self) {
-        let destinations: Vec<Nwk> = self
-            .state
-            .pending_routes
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .keys()
-            .copied()
-            .collect();
+        let destinations: Vec<Nwk> = self.state.pending_routes.lock().keys().copied().collect();
 
         for destination in destinations {
             match self.discovery_state(destination) {
@@ -904,12 +869,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// A route exists: re-resolve each queued frame and enqueue it. A frame whose route
     /// vanished in the race is dropped with an error.
     fn release_queued_frames(&self, destination: Nwk) {
-        let bucket = self
-            .state
-            .pending_routes
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .remove(&destination);
+        let bucket = self.state.pending_routes.lock().remove(&destination);
 
         let Some(bucket) = bucket else {
             return;
@@ -945,11 +905,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// left, otherwise mark it failed and discard every frame waiting on it.
     fn retry_or_fail_discovery(&self, destination: Nwk) {
         let discarded = {
-            let mut pending = self
-                .state
-                .pending_routes
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap();
+            let mut pending = self.state.pending_routes.lock();
 
             let Some(bucket) = pending.get_mut(&destination) else {
                 return;
@@ -992,11 +948,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn sender_task(&self) {
         loop {
             loop {
-                let request = self
-                    .send_queue
-                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                    .unwrap()
-                    .pop();
+                let request = self.send_queue.lock().pop();
 
                 let Some(request) = request else {
                     break;

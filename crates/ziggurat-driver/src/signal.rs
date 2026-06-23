@@ -1,9 +1,8 @@
 //! `Signal` primitive: effectively a `Mutex` plus a `Notify`.
 
+use crate::sync::{Mutex, Notify};
 use core::fmt;
-use parking_lot::Mutex;
 use std::sync::Arc;
-use tokio::sync::Notify;
 
 /// The producer was dropped without ever signalling a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

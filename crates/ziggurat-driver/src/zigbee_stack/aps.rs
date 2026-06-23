@@ -13,8 +13,8 @@ use std::collections::hash_map::Entry;
 use ziggurat_phy::RadioPhy;
 
 use super::{
-    ApsAck, ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, TxPriority,
-    ZigbeeStack, ZigbeeStackError,
+    ApsAck, ApsAckData, ApsAckWaiter, NwkSecurityMode, SendMode, TxPriority, ZigbeeStack,
+    ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -79,12 +79,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
         tracing::debug!("Received APS ack: {ack_data:?}");
 
-        let tx = self
-            .state
-            .pending_aps_acks
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .remove(&ack_data);
+        let tx = self.state.pending_aps_acks.lock().remove(&ack_data);
         if let Some(tx) = tx {
             tx.signal(());
         }
@@ -98,11 +93,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let now = self.core_now();
         let timeout = self.tunables.aps_duplicate_rejection_timeout;
 
-        let mut table = self
-            .state
-            .aps_duplicates
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap();
+        let mut table = self.state.aps_duplicates.lock();
         table.retain(|_, seen| now.saturating_duration_since(*seen) < timeout);
 
         match table.entry((source, counter)) {
@@ -310,8 +301,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         {
             self.state
                 .pending_aps_acks
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
+                .lock()
                 .insert(ack_data.clone(), ack_tx);
         }
 
@@ -324,11 +314,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             )
             .await
         {
-            self.state
-                .pending_aps_acks
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
-                .remove(&ack_data);
+            self.state.pending_aps_acks.lock().remove(&ack_data);
             return Err(err);
         }
 
@@ -355,11 +341,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
             Ok(Err(_)) | Err(_) => {
                 tracing::warn!("APS ACK timed out for {:?}", waiter.ack_data);
-                self.state
-                    .pending_aps_acks
-                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                    .unwrap()
-                    .remove(&waiter.ack_data);
+                self.state.pending_aps_acks.lock().remove(&waiter.ack_data);
                 Err(ZigbeeStackError::ApsAckTimeout)
             }
         }

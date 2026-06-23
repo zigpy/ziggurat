@@ -11,8 +11,8 @@ use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
 use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
-    DeviceLeaveReason, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendKind, TxCompletion, TxPriority,
-    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    DeviceLeaveReason, NwkSecurityMode, SendKind, TxCompletion, TxPriority, ZigbeeNotification,
+    ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -97,12 +97,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // source address match table. If that write is still in flight, the device is
         // asleep again by now: everything stays queued for the next poll instead of
         // being transmitted into the void.
-        let fp_advertised = poll_source.is_some_and(|address| {
-            self.src_match_written
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
-                .contains(address)
-        });
+        let fp_advertised =
+            poll_source.is_some_and(|address| self.src_match_written.lock().contains(address));
 
         let delivered =
             fp_advertised && self.deliver_indirect_transaction(source_eui64, source_nwk);
@@ -310,10 +306,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .set_frame_pending_table(&short, &extended)
             .await?;
 
-        *self
-            .src_match_written
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap() = table;
+        *self.src_match_written.lock() = table;
 
         Ok(())
     }

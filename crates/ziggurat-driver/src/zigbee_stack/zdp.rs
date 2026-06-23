@@ -11,8 +11,7 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkDeviceType, TxPriority, ZigbeeStack,
-    ZigbeeStackError, neighbors, routing,
+    ApsAck, MAX_DEPTH, NwkDeviceType, TxPriority, ZigbeeStack, ZigbeeStackError, neighbors, routing,
 };
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
@@ -238,10 +237,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 2.4.3.1.12.2: another router's announcement restarts our own pending
         // announcement countdown to avoid a network-wide broadcast storm
-        *self
-            .parent_annce_received
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap() = Some(self.core_now());
+        *self.parent_annce_received.lock() = Some(self.core_now());
 
         let (claimed, removed) = self
             .core()
@@ -346,8 +342,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // countdown
             if self
                 .parent_annce_received
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
+                .lock()
                 .is_some_and(|received_at| received_at > slept_at)
             {
                 continue;

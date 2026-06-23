@@ -31,8 +31,8 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, DeviceLeaveReason, JoinKind, LOCK_ACQUIRE_TIMEOUT, NwkDeviceType,
-    NwkSecurityMode, RadioPhy, SendMode, TxPriority, ZigbeeNotification, ZigbeeStack, neighbors,
+    AddrConflictSource, DeviceLeaveReason, JoinKind, NwkDeviceType, NwkSecurityMode, RadioPhy,
+    SendMode, TxPriority, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -189,11 +189,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// device children are moved to a fresh address; routers resolve on their own.
     pub(super) fn handle_address_conflict(&self, address: Nwk, source: AddrConflictSource) {
         {
-            let mut conflicts = self
-                .state
-                .address_conflicts
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap();
+            let mut conflicts = self.state.address_conflicts.lock();
 
             let now = self.core_now();
             let window = self.tunables.broadcast_delivery_time;
@@ -262,8 +258,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let heard_from_network = arc_self
                 .state
                 .address_conflicts
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
+                .lock()
                 .get(&address)
                 .is_some_and(|conflict| conflict.heard_from_network);
 
