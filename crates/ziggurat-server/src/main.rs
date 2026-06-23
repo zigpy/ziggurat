@@ -948,33 +948,25 @@ impl ZigguratServer {
             return error_response(id, "not_configured", "no stack is running");
         };
 
-        let (result_tx, mut result_rx) = mpsc::channel::<(u8, i8)>(32);
-
-        // The scan runs on its own task so it always reaches its channel restore, even if
-        // this request's task is dropped. Its only sender lives until the scan ends, so
-        // the drain loop below terminates exactly when the scan is done.
+        // An energy detect is self-contained per channel, so the manager owns the loop
+        // and streams each result as the channel completes.
         let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
-        let scan = tokio::spawn(async move {
-            stack
-                .energy_scan(&request.channels, duration, result_tx)
-                .await
-        });
-
-        while let Some((channel, rssi)) = result_rx.recv().await {
-            let _ = outbound
-                .send(event_data(
-                    id,
-                    "energy_result",
-                    json!({"channel": channel, "rssi": rssi}),
-                ))
-                .await;
+        for channel in request.channels {
+            match stack.energy_detect(channel, duration).await {
+                Ok(rssi) => {
+                    let _ = outbound
+                        .send(event_data(
+                            id,
+                            "energy_result",
+                            json!({"channel": channel, "rssi": rssi}),
+                        ))
+                        .await;
+                }
+                Err(e) => return error_response(id, "energy_scan_failed", e),
+            }
         }
 
-        match scan.await {
-            Ok(Ok(())) => response(id, json!({"status": "complete"})),
-            Ok(Err(e)) => error_response(id, "energy_scan_failed", e),
-            Err(e) => error_response(id, "energy_scan_failed", e),
-        }
+        response(id, json!({"status": "complete"}))
     }
 
     async fn handle_network_scan(
@@ -992,26 +984,34 @@ impl ZigguratServer {
             return error_response(id, "not_configured", "no stack is running");
         };
 
-        let (found_tx, mut found_rx) = mpsc::channel::<NetworkBeacon>(32);
-
-        // The scan runs on its own task so it always reaches its channel restore, even if
-        // this request's task is dropped. Its only sender lives until the scan ends, so
-        // the drain loop below terminates exactly when the scan is done.
+        // Open the collection window before spawning, so the drain loop below cannot race
+        // ahead of the scan starting. The scan runs on its own task so it always reaches
+        // its channel restore even if this request's task is dropped.
+        stack.begin_network_scan();
         let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
+        let scan_stack = stack.clone();
         let scan = tokio::spawn(async move {
-            stack
-                .network_scan(&request.channels, duration, found_tx)
+            scan_stack
+                .run_network_scan(&request.channels, duration)
                 .await
         });
 
-        while let Some(beacon) = found_rx.recv().await {
-            let _ = outbound
-                .send(event_data(
-                    id,
-                    "network_found",
-                    network_beacon_json(&beacon),
-                ))
-                .await;
+        // `next_scan_beacons` delivers beacons as they arrive and returns empty once the
+        // window has closed and the queue is drained, which ends the loop.
+        loop {
+            let batch = stack.next_scan_beacons().await;
+            if batch.is_empty() {
+                break;
+            }
+            for beacon in batch {
+                let _ = outbound
+                    .send(event_data(
+                        id,
+                        "network_found",
+                        network_beacon_json(&beacon),
+                    ))
+                    .await;
+            }
         }
 
         match scan.await {

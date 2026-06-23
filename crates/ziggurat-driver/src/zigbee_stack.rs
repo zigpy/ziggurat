@@ -19,10 +19,10 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::task::JoinSet;
 use ziggurat_zigbee::nwk::frame::NwkFrame;
 
@@ -698,9 +698,11 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     notification_wake: Notify,
     pub raw_frame_rx: AsyncMutex<P::RxStream>,
     pub reset_rx: AsyncMutex<P::ResetStream>,
-    /// Installed for the duration of a network scan; the receive loop forwards decoded
-    /// beacons here while it is set.
-    network_scan_tx: Mutex<Option<mpsc::Sender<NetworkBeacon>>>,
+    /// Whether a network scan is collecting. The receive loop only queues beacons while
+    /// this is set, so stray beacons outside a scan are dropped.
+    scan_active: AtomicBool,
+    scan_beacons: Mutex<VecDeque<NetworkBeacon>>,
+    scan_beacon_wake: Notify,
 
     /// Wakes the task that rewrites the RCP source address match table whenever the
     /// set of devices with queued indirect transactions changes
@@ -797,7 +799,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             notification_wake: Notify::new(),
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
-            network_scan_tx: Mutex::new(None),
+            scan_active: AtomicBool::new(false),
+            scan_beacons: Mutex::new(VecDeque::new()),
+            scan_beacon_wake: Notify::new(),
             src_match_sync: Notify::new(),
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
@@ -1188,8 +1192,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Decode a received beacon and, if a network scan is in flight, forward it to the
-    /// scan's collector. Beacons received outside a scan are dropped.
+    /// Decode a received beacon and, if a network scan is in flight, collect it into
+    /// the scan's outbox for the collector to drain. Beacons received outside a scan
+    /// are dropped.
     fn handle_beacon(
         &self,
         beacon: &ziggurat_ieee_802154::Ieee802154BeaconFrame,
@@ -1197,9 +1202,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         lqi: u8,
         rssi: i8,
     ) {
-        let Some(tx) = self.network_scan_tx.lock().clone() else {
+        // Skip the decode entirely when no scan is collecting.
+        if !self.scan_active.load(AtomicOrdering::Relaxed) {
             return;
-        };
+        }
 
         let payload = match ZigbeeBeacon::from_abstract_bits(&beacon.beacon_payload) {
             Ok(payload) => payload,
@@ -1217,7 +1223,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         };
 
-        let _ = tx.try_send(NetworkBeacon {
+        let network_beacon = NetworkBeacon {
             channel,
             source,
             pan_id,
@@ -1231,18 +1237,31 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             update_id: payload.update_id,
             lqi,
             rssi,
-        });
+        };
+
+        self.scan_beacons
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .push_back(network_beacon);
+        self.scan_beacon_wake.notify_one();
     }
 
-    /// Active scan: broadcast a beacon request on each channel and collect the beacons.
-    pub async fn network_scan(
+    /// Open the beacon-collection window for an active scan.
+    pub fn begin_network_scan(&self) {
+        self.scan_beacons
+            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+            .unwrap()
+            .clear();
+        self.scan_active.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// Active scan: broadcast a beacon request on each channel and dwell to collect
+    /// beacons.
+    pub async fn run_network_scan(
         &self,
         channels: &[u8],
         duration_per_channel: Duration,
-        found: mpsc::Sender<NetworkBeacon>,
     ) -> Result<(), ZigbeeStackError> {
-        *self.network_scan_tx.lock() = Some(found);
-
         let beacon_request = self.beacon_request_psdu();
         let home_channel = self.core().mac.channel;
 
@@ -1267,28 +1286,43 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
         .await;
 
-        *self.network_scan_tx.lock() = None;
+        // Close the window and wake the drainer so it delivers the last beacons and stops.
+        self.scan_active.store(false, AtomicOrdering::Relaxed);
+        self.scan_beacon_wake.notify_one();
 
         result.map_err(Into::into)
     }
 
-    /// Performs an energy detect scan, sending the maximum RSSI seen on each channel to
-    /// `results` as that channel completes.
-    pub async fn energy_scan(
-        &self,
-        channels: &[u8],
-        duration_per_channel: Duration,
-        results: mpsc::Sender<(u8, i8)>,
-    ) -> Result<(), ZigbeeStackError> {
-        for &channel in channels {
-            let max_rssi = self
-                .radio
-                .energy_detect(channel, duration_per_channel)
-                .await?;
-            let _ = results.send((channel, max_rssi)).await;
+    /// Wait for and take beacons collected so far by the active scan. Drains any
+    /// remaining beacons even after the window closes, then returns empty once both
+    /// the window is closed.
+    pub async fn next_scan_beacons(&self) -> Vec<NetworkBeacon> {
+        loop {
+            let batch: Vec<NetworkBeacon> = self
+                .scan_beacons
+                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
+                .unwrap()
+                .drain(..)
+                .collect();
+            if !batch.is_empty() {
+                return batch;
+            }
+            if !self.scan_active.load(AtomicOrdering::Relaxed) {
+                return Vec::new();
+            }
+            self.scan_beacon_wake.notified().await;
         }
+    }
 
-        Ok(())
+    /// One channel of an energy-detect scan: the maximum RSSI seen on `channel`. The
+    /// manager loops over channels and streams the results; no radio state is held
+    /// between calls.
+    pub async fn energy_detect(
+        &self,
+        channel: u8,
+        duration: Duration,
+    ) -> Result<i8, ZigbeeStackError> {
+        Ok(self.radio.energy_detect(channel, duration).await?)
     }
 
     /// Retune the radio to a new channel, the coordinator's half of a network-wide
