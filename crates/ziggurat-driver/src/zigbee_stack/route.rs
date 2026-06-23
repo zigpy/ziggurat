@@ -358,14 +358,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let min_deadline = self.core_now() + self.tunables.mtorr_min_interval;
             let max_deadline = self.core_now() + self.tunables.mtorr_max_interval;
 
-            // Avertise every max interval, sooner when accumulated route errors or
+            // Advertise every max interval, sooner when accumulated route errors or
             // delivery failures signal that routes toward us have gone bad, but never
             // within the min interval
-            tokio::select! {
-                () = self.sleep_until_core(max_deadline) => {}
-                () = self.mtorr_kick.notified() => {
-                    self.sleep_until_core(min_deadline).await;
-                }
+            let max_sleep = core::pin::pin!(self.sleep_until_core(max_deadline));
+            let kicked = core::pin::pin!(self.mtorr_kick.notified());
+            if let futures::future::Either::Right(((), _)) =
+                futures::future::select(max_sleep, kicked).await
+            {
+                // Kicked early: still honor the minimum spacing before re-advertising.
+                self.sleep_until_core(min_deadline).await;
             }
         }
     }

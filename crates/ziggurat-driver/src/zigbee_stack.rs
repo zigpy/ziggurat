@@ -14,8 +14,7 @@ use ziggurat_zigbee::beacon::ZigbeeBeacon;
 
 use thiserror::Error;
 
-use crate::sync::Notify;
-use crate::sync::{Mutex, MutexGuard};
+use crate::sync::{AsyncMutex, Mutex, MutexGuard, Notify};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::future::Future;
@@ -23,7 +22,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
 use ziggurat_zigbee::nwk::frame::NwkFrame;
 
 mod aps;
