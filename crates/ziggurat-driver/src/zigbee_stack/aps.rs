@@ -7,9 +7,9 @@ use ziggurat_zigbee::aps::frame::{
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
+use crate::signal;
 use std::cmp;
 use std::collections::hash_map::Entry;
-use tokio::sync::oneshot;
 use ziggurat_phy::RadioPhy;
 
 use super::{
@@ -86,7 +86,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .unwrap()
             .remove(&ack_data);
         if let Some(tx) = tx {
-            let _ = tx.send(());
+            tx.signal(());
         }
     }
 
@@ -304,7 +304,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             counter: aps_seq,
         };
 
-        let (ack_tx, ack_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = signal::channel();
 
         tracing::debug!("APS ACK requested, waiting for {ack_data:?}");
         {
@@ -348,7 +348,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Wait for the end-to-end APS ack of a previously transmitted frame.
     pub async fn wait_aps_ack(&self, waiter: ApsAckWaiter) -> Result<(), ZigbeeStackError> {
-        match R::timeout(waiter.timeout, waiter.receiver).await {
+        match R::timeout(waiter.timeout, waiter.receiver.wait()).await {
             Ok(Ok(())) => {
                 tracing::debug!("APS ACK received");
                 Ok(())

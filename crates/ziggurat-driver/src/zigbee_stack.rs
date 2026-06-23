@@ -1,6 +1,7 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
 use crate::runtime::{Elapsed, RtInstant, Runtime};
+use crate::signal::{Signal, SignalWaiter};
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -21,7 +22,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
 use tokio::task::JoinSet;
 use ziggurat_zigbee::nwk::frame::NwkFrame;
 
@@ -253,13 +254,13 @@ impl ApsAckData {
 /// the child extracts it), or `Err` on transmit failure, expiry, or drop. Shared by the
 /// sender queue, the indirect queue, and queued frames, since a completion can hand off
 /// between them.
-pub type TxCompletion = oneshot::Sender<Result<(), ZigbeeStackError>>;
+pub type TxCompletion = Signal<Result<(), ZigbeeStackError>>;
 
 /// The end-to-end delivery confirmation of a transmitted APS frame, pending until the
 /// destination's APS ack arrives. Resolved via [`ZigbeeStack::wait_aps_ack`].
 #[derive(Debug)]
 pub struct ApsAckWaiter {
-    pub(crate) receiver: oneshot::Receiver<()>,
+    pub(crate) receiver: SignalWaiter<()>,
     pub(crate) timeout: Duration,
     pub(crate) ack_data: ApsAckData,
 }
@@ -455,7 +456,7 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
+    pub pending_aps_acks: Mutex<HashMap<ApsAckData, Signal<()>>>,
     pub pending_routes: Mutex<HashMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
     pub pending_broadcasts: Mutex<HashMap<(Nwk, u8), PendingBroadcast>>,

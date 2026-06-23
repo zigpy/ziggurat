@@ -1,9 +1,9 @@
 use crate::runtime::Runtime;
+use crate::signal::{self, SignalWaiter};
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
-use tokio::sync::oneshot;
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
@@ -44,8 +44,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         destination: Ieee802154Address,
         frame: Ieee802154Frame<EncryptedNwkFrame>,
-    ) -> oneshot::Receiver<Result<(), ZigbeeStackError>> {
-        let (completion, result_rx) = oneshot::channel();
+    ) -> SignalWaiter<Result<(), ZigbeeStackError>> {
+        let (completion, result_rx) = signal::channel();
         self.enqueue_indirect_frame(destination, frame, completion);
         result_rx
     }
@@ -57,7 +57,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     ) -> Result<(), ZigbeeStackError> {
         // Every transaction is eventually resolved by delivery, the expiry sweep, or
         // child eviction; a dropped sender means the stack is shutting down
-        self.push_indirect_frame(destination, frame)
+        let waiter = self.push_indirect_frame(destination, frame);
+        waiter
+            .wait()
             .await
             .unwrap_or(Err(ZigbeeStackError::IndirectExpired { destination }))
     }
@@ -130,9 +132,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .extract(source_eui64, source_nwk, self.core_now());
 
         for (destination, transaction) in outcome.expired {
-            let _ = transaction
+            transaction
                 .completion
-                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
+                .signal(Err(ZigbeeStackError::IndirectExpired { destination }));
         }
 
         let Some(delivery) = outcome.delivery else {
@@ -186,7 +188,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .await
         {
             Ok(()) => {
-                let _ = transaction.completion.send(Ok(()));
+                transaction.completion.signal(Ok(()));
                 self.remove_indirect_queue_if_empty(destination);
             }
             // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
@@ -199,7 +201,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .requeue(destination, transaction);
             }
             Err(err) => {
-                let _ = transaction.completion.send(Err(err));
+                transaction.completion.signal(Err(err));
                 self.remove_indirect_queue_if_empty(destination);
             }
         }
@@ -220,9 +222,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         for (destination, transaction) in dropped {
-            let _ = transaction
+            transaction
                 .completion
-                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
+                .signal(Err(ZigbeeStackError::IndirectExpired { destination }));
         }
 
         self.src_match_sync.notify_one();
@@ -354,9 +356,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         for (destination, transaction) in expired {
             tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
-            let _ = transaction
+            transaction
                 .completion
-                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
+                .signal(Err(ZigbeeStackError::IndirectExpired { destination }));
         }
 
         self.src_match_sync.notify_one();

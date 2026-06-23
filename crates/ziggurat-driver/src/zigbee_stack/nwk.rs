@@ -1,11 +1,11 @@
 use crate::runtime::{Elapsed, Runtime};
+use crate::signal;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::Duration;
-use tokio::sync::oneshot;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioPhy, TxResult};
@@ -482,7 +482,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
                 );
                 if let Some(completion) = completion {
-                    let _ = completion.send(Err(ZigbeeStackError::RouteDiscoverySuppressed));
+                    completion.signal(Err(ZigbeeStackError::RouteDiscoverySuppressed));
                 }
             }
         }
@@ -643,9 +643,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         mode: SendMode,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
-        let (completion_tx, completion_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = signal::channel();
         self.originate_unicast(nwk_frame, security, mode, priority, Some(completion_tx));
         completion_rx
+            .wait()
             .await
             .unwrap_or(Err(ZigbeeStackError::TransmitFailed(TxResult::Aborted)))
     }
@@ -764,9 +765,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         kind: SendKind,
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
-        let (completion_tx, completion_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = signal::channel();
         self.enqueue_send(kind, priority, Some(completion_tx));
         completion_rx
+            .wait()
             .await
             .unwrap_or(Err(ZigbeeStackError::TransmitFailed(TxResult::Aborted)))
     }
@@ -932,7 +934,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
                 NextHop::NeedDiscovery | NextHop::Discard => {
                     if let Some(completion) = completion {
-                        let _ = completion.send(Err(ZigbeeStackError::RouteInactiveAfterDiscovery));
+                        completion.signal(Err(ZigbeeStackError::RouteInactiveAfterDiscovery));
                     }
                 }
             }
@@ -976,8 +978,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 );
                 for PendingFrame { completion, .. } in frames {
                     if let Some(completion) = completion {
-                        let _ =
-                            completion.send(Err(ZigbeeStackError::RouteDiscoveryTimeout(Elapsed)));
+                        completion.signal(Err(ZigbeeStackError::RouteDiscoveryTimeout(Elapsed)));
                     }
                 }
             }
@@ -1019,7 +1020,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                 match request.completion {
                     Some(completion) => {
-                        let _ = completion.send(result);
+                        completion.signal(result);
                     }
                     None => {
                         if let Err(err) = result {
