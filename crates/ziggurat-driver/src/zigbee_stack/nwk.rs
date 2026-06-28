@@ -4,8 +4,9 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
-use std::sync::atomic::Ordering as AtomicOrdering;
-use std::time::Duration;
+use alloc::vec::Vec;
+use core::sync::atomic::Ordering as AtomicOrdering;
+use core::time::Duration;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioPhy, TxResult};
@@ -223,7 +224,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn broadcast_jitter(&self) -> Duration {
         self.tunables
             .max_broadcast_jitter
-            .mul_f32(rand::random::<f32>())
+            .mul_f32(crate::rng::random_f32())
     }
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience

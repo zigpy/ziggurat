@@ -1,6 +1,7 @@
 use crate::runtime::Runtime;
 use crate::signal::{self, SignalWaiter};
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
+use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 

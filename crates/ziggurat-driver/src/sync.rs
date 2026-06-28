@@ -1,21 +1,14 @@
 //! The synchronization primitives the stack rests on: a blocking [`Mutex`], an async
 //! [`AsyncMutex`], and an [`Notify`].
-//!
-//! Everything in the driver imports these from here rather than naming `parking_lot`,
-//! `tokio`, `spin`, or `embassy-sync` directly, so this module is the single seam where
-//! the implementation is chosen by the `embassy` feature. The blocking [`Mutex`] must
-//! never be held across an `.await` (the protocol core's
-//! [`CoreGuard`](crate::zigbee_stack::CoreGuard) enforces this by being `!Send`); use
-//! [`AsyncMutex`] for the few guards that genuinely outlive an await point.
 
-#[cfg(not(feature = "embassy"))]
+#[cfg(feature = "tokio")]
 mod imp {
     pub use parking_lot::{Mutex, MutexGuard};
     pub use tokio::sync::Mutex as AsyncMutex;
     pub use tokio::sync::Notify;
 }
 
-#[cfg(feature = "embassy")]
+#[cfg(all(feature = "embassy", not(feature = "tokio")))]
 mod imp {
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 

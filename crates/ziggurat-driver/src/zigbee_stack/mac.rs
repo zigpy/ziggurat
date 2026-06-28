@@ -4,6 +4,7 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Frame, Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
 use abstract_bits::AbstractBits;
+use alloc::vec::Vec;
 use arbitrary_int::u24;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
 use ziggurat_phy::{RadioPhy, TxFrame, TxResult};

@@ -1,4 +1,5 @@
 use crate::runtime::Runtime;
+use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
@@ -334,7 +335,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let jitter = self
                 .tunables
                 .parent_annce_jitter_max
-                .mul_f32(rand::random::<f32>());
+                .mul_f32(crate::rng::random_f32());
             let slept_at = self.core_now();
             R::sleep(self.tunables.parent_annce_base_timer + jitter).await;
 

@@ -1,8 +1,8 @@
 //! `Signal` primitive: effectively a `Mutex` plus a `Notify`.
 
 use crate::sync::{Mutex, Notify};
+use alloc::sync::Arc;
 use core::fmt;
-use std::sync::Arc;
 
 /// The producer was dropped without ever signalling a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

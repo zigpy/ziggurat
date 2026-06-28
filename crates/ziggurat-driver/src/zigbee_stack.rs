@@ -15,13 +15,16 @@ use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use thiserror::Error;
 
 use crate::sync::{AsyncMutex, Mutex, MutexGuard, Notify};
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
-use std::future::Future;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Weak};
-use std::time::Duration;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
+use alloc::string::String;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::future::Future;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+use core::time::Duration;
 use ziggurat_zigbee::nwk::frame::NwkFrame;
 
 mod aps;
@@ -220,7 +223,7 @@ pub struct AddressConflict {
     pub heard_from_network: bool,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ApsAckData {
     pub src: Nwk,
     pub destination_endpoint: Option<u8>,
@@ -265,7 +268,7 @@ pub struct ApsAckWaiter {
 /// always matches frame-counter order regardless of priority reordering in the queue.
 #[derive(Debug)]
 pub(crate) struct SendRequest {
-    seq: u64,
+    seq: u32,
     priority: TxPriority,
     pub(crate) kind: SendKind,
     pub(crate) completion: Option<TxCompletion>,
@@ -449,16 +452,16 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub pending_aps_acks: Mutex<HashMap<ApsAckData, Signal<()>>>,
-    pub pending_routes: Mutex<HashMap<Nwk, PendingRoute>>,
+    pub pending_aps_acks: Mutex<BTreeMap<ApsAckData, Signal<()>>>,
+    pub pending_routes: Mutex<BTreeMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
-    pub pending_broadcasts: Mutex<HashMap<(Nwk, u8), PendingBroadcast>>,
-    pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
+    pub pending_broadcasts: Mutex<BTreeMap<(Nwk, u8), PendingBroadcast>>,
+    pub address_conflicts: Mutex<BTreeMap<Nwk, AddressConflict>>,
 
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
     /// the receipt time; an inbound data frame matching a live entry is a retransmission
     /// to be acknowledged but not delivered to the application a second time.
-    pub aps_duplicates: Mutex<HashMap<(Nwk, u8), CoreInstant>>,
+    pub aps_duplicates: Mutex<BTreeMap<(Nwk, u8), CoreInstant>>,
 
     // We intentionally violate the spec with these options
     //
@@ -553,11 +556,11 @@ impl State {
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
             }),
-            pending_aps_acks: Mutex::new(HashMap::new()),
-            pending_routes: Mutex::new(HashMap::new()),
-            pending_broadcasts: Mutex::new(HashMap::new()),
-            address_conflicts: Mutex::new(HashMap::new()),
-            aps_duplicates: Mutex::new(HashMap::new()),
+            pending_aps_acks: Mutex::new(BTreeMap::new()),
+            pending_routes: Mutex::new(BTreeMap::new()),
+            pending_broadcasts: Mutex::new(BTreeMap::new()),
+            address_conflicts: Mutex::new(BTreeMap::new()),
+            aps_duplicates: Mutex::new(BTreeMap::new()),
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
@@ -676,7 +679,7 @@ pub struct NetworkBeacon {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
+pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime> {
     self_weak: Weak<Self>,
 
     /// The runtime clock baseline. `now` is converted to the sans-io [`CoreInstant`]
@@ -730,7 +733,7 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::TokioRuntime> {
     /// route is established for a destination with queued frames.
     pub(crate) pending_route_wake: Notify,
     /// Monotonic tiebreaker giving equal-priority sends FIFO order in `send_queue`.
-    pub(crate) send_seq: AtomicU64,
+    pub(crate) send_seq: AtomicU32,
 
     /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
     /// stopped: a leaked background task would keep the replaced stack processing frames
@@ -810,7 +813,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             send_queue: Mutex::new(BinaryHeap::new()),
             send_wake: Notify::new(),
             pending_route_wake: Notify::new(),
-            send_seq: AtomicU64::new(0),
+            send_seq: AtomicU32::new(0),
             spawner,
         })
     }

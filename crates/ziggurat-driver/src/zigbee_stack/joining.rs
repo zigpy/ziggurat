@@ -22,7 +22,9 @@ use ziggurat_zigbee::nwk::frame::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
 };
 
-use std::time::Duration;
+use alloc::format;
+use alloc::vec::Vec;
+use core::time::Duration;
 use ziggurat_zigbee::nwk::commands::{
     Nwk802154AssociationStatus, NwkCommand, NwkEndDeviceTimeoutRequestCommand,
     NwkEndDeviceTimeoutResponseCommand, NwkEndDeviceTimeoutResponseStatus, NwkLeaveCommand,
@@ -171,7 +173,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core.nib.address_map.allocate(
             eui64,
             &core.nib.neighbors,
-            std::iter::repeat_with(|| Nwk(rand::random::<u16>())),
+            core::iter::repeat_with(|| Nwk(crate::rng::random_u16())),
         )
     }
 
@@ -180,7 +182,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         core.nib.address_map.generate_unused(
             &core.nib.neighbors,
-            std::iter::repeat_with(|| Nwk(rand::random::<u16>())),
+            core::iter::repeat_with(|| Nwk(crate::rng::random_u16())),
         )
     }
 
@@ -251,7 +253,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 arc_self
                     .tunables
                     .max_broadcast_jitter
-                    .mul_f32(rand::random::<f32>()),
+                    .mul_f32(crate::rng::random_f32()),
             )
             .await;
 
@@ -620,7 +622,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let new_key = core
             .aib
             .aps_security
-            .issue_device_key(source_ieee, Key(rand::random()));
+            .issue_device_key(source_ieee, Key(crate::rng::random_array()));
         drop(core);
 
         // The key is persisted only once the device proves possession via Verify-Key

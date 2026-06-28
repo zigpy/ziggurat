@@ -8,8 +8,9 @@ use ziggurat_zigbee::aps::frame::{
 use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
 use crate::signal;
-use std::cmp;
-use std::collections::hash_map::Entry;
+use alloc::collections::btree_map::Entry;
+use alloc::vec::Vec;
+use core::cmp;
 use ziggurat_phy::RadioPhy;
 
 use super::{

@@ -1,6 +1,6 @@
 use crate::runtime::Runtime;
-use std::cmp;
-use std::time::Duration;
+use core::cmp;
+use core::time::Duration;
 
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
@@ -237,7 +237,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec 3.6.4.5.1.4: relayed route requests are jittered and retried
         let jitter = (self.tunables.min_rreq_jitter
             + (self.tunables.max_rreq_jitter - self.tunables.min_rreq_jitter)
-                .mul_f32(rand::random::<f32>()))
+                .mul_f32(crate::rng::random_f32()))
             * 2;
 
         self.background_broadcast_route_request(

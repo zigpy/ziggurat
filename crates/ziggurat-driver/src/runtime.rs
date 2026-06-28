@@ -1,5 +1,6 @@
 //! Async runtime abstraction layer.
 
+use alloc::boxed::Box;
 use core::future::Future;
 use core::ops::Add;
 use core::pin::Pin;
@@ -35,6 +36,7 @@ pub trait RtInstant: Copy + Send + Sync + 'static + Add<Duration, Output = Self>
     fn saturating_duration_since(self, earlier: Self) -> Duration;
 }
 
+#[cfg(feature = "tokio")]
 impl RtInstant for tokio::time::Instant {
     fn saturating_duration_since(self, earlier: Self) -> Duration {
         Self::saturating_duration_since(&self, earlier)
@@ -104,9 +106,11 @@ pub trait Runtime: Send + Sync + 'static {
 }
 
 /// The tokio runtime: the host server's executor.
+#[cfg(feature = "tokio")]
 #[derive(Debug, Clone, Copy)]
 pub struct TokioRuntime;
 
+#[cfg(feature = "tokio")]
 impl Runtime for TokioRuntime {
     type Instant = tokio::time::Instant;
     type Spawner = TokioSpawner;
@@ -125,11 +129,13 @@ impl Runtime for TokioRuntime {
 }
 
 /// The tokio spawner: tasks go into a `JoinSet` so a replaced stack can abort them.
+#[cfg(feature = "tokio")]
 #[derive(Default)]
 pub struct TokioSpawner {
     tasks: parking_lot::Mutex<tokio::task::JoinSet<()>>,
 }
 
+#[cfg(feature = "tokio")]
 impl Spawn for TokioSpawner {
     fn spawn(&self, task: SpawnedTask) {
         let mut tasks = self.tasks.lock();
@@ -154,14 +160,26 @@ impl Spawn for TokioSpawner {
     }
 }
 
-/// The embassy runtime adapter. Host-runnable through `arch-std` so it can stand in for
-/// tokio, and the same impl drives the MCU once an esp PHY backs it.
+/// The embassy runtime adapter. Drives the MCU directly; host-runnable through
+/// `embassy-host` (`arch-std`) so it can stand in for tokio in tests.
 #[cfg(feature = "embassy")]
-pub use embassy_impl::{EmbassyRuntime, EmbassySpawner, start_embassy_executor};
+pub use embassy_impl::{EmbassyRuntime, EmbassySpawner};
+
+#[cfg(feature = "embassy-host")]
+pub use embassy_impl::start_embassy_executor;
+
+/// The runtime the stack defaults to when no `R` type parameter is given. Resolves to
+/// whichever backend feature is enabled.
+#[cfg(feature = "tokio")]
+pub type DefaultRuntime = TokioRuntime;
+#[cfg(all(feature = "embassy", not(feature = "tokio")))]
+pub type DefaultRuntime = EmbassyRuntime;
 
 #[cfg(feature = "embassy")]
 mod embassy_impl {
     use super::{RtInstant, Runtime, Spawn, SpawnedTask};
+    #[cfg(feature = "embassy-host")]
+    use alloc::boxed::Box;
     use core::future::Future;
     use core::ops::Add;
     use core::time::Duration;
@@ -232,8 +250,13 @@ mod embassy_impl {
 
     impl Spawn for EmbassySpawner {
         fn spawn(&self, task: SpawnedTask) {
-            if self.0.spawn(task_runner(task)).is_err() {
-                tracing::error!("embassy task pool exhausted; background task dropped");
+            // In embassy-executor 0.10 the pool slot is claimed when the token is built,
+            // so exhaustion surfaces here rather than at `spawn`.
+            match task_runner(task) {
+                Ok(token) => self.0.spawn(token),
+                Err(_) => {
+                    tracing::error!("embassy task pool exhausted; background task dropped");
+                }
             }
         }
 
@@ -244,6 +267,7 @@ mod embassy_impl {
 
     /// Run an embassy `arch-std` executor on a dedicated thread, returning a spawner
     /// for it.
+    #[cfg(feature = "embassy-host")]
     pub fn start_embassy_executor(tokio_handle: tokio::runtime::Handle) -> EmbassySpawner {
         use std::sync::mpsc;
 

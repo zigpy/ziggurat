@@ -1,4 +1,5 @@
 use crate::runtime::Runtime;
+use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
@@ -119,7 +120,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // repeat one boundary entry (the last of frame N is the first of frame N+1)
             // so a receiver can stitch the advertised address range together (spec
             // 3.6.4.4.2). An empty list still emits a single first+last frame.
-            let end = std::cmp::min(start + MAX_LINK_STATUSES, total);
+            let end = core::cmp::min(start + MAX_LINK_STATUSES, total);
 
             let link_status_frame = self
                 .nwk_command_frame(
