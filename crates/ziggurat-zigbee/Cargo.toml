@@ -11,7 +11,7 @@ repository.workspace = true
 [dependencies]
 ziggurat-ieee-802154.workspace = true
 
-abstract-bits = "0.2.0"
+abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
 aes = "0.9.1"
 arbitrary-int = "2.1.1"
 ccm = { version = "0.6.0-rc.3", default-features = false }

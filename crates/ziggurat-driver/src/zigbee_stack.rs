@@ -1194,7 +1194,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        let payload = match ZigbeeBeacon::from_abstract_bits(&beacon.beacon_payload) {
+        let payload = match ZigbeeBeacon::from_abstract_bytes(&beacon.beacon_payload) {
             Ok(payload) => payload,
             Err(e) => {
                 tracing::debug!("Ignoring non-Zigbee beacon: {e:?}");

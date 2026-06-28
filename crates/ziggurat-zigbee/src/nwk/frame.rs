@@ -223,7 +223,7 @@ pub struct NwkSecurityHeaderControlField {
 }
 
 impl NwkSecurityHeaderControlField {
-    /// The field's single serialized byte, without `to_abstract_bits`'s allocation:
+    /// The field's single serialized byte, without `to_abstract_bytes`'s allocation:
     /// it goes into every CCM* nonce.
     pub fn to_bytes(&self) -> [u8; 1] {
         let mut buffer = [0u8; 1];

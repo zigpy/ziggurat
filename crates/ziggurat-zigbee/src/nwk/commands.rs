@@ -526,30 +526,31 @@ impl NwkCommand {
     /// followed by the command body.
     pub fn to_bytes(&self) -> Vec<u8> {
         let (id, body) = match self {
-            Self::RouteRequest(c) => (NwkCommandId::RouteRequest, c.to_abstract_bits()),
-            Self::RouteReply(c) => (NwkCommandId::RouteReply, c.to_abstract_bits()),
-            Self::NetworkStatus(c) => (NwkCommandId::NetworkStatus, c.to_abstract_bits()),
-            Self::Leave(c) => (NwkCommandId::Leave, c.to_abstract_bits()),
-            Self::RouteRecord(c) => (NwkCommandId::RouteRecord, c.to_abstract_bits()),
-            Self::RejoinRequest(c) => (NwkCommandId::RejoinRequest, c.to_abstract_bits()),
-            Self::RejoinResponse(c) => (NwkCommandId::RejoinResponse, c.to_abstract_bits()),
-            Self::LinkStatus(c) => (NwkCommandId::LinkStatus, c.to_abstract_bits()),
-            Self::NetworkReport(c) => (NwkCommandId::NetworkReport, c.to_abstract_bits()),
-            Self::NetworkUpdate(c) => (NwkCommandId::NetworkUpdate, c.to_abstract_bits()),
+            Self::RouteRequest(c) => (NwkCommandId::RouteRequest, c.to_abstract_bytes()),
+            Self::RouteReply(c) => (NwkCommandId::RouteReply, c.to_abstract_bytes()),
+            Self::NetworkStatus(c) => (NwkCommandId::NetworkStatus, c.to_abstract_bytes()),
+            Self::Leave(c) => (NwkCommandId::Leave, c.to_abstract_bytes()),
+            Self::RouteRecord(c) => (NwkCommandId::RouteRecord, c.to_abstract_bytes()),
+            Self::RejoinRequest(c) => (NwkCommandId::RejoinRequest, c.to_abstract_bytes()),
+            Self::RejoinResponse(c) => (NwkCommandId::RejoinResponse, c.to_abstract_bytes()),
+            Self::LinkStatus(c) => (NwkCommandId::LinkStatus, c.to_abstract_bytes()),
+            Self::NetworkReport(c) => (NwkCommandId::NetworkReport, c.to_abstract_bytes()),
+            Self::NetworkUpdate(c) => (NwkCommandId::NetworkUpdate, c.to_abstract_bytes()),
             Self::EndDeviceTimeoutRequest(c) => {
-                (NwkCommandId::EndDeviceTimeoutRequest, c.to_abstract_bits())
+                (NwkCommandId::EndDeviceTimeoutRequest, c.to_abstract_bytes())
             }
-            Self::EndDeviceTimeoutResponse(c) => {
-                (NwkCommandId::EndDeviceTimeoutResponse, c.to_abstract_bits())
-            }
-            Self::LinkPowerDelta(c) => (NwkCommandId::LinkPowerDelta, c.to_abstract_bits()),
+            Self::EndDeviceTimeoutResponse(c) => (
+                NwkCommandId::EndDeviceTimeoutResponse,
+                c.to_abstract_bytes(),
+            ),
+            Self::LinkPowerDelta(c) => (NwkCommandId::LinkPowerDelta, c.to_abstract_bytes()),
             Self::NetworkCommissioningRequest(c) => (
                 NwkCommandId::NetworkCommissioningRequest,
-                c.to_abstract_bits(),
+                c.to_abstract_bytes(),
             ),
             Self::NetworkCommissioningResponse(c) => (
                 NwkCommandId::NetworkCommissioningResponse,
-                c.to_abstract_bits(),
+                c.to_abstract_bytes(),
             ),
             Self::Unparsed(raw) => return raw.to_vec(),
         };
@@ -561,7 +562,7 @@ impl NwkCommand {
 }
 
 fn parse_body<T: AbstractBits>(body: &[u8]) -> Option<T> {
-    T::from_abstract_bits(body).ok()
+    T::from_abstract_bytes(body).ok()
 }
 
 #[cfg(test)]

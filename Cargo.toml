@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["fuzz"]
+# ziggurat-phy-esp only builds for an ESP32-C6 (riscv32imac) with esp-hal; excluded so
+# host `cargo build` over the workspace doesn't try (and fail) to compile it.
+exclude = ["fuzz", "crates/ziggurat-phy-esp"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +12,7 @@ edition = "2024"
 license = "Apache-2.0"
 authors = []
 repository = "https://github.com/zigpy/ziggurat"
+
 
 [workspace.dependencies]
 ziggurat-ieee-802154 = { path = "crates/ziggurat-ieee-802154", version = "0.1.0" }

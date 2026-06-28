@@ -108,7 +108,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 tx_offset: RenamedU24(u24::new(0xFFFFFF)),
                 update_id,
             }
-            .to_abstract_bits()
+            .to_abstract_bytes()
             .unwrap(),
             gts_specification: 0x00,
             pending_address_specification: 0x00,
