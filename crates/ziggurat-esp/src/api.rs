@@ -2,6 +2,7 @@
 //! request per line; each is answered with an `accepted` event then a `response`.
 //! Unsolicited `notification` lines carry network events.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -10,12 +11,14 @@ use core::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables, TxPriority,
     WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
+use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 
 use crate::{App, OUTBOUND};
@@ -221,6 +224,15 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         "network_scan" => handle_network_scan(app, id, params).await,
         "permit_joins" => handle_permit_joins(app, id, params),
         "set_channel" => handle_set_channel(app, id, params).await,
+        "packet_capture" => {
+            // Streaming with no terminal response: the spawned capture task emits
+            // `captured_packet` events until the client disconnects.
+            handle_packet_capture(app, id, params).await;
+            return;
+        }
+        "packet_capture_change_channel" => {
+            handle_packet_capture_change_channel(app, id, params).await
+        }
         "set_nwk_update_id" => handle_set_nwk_update_id(app, id, params),
         "set_provisional_key" => handle_set_provisional_key(app, id, params),
         other => error_response(id, "unknown_method", other),
@@ -543,6 +555,70 @@ async fn handle_set_channel(app: &App, id: u64, params: Value) -> Value {
     };
 
     match stack.set_channel(request.channel).await {
+        Ok(()) => response(id, json!({"status": "success"})),
+        Err(e) => error_response(id, "set_channel_failed", e),
+    }
+}
+
+/// Radio programming for promiscuous capture: receive every frame on `channel`, no PAN/
+/// address filtering, no network required. Dummy addresses since nothing is addressed to us.
+const fn capture_config(channel: u8) -> RadioConfig {
+    RadioConfig {
+        channel,
+        tx_power: DEFAULT_TX_POWER,
+        short_address: Nwk(0xFFFF),
+        extended_address: Eui64([0; 8]),
+        pan_id: PanId(0xFFFF),
+        promiscuous: true,
+        rx_on_when_idle: true,
+        frame_pending_short: Vec::new(),
+        frame_pending_extended: Vec::new(),
+    }
+}
+
+/// Put the radio in promiscuous mode and stream every received frame as a `captured_packet`
+/// event. Runs without a configured stack (only `connect()` is needed). The capture task
+/// streams until the client disconnects; there is no terminal response.
+async fn handle_packet_capture(app: &App, id: u64, params: Value) {
+    let request: SetChannelRequest = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(e) => {
+            emit(error_response(id, "invalid_request", e)).await;
+            return;
+        }
+    };
+
+    if let Err(e) = app.phy.reconfigure(&capture_config(request.channel)).await {
+        emit(error_response(id, "packet_capture_failed", e)).await;
+        return;
+    }
+
+    let phy = app.phy.clone();
+    app.spawner.spawn(Box::pin(async move {
+        let mut rx = phy.subscribe_rx();
+        while let Some(frame) = rx.recv().await {
+            emit(event_data(
+                id,
+                "captured_packet",
+                json!({
+                    "channel": frame.channel,
+                    "rssi": frame.rssi,
+                    "lqi": frame.lqi,
+                    "data": hex::encode(&frame.psdu),
+                }),
+            ))
+            .await;
+        }
+    }));
+}
+
+async fn handle_packet_capture_change_channel(app: &App, id: u64, params: Value) -> Value {
+    let request: SetChannelRequest = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(e) => return error_response(id, "invalid_request", e),
+    };
+
+    match app.phy.reconfigure(&capture_config(request.channel)).await {
         Ok(()) => response(id, json!({"status": "success"})),
         Err(e) => error_response(id, "set_channel_failed", e),
     }

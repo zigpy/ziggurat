@@ -2042,6 +2042,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ziggurat-driver",
+ "ziggurat-phy",
  "ziggurat-phy-spinel",
  "ziggurat-spinel",
  "ziggurat-zigbee",

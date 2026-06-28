@@ -22,6 +22,7 @@ use ziggurat_driver::zigbee_stack::{
     TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
+use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_spinel::client::SpinelClient;
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
@@ -39,6 +40,22 @@ const NOTIFICATION_HUB_DEPTH: usize = 1024;
 
 /// The radio transmit power (in dBm) used when `configure` does not specify one.
 const DEFAULT_TX_POWER: i8 = 8;
+
+/// Radio programming for promiscuous capture: receive every frame on `channel`, no PAN/
+/// address filtering, no network required (dummy addresses).
+const fn capture_config(channel: u8) -> RadioConfig {
+    RadioConfig {
+        channel,
+        tx_power: DEFAULT_TX_POWER,
+        short_address: Nwk(0xFFFF),
+        extended_address: Eui64([0; 8]),
+        pan_id: PanId(0xFFFF),
+        promiscuous: true,
+        rx_on_when_idle: true,
+        frame_pending_short: Vec::new(),
+        frame_pending_extended: Vec::new(),
+    }
+}
 
 /// Big-endian colon-separated hex, the format used by zigpy for EUI64 addresses
 fn eui64_to_string(eui64: Eui64) -> String {
@@ -615,6 +632,12 @@ impl ZigguratServer {
                     "set_provisional_key" => server.handle_set_provisional_key(id, params),
                     "set_nwk_update_id" => server.handle_set_nwk_update_id(id, params),
                     "set_channel" => server.handle_set_channel(id, params).await,
+                    "packet_capture" => server.handle_packet_capture(id, params, &outbound).await,
+                    "packet_capture_change_channel" => {
+                        server
+                            .handle_packet_capture_change_channel(id, params)
+                            .await
+                    }
                     _ => error_response(id, "unknown_method", method),
                 };
 
@@ -774,6 +797,70 @@ impl ZigguratServer {
         };
 
         match stack.set_channel(request.channel).await {
+            Ok(()) => response(id, json!({"status": "success"})),
+            Err(e) => error_response(id, "set_channel_failed", e),
+        }
+    }
+
+    /// Put the radio in promiscuous mode and stream every received frame as a
+    /// `captured_packet` event until the client disconnects. No network is required (it
+    /// reprograms the radio directly), so a running stack is disrupted for the session.
+    async fn handle_packet_capture(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+        outbound: &mpsc::Sender<serde_json::Value>,
+    ) -> serde_json::Value {
+        let request: SetChannelRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let phy = match self.phy() {
+            Ok(p) => p,
+            Err(e) => return error_response(id, "serial_port_error", e),
+        };
+
+        if let Err(e) = phy.reconfigure(&capture_config(request.channel)).await {
+            return error_response(id, "packet_capture_failed", e);
+        }
+
+        let mut rx = phy.subscribe_rx();
+        while let Some(frame) = rx.recv().await {
+            let event = event_data(
+                id,
+                "captured_packet",
+                json!({
+                    "channel": frame.channel,
+                    "rssi": frame.rssi,
+                    "lqi": frame.lqi,
+                    "data": hex::encode(frame.psdu),
+                }),
+            );
+            if outbound.send(event).await.is_err() {
+                break; // client disconnected
+            }
+        }
+
+        response(id, json!({"status": "complete"}))
+    }
+
+    async fn handle_packet_capture_change_channel(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let request: SetChannelRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let phy = match self.phy() {
+            Ok(p) => p,
+            Err(e) => return error_response(id, "serial_port_error", e),
+        };
+
+        match phy.reconfigure(&capture_config(request.channel)).await {
             Ok(()) => response(id, json!({"status": "success"})),
             Err(e) => error_response(id, "set_channel_failed", e),
         }
