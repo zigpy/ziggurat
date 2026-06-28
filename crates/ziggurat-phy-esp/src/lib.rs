@@ -18,7 +18,7 @@ use core::time::Duration;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
-use embassy_sync::mutex::Mutex;
+use embassy_sync::mutex::{Mutex, MutexGuard};
 use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 use esp_hal::interrupt::{self, Priority};
@@ -90,6 +90,7 @@ struct RadioState {
 
 pub struct EspPhy {
     state: Mutex<CriticalSectionRawMutex, RadioState>,
+    exclusive: Mutex<CriticalSectionRawMutex, ()>,
 }
 
 impl EspPhy {
@@ -110,6 +111,7 @@ impl EspPhy {
                 radio,
                 config: Config::default(),
             }),
+            exclusive: Mutex::new(()),
         }
     }
 
@@ -223,6 +225,7 @@ impl Receiver<ResetEvent> for EspReset {
 
 pub struct EspExclusive<'a> {
     phy: &'a EspPhy,
+    _guard: MutexGuard<'a, CriticalSectionRawMutex, ()>,
 }
 
 impl ExclusiveRadio for EspExclusive<'_> {
@@ -276,6 +279,9 @@ impl RadioPhy for EspPhy {
     }
 
     async fn transmit(&self, frame: TxFrame) -> Result<TxResult, RadioError> {
+        // Wait behind any exclusive holder (a scan) so this transmit can't retune the radio
+        // mid-scan.
+        let _exclusive = self.exclusive.lock().await;
         self.transmit_inner(&frame).await
     }
 
@@ -336,7 +342,10 @@ impl RadioPhy for EspPhy {
     }
 
     async fn lock(&self) -> EspExclusive<'_> {
-        EspExclusive { phy: self }
+        EspExclusive {
+            phy: self,
+            _guard: self.exclusive.lock().await,
+        }
     }
 
     fn subscribe_rx(&self) -> EspRx {
