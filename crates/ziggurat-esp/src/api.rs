@@ -235,6 +235,10 @@ async fn handle_configure(app: &mut App, id: u64, params: Value) -> Value {
         Err(e) => return error_response(id, "invalid_request", e),
     };
 
+    if let Some(old_stack) = app.stack.take() {
+        old_stack.shutdown().await;
+    }
+
     let tclk_seed = match (request.tclk_seed, request.tclk_flavor) {
         (Some(seed), Some(flavor)) => Some(TclkSeed { seed, flavor }),
         (None, None) => None,

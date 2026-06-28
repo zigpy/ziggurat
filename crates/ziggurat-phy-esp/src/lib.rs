@@ -20,7 +20,10 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
-use esp_hal::peripherals::IEEE802154;
+use embassy_time::Timer;
+use esp_hal::interrupt::{self, Priority};
+use esp_hal::peripherals::{IEEE802154, Interrupt};
+use esp_hal::system::Cpu;
 use esp_radio::ieee802154::{Config, Ieee802154};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
@@ -95,6 +98,13 @@ impl EspPhy {
         radio.set_rx_available_callback_fn(on_rx_available);
         radio.set_tx_done_callback_fn(on_tx_done);
         radio.set_tx_failed_callback_fn(on_tx_failed);
+
+        // esp-radio enables coex PTI at init but never disables it, and there is no coex
+        // partner running here.
+        unsafe {
+            let pti = regs::read(regs::PTI);
+            regs::write(regs::PTI, (pti & !0xFF) | regs::COEX_DISABLE);
+        }
         Self {
             state: Mutex::new(RadioState {
                 radio,
@@ -157,20 +167,19 @@ impl EspPhy {
     }
 }
 
-/// esp-radio RX buffer layout: `data[0]` is the PSDU length, `data[1..][..len]` the PSDU
-/// (FCS included), and the final PSDU byte carries the RSSI. We strip the 2-byte FCS.
 fn raw_to_rx_frame(data: &[u8], channel: u8) -> Option<RxFrame> {
     let len = data[0] as usize;
     if len < 2 || 1 + len > data.len() {
         return None;
     }
     let psdu = &data[1..1 + len];
-    let rssi = psdu[len - 1] as i8;
+    let rssi = psdu[len - 2] as i8;
+    let lqi = psdu[len - 1];
     Some(RxFrame {
         psdu: psdu[..len - 2].to_vec(),
         channel,
         rssi,
-        lqi: esp_radio::ieee802154::rssi_to_lqi(rssi),
+        lqi,
         timestamp_us: 0, // TODO: esp-radio does not surface a per-frame timestamp
     })
 }
