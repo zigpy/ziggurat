@@ -240,6 +240,7 @@ mod embassy_impl {
 
     /// Spawns into the embassy executor. Holds a [`SendSpawner`](embassy_executor::SendSpawner)
     /// so it is `Send + Sync`; obtained from the executor at startup.
+    #[derive(Clone, Copy)]
     pub struct EmbassySpawner(embassy_executor::SendSpawner);
 
     impl EmbassySpawner {

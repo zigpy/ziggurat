@@ -25,7 +25,7 @@ use esp_radio::ieee802154::{Config, Ieee802154};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
-    TxPriority, TxResult,
+    TxResult,
 };
 
 const RX_DEPTH: usize = 16;
@@ -225,11 +225,7 @@ impl RadioPhy for EspPhy {
         Ok(())
     }
 
-    async fn transmit(
-        &self,
-        frame: TxFrame,
-        _priority: TxPriority,
-    ) -> Result<TxResult, RadioError> {
+    async fn transmit(&self, frame: TxFrame) -> Result<TxResult, RadioError> {
         self.transmit_inner(&frame).await
     }
 

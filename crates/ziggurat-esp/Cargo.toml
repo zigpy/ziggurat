@@ -1,0 +1,51 @@
+[package]
+name = "ziggurat-esp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "ESP32-C6 firmware running the Ziggurat stack with a line-delimited JSON API"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ziggurat-esp"
+path = "src/main.rs"
+
+[dependencies]
+ziggurat-driver = { path = "../ziggurat-driver", default-features = false, features = [
+    "embassy",
+] }
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-phy-esp = { path = "../ziggurat-phy-esp" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+ziggurat-zigbee = { path = "../ziggurat-zigbee" }
+
+esp-hal = { version = "1.1.1", features = ["esp32c6", "unstable"] }
+esp-radio = { version = "0.18.0", features = ["esp32c6", "ieee802154", "unstable"] }
+esp-rtos = { version = "0.3.0", features = ["esp32c6", "embassy"] }
+esp-alloc = "0.10.0"
+esp-backtrace = { version = "0.19.0", features = [
+    "esp32c6",
+    "panic-handler",
+    "println",
+] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c6"] }
+esp-println = { version = "0.17.0", features = ["esp32c6", "log-04"] }
+
+embassy-executor = "0.10"
+embassy-time = "0.5"
+embassy-sync = "0.8"
+embedded-io-async = "0.7"
+
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = "fat"
+codegen-units = 1
+
+# A standalone workspace: this crate only builds for the ESP32-C6 target and is excluded
+# from the host workspace.
+[workspace]
