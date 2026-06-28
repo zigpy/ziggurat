@@ -739,6 +739,14 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// stopped: a leaked background task would keep the replaced stack processing frames
     /// and transmitting alongside its successor.
     spawner: R::Spawner,
+
+    /// Per-task cancel signals, keyed by task id.
+    cancels: Mutex<BTreeMap<u32, Arc<Notify>>>,
+    /// Hands each spawned task a unique id for the `cancels` map.
+    next_task_id: AtomicU32,
+    /// Woken whenever a task removes itself from `cancels`, so `shutdown` can await the
+    /// set draining to empty.
+    tasks_drained: Notify,
 }
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -815,6 +823,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             pending_route_wake: Notify::new(),
             send_seq: AtomicU32::new(0),
             spawner,
+            cancels: Mutex::new(BTreeMap::new()),
+            next_task_id: AtomicU32::new(0),
+            tasks_drained: Notify::new(),
         })
     }
 
@@ -1324,7 +1335,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.spawner.spawn(Box::pin(future));
+        let id = self.next_task_id.fetch_add(1, AtomicOrdering::Relaxed);
+        let cancel = Arc::new(Notify::new());
+        self.cancels.lock().insert(id, cancel.clone());
+
+        // Hold a weak handle so a task that outlives `shutdown` (or finishes naturally) can
+        // still deregister without keeping the stack alive.
+        let weak = self.self_weak.clone();
+
+        self.spawner.spawn(Box::pin(async move {
+            // Run the task until it finishes or `shutdown` cancels it. Dropping the task
+            // future at an await point is safe: the stack never holds the blocking core
+            // lock across an await (enforced by `CoreGuard` being `!Send`).
+            {
+                let future = core::pin::pin!(future);
+                let cancelled = core::pin::pin!(cancel.notified());
+                let _ = futures::future::select(future, cancelled).await;
+            }
+
+            if let Some(stack) = weak.upgrade() {
+                stack.cancels.lock().remove(&id);
+                stack.tasks_drained.notify_one();
+            }
+        }));
     }
 
     /// Spawns a tracked task that needs an owned handle to the stack.
@@ -1345,6 +1378,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// replaced stack provably stops processing frames and transmitting before its
     /// successor takes over the shared Spinel client.
     pub async fn shutdown(&self) {
+        // Cooperatively cancel every tracked task, then wait for each to deregister. This
+        // is what stops the tasks on embassy, where the spawner cannot abort them.
+        for cancel in self.cancels.lock().values() {
+            cancel.notify_one();
+        }
+
+        while !self.cancels.lock().is_empty() {
+            self.tasks_drained.notified().await;
+        }
+
+        // On executors that can abort (tokio), this also reaps the finished JoinSet
+        // entries; on embassy it is a no-op.
         self.spawner.shutdown().await;
     }
 
