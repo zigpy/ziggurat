@@ -157,7 +157,7 @@ impl Spawn for TokioSpawner {
 /// The embassy runtime adapter. Host-runnable through `arch-std` so it can stand in for
 /// tokio, and the same impl drives the MCU once an esp PHY backs it.
 #[cfg(feature = "embassy")]
-pub use embassy_impl::{EmbassyRuntime, EmbassySpawner};
+pub use embassy_impl::{EmbassyRuntime, EmbassySpawner, start_embassy_executor};
 
 #[cfg(feature = "embassy")]
 mod embassy_impl {
@@ -240,5 +240,28 @@ mod embassy_impl {
         // Embassy cannot cancel spawned tasks; the MCU stack is never replaced, so there
         // is nothing to stop.
         async fn shutdown(&self) {}
+    }
+
+    /// Run an embassy `arch-std` executor on a dedicated thread, returning a spawner
+    /// for it.
+    pub fn start_embassy_executor(tokio_handle: tokio::runtime::Handle) -> EmbassySpawner {
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("embassy-executor".into())
+            .spawn(move || {
+                // Held for the executor's (and thread's) entire life, so every poll on this
+                // thread sees the tokio runtime.
+                let _enter = tokio_handle.enter();
+                let executor: &'static mut embassy_executor::Executor =
+                    Box::leak(Box::new(embassy_executor::Executor::new()));
+                executor.run(move |spawner| {
+                    let _ = tx.send(spawner.make_send());
+                });
+            })
+            .expect("spawn embassy-executor thread");
+
+        EmbassySpawner::new(rx.recv().expect("embassy executor failed to start"))
     }
 }
