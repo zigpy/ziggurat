@@ -34,6 +34,7 @@ const RX_DEPTH: usize = 16;
 // esp-radio completion callbacks are plain `fn()` (no captures), so they must reach the
 // async side through statics.
 static RX_CHANNEL: Channel<CriticalSectionRawMutex, RxFrame, RX_DEPTH> = Channel::new();
+static RESET_CHANNEL: Channel<CriticalSectionRawMutex, ResetEvent, 1> = Channel::new();
 static RX_AVAILABLE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static TX_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static TX_FAILED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -170,12 +171,13 @@ impl Receiver<RxFrame> for EspRx {
     }
 }
 
-/// The native radio never spontaneously resets, so this stream never yields.
-pub struct NeverReset;
+/// Reset notifications: the native radio never spontaneously resets, so the only events
+/// are the ones [`EspPhy::reset`] synthesizes when the driver asks for a reset.
+pub struct EspReset(ChannelReceiver<'static, CriticalSectionRawMutex, ResetEvent, 1>);
 
-impl Receiver<ResetEvent> for NeverReset {
+impl Receiver<ResetEvent> for EspReset {
     async fn recv(&mut self) -> Option<ResetEvent> {
-        core::future::pending().await
+        Some(self.0.receive().await)
     }
 }
 
@@ -200,10 +202,14 @@ impl ExclusiveRadio for EspExclusive<'_> {
 impl RadioPhy for EspPhy {
     type Exclusive<'a> = EspExclusive<'a>;
     type RxStream = EspRx;
-    type ResetStream = NeverReset;
+    type ResetStream = EspReset;
 
     async fn reset(&self) -> Result<(), RadioError> {
-        // No external RCP to reset; reconfigure re-applies all state.
+        // No external RCP to reset; reconfigure re-applies all state. The driver waits for
+        // a reset notification afterward, so synthesize one.
+        let _ = RESET_CHANNEL.try_send(ResetEvent {
+            reason: String::from("esp radio ready"),
+        });
         Ok(())
     }
 
@@ -244,8 +250,8 @@ impl RadioPhy for EspPhy {
         EspRx(RX_CHANNEL.receiver())
     }
 
-    fn subscribe_reset(&self) -> NeverReset {
-        NeverReset
+    fn subscribe_reset(&self) -> EspReset {
+        EspReset(RESET_CHANNEL.receiver())
     }
 }
 
