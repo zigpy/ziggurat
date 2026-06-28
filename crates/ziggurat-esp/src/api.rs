@@ -173,7 +173,6 @@ const fn default_accept_direct_joins() -> bool {
 #[derive(Deserialize)]
 struct EnergyScanRequest {
     channels: Vec<u8>,
-    #[allow(dead_code)]
     duration_per_channel_ms: u16,
 }
 
@@ -218,7 +217,7 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         "get_hw_address" => handle_get_hw_address(id),
         "get_network_info" => handle_get_network_info(app, id),
         "send_aps" => handle_send_aps(app, id, params).await,
-        "energy_scan" => handle_energy_scan(id, params).await,
+        "energy_scan" => handle_energy_scan(app, id, params).await,
         "network_scan" => handle_network_scan(app, id, params).await,
         "permit_joins" => handle_permit_joins(app, id, params),
         "set_channel" => handle_set_channel(app, id, params).await,
@@ -434,22 +433,31 @@ async fn handle_send_aps(app: &App, id: u64, params: Value) -> Value {
     }
 }
 
-/// Placeholder energy scan: esp-radio exposes no energy-detect API, so this streams a
-/// flat floor RSSI per channel. Channel selection is therefore not energy-informed, but
-/// `form` and other callers that expect a per-channel stream still work.
-async fn handle_energy_scan(id: u64, params: Value) -> Value {
+/// Energy scan: per-channel hardware energy detection, streamed as `energy_result`
+/// events. The radio's ED is driven directly through its registers (see ziggurat-phy-esp).
+async fn handle_energy_scan(app: &App, id: u64, params: Value) -> Value {
     let request: EnergyScanRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
     };
 
+    let Some(stack) = app.stack.as_ref() else {
+        return error_response(id, "not_configured", "no stack is running");
+    };
+
+    let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
     for channel in request.channels {
-        emit(event_data(
-            id,
-            "energy_result",
-            json!({"channel": channel, "rssi": -90}),
-        ))
-        .await;
+        match stack.energy_detect(channel, duration).await {
+            Ok(rssi) => {
+                emit(event_data(
+                    id,
+                    "energy_result",
+                    json!({"channel": channel, "rssi": rssi}),
+                ))
+                .await;
+            }
+            Err(e) => return error_response(id, "energy_scan_failed", e),
+        }
     }
 
     response(id, json!({"status": "complete"}))

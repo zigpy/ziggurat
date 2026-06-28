@@ -39,6 +39,37 @@ static RX_AVAILABLE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static TX_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static TX_FAILED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
+/// Direct IEEE802154 register access. esp-radio exposes neither an energy-detect API nor a
+/// coex-disable, so we reach the memory-mapped registers ourselves (offsets/values per
+/// ESP-IDF's `components/ieee802154`). esp-radio owns the peripheral, but the register block
+/// is at a fixed address; we serialize with everything else through the radio `state` lock.
+mod regs {
+    const BASE: usize = 0x600A_3000;
+    pub const CMD: usize = BASE + 0x00;
+    pub const ED_DURATION: usize = BASE + 0x50;
+    pub const ED_CFG: usize = BASE + 0x54;
+    pub const EVENT_STATUS: usize = BASE + 0x64;
+    pub const PTI: usize = BASE + 0x70;
+
+    pub const CMD_ED_START: u32 = 0x44;
+    pub const CMD_STOP: u32 = 0x45;
+    pub const EVENT_ED_DONE: u32 = 1 << 6;
+    pub const ALL_EVENTS: u32 = 0x1FFF;
+    /// `ed_cfg.ed_sample_mode`: 0 = report the peak (max) sample, 1 = average.
+    pub const ED_SAMPLE_MODE: u32 = 1 << 13;
+    /// `pti.pti` (bits 0..3) and `pti.hw_ack_pti` (bits 4..7), both set to 1 — ESP-IDF's
+    /// `ieee802154_ll_disable_coex`: the radio always wins arbitration, so a non-existent
+    /// coex partner can't gate (and starve) RX/TX/ED.
+    pub const COEX_DISABLE: u32 = 0x11;
+
+    pub unsafe fn read(addr: usize) -> u32 {
+        unsafe { core::ptr::read_volatile(addr as *const u32) }
+    }
+    pub unsafe fn write(addr: usize, value: u32) {
+        unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
+    }
+}
+
 fn on_rx_available() {
     RX_AVAILABLE.signal(());
 }
@@ -191,6 +222,10 @@ impl ExclusiveRadio for EspExclusive<'_> {
         state.config.channel = channel;
         let config = state.config;
         state.radio.set_config(config);
+        // A channel change only reaches the running receiver when RX is (re)started, so
+        // re-arm it; otherwise the radio keeps receiving on the previous channel (e.g. a
+        // network scan would only ever hear the home channel).
+        state.radio.start_receive();
         Ok(())
     }
 
@@ -235,11 +270,60 @@ impl RadioPhy for EspPhy {
         self.transmit_inner(&frame).await
     }
 
-    async fn energy_detect(&self, _channel: u8, _duration: Duration) -> Result<i8, RadioError> {
-        // TODO: esp-radio does not expose ED scan; needs register access or an upstream PR.
-        Err(RadioError::Other(String::from(
-            "energy detect not supported by esp-radio",
-        )))
+    async fn energy_detect(&self, channel: u8, duration: Duration) -> Result<i8, RadioError> {
+        use regs::*;
+
+        let mut state = self.state.lock().await;
+        let home = state.config.channel;
+
+        // Tune to the target channel (esp-radio maps channel -> RF frequency).
+        state.config.channel = channel;
+        let config = state.config;
+        state.radio.set_config(config);
+
+        // The hardware measures over `duration`, in 16 us symbol periods, latched into a
+        // 24-bit field.
+        let symbols = ((duration.as_micros() / 16) as u32).min(0x00FF_FFFF);
+
+        // ED_DONE must stay enabled in the event mask for the hardware to latch the
+        // completion, but esp-radio's ISR clears every event and has no ED handler, so it
+        // would consume the completion (and could restart RX mid-measurement) before we
+        // read it. Mask the MAC interrupt at the controller for the measurement instead:
+        // the event still latches, we poll it, and the ISR cannot run.
+        interrupt::disable(Cpu::current(), Interrupt::ZB_MAC);
+
+        let rss = unsafe {
+            write(CMD, CMD_STOP);
+            write(EVENT_STATUS, ALL_EVENTS); // write-1-to-clear
+            // Peak (max) sampling: report the strongest energy seen over the dwell, so a
+            // mostly-idle channel with brief bursts still registers them (averaging would
+            // wash them out to the noise floor). The driver wants peak channel energy.
+            write(ED_CFG, read(ED_CFG) & !ED_SAMPLE_MODE);
+            write(ED_DURATION, symbols);
+            write(CMD, CMD_ED_START);
+
+            // Wait out the dwell, then poll for the latched completion.
+            Timer::after(embassy_time::Duration::from_micros(u64::from(symbols) * 16)).await;
+            let mut remaining = 50;
+            while read(EVENT_STATUS) & EVENT_ED_DONE == 0 && remaining > 0 {
+                Timer::after(embassy_time::Duration::from_millis(1)).await;
+                remaining -= 1;
+            }
+
+            let rss = ((read(ED_CFG) >> 16) & 0xFF) as i8;
+            write(EVENT_STATUS, ALL_EVENTS);
+            rss
+        };
+
+        interrupt::enable(Interrupt::ZB_MAC, Priority::Priority1);
+
+        // Restore the home channel and resume receiving.
+        state.config.channel = home;
+        let config = state.config;
+        state.radio.set_config(config);
+        state.radio.start_receive();
+
+        Ok(rss)
     }
 
     async fn lock(&self) -> EspExclusive<'_> {

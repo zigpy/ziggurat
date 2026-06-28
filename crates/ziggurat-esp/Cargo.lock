@@ -2277,6 +2277,7 @@ version = "0.1.0"
 dependencies = [
  "embassy-futures",
  "embassy-sync 0.8.0",
+ "embassy-time",
  "esp-hal",
  "esp-radio",
  "ziggurat-ieee-802154",
