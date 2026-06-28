@@ -5,14 +5,15 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, NetworkConfig, NwkDeviceType, TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY,
-    ZigbeeNotification, ZigbeeStack,
+    ApsAck, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables, TxPriority,
+    WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
@@ -40,6 +41,10 @@ pub fn hello_message(configured: bool) -> Value {
 
 fn event(id: u64, name: &str) -> Value {
     json!({"type": "event", "id": id, "event": name})
+}
+
+fn event_data(id: u64, name: &str, data: Value) -> Value {
+    json!({"type": "event", "id": id, "event": name, "data": data})
 }
 
 fn response(id: u64, result: Value) -> Value {
@@ -166,6 +171,19 @@ const fn default_accept_direct_joins() -> bool {
 }
 
 #[derive(Deserialize)]
+struct EnergyScanRequest {
+    channels: Vec<u8>,
+    #[allow(dead_code)]
+    duration_per_channel_ms: u16,
+}
+
+#[derive(Deserialize)]
+struct NetworkScanRequest {
+    channels: Vec<u8>,
+    duration_per_channel_ms: u16,
+}
+
+#[derive(Deserialize)]
 struct SetChannelRequest {
     channel: u8,
 }
@@ -200,6 +218,8 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         "get_hw_address" => handle_get_hw_address(id),
         "get_network_info" => handle_get_network_info(app, id),
         "send_aps" => handle_send_aps(app, id, params).await,
+        "energy_scan" => handle_energy_scan(id, params).await,
+        "network_scan" => handle_network_scan(app, id, params).await,
         "permit_joins" => handle_permit_joins(app, id, params),
         "set_channel" => handle_set_channel(app, id, params).await,
         "set_nwk_update_id" => handle_set_nwk_update_id(app, id, params),
@@ -306,6 +326,8 @@ fn handle_get_network_info(app: &App, id: u64) -> Value {
     let state = &stack.state;
     let core = state.core.lock();
     let nwk_security = &core.nib.nwk_security;
+    let aps_security = &core.aib.aps_security;
+    let tclk_seed = &stack.config.tclk_seed;
 
     response(
         id,
@@ -319,6 +341,19 @@ fn handle_get_network_info(app: &App, id: u64) -> Value {
             "network_key": key_to_string(&nwk_security.network_key()),
             "network_key_seq": nwk_security.key_seq_number(),
             "network_key_tx_counter": nwk_security.outgoing_frame_counter(),
+            "tc_link_key": key_to_string(&stack.config.tc_link_key),
+            "tclk_seed": tclk_seed.as_ref().map(|tclk| hex::encode(tclk.seed.to_bytes())),
+            "tclk_flavor": tclk_seed.as_ref().map(|tclk| match tclk.flavor {
+                TclkFlavor::ZStack => "zstack",
+                TclkFlavor::Ezsp => "ezsp",
+            }),
+            "key_table": aps_security
+                .device_keys()
+                .map(|(partner_ieee, entry)| json!({
+                    "partner_ieee": eui64_to_string(partner_ieee),
+                    "key": key_to_string(&entry.key),
+                }))
+                .collect::<Vec<_>>(),
             "tx_power": stack.config.tx_power,
         }),
     )
@@ -396,6 +431,78 @@ async fn handle_send_aps(app: &App, id: u64, params: Value) -> Value {
             Ok(()) => response(id, json!({"status": "delivered"})),
             Err(e) => error_response(id, "aps_ack_timeout", e),
         },
+    }
+}
+
+/// Placeholder energy scan: esp-radio exposes no energy-detect API, so this streams a
+/// flat floor RSSI per channel. Channel selection is therefore not energy-informed, but
+/// `form` and other callers that expect a per-channel stream still work.
+async fn handle_energy_scan(id: u64, params: Value) -> Value {
+    let request: EnergyScanRequest = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(e) => return error_response(id, "invalid_request", e),
+    };
+
+    for channel in request.channels {
+        emit(event_data(
+            id,
+            "energy_result",
+            json!({"channel": channel, "rssi": -90}),
+        ))
+        .await;
+    }
+
+    response(id, json!({"status": "complete"}))
+}
+
+fn network_beacon_json(beacon: &NetworkBeacon) -> Value {
+    json!({
+        "channel": beacon.channel,
+        "source": beacon.source.map(|nwk| format!("{:04x}", nwk.0)),
+        "pan_id": format!("{:04x}", beacon.pan_id.0),
+        "extended_pan_id": eui64_to_string(beacon.extended_pan_id),
+        "permit_joining": beacon.permit_joining,
+        "stack_profile": beacon.stack_profile,
+        "protocol_version": beacon.protocol_version,
+        "router_capacity": beacon.router_capacity,
+        "end_device_capacity": beacon.end_device_capacity,
+        "device_depth": beacon.device_depth,
+        "update_id": beacon.update_id,
+        "lqi": beacon.lqi,
+        "rssi": beacon.rssi,
+    })
+}
+
+/// Active scan: beacon-request each channel and stream the beacons heard. Runs inline —
+/// the receive loop collects beacons concurrently during the per-channel dwell, so they
+/// are all queued by the time the scan returns and we drain them.
+async fn handle_network_scan(app: &App, id: u64, params: Value) -> Value {
+    let request: NetworkScanRequest = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(e) => return error_response(id, "invalid_request", e),
+    };
+
+    let Some(stack) = app.stack.as_ref() else {
+        return error_response(id, "not_configured", "no stack is running");
+    };
+
+    stack.begin_network_scan();
+    let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
+    let result = stack.run_network_scan(&request.channels, duration).await;
+
+    loop {
+        let batch = stack.next_scan_beacons().await;
+        if batch.is_empty() {
+            break;
+        }
+        for beacon in batch {
+            emit(event_data(id, "network_found", network_beacon_json(&beacon))).await;
+        }
+    }
+
+    match result {
+        Ok(()) => response(id, json!({"status": "complete"})),
+        Err(e) => error_response(id, "network_scan_failed", e),
     }
 }
 
