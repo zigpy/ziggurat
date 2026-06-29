@@ -23,6 +23,7 @@ use ziggurat_driver::zigbee_stack::{
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
+use ziggurat_phy_esp::EspPhy;
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 
 use crate::{App, OUTBOUND};
@@ -239,7 +240,12 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         "configure" => handle_configure(app, id, params).await,
         "get_hw_address" => handle_get_hw_address(id),
         "get_network_info" => handle_get_network_info(app, id),
-        "send_aps" => handle_send_aps(app, id, params).await,
+        "send_aps" => {
+            // A send blocks on route discovery (seconds) and the APS-ack wait, so it
+            // runs on its own task.
+            dispatch_send_aps(app, id, params).await;
+            return;
+        }
         "energy_scan" => handle_energy_scan(app, id, params).await,
         "network_scan" => handle_network_scan(app, id, params).await,
         "permit_joins" => handle_permit_joins(app, id, params),
@@ -414,39 +420,57 @@ fn handle_get_network_info(app: &App, id: u64) -> Value {
     )
 }
 
-async fn handle_send_aps(app: &App, id: u64, params: Value) -> Value {
-    let request: SendApsRequest = match serde_json::from_value(params) {
-        Ok(request) => request,
-        Err(e) => return error_response(id, "invalid_request", e),
+/// Validate that a stack is running, then spawn the send on its own task. Sends block
+/// on route discovery and the APS-ack wait, so handling one inline in the command loop
+/// would serialize the whole API behind each transmit. The task holds its own stack
+/// handle(`Arc`), so it outlives this borrow.
+async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
+    let Some(stack) = app.stack.as_ref() else {
+        emit(error_response(id, "not_configured", "no stack is running")).await;
+        return;
     };
 
-    let Some(stack) = app.stack.as_ref() else {
-        return error_response(id, "not_configured", "no stack is running");
+    app.spawner
+        .spawn(Box::pin(run_send_aps(stack.clone(), id, params)));
+}
+
+/// Drives one send to completion (transmit, then APS-ack wait), emitting the lifecycle
+/// events and terminal response itself.
+async fn run_send_aps(stack: Arc<ZigbeeStack<EspPhy>>, id: u64, params: Value) {
+    let request: SendApsRequest = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(e) => return emit(error_response(id, "invalid_request", e)).await,
     };
 
     let destination = match (request.destination_eui64, request.destination) {
         (_, Some(nwk)) => nwk,
         (Some(eui64), None) => match stack.state.core.lock().nib.address_map.nwk_for(eui64) {
             Some(nwk) => nwk,
-            None => return error_response(id, "unknown_destination_eui64", format!("{eui64:?}")),
+            None => {
+                return emit(error_response(id, "unknown_destination_eui64", format!("{eui64:?}")))
+                    .await;
+            }
         },
-        (None, None) => return error_response(id, "missing_destination", "no destination given"),
+        (None, None) => {
+            return emit(error_response(id, "missing_destination", "no destination given")).await;
+        }
     };
 
     let asdu = match hex::decode(&request.data) {
         Ok(asdu) => asdu,
-        Err(e) => return error_response(id, "invalid_data", e),
+        Err(e) => return emit(error_response(id, "invalid_data", e)).await,
     };
 
     let aps_security = if request.aps_encryption {
         match (request.destination_eui64, request.delivery_mode) {
             (Some(eui64), ApsDeliveryMode::Unicast) => Some(eui64),
             _ => {
-                return error_response(
+                return emit(error_response(
                     id,
                     "invalid_request",
                     "aps_encryption requires a unicast destination_eui64",
-                );
+                ))
+                .await;
             }
         }
     } else {
@@ -475,18 +499,19 @@ async fn handle_send_aps(app: &App, id: u64, params: Value) -> Value {
         .await
     {
         Ok(ack_waiter) => ack_waiter,
-        Err(e) => return error_response(id, "transmit_failed", e),
+        Err(e) => return emit(error_response(id, "transmit_failed", e)).await,
     };
 
     emit(event(id, "transmitted")).await;
 
-    match ack_waiter {
+    let message = match ack_waiter {
         None => response(id, json!({"status": "sent"})),
         Some(waiter) => match stack.wait_aps_ack(waiter).await {
             Ok(()) => response(id, json!({"status": "delivered"})),
             Err(e) => error_response(id, "aps_ack_timeout", e),
         },
-    }
+    };
+    emit(message).await;
 }
 
 /// Energy scan: per-channel hardware energy detection, streamed as `energy_result`
