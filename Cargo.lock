@@ -2075,6 +2075,7 @@ dependencies = [
  "hex",
  "hex-literal",
  "num_enum",
+ "once_cell",
  "serde",
  "subtle",
  "thiserror",

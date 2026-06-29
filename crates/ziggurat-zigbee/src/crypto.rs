@@ -1,15 +1,123 @@
 use aes::Aes128;
-use aes::Block;
-use aes::cipher::BlockCipherEncrypt;
-use aes::cipher::KeyInit;
+use aes::cipher::array::Array;
+use aes::cipher::consts::{U1, U16};
+use aes::cipher::{
+    Block, BlockCipherEncBackend, BlockCipherEncClosure, BlockCipherEncrypt, BlockSizeUser, InOut,
+    KeyInit, KeySizeUser, ParBlocksSizeUser,
+};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use ccm::Ccm;
 use ccm::aead::AeadInOut;
 use ccm::consts::{U4, U13};
+use once_cell::race::OnceBox;
 use thiserror::Error;
 
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key};
+
+static SOFTWARE_BACKEND: SoftwareBackend = SoftwareBackend;
+
+/// The installed backend, or unset for the software default.
+static BACKEND: OnceBox<&'static dyn CryptoBackend> = OnceBox::new();
+
+/// Install the platform crypto backend. Call once during startup, before any frames are
+/// processed. The host leaves this unset and runs everything in software.
+pub fn install(backend: &'static dyn CryptoBackend) {
+    let _ = BACKEND.set(Box::new(backend));
+}
+
+fn backend() -> &'static dyn CryptoBackend {
+    BACKEND.get().copied().unwrap_or(&SOFTWARE_BACKEND)
+}
+
+/// A complete platform crypto backend. The host and tests use [`SoftwareBackend`]; MCU
+/// targets [`install`] one backed by their hardware.
+///
+/// Implementors must provide the AES-128 block primitive. CCM* defaults to a software
+/// implementation built on that block, so a backend whose accelerator offers only block
+/// modes (like the ESP32-C6, whose AES accelerator has no CCM mode) gets hardware-backed
+/// CCM* for free; an SoC with a dedicated CCM* engine overrides the two methods.
+pub trait CryptoBackend: Sync {
+    /// AES-128 ECB, one block, encrypted in place.
+    fn aes128_encrypt_block(&self, key: &[u8; 16], block: &mut [u8; 16]);
+
+    /// CCM*-protect a payload in place: `auth_data` is authenticated, the buffer is
+    /// encrypted, and the encrypted MIC ("MAC tag") is appended to it.
+    fn encrypt_ccm(
+        &self,
+        key: &Key,
+        nonce: &[u8; 13],
+        auth_data: &[u8],
+        buffer: FrameBytes,
+    ) -> FrameBytes {
+        software_encrypt_ccm(key, nonce, auth_data, buffer)
+    }
+
+    /// Reverse of [`encrypt_ccm`](CryptoBackend::encrypt_ccm): verify the MIC and
+    /// decrypt in place, returning the buffer truncated to the plaintext.
+    fn decrypt_ccm(
+        &self,
+        key: &Key,
+        nonce: &[u8; 13],
+        auth_data: &[u8],
+        tagged_ciphertext: FrameBytes,
+    ) -> Result<FrameBytes, DecryptionError> {
+        software_decrypt_ccm(key, nonce, auth_data, tagged_ciphertext)
+    }
+}
+
+/// Pure-software backend (RustCrypto `aes`/`ccm`), used until an MCU installs its own.
+pub struct SoftwareBackend;
+
+impl CryptoBackend for SoftwareBackend {
+    fn aes128_encrypt_block(&self, key: &[u8; 16], block: &mut [u8; 16]) {
+        let cipher = Aes128::new(&(*key).into());
+        let mut buffer: Array<u8, U16> = (*block).into();
+        cipher.encrypt_block(&mut buffer);
+        *block = buffer.into();
+    }
+}
+
+/// A RustCrypto block cipher that delegates each AES-128 block to the installed
+/// [`CryptoBackend`], so the software `ccm` implementation transparently uses hardware
+/// AES when a backend is installed.
+#[derive(Clone)]
+struct BackendAes {
+    key: [u8; 16],
+}
+
+impl KeySizeUser for BackendAes {
+    type KeySize = U16;
+}
+
+impl KeyInit for BackendAes {
+    fn new(key: &aes::cipher::Key<Self>) -> Self {
+        Self { key: (*key).into() }
+    }
+}
+
+impl BlockSizeUser for BackendAes {
+    type BlockSize = U16;
+}
+
+impl ParBlocksSizeUser for BackendAes {
+    type ParBlocksSize = U1;
+}
+
+impl BlockCipherEncBackend for BackendAes {
+    fn encrypt_block(&self, mut block: InOut<'_, '_, Block<Self>>) {
+        let mut buffer: [u8; 16] = (*block.get_in()).into();
+        backend().aes128_encrypt_block(&self.key, &mut buffer);
+        *block.get_out() = buffer.into();
+    }
+}
+
+impl BlockCipherEncrypt for BackendAes {
+    fn encrypt_with_backend(&self, f: impl BlockCipherEncClosure<BlockSize = Self::BlockSize>) {
+        f.call(self);
+    }
+}
 
 /// AES-MMO (Matyas-Meyer-Oseas) cryptographic hash, Zigbee spec B.1.3/B.4. Only the
 /// short-message padding scheme is implemented (inputs below 2^16 bits).
@@ -23,14 +131,15 @@ pub fn aes_mmo_hash(data: &[u8]) -> [u8; 16] {
     }
     padded.extend(((data.len() * 8) as u16).to_be_bytes());
 
+    let backend = backend();
     let mut digest = [0u8; 16];
 
     for chunk in padded.chunks_exact(16) {
-        let cipher = Aes128::new(&digest.into());
-        let block = Block::try_from(chunk).expect("16-byte chunk is always valid");
-
-        let mut encrypted = Block::default();
-        cipher.encrypt_block_b2b(&block, &mut encrypted);
+        // MMO: encrypt the message block under the running digest as the key, then XOR the
+        // ciphertext with the plaintext block.
+        let block: [u8; 16] = chunk.try_into().expect("16-byte chunk is always valid");
+        let mut encrypted = block;
+        backend.aes128_encrypt_block(&digest, &mut encrypted);
 
         for (digest_byte, (encrypted_byte, block_byte)) in
             digest.iter_mut().zip(encrypted.iter().zip(block.iter()))
@@ -98,8 +207,9 @@ pub fn ezsp_tclk(seed: &Key, eui64: Eui64) -> Key {
 
 /// Zigbee CCM* at security level 5 (spec annex A): AES-128 CCM with a 4-byte MIC and
 /// a 13-byte nonce. CCM* only differs from standard CCM at the unencrypted security
-/// levels, which are never used on the air.
-type ZigbeeCcm = Ccm<Aes128, U4, U13>;
+/// levels, which are never used on the air. The underlying AES blocks route through the
+/// installed [`CryptoBackend`], so this picks up hardware AES automatically.
+type ZigbeeCcm = Ccm<BackendAes, U4, U13>;
 
 pub const MIC_LENGTH: usize = 4;
 
@@ -117,6 +227,15 @@ pub fn encrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
+    buffer: FrameBytes,
+) -> FrameBytes {
+    backend().encrypt_ccm(key, nonce, auth_data, buffer)
+}
+
+fn software_encrypt_ccm(
+    key: &Key,
+    nonce: &[u8; 13],
+    auth_data: &[u8],
     mut buffer: FrameBytes,
 ) -> FrameBytes {
     let mic = ZigbeeCcm::new(&key.0.into())
@@ -131,6 +250,15 @@ pub fn encrypt_ccm(
 /// Reverse of [`encrypt_ccm`]: verify the MIC and decrypt in place, returning the
 /// buffer truncated to the plaintext.
 pub fn decrypt_ccm(
+    key: &Key,
+    nonce: &[u8; 13],
+    auth_data: &[u8],
+    tagged_ciphertext: FrameBytes,
+) -> Result<FrameBytes, DecryptionError> {
+    backend().decrypt_ccm(key, nonce, auth_data, tagged_ciphertext)
+}
+
+fn software_decrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
@@ -201,6 +329,34 @@ mod test {
         assert_eq!(
             zstack_tclk(&seed, eui64, 0),
             Key::from_hex("884aff2f441e747700c2ddb6bb87cfee")
+        );
+    }
+
+    /// CCM* round-trips through the backend-delegating block cipher and rejects tampering.
+    #[test]
+    fn test_ccm_round_trip() {
+        let key = Key::from_hex("0011223344556677889900aabbccddee");
+        let nonce = hex!("000102030405060708090a0b0c");
+        let aad = hex!("aabbccdd");
+        let plaintext = hex!("decafbad01020304");
+
+        let ciphertext = encrypt_ccm(
+            &key,
+            &nonce,
+            &aad,
+            FrameBytes::from_slice(&plaintext).unwrap(),
+        );
+        assert_eq!(ciphertext.len(), plaintext.len() + MIC_LENGTH);
+        assert_ne!(&ciphertext.as_slice()[..plaintext.len()], &plaintext[..]);
+
+        let decrypted = decrypt_ccm(&key, &nonce, &aad, ciphertext.clone()).unwrap();
+        assert_eq!(decrypted.as_slice(), &plaintext[..]);
+
+        let mut tampered = ciphertext;
+        tampered.as_mut_slice()[0] ^= 0xff;
+        assert_eq!(
+            decrypt_ccm(&key, &nonce, &aad, tampered),
+            Err(DecryptionError::InvalidMacTag)
         );
     }
 

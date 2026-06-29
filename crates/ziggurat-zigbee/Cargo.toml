@@ -19,6 +19,7 @@ educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }
 num_enum = { version = "0.7.3", default-features = false }
+once_cell = { version = "1", default-features = false, features = ["race", "alloc"] }
 serde = { version = "1.0.219", default-features = false, features = ["alloc", "derive"] }
 subtle = { version = "2", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }

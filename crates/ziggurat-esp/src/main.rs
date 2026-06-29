@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod api;
+mod hw_crypto;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -98,6 +99,10 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
     esp_alloc::heap_allocator!(size: 96 * 1024);
+
+    // Route all AES (CCM* and AES-MMO) through the hardware accelerator instead of
+    // software AES on the RISC-V core. Must happen before the stack processes any frames.
+    hw_crypto::init(peripherals.AES);
 
     // Install the randomness source the stack pulls jitter, addresses, and keys from. The
     // SoC RNG is true-random once the radio subsystem is up (it is, below).
