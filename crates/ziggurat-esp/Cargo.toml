@@ -52,11 +52,11 @@ codegen-units = 1
 # from the host workspace.
 [workspace]
 
-# Build against a local checkout of the esp-hal fork so we can patch esp-radio's
-# IEEE 802.15.4 driver to set the auto-ACK frame-pending bit (RX_DONE ISR). esp-radio's
-# intra-repo deps are path-based, so esp-hal must be patched alongside it to avoid two
-# esp-hal copies. To be repointed at the fork's pushed commit later.
+# Build against the esp-hal fork so we can patch esp-radio's IEEE 802.15.4 driver to set
+# the auto-ACK frame-pending bit (RX_DONE ISR). esp-radio's intra-repo deps are path-based,
+# so esp-hal must be patched alongside it to avoid two esp-hal copies; cargo resolves each
+# package by name within the git workspace.
 [patch.crates-io]
-esp-hal = { path = "../../../esp-hal/esp-hal" }
-esp-radio = { path = "../../../esp-hal/esp-radio" }
-esp-rom-sys = { path = "../../../esp-hal/esp-rom-sys" }
+esp-hal = { git = "https://github.com/puddly/esp-hal", rev = "711fe337f65c6dfe1b6851c41b71bca3bf3c4832" }
+esp-radio = { git = "https://github.com/puddly/esp-hal", rev = "711fe337f65c6dfe1b6851c41b71bca3bf3c4832" }
+esp-rom-sys = { git = "https://github.com/puddly/esp-hal", rev = "711fe337f65c6dfe1b6851c41b71bca3bf3c4832" }

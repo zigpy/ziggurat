@@ -13,6 +13,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::time::Duration;
 
 use embassy_futures::select::{Either, select};
@@ -149,8 +150,7 @@ impl EspPhy {
                     .transmit_raw(&frame.psdu, frame.csma_ca)
                     .map_err(|e| RadioError::Other(String::from(esp_err(e))))?;
 
-                // Holds the radio lock across the completion wait, so RX is blocked for the
-                // TX duration. TODO: release and reacquire instead.
+                // Hold the radio lock across the completion wait.
                 match select(TX_DONE.wait(), TX_FAILED.wait()).await {
                     Either::First(()) => {
                         if state.radio.get_ack_frame().is_some() {
@@ -286,7 +286,7 @@ impl RadioPhy for EspPhy {
         let esp = state.config;
         state.radio.set_config(esp);
         state.radio.start_receive();
-        
+
         retune_rx(channel);
 
         Ok(())
@@ -294,10 +294,13 @@ impl RadioPhy for EspPhy {
 
     async fn set_frame_pending_table(
         &self,
-        _short: &[Nwk],
-        _extended: &[Eui64],
+        short: &[Nwk],
+        extended: &[Eui64],
     ) -> Result<(), RadioError> {
-        // TODO: esp-radio source-match via set_short_address(i, ..) + PendingMode.
+        let shorts: Vec<u16> = short.iter().map(|n| n.as_u16()).collect();
+        let exts: Vec<u64> = extended.iter().map(|e| u64::from_le_bytes(e.to_bytes())).collect();
+        let mut state = self.state.lock().await;
+        state.radio.set_source_match_table(&shorts, &exts);
         Ok(())
     }
 
