@@ -16,8 +16,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_time::{Duration, Timer};
 use embedded_io_async::Read;
 use embedded_io_async::Write;
 use esp_alloc as _;
@@ -28,7 +30,7 @@ use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
+use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 
 use ziggurat_driver::rng;
 use ziggurat_driver::runtime::EmbassySpawner;
@@ -43,11 +45,18 @@ const OUTBOUND_DEPTH: usize = 16;
 pub static OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, OUTBOUND_DEPTH> =
     Channel::new();
 
+/// Complete inbound request lines, produced by `reader_task` and consumed by the
+/// processor loop in `main`. Decoupling the read from the (slower) handling keeps the
+/// USB RX FIFO drained promptly: a burst of commands fills this queue instead of
+/// stalling the FIFO.
+const INBOUND_DEPTH: usize = 32;
+static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Channel::new();
+
 /// Cancels the packet-capture task. Each capture gets a fresh one; `stop_packet_capture`
 /// signals it so the task exits and frees the radio.
 pub type CaptureStop = embassy_sync::signal::Signal<CriticalSectionRawMutex, ()>;
 
-/// The firmware's mutable state, owned by (and only touched from) the reader loop.
+/// The firmware's mutable state, owned by (and only touched from) the processor loop.
 pub struct App {
     pub phy: Arc<EspPhy>,
     pub spawner: EmbassySpawner,
@@ -60,6 +69,36 @@ pub struct App {
 #[embassy_executor::task]
 async fn rx_task(phy: Arc<EspPhy>) {
     phy.run_rx().await
+}
+
+/// How often the reader re-checks the USB RX FIFO when no byte has arrived. Bounds the
+/// recovery latency from a dropped esp-hal RX wakeup (see `reader_task`).
+const RX_WATCHDOG: Duration = Duration::from_millis(50);
+
+/// Drains the USB-Serial-JTAG RX continuously, splitting on newlines and queueing each
+/// complete line for the processor.
+#[embassy_executor::task]
+async fn reader_task(mut rx: UsbSerialJtagRx<'static, Async>) {
+    let mut buf = [0u8; 256];
+    let mut line: Vec<u8> = Vec::with_capacity(2048);
+    loop {
+        let n = match select(rx.read(&mut buf), Timer::after(RX_WATCHDOG)).await {
+            Either::First(result) => result.unwrap_or(0),
+            Either::Second(()) => continue,
+        };
+        for &byte in &buf[..n] {
+            match byte {
+                b'\n' => {
+                    if !line.is_empty() {
+                        INBOUND.send(line.clone()).await;
+                        line.clear();
+                    }
+                }
+                b'\r' => {}
+                _ => line.push(byte),
+            }
+        }
+    }
 }
 
 /// The single serial writer: every outbound line goes through it, so concurrent
@@ -118,11 +157,12 @@ async fn main(spawner: Spawner) -> ! {
     }));
 
     let usb = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
-    let (mut serial_rx, serial_tx) = usb.split();
+    let (serial_rx, serial_tx) = usb.split();
 
     let phy = Arc::new(EspPhy::new(peripherals.IEEE802154));
 
     spawner.spawn(rx_task(phy.clone()).unwrap());
+    spawner.spawn(reader_task(serial_rx).unwrap());
     spawner.spawn(writer_task(serial_tx).unwrap());
 
     let mut app = App {
@@ -134,24 +174,13 @@ async fn main(spawner: Spawner) -> ! {
 
     api::emit(api::hello_message(false)).await;
 
-    // The reader loop: accumulate bytes into a line, dispatch on newline. `buf` is only
-    // the per-read chunk; `line` grows without bound, so a full-network-state `configure`
-    // line spanning many reads is reassembled whole.
-    let mut buf = [0u8; 256];
-    let mut line: Vec<u8> = Vec::with_capacity(2048);
+    // The processor loop. `reader_task` owns the RX side and keeps the FIFO drained, so
+    // a slow handler here only backs up `INBOUND` (bounded) instead of stalling
+    // intake. `handle_line` spawns each `send_aps` on its own task so a slow transmit
+    // (route discovery, APS-ack wait) doesn't serialize every later command behind
+    // it.
     loop {
-        let n = serial_rx.read(&mut buf).await.unwrap_or(0);
-        for &byte in &buf[..n] {
-            match byte {
-                b'\n' => {
-                    if !line.is_empty() {
-                        api::handle_line(&mut app, &line).await;
-                        line.clear();
-                    }
-                }
-                b'\r' => {}
-                _ => line.push(byte),
-            }
-        }
+        let line = INBOUND.receive().await;
+        api::handle_line(&mut app, &line).await;
     }
 }
