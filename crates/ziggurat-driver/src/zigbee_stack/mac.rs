@@ -1,3 +1,5 @@
+use core::time::Duration;
+
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154CommandFrame, Ieee802154DataFrame,
@@ -19,6 +21,11 @@ use super::{
     ZigbeeStackError,
 };
 
+/// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
+///
+/// [`hack_beacon_spam_duration`]: super::State::hack_beacon_spam_duration
+const BEACON_SPAM_INTERVAL: Duration = Duration::from_millis(5);
+
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
         tracing::debug!(
@@ -28,7 +35,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         match &command_frame.command_payload {
             ziggurat_ieee_802154::Ieee802154CommandPayload::BeaconRequest(_) => {
-                self.send_802154_beacon();
+                let spam = self.state.hack_beacon_spam_duration;
+                if spam.is_zero() || !self.permitting_joins() {
+                    self.send_802154_beacon();
+                } else {
+                    // Open/extend the spray window and let the beacon-spam reactor drive
+                    // the cadence, so a storm of requests can't exceed one beacon per
+                    // BEACON_SPAM_INTERVAL.
+                    self.core().beacon_spam_until = Some(self.core_now() + spam);
+                    self.beacon_spam_wake.notify_one();
+                }
             }
             ziggurat_ieee_802154::Ieee802154CommandPayload::AssociationRequest(
                 ieee802154_association_request_command,
@@ -131,6 +147,27 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tx_priority,
             None,
         );
+    }
+
+    /// The beacon-spam reactor (the [`hack_beacon_spam_duration`] hack): while a spray
+    /// window is open and joins are still permitting, send a beacon every
+    /// [`BEACON_SPAM_INTERVAL`], then idle on its wake. A beacon request opens or
+    /// extends the window; the fixed sleep (rather than racing the wake) is what caps
+    /// the rate at one beacon per interval no matter how many requests arrive.
+    ///
+    /// [`hack_beacon_spam_duration`]: super::State::hack_beacon_spam_duration
+    pub(super) async fn beacon_spam_task(&self) {
+        loop {
+            let until = self.core().beacon_spam_until;
+            if until.is_some_and(|deadline| deadline > self.core_now()) {
+                if self.permitting_joins() {
+                    self.send_802154_beacon();
+                }
+                R::sleep(BEACON_SPAM_INTERVAL).await;
+            } else {
+                self.beacon_spam_wake.notified().await;
+            }
+        }
     }
 
     pub(super) fn beacon_request_psdu(&self) -> Vec<u8> {

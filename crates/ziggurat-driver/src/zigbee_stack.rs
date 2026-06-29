@@ -426,6 +426,10 @@ pub struct ZigbeeCore {
     /// join completes while the coordinator's own beacon stays closed. Rejoins are
     /// never gated by this.
     pub trust_center_joins_until: Option<CoreInstant>,
+
+    /// While set and in the future, the beacon-spam reactor sends a beacon every 5 ms
+    /// (the `hack_beacon_spam_duration` hack). Each beacon request extends it.
+    pub beacon_spam_until: Option<CoreInstant>,
 }
 
 /// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It encodes
@@ -477,6 +481,10 @@ pub struct State {
     /// Instead of caching route information, always perform route discovery. This is
     /// much slower but ensures that routing logic is always followed.
     pub hack_force_route_discovery: bool,
+    /// While permitting joins, spray a beacon every 5 ms for this long after each beacon
+    /// request, to out-compete neighbouring networks that permanently permit joins. Zero
+    /// disables it (a single beacon per request, the spec behaviour).
+    pub hack_beacon_spam_duration: Duration,
 
     pub role: NwkDeviceType,
     pub capability_information: NwkCapabilityInformation,
@@ -555,6 +563,7 @@ impl State {
                 },
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
+                beacon_spam_until: None,
             }),
             pending_aps_acks: Mutex::new(BTreeMap::new()),
             pending_routes: Mutex::new(BTreeMap::new()),
@@ -565,6 +574,7 @@ impl State {
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
             hack_force_route_discovery: false,
+            hack_beacon_spam_duration: Duration::from_millis(100),
 
             role: config.role,
             capability_information: NwkCapabilityInformation {
@@ -720,6 +730,8 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Wakes the broadcast-retransmit reactor: signaled on every recorded passive ack
     /// and whenever a broadcast is queued for retransmission.
     pub(crate) broadcast_retransmit_wake: Notify,
+    /// Wakes the beacon-spam reactor when a beacon request opens its spray window.
+    pub(crate) beacon_spam_wake: Notify,
     /// Wakes the maintenance task when a new indirect transaction or child entry
     /// could move the earliest expiry deadline closer
     pub(crate) maintenance_wake: Notify,
@@ -817,6 +829,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             mtorr_kick: Notify::new(),
             link_status_received: Notify::new(),
             broadcast_retransmit_wake: Notify::new(),
+            beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
             send_queue: Mutex::new(BinaryHeap::new()),
             send_wake: Notify::new(),
@@ -1037,6 +1050,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.spawn_tracked(async move {
             arc_self.broadcast_retransmit_task().await;
+        });
+
+        // Sprays beacons while a beacon-spam window is open (the hack_beacon_spam_duration
+        // hack). Idle unless beacon requests open the window.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.beacon_spam_task().await;
         });
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will
