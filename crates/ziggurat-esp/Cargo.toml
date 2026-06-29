@@ -40,6 +40,7 @@ embedded-io-async = "0.7"
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+subtle = { version = "2", default-features = false }
 
 [profile.release]
 opt-level = "s"

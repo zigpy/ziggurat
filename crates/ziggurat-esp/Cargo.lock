@@ -2244,6 +2244,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "subtle",
  "ziggurat-driver",
  "ziggurat-ieee-802154",
  "ziggurat-phy",

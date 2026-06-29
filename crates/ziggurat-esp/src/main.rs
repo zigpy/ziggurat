@@ -100,9 +100,10 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(size: 96 * 1024);
 
-    // Route all AES (CCM* and AES-MMO) through the hardware accelerator instead of
-    // software AES on the RISC-V core. Must happen before the stack processes any frames.
-    hw_crypto::init(peripherals.AES);
+    // Route Zigbee crypto through the AES accelerator: CCM* runs as two DMA passes
+    // (CBC-MAC + CTR) and AES-MMO rides the single-block path. Must happen before the
+    // stack processes any frames.
+    hw_crypto::init(peripherals.AES, peripherals.DMA_CH0);
 
     // Install the randomness source the stack pulls jitter, addresses, and keys from. The
     // SoC RNG is true-random once the radio subsystem is up (it is, below).
