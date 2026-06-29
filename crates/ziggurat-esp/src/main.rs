@@ -42,11 +42,17 @@ const OUTBOUND_DEPTH: usize = 16;
 pub static OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, OUTBOUND_DEPTH> =
     Channel::new();
 
+/// Cancels the packet-capture task. Each capture gets a fresh one; `stop_packet_capture`
+/// signals it so the task exits and frees the radio.
+pub type CaptureStop = embassy_sync::signal::Signal<CriticalSectionRawMutex, ()>;
+
 /// The firmware's mutable state, owned by (and only touched from) the reader loop.
 pub struct App {
     pub phy: Arc<EspPhy>,
     pub spawner: EmbassySpawner,
     pub stack: Option<Arc<ZigbeeStack<EspPhy>>>,
+    /// `Some` while a packet capture is streaming; signalling it stops the capture.
+    pub capture_stop: Option<Arc<CaptureStop>>,
 }
 
 /// Drain the radio's received frames; the stack reads them off the shared RX channel.
@@ -116,6 +122,7 @@ async fn main(spawner: Spawner) -> ! {
         phy,
         spawner: EmbassySpawner::new(spawner.make_send()),
         stack: None,
+        capture_stop: None,
     };
 
     api::emit(api::hello_message(false)).await;

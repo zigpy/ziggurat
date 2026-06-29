@@ -34,6 +34,7 @@ esp-println = { version = "0.17.0", features = ["esp32c6", "log-04"] }
 embassy-executor = "0.10"
 embassy-time = "0.5"
 embassy-sync = "0.8"
+embassy-futures = "0.1"
 embedded-io-async = "0.7"
 
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }

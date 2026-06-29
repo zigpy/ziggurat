@@ -244,6 +244,20 @@ struct SetNwkUpdateIdRequest {
     nwk_update_id: u8,
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+enum ResetType {
+    /// Return to idle, leaving any configured network running.
+    Soft,
+    /// Reset the radio (RCP).
+    Hard,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResetRequest {
+    reset_type: ResetType,
+}
+
 fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json::Value {
     match notification_event {
         ZigbeeNotification::ReceivedApsCommand {
@@ -622,6 +636,7 @@ impl ZigguratServer {
 
                 let message = match method.as_str() {
                     "ping" => server.handle_ping(id).await,
+                    "reset" => server.handle_reset(id, params).await,
                     "configure" => server.handle_configure(id, params).await,
                     "get_hw_address" => server.handle_get_hw_address(id).await,
                     "get_network_info" => server.handle_get_network_info(id),
@@ -653,6 +668,28 @@ impl ZigguratServer {
         tokio::task::yield_now().await;
 
         response(id, json!({"status": "pong"}))
+    }
+
+    /// Soft or hard reset. A soft reset is a no-op success on the host (no transient
+    /// radio state outlives a connection here), kept for wire parity with the firmware. A
+    /// hard reset resets the radio (RCP); the stack's recovery task reprograms it.
+    async fn handle_reset(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: ResetRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        if matches!(request.reset_type, ResetType::Hard) {
+            let phy = match self.phy() {
+                Ok(p) => p,
+                Err(e) => return error_response(id, "serial_port_error", e),
+            };
+            if let Err(e) = phy.reset().await {
+                return error_response(id, "reset_failed", e);
+            }
+        }
+
+        response(id, json!({"status": "success"}))
     }
 
     /// (Re)initializes the Zigbee stack. The stack deliberately outlives client
@@ -1033,15 +1070,18 @@ impl ZigguratServer {
             Err(e) => return error_response(id, "invalid_request", e),
         };
 
-        let Some(stack) = self.current_stack() else {
-            return error_response(id, "not_configured", "no stack is running");
+        // An energy detect is a radio operation, not a network one: it drives the radio
+        // directly and needs no configured stack.
+        let phy = match self.phy() {
+            Ok(p) => p,
+            Err(e) => return error_response(id, "serial_port_error", e),
         };
 
         // An energy detect is self-contained per channel, so the manager owns the loop
         // and streams each result as the channel completes.
         let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
         for channel in request.channels {
-            match stack.energy_detect(channel, duration).await {
+            match phy.energy_detect(channel, duration).await {
                 Ok(rssi) => {
                     let _ = outbound
                         .send(event_data(

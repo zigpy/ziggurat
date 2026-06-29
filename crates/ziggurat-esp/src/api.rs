@@ -5,11 +5,15 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use embassy_futures::select::{Either, select};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::CaptureStop;
 
 use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
@@ -201,6 +205,21 @@ struct SetProvisionalKeyRequest {
     key: Key,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ResetType {
+    /// Stop transient radio activity (packet capture) and return to idle. The configured
+    /// network, if any, keeps running. Sent by the client on connect as a session reset.
+    Soft,
+    /// Reboot the MCU. The serial link drops and the client reconnects.
+    Hard,
+}
+
+#[derive(Deserialize)]
+struct ResetRequest {
+    reset_type: ResetType,
+}
+
 /// Parse and dispatch one inbound line, emitting the `accepted` event and the response.
 pub async fn handle_line(app: &mut App, line: &[u8]) {
     let request: Request = match serde_json::from_slice(line) {
@@ -216,6 +235,7 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
     let Request { id, method, params } = request;
     let message = match method.as_str() {
         "ping" => response(id, json!({"status": "pong"})),
+        "reset" => handle_reset(app, id, params),
         "configure" => handle_configure(app, id, params).await,
         "get_hw_address" => handle_get_hw_address(id),
         "get_network_info" => handle_get_network_info(app, id),
@@ -239,6 +259,26 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
     };
 
     emit(message).await;
+}
+
+/// Soft or hard reset. Both stop any in-progress packet capture (freeing the radio); a hard
+/// reset additionally reboots the MCU. The configured network is left running on a soft
+/// reset — it must survive client reconnects.
+fn handle_reset(app: &mut App, id: u64, params: Value) -> Value {
+    let request: ResetRequest = match serde_json::from_value(params) {
+        Ok(request) => request,
+        Err(e) => return error_response(id, "invalid_request", e),
+    };
+
+    if let Some(stop) = app.capture_stop.take() {
+        stop.signal(());
+    }
+
+    if matches!(request.reset_type, ResetType::Hard) {
+        esp_hal::system::software_reset(); // diverges; the link drops and the client reconnects
+    }
+
+    response(id, json!({"status": "success"}))
 }
 
 async fn handle_configure(app: &mut App, id: u64, params: Value) -> Value {
@@ -457,13 +497,10 @@ async fn handle_energy_scan(app: &App, id: u64, params: Value) -> Value {
         Err(e) => return error_response(id, "invalid_request", e),
     };
 
-    let Some(stack) = app.stack.as_ref() else {
-        return error_response(id, "not_configured", "no stack is running");
-    };
-
+    // Energy detect is a radio operation, not a network one.
     let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
     for channel in request.channels {
-        match stack.energy_detect(channel, duration).await {
+        match app.phy.energy_detect(channel, duration).await {
             Ok(rssi) => {
                 emit(event_data(
                     id,
@@ -577,9 +614,10 @@ const fn capture_config(channel: u8) -> RadioConfig {
 }
 
 /// Put the radio in promiscuous mode and stream every received frame as a `captured_packet`
-/// event. Runs without a configured stack (only `connect()` is needed). The capture task
-/// streams until the client disconnects; there is no terminal response.
-async fn handle_packet_capture(app: &App, id: u64, params: Value) {
+/// event. No configured stack needed (only `connect()`). Singleton: a second call just
+/// retunes. Stopped by `reset` (the client sends a soft reset on connect, clearing any stale
+/// capture). There is no terminal response.
+async fn handle_packet_capture(app: &mut App, id: u64, params: Value) {
     let request: SetChannelRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => {
@@ -593,21 +631,38 @@ async fn handle_packet_capture(app: &App, id: u64, params: Value) {
         return;
     }
 
+    // Already capturing: the reconfigure above retuned it; don't spawn a second task.
+    if app.capture_stop.is_some() {
+        return;
+    }
+
+    let stop = Arc::new(CaptureStop::new());
+    app.capture_stop = Some(stop.clone());
+
     let phy = app.phy.clone();
     app.spawner.spawn(Box::pin(async move {
         let mut rx = phy.subscribe_rx();
-        while let Some(frame) = rx.recv().await {
-            emit(event_data(
-                id,
-                "captured_packet",
-                json!({
-                    "channel": frame.channel,
-                    "rssi": frame.rssi,
-                    "lqi": frame.lqi,
-                    "data": hex::encode(&frame.psdu),
-                }),
-            ))
-            .await;
+        loop {
+            match select(rx.recv(), stop.wait()).await {
+                Either::First(Some(frame)) => {
+                    if let Ok(line) = serde_json::to_string(&event_data(
+                        id,
+                        "captured_packet",
+                        json!({
+                            "channel": frame.channel,
+                            "rssi": frame.rssi,
+                            "lqi": frame.lqi,
+                            "data": hex::encode(&frame.psdu),
+                        }),
+                    )) {
+                        // Drop on a full queue: a sniffer must not block (or back up stale
+                        // frames for a reconnecting client).
+                        let _ = OUTBOUND.try_send(line);
+                    }
+                }
+                // RX stream closed or `reset` signalled the stop.
+                _ => break,
+            }
         }
     }));
 }

@@ -49,18 +49,20 @@ static TX_FAILED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 mod regs {
     const BASE: usize = 0x600A_3000;
     pub const CMD: usize = BASE + 0x00;
+    pub const CHANNEL: usize = BASE + 0x48;
     pub const ED_DURATION: usize = BASE + 0x50;
     pub const ED_CFG: usize = BASE + 0x54;
     pub const EVENT_STATUS: usize = BASE + 0x64;
     pub const PTI: usize = BASE + 0x70;
 
+    pub const CMD_RX_START: u32 = 0x42;
     pub const CMD_ED_START: u32 = 0x44;
     pub const CMD_STOP: u32 = 0x45;
     pub const EVENT_ED_DONE: u32 = 1 << 6;
     pub const ALL_EVENTS: u32 = 0x1FFF;
     /// `ed_cfg.ed_sample_mode`: 0 = report the peak (max) sample, 1 = average.
     pub const ED_SAMPLE_MODE: u32 = 1 << 13;
-    /// `pti.pti` (bits 0..3) and `pti.hw_ack_pti` (bits 4..7), both set to 1 — ESP-IDF's
+    /// `pti.pti` (bits 0..3) and `pti.hw_ack_pti` (bits 4..7), both set to 1 - ESP-IDF's
     /// `ieee802154_ll_disable_coex`: the radio always wins arbitration, so a non-existent
     /// coex partner can't gate (and starve) RX/TX/ED.
     pub const COEX_DISABLE: u32 = 0x11;
@@ -205,6 +207,22 @@ const fn esp_err(_e: esp_radio::ieee802154::Error) -> &'static str {
     "esp-radio transmit error"
 }
 
+/// Force the receiver onto `channel`. esp-radio's `set_config` only updates the deferred
+/// PIB (applied later by `pib_update` in rx/tx init), and `start_receive` no-ops while
+/// already receiving - so a channel change otherwise never reaches a running receiver, which
+/// keeps hearing the old channel. Write the frequency register directly (same mapping as
+/// esp-radio's `channel_to_freq`), then stop + restart RX so the radio re-reads it. The RX
+/// buffer a prior `start_receive` set up persists across this.
+fn retune_rx(channel: u8) {
+    let freq = u32::from((channel - 11) * 5 + 3);
+    unsafe {
+        let chan = regs::read(regs::CHANNEL);
+        regs::write(regs::CHANNEL, (chan & !0x7F) | freq);
+        regs::write(regs::CMD, regs::CMD_STOP);
+        regs::write(regs::CMD, regs::CMD_RX_START);
+    }
+}
+
 pub struct EspRx(ChannelReceiver<'static, CriticalSectionRawMutex, RxFrame, RX_DEPTH>);
 
 impl Receiver<RxFrame> for EspRx {
@@ -234,10 +252,10 @@ impl ExclusiveRadio for EspExclusive<'_> {
         state.config.channel = channel;
         let config = state.config;
         state.radio.set_config(config);
-        // A channel change only reaches the running receiver when RX is (re)started, so
-        // re-arm it; otherwise the radio keeps receiving on the previous channel (e.g. a
-        // network scan would only ever hear the home channel).
+        // start_receive sets up the RX buffer the first time, but esp-radio no-ops it while
+        // already receiving, so it won't retune a running receiver. Force the retune below.
         state.radio.start_receive();
+        retune_rx(channel);
         Ok(())
     }
 
@@ -262,10 +280,15 @@ impl RadioPhy for EspPhy {
 
     async fn reconfigure(&self, config: &RadioConfig) -> Result<(), RadioError> {
         let mut state = self.state.lock().await;
+        let channel = config.channel;
         state.config = esp_config(config);
-        let config = state.config;
-        state.radio.set_config(config);
+
+        let esp = state.config;
+        state.radio.set_config(esp);
         state.radio.start_receive();
+        
+        retune_rx(channel);
+
         Ok(())
     }
 
