@@ -5,9 +5,10 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use esp_hal::aes::cipher_modes::{Cbc, Ctr};
-use esp_hal::aes::dma::{AesDma, DmaCipherState};
+use esp_hal::aes::dma::{AesDma, AesDmaChannel, DmaCipherState};
 use esp_hal::aes::{Aes, Operation};
-use esp_hal::dma::{DmaChannelFor, DmaRxBuf, DmaTxBuf};
+use esp_hal::dma::aligned::DmaAlignedMut;
+use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
 use esp_hal::dma_buffers;
 use esp_hal::peripherals::AES;
 use subtle::ConstantTimeEq;
@@ -187,10 +188,18 @@ fn format_cbc_mac_input(out: &mut [u8], nonce: &[u8; 13], aad: &[u8], payload: &
 
 /// Claim the AES peripheral + a DMA channel and install the hardware crypto backend. Call
 /// once during startup, before the stack processes frames.
-pub fn init(aes: AES<'static>, dma: impl DmaChannelFor<AES<'static>>) {
+pub fn init(aes: AES<'static>, dma: impl AesDmaChannel<'static>) {
     let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = dma_buffers!(DMA_BUF_SIZE);
-    let rx = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
-    let tx = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
+    let rx = DmaRxBuf::new(
+        DmaAlignedMut::new(rx_descriptors).unwrap(),
+        DmaAlignedMut::new(rx_buffer).unwrap(),
+    )
+    .unwrap();
+    let tx = DmaTxBuf::new(
+        DmaAlignedMut::new(tx_descriptors).unwrap(),
+        DmaAlignedMut::new(tx_buffer).unwrap(),
+    )
+    .unwrap();
     let aes_dma = Aes::new(aes).with_dma(dma);
 
     HW.lock(|cell| {

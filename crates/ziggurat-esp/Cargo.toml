@@ -19,8 +19,8 @@ ziggurat-phy-esp = { path = "../ziggurat-phy-esp" }
 ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
 ziggurat-zigbee = { path = "../ziggurat-zigbee" }
 
-esp-hal = { version = "1.1.1", features = ["esp32c6", "unstable"] }
-esp-radio = { version = "0.18.0", features = ["esp32c6", "ieee802154", "unstable"] }
+esp-hal = { version = "1.1.0", features = ["esp32c6", "unstable"] }
+esp-radio = { version = "1.0.0-beta.0", features = ["esp32c6", "ieee802154", "unstable"] }
 esp-rtos = { version = "0.3.0", features = ["esp32c6", "embassy"] }
 esp-alloc = "0.10.0"
 esp-backtrace = { version = "0.19.0", features = [
@@ -51,3 +51,12 @@ codegen-units = 1
 # A standalone workspace: this crate only builds for the ESP32-C6 target and is excluded
 # from the host workspace.
 [workspace]
+
+# Build against a local checkout of the esp-hal fork so we can patch esp-radio's
+# IEEE 802.15.4 driver to set the auto-ACK frame-pending bit (RX_DONE ISR). esp-radio's
+# intra-repo deps are path-based, so esp-hal must be patched alongside it to avoid two
+# esp-hal copies. To be repointed at the fork's pushed commit later.
+[patch.crates-io]
+esp-hal = { path = "../../../esp-hal/esp-hal" }
+esp-radio = { path = "../../../esp-hal/esp-radio" }
+esp-rom-sys = { path = "../../../esp-hal/esp-rom-sys" }

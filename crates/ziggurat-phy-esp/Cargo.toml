@@ -13,5 +13,5 @@ ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
 embassy-sync = "0.8"
 embassy-futures = "0.1"
 embassy-time = "0.5"
-esp-radio = { version = "0.18.0", features = ["esp32c6", "ieee802154", "unstable"] }
-esp-hal = { version = "1.1.1", features = ["esp32c6", "unstable"] }
+esp-radio = { version = "1.0.0-beta.0", features = ["esp32c6", "ieee802154", "unstable"] }
+esp-hal = { version = "1.1.0", features = ["esp32c6", "unstable"] }

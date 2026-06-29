@@ -28,7 +28,7 @@ use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
+use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
 
 use ziggurat_driver::rng;
 use ziggurat_driver::runtime::EmbassySpawner;
