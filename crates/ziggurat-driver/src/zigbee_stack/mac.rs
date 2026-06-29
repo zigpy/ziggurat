@@ -382,9 +382,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         match result {
             TxResult::Acked => Ok(()),
-            TxResult::NoAck => Err(ZigbeeStackError::NwkNoAck {
-                next_hop: final_frame.header().dest_address.unwrap(),
-            }),
+            // A frame with no destination (e.g. a beacon) never requested an ACK, so
+            // "no ACK" is the expected outcome, not a failure.
+            TxResult::NoAck => final_frame
+                .header()
+                .dest_address
+                .map_or(Ok(()), |next_hop| {
+                    Err(ZigbeeStackError::NwkNoAck { next_hop })
+                }),
             TxResult::ChannelAccessFailure => Err(ZigbeeStackError::CcaFailure),
             other => Err(ZigbeeStackError::TransmitFailed(other)),
         }
