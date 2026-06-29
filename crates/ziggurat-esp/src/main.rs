@@ -76,7 +76,8 @@ async fn writer_task(mut tx: UsbSerialJtagTx<'static, Async>) {
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    let peripherals = esp_hal::init(esp_hal::Config::default());
+    let peripherals =
+        esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
 
     // XIAO ESP32-C6 antenna RF switch: GPIO3 low powers the switch, then (after it
     // settles) GPIO14 low selects the onboard ceramic antenna. Without this the board
