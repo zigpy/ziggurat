@@ -314,6 +314,13 @@ impl Routing {
     /// mostly reverse-route side effects of their discoveries). This deviates from
     /// the spec's table-first order (3.6.4.3).
     pub fn route_to(&self, destination: Nwk, max_source_route: u8) -> Option<Route> {
+        // TODO: a route record wins unconditionally here, with no outgoing-link-cost check.
+        // For a concentrator this reverses the device->coordinator path and assumes the link
+        // is symmetric: a device reachable directly inbound advertises Relay Count 0, so we
+        // transmit direct even when our outbound link to it is poor (asymmetric radio). The
+        // cost-aware AODV path only runs in the `_` fallback. Fold the neighbor's
+        // `outgoing_cost` in so a Relay-Count-0 record only yields `NextHop` when the
+        // outbound link is actually good; otherwise fall through to cost-based routing.
         match self.route_record_table.get(&destination) {
             // Spec 3.6.4.3.1: no intermediate relays means direct transmission
             Some(relays) if relays.is_empty() => Some(Route::NextHop(destination)),

@@ -721,6 +721,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         completion: Option<TxCompletion>,
     ) {
         if let Some(child_eui64) = self.sleepy_child_eui64(next_hop) {
+            // TODO: this assigns the NWK frame counter NOW (finish_unicast_nwk_frame ->
+            // encrypt_nwk_frame), but the frame then waits in the indirect queue until the
+            // child polls. Meanwhile the sender_task hands out higher counters, so the
+            // indirect frame can hit the air with a counter below ones already sent and get
+            // replay-rejected. Encrypt at indirect-transmit time (on the poll), like the
+            // sender_task does at dequeue, so counter order always matches on-air order.
             let frame = self.finish_unicast_nwk_frame(nwk_frame, next_hop, security);
             self.increment_tx_total();
 
