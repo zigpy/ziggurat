@@ -1,5 +1,5 @@
 use crate::runtime::Runtime;
-use crate::signal::{self, SignalWaiter};
+use crate::signal;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
 use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
@@ -7,58 +7,47 @@ use ziggurat_phy::RadioPhy;
 
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
-use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
 
 use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
-    DeviceLeaveReason, NwkSecurityMode, SendKind, TxCompletion, TxPriority, ZigbeeNotification,
-    ZigbeeStack, ZigbeeStackError,
+    DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind, TxCompletion,
+    TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    /// Queue a finished 802.15.4 frame for a polling device, resolving `completion` with
-    /// the transmit result when the destination extracts it (802.15.4 spec 6.7.3), or
-    /// with an error on expiry or eviction. There is no retry loop: the destination
-    /// re-polling is the retry mechanism, expiry is the failure signal. Whoever wants the
-    /// outcome — an awaiting unicast originator, or nobody — owns the completion's
-    /// receiving half.
+    /// Queue a frame for a polling device (802.15.4 spec 6.7.3), under its own
+    /// `poll_address`. A `completion`, if supplied, is resolved with the transmit result
+    /// when the device extracts the frame, or with an error on expiry or eviction; a
+    /// fire-and-forget caller passes `None`.
     pub(super) fn enqueue_indirect_frame(
         &self,
-        destination: Ieee802154Address,
-        frame: Ieee802154Frame<EncryptedNwkFrame>,
-        completion: TxCompletion,
+        frame: IndirectFrame,
+        completion: Option<TxCompletion>,
     ) {
+        // The queue stores a completion unconditionally; a fire-and-forget caller gets
+        // a throwaway whose waiter is dropped, so resolving it later is a no-op.
+        let completion = completion.unwrap_or_else(|| signal::channel().0);
+
         self.core()
             .mac
             .indirect_queue
-            .push(destination, frame, completion, self.core_now());
+            .push(frame.poll_address, frame, completion, self.core_now());
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
     }
 
-    /// Queue a frame for a polling device without waiting on its delivery; the returned
-    /// receiver resolves like [`Self::enqueue_indirect_frame`]'s completion. Fire-and-forget
-    /// callers drop it.
-    pub(super) fn push_indirect_frame(
-        &self,
-        destination: Ieee802154Address,
-        frame: Ieee802154Frame<EncryptedNwkFrame>,
-    ) -> SignalWaiter<Result<(), ZigbeeStackError>> {
-        let (completion, result_rx) = signal::channel();
-        self.enqueue_indirect_frame(destination, frame, completion);
-        result_rx
-    }
-
+    /// Queue a frame and await its delivery: resolves once the device extracts it, or
+    /// with an error on expiry or eviction. A dropped sender (stack shutdown) reads as
+    /// expiry.
     pub(super) async fn queue_indirect_frame(
         &self,
-        destination: Ieee802154Address,
-        frame: Ieee802154Frame<EncryptedNwkFrame>,
+        frame: IndirectFrame,
     ) -> Result<(), ZigbeeStackError> {
-        // Every transaction is eventually resolved by delivery, the expiry sweep, or
-        // child eviction; a dropped sender means the stack is shutting down
-        let waiter = self.push_indirect_frame(destination, frame);
+        let destination = frame.poll_address;
+        let (completion, waiter) = signal::channel();
+        self.enqueue_indirect_frame(frame, Some(completion));
         waiter
             .wait()
             .await
@@ -155,14 +144,26 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         true
     }
 
-    async fn transmit_indirect_transaction(&self, delivery: Delivery<TxCompletion>) {
+    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectFrame, TxCompletion>) {
         let Delivery {
             destination,
             transaction,
             more_pending,
         } = delivery;
 
-        let mut frame = transaction.frame.clone();
+        // Finish a deferred NWK frame now, at delivery time: this is where its frame
+        // counter is assigned (via `encrypt_nwk_frame`), just before the frame hits the
+        // air, rather than when it was queued. The transaction is left intact (we clone
+        // out of it) so a failed transmit can requeue the plaintext and earn a fresh
+        // counter on the next poll.
+        let mut frame = match &transaction.frame.payload {
+            IndirectPayload::Deferred {
+                nwk_frame,
+                next_hop,
+                security,
+            } => self.finish_unicast_nwk_frame(nwk_frame.clone(), *next_hop, *security),
+            IndirectPayload::Final(frame) => frame.clone(),
+        };
 
         if more_pending {
             match frame {
@@ -259,10 +260,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            let frame =
-                arc_self.finish_unicast_nwk_frame(nwk_frame, nwk, NwkSecurityMode::NetworkKey);
+            let frame = IndirectFrame {
+                poll_address: destination,
+                payload: IndirectPayload::Deferred {
+                    nwk_frame,
+                    next_hop: nwk,
+                    security: NwkSecurityMode::NetworkKey,
+                },
+            };
 
-            if let Err(err) = arc_self.queue_indirect_frame(destination, frame).await {
+            if let Err(err) = arc_self.queue_indirect_frame(frame).await {
                 tracing::debug!("Queued leave to {nwk:?} was not extracted: {err}");
             }
         });

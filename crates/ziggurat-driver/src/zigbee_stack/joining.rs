@@ -33,8 +33,8 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, DeviceLeaveReason, JoinKind, NwkDeviceType, NwkSecurityMode, RadioPhy,
-    SendMode, TxPriority, ZigbeeNotification, ZigbeeStack, neighbors,
+    AddrConflictSource, DeviceLeaveReason, IndirectFrame, IndirectPayload, JoinKind, NwkDeviceType,
+    NwkSecurityMode, RadioPhy, SendMode, TxPriority, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -147,10 +147,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            match arc_self
-                .queue_indirect_frame(Ieee802154Address::Eui64(eui64), response_frame)
-                .await
-            {
+            let frame = IndirectFrame {
+                poll_address: Ieee802154Address::Eui64(eui64),
+                payload: IndirectPayload::Final(response_frame),
+            };
+            match arc_self.queue_indirect_frame(frame).await {
                 Ok(()) => {
                     // Zigbee spec 4.6.3.2: the network key is delivered once the
                     // device has confirmed receipt of its short address

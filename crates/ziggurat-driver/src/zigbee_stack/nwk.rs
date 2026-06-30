@@ -24,9 +24,9 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast,
-    PendingFrame, PendingRoute, SendKind, SendMode, SendRequest, TxCompletion, TxPriority,
-    ZigbeeStack, ZigbeeStackError,
+    AddrConflictSource, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
+    PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute, PendingUnicastRetry, SendKind,
+    SendMode, SendRequest, TxCompletion, TxPriority, ZigbeeStack, ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -721,20 +721,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         completion: Option<TxCompletion>,
     ) {
         if let Some(child_eui64) = self.sleepy_child_eui64(next_hop) {
-            // TODO: this assigns the NWK frame counter NOW (finish_unicast_nwk_frame ->
-            // encrypt_nwk_frame), but the frame then waits in the indirect queue until the
-            // child polls. Meanwhile the sender_task hands out higher counters, so the
-            // indirect frame can hit the air with a counter below ones already sent and get
-            // replay-rejected. Encrypt at indirect-transmit time (on the poll), like the
-            // sender_task does at dequeue, so counter order always matches on-air order.
-            let frame = self.finish_unicast_nwk_frame(nwk_frame, next_hop, security);
+            // The frame is left as plaintext and finished (encrypted, counter assigned)
+            // only when the child polls. See `IndirectFrame`. The NWK sequence number
+            // is already assigned.
+            let frame = IndirectFrame {
+                poll_address: Ieee802154Address::Eui64(child_eui64),
+                payload: IndirectPayload::Deferred {
+                    nwk_frame,
+                    next_hop,
+                    security,
+                },
+            };
             self.increment_tx_total();
 
-            let destination = Ieee802154Address::Eui64(child_eui64);
-            match completion {
-                Some(completion) => self.enqueue_indirect_frame(destination, frame, completion),
-                None => drop(self.push_indirect_frame(destination, frame)),
-            }
+            self.enqueue_indirect_frame(frame, completion);
             return;
         }
 
@@ -743,6 +743,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 nwk_frame,
                 next_hop,
                 security,
+                attempts_remaining: self.tunables.unicast_retries,
             },
             priority,
             completion,
@@ -961,30 +962,35 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     break;
                 };
 
-                let result = match request.kind {
+                match request.kind {
                     SendKind::Unicast {
                         nwk_frame,
                         next_hop,
                         security,
+                        attempts_remaining,
                     } => {
-                        self.process_unicast_send(nwk_frame, next_hop, security)
-                            .await
+                        // Owns the completion: resolves it on success or terminal
+                        // failure, or hands it to the retry reactor.
+                        self.attempt_unicast_send(
+                            nwk_frame,
+                            next_hop,
+                            security,
+                            request.priority,
+                            attempts_remaining,
+                            request.completion,
+                        )
+                        .await;
                     }
                     SendKind::Broadcast {
                         nwk_frame,
                         security,
-                    } => self.process_broadcast_send(nwk_frame, security).await,
-                    SendKind::Raw { frame } => self.send_802154_frame(frame).await,
-                };
-
-                match request.completion {
-                    Some(completion) => {
-                        completion.signal(result);
+                    } => {
+                        let result = self.process_broadcast_send(nwk_frame, security).await;
+                        Self::resolve_completion(request.completion, result);
                     }
-                    None => {
-                        if let Err(err) = result {
-                            tracing::warn!("Background send failed: {err}");
-                        }
+                    SendKind::Raw { frame } => {
+                        let result = self.send_802154_frame(frame).await;
+                        Self::resolve_completion(request.completion, result);
                     }
                 }
             }
@@ -993,73 +999,183 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Encrypt and unicast a dequeued frame to the next hop, with NWK retries.
-    async fn process_unicast_send(
+    /// Resolve a send's completion (if any) with its outcome, logging a dropped
+    /// background failure that nothing is waiting on.
+    fn resolve_completion(completion: Option<TxCompletion>, result: Result<(), ZigbeeStackError>) {
+        match completion {
+            Some(completion) => completion.signal(result),
+            None => {
+                if let Err(err) = result {
+                    tracing::warn!("Background send failed: {err}");
+                }
+            }
+        }
+    }
+
+    /// One transmit attempt for a dequeued unicast: assign the frame counter, encrypt,
+    /// and send once. On success (or terminal failure) the completion resolves here;
+    /// on a failed attempt with retries left, the plaintext frame is parked with the
+    /// unicast-retry reactor instead of being slept on, so the sender stays free.
+    async fn attempt_unicast_send(
         &self,
         mut nwk_frame: NwkFrame,
         next_hop_address: Nwk,
         security: NwkSecurityMode,
-    ) -> Result<(), ZigbeeStackError> {
+        priority: TxPriority,
+        attempts_remaining: u8,
+        completion: Option<TxCompletion>,
+    ) {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
+        let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
+        let ieee802154_frame =
+            self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame);
 
-        for attempt in 0..=self.tunables.unicast_retries {
-            let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
-            let ieee802154_frame =
-                self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame);
+        // When forwarding packets to another node, update the counters for the neighbor
+        {
+            let mut core = self.core();
+            let relaying_ieee = core.nib.address_map.eui64_for(next_hop_address);
 
-            // When forwarding packets to another node, update the counters for the neighbor
-            {
-                let mut core = self.core();
-                let relaying_ieee = core.nib.address_map.eui64_for(next_hop_address);
-
-                if let Some(relaying_ieee) = relaying_ieee {
-                    core.nib.neighbors.record_outbound_activity(relaying_ieee);
-                }
-
-                // And the routing table counters
-                core.nib
-                    .routing
-                    .record_usage(nwk_frame.nwk_header.destination);
+            if let Some(relaying_ieee) = relaying_ieee {
+                core.nib.neighbors.record_outbound_activity(relaying_ieee);
             }
 
-            self.increment_tx_total();
+            // And the routing table counters
+            core.nib
+                .routing
+                .record_usage(nwk_frame.nwk_header.destination);
+        }
 
-            match self.send_802154_frame(ieee802154_frame).await {
-                Ok(_) => {
-                    break;
-                }
-                Err(e) => {
-                    // Spec Table 3-75: an unacknowledged unicast is a transmit failure
-                    // recorded against the next hop. Counted per MCPS-DATA.request, like
-                    // `nwkTxTotal` above, so the two stay on the same denominator.
-                    if let ZigbeeStackError::NwkNoAck { .. } = e {
-                        let mut core = self.core();
-                        if let Some(next_hop_eui64) =
-                            core.nib.address_map.eui64_for(next_hop_address)
-                        {
-                            core.nib.neighbors.record_transmit_failure(next_hop_eui64);
-                        }
-                    }
+        self.increment_tx_total();
 
-                    tracing::warn!("Failed to send unicast frame: {e}");
+        let Err(e) = self.send_802154_frame(ieee802154_frame).await else {
+            Self::resolve_completion(completion, Ok(()));
+            return;
+        };
 
-                    if attempt + 1 > self.tunables.unicast_retries {
-                        tracing::error!("Failed to send unicast frame after {attempt} attempts");
-                        self.handle_unicast_send_failure(&nwk_frame, next_hop_address);
-                        return Err(e);
-                    }
-                    tracing::debug!(
-                        "Retrying unicast frame send, attempt {} of {}",
-                        attempt,
-                        self.tunables.unicast_retries
-                    );
-
-                    R::sleep(self.tunables.unicast_retry_delay).await;
-                }
+        // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
+        // against the next hop. Counted per MCPS-DATA.request, like `nwkTxTotal` above,
+        // so the two stay on the same denominator.
+        if let ZigbeeStackError::NwkNoAck { .. } = e {
+            let mut core = self.core();
+            if let Some(next_hop_eui64) = core.nib.address_map.eui64_for(next_hop_address) {
+                core.nib.neighbors.record_transmit_failure(next_hop_eui64);
             }
         }
 
-        Ok(())
+        tracing::warn!("Failed to send unicast frame: {e}");
+
+        if attempts_remaining == 0 {
+            tracing::error!("Failed to send unicast frame after all attempts");
+            self.handle_unicast_send_failure(&nwk_frame, next_hop_address);
+            Self::resolve_completion(completion, Err(e));
+            return;
+        }
+
+        // Park the frame for re-transmission after the retry delay. The plaintext frame
+        // is re-enqueued (not the ciphertext), so the next attempt earns a fresh counter
+        // at dequeue and on-air order stays equal to counter order.
+        tracing::debug!("Scheduling unicast retry, {attempts_remaining} attempt(s) remaining");
+        self.schedule_unicast_retry(
+            nwk_frame,
+            next_hop_address,
+            security,
+            priority,
+            attempts_remaining - 1,
+            completion,
+        );
+    }
+
+    /// Park a failed unicast for re-enqueue after [`unicast_retry_delay`] and wake the
+    /// retry reactor.
+    fn schedule_unicast_retry(
+        &self,
+        nwk_frame: NwkFrame,
+        next_hop: Nwk,
+        security: NwkSecurityMode,
+        priority: TxPriority,
+        attempts_remaining: u8,
+        completion: Option<TxCompletion>,
+    ) {
+        let next_attempt = self.core_now() + self.tunables.unicast_retry_delay;
+        self.state
+            .pending_unicast_retries
+            .lock()
+            .push(PendingUnicastRetry {
+                nwk_frame,
+                next_hop,
+                security,
+                priority,
+                attempts_remaining,
+                next_attempt,
+                completion,
+            });
+        self.unicast_retry_wake.notify_one();
+    }
+
+    /// The unicast-retry reactor: a single long-lived task that re-enqueues failed
+    /// unicasts once their retry delay elapses, mirroring the broadcast-retransmit
+    /// reactor.
+    pub(super) async fn unicast_retry_task(&self) {
+        loop {
+            match self.earliest_unicast_retry() {
+                Some(deadline) => {
+                    let _ = self
+                        .timeout_at_core(deadline, self.unicast_retry_wake.notified())
+                        .await;
+                }
+                None => self.unicast_retry_wake.notified().await,
+            }
+
+            self.drive_unicast_retries();
+        }
+    }
+
+    /// The soonest re-enqueue deadline across all parked retries, or `None` when none are
+    /// parked (the reactor then sleeps on its wake signal).
+    fn earliest_unicast_retry(&self) -> Option<CoreInstant> {
+        self.state
+            .pending_unicast_retries
+            .lock()
+            .iter()
+            .map(|retry| retry.next_attempt)
+            .min()
+    }
+
+    /// One reactor pass: re-enqueue every parked retry whose delay has elapsed. The
+    /// re-enqueued frame competes by its priority and earns a fresh counter at dequeue.
+    fn drive_unicast_retries(&self) {
+        let now = self.core_now();
+
+        let due: Vec<PendingUnicastRetry> = {
+            let mut pending = self.state.pending_unicast_retries.lock();
+            let mut due = Vec::new();
+            let mut i = 0;
+            while i < pending.len() {
+                if pending[i].next_attempt <= now {
+                    // Order does not matter (the priority queue reorders anyway), so an
+                    // O(1) swap-remove is fine.
+                    due.push(pending.swap_remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            drop(pending);
+
+            due
+        };
+
+        for retry in due {
+            self.enqueue_send(
+                SendKind::Unicast {
+                    nwk_frame: retry.nwk_frame,
+                    next_hop: retry.next_hop,
+                    security: retry.security,
+                    attempts_remaining: retry.attempts_remaining,
+                },
+                retry.priority,
+                retry.completion,
+            );
+        }
     }
 
     /// A unicast exhausted its retries at the sender. The next hop is dead: invalidate
@@ -1110,12 +1226,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .collect();
 
         for (child_eui64, child_nwk) in sleepy_children {
-            let finished = self.finish_unicast_nwk_frame(nwk_frame.clone(), child_nwk, security);
+            // Finished only when the child polls (see `IndirectFrame`).
+            let frame = IndirectFrame {
+                poll_address: Ieee802154Address::Eui64(child_eui64),
+                payload: IndirectPayload::Deferred {
+                    nwk_frame: nwk_frame.clone(),
+                    next_hop: child_nwk,
+                    security,
+                },
+            };
             self.increment_tx_total();
 
-            // We don't await the result
-            let _result_rx =
-                self.push_indirect_frame(Ieee802154Address::Eui64(child_eui64), finished);
+            // Fire-and-forget: a broadcast copy has no end-to-end result to await.
+            self.enqueue_indirect_frame(frame, None);
         }
     }
 

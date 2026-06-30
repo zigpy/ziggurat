@@ -25,7 +25,7 @@ use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
-use ziggurat_zigbee::nwk::frame::NwkFrame;
+use ziggurat_zigbee::nwk::frame::{EncryptedNwkFrame, NwkFrame};
 
 mod aps;
 mod indirect;
@@ -122,7 +122,7 @@ pub enum SendMode {
     /// lookup (and route discovery suppressed). Used for frames to a one-hop neighbor,
     /// e.g. delivering the network key to a joining device.
     Direct,
-    /// Resolve the next hop through the routing layer — the route table or an applicable
+    /// Resolve the next hop through the routing layer: the route table or an applicable
     /// source route, discovering a route first if none is known.
     Route,
 }
@@ -287,6 +287,11 @@ pub(crate) enum SendKind {
         nwk_frame: NwkFrame,
         next_hop: Nwk,
         security: NwkSecurityMode,
+        /// NWK-layer retries left after the current attempt. Seeded from
+        /// `Tunables::unicast_retries`; a failed attempt with retries remaining is
+        /// re-enqueued (decremented) by the unicast-retry reactor rather than slept on
+        /// in the sender, so the single sender task never blocks on a retry delay.
+        attempts_remaining: u8,
     },
     Broadcast {
         nwk_frame: NwkFrame,
@@ -335,6 +340,29 @@ pub struct PendingBroadcast {
     pub(crate) attempts_remaining: u8,
     /// When the next retransmission is due, unless the quorum is heard first.
     pub(crate) next_attempt: CoreInstant,
+}
+
+/// A unicast awaiting re-transmission after a failed attempt, held by the unicast-retry
+/// reactor ([`ZigbeeStack::unicast_retry_task`]).
+///
+/// Pulling the NWK retry delay out of the sender task is what keeps the single sender
+/// from ever sleeping mid-queue: a failed unicast is parked here and re-enqueued once
+/// its delay elapses, so the radio keeps draining other frames in the meantime. The
+/// frame is held as plaintext (no aux header / counter yet) so the next attempt earns
+/// a fresh frame counter at dequeue, keeping on-air order equal to counter order. The
+/// completion rides along and is resolved when the frame finally succeeds or exhausts
+/// its attempts.
+#[derive(Debug)]
+pub struct PendingUnicastRetry {
+    pub(crate) nwk_frame: NwkFrame,
+    pub(crate) next_hop: Nwk,
+    pub(crate) security: NwkSecurityMode,
+    pub(crate) priority: TxPriority,
+    /// Attempts left after the one that just failed.
+    pub(crate) attempts_remaining: u8,
+    /// When the re-enqueue is due.
+    pub(crate) next_attempt: CoreInstant,
+    pub(crate) completion: Option<TxCompletion>,
 }
 
 impl PartialEq for SendRequest {
@@ -397,6 +425,45 @@ pub struct Aib {
     pub aps_security: ApsSecurity,
 }
 
+/// A frame queued for indirect delivery to a sleepy device, together with the address it
+/// is queued under (802.15.4 spec 6.7.3).
+///
+/// `poll_address` is the address the device polls with, which a MAC Data Request is
+/// matched against and so the indirect queue's key: the extended address before a device
+/// has joined (it has no short address yet), the short address once it has. It is neither
+/// the frame's NWK destination (`nwk_header.destination`) nor a [`Deferred`] payload's
+/// `next_hop` (the short address used to build the MAC header) — the same device can wear
+/// all three.
+///
+/// [`Deferred`]: IndirectPayload::Deferred
+#[derive(Debug)]
+pub struct IndirectFrame {
+    pub poll_address: Ieee802154Address,
+    pub payload: IndirectPayload,
+}
+
+/// The payload of an [`IndirectFrame`].
+///
+/// A NWK frame to a sleepy child is queued as [`Deferred`](Self::Deferred): it is
+/// finished (encrypted, with a fresh NWK frame counter assigned) only when the child
+/// polls, not when it is queued. A transaction can wait in the indirect queue for
+/// seconds; assigning the counter at enqueue would let the sender hand out higher
+/// counters in the meantime, so the frame would reach the air with a counter below
+/// ones already sent and the destination's replay window would reject it. Finishing at
+/// delivery keeps the counter in on-air order.
+///
+/// Frames with no NWK layer to encrypt (a MAC association response) are queued
+/// [`Final`](Self::Final) and transmitted as-is.
+#[derive(Debug)]
+pub enum IndirectPayload {
+    Deferred {
+        nwk_frame: NwkFrame,
+        next_hop: Nwk,
+        security: NwkSecurityMode,
+    },
+    Final(Ieee802154Frame<EncryptedNwkFrame>),
+}
+
 /// Host-side mirror of the MAC PIB attributes we drive on the RCP. The MAC sub-layer
 /// physically lives on the radio coprocessor; these are our authoritative copies.
 #[derive(Debug)]
@@ -406,17 +473,10 @@ pub struct MacState {
     pub pan_id: PanId,
     /// Frames awaiting extraction by a polling device. Completions are resolved
     /// with the transmit result on extraction, or an error on expiry or drop.
-    pub indirect_queue: IndirectQueue<TxCompletion>,
+    pub indirect_queue: IndirectQueue<IndirectFrame, TxCompletion>,
 }
 
 /// The driver's unified mutable protocol state, behind a single lock.
-///
-/// An operation spanning several layers takes one guard instead of juggling a lock per
-/// field (and can never deadlock against itself on lock ordering). This is also the
-/// shape the eventual no_std core will own directly — there with no lock, here behind
-/// one `Mutex` for the threaded driver. Spec attributes are grouped by their
-/// information base ([`Nib`],[`Aib`], [`MacState`]); a field directly on the core is,
-/// by that absence, one of our own constructs with no spec information-base home.
 #[derive(Debug)]
 pub struct ZigbeeCore {
     pub nib: Nib,
@@ -467,6 +527,10 @@ pub struct State {
     pub pending_routes: Mutex<BTreeMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
     pub pending_broadcasts: Mutex<BTreeMap<(Nwk, u8), PendingBroadcast>>,
+    /// Unicasts awaiting re-transmission after a failed attempt. Unordered: each entry
+    /// is an independent in-flight frame (no dedup key like broadcasts have), drained
+    /// by the unicast-retry reactor when due.
+    pub pending_unicast_retries: Mutex<Vec<PendingUnicastRetry>>,
     pub address_conflicts: Mutex<BTreeMap<Nwk, AddressConflict>>,
 
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
@@ -575,6 +639,7 @@ impl State {
             pending_aps_acks: Mutex::new(BTreeMap::new()),
             pending_routes: Mutex::new(BTreeMap::new()),
             pending_broadcasts: Mutex::new(BTreeMap::new()),
+            pending_unicast_retries: Mutex::new(Vec::new()),
             address_conflicts: Mutex::new(BTreeMap::new()),
             aps_duplicates: Mutex::new(BTreeMap::new()),
 
@@ -737,6 +802,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Wakes the broadcast-retransmit reactor: signaled on every recorded passive ack
     /// and whenever a broadcast is queued for retransmission.
     pub(crate) broadcast_retransmit_wake: Notify,
+    /// Wakes the unicast-retry reactor whenever a failed unicast is parked for a later
+    /// re-enqueue.
+    pub(crate) unicast_retry_wake: Notify,
     /// Wakes the beacon-spam reactor when a beacon request opens its spray window.
     pub(crate) beacon_spam_wake: Notify,
     /// Wakes the maintenance task when a new indirect transaction or child entry
@@ -836,6 +904,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             mtorr_kick: Notify::new(),
             link_status_received: Notify::new(),
             broadcast_retransmit_wake: Notify::new(),
+            unicast_retry_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
             send_queue: Mutex::new(BinaryHeap::new()),
@@ -1045,8 +1114,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             arc_self.sender_task().await;
         });
 
-        // Drains frames queued awaiting route discovery, and discards them when discovery
-        // is exhausted. Must run before anything can queue one.
+        // Drains frames queued awaiting route discovery, and discards them when
+        // discovery is exhausted. Must run before anything can queue one.
         let arc_self = self
             .self_weak
             .upgrade()
@@ -1065,6 +1134,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.spawn_tracked(async move {
             arc_self.broadcast_retransmit_task().await;
+        });
+
+        // Re-enqueues failed unicasts after their retry delay, so the sender task never
+        // sleeps mid-queue. Must run before anything can queue a unicast.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.unicast_retry_task().await;
         });
 
         // Sprays beacons while a beacon-spam window is open (the hack_beacon_spam_duration

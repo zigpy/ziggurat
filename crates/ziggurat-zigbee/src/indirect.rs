@@ -6,21 +6,23 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 use crate::Instant;
 
+use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
-use crate::nwk::frame::EncryptedNwkFrame;
-
-/// A finished 802.15.4 frame awaiting indirect delivery (802.15.4 spec 6.7.3).
+/// A frame awaiting indirect delivery (802.15.4 spec 6.7.3).
 ///
 /// The destination extracts it by polling with a MAC Data Request; the radio's
 /// automatic ACK of that poll has its frame pending bit set (via the source address
 /// match table), telling the device to keep listening.
+///
+/// The payload type `F` is opaque to the queue: the driver chooses whether to store a
+/// finished frame or one still to be encrypted at delivery time (so a frame can wait
+/// here for seconds without holding a frame counter that would be stale once sent).
 #[derive(Debug)]
-pub struct Transaction<C> {
+pub struct Transaction<F, C> {
     /// The frame as queued; the frame pending bit is applied to a copy at delivery
     /// time, based on whether more transactions remain.
-    pub frame: Ieee802154Frame<EncryptedNwkFrame>,
+    pub frame: F,
     pub expires_at: Instant,
     /// The driver's completion token, resolved on delivery, expiry, or drop.
     pub completion: C,
@@ -28,10 +30,10 @@ pub struct Transaction<C> {
 
 /// A transaction extracted by a poll, ready for transmission.
 #[derive(Debug)]
-pub struct Delivery<C> {
+pub struct Delivery<F, C> {
     /// The queue key the transaction was extracted from
     pub destination: Ieee802154Address,
-    pub transaction: Transaction<C>,
+    pub transaction: Transaction<F, C>,
     /// Further transactions remain queued: the delivered frame's pending bit is set
     /// so the device keeps polling (802.15.4 spec 6.7.3)
     pub more_pending: bool,
@@ -41,11 +43,11 @@ pub struct Delivery<C> {
 #[derive(Debug)]
 #[must_use = "the expired transactions must be failed and the delivery transmitted; \
     dropping the outcome silently loses queued frames and leaks their completions"]
-pub struct PollOutcome<C> {
+pub struct PollOutcome<F, C> {
     /// Transactions that expired at the head of the queue, to be failed
-    pub expired: Vec<(Ieee802154Address, Transaction<C>)>,
+    pub expired: Vec<(Ieee802154Address, Transaction<F, C>)>,
     /// The oldest live transaction, if any
-    pub delivery: Option<Delivery<C>>,
+    pub delivery: Option<Delivery<F, C>>,
 }
 
 /// The source address match table contents most recently written to the RCP, used to
@@ -71,13 +73,13 @@ impl SrcMatchTable {
 /// was queued under; a poll is matched against both its extended and short source
 /// address.
 #[derive(Debug)]
-pub struct IndirectQueue<C> {
+pub struct IndirectQueue<F, C> {
     /// How long a transaction awaits a poll before expiring
     persistence_time: Duration,
-    queue: BTreeMap<Ieee802154Address, VecDeque<Transaction<C>>>,
+    queue: BTreeMap<Ieee802154Address, VecDeque<Transaction<F, C>>>,
 }
 
-impl<C> IndirectQueue<C> {
+impl<F, C> IndirectQueue<F, C> {
     pub const fn new(persistence_time: Duration) -> Self {
         Self {
             persistence_time,
@@ -85,13 +87,7 @@ impl<C> IndirectQueue<C> {
         }
     }
 
-    pub fn push(
-        &mut self,
-        destination: Ieee802154Address,
-        frame: Ieee802154Frame<EncryptedNwkFrame>,
-        completion: C,
-        now: Instant,
-    ) {
+    pub fn push(&mut self, destination: Ieee802154Address, frame: F, completion: C, now: Instant) {
         self.queue
             .entry(destination)
             .or_default()
@@ -105,7 +101,7 @@ impl<C> IndirectQueue<C> {
     /// 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged, so a
     /// failed transmit goes back to the head of the queue for the next poll, keeping
     /// its original deadline.
-    pub fn requeue(&mut self, destination: Ieee802154Address, transaction: Transaction<C>) {
+    pub fn requeue(&mut self, destination: Ieee802154Address, transaction: Transaction<F, C>) {
         self.queue
             .entry(destination)
             .or_default()
@@ -124,7 +120,7 @@ impl<C> IndirectQueue<C> {
         eui64: Option<Eui64>,
         nwk: Option<Nwk>,
         now: Instant,
-    ) -> PollOutcome<C> {
+    ) -> PollOutcome<F, C> {
         let keys = eui64
             .map(Ieee802154Address::Eui64)
             .into_iter()
@@ -184,7 +180,7 @@ impl<C> IndirectQueue<C> {
         &mut self,
         eui64: Option<Eui64>,
         nwk: Nwk,
-    ) -> Vec<(Ieee802154Address, Transaction<C>)> {
+    ) -> Vec<(Ieee802154Address, Transaction<F, C>)> {
         let keys = eui64
             .map(Ieee802154Address::Eui64)
             .into_iter()
@@ -210,7 +206,7 @@ impl<C> IndirectQueue<C> {
     /// uniform persistence time and requeued transmit failures keep their deadline.
     #[must_use = "expired transactions must be failed (their completions resolved); \
         dropping them leaves their awaiters hanging"]
-    pub fn expire(&mut self, now: Instant) -> Vec<(Ieee802154Address, Transaction<C>)> {
+    pub fn expire(&mut self, now: Instant) -> Vec<(Ieee802154Address, Transaction<F, C>)> {
         let mut expired = Vec::new();
 
         self.queue.retain(|&destination, transactions| {
