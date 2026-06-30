@@ -3,7 +3,15 @@ resolver = "2"
 members = ["crates/*"]
 # ziggurat-phy-esp and ziggurat-esp only build for an ESP32-C6 (riscv32imac) with esp-hal;
 # excluded so host `cargo build` over the workspace doesn't try (and fail) to compile them.
-exclude = ["fuzz", "crates/ziggurat-phy-esp", "crates/ziggurat-esp"]
+# The EFR32MG24 crates likewise only build for thumbv8m.main-none-eabihf (Cortex-M33F).
+exclude = [
+    "fuzz",
+    "crates/ziggurat-phy-esp",
+    "crates/ziggurat-esp",
+    "crates/ziggurat-efr32-pac",
+    "crates/ziggurat-rail-sys",
+    "crates/ziggurat-efr32",
+]
 
 [workspace.package]
 version = "0.1.0"
