@@ -1,0 +1,26 @@
+[package]
+name = "ziggurat-efr32"
+version = "0.1.0"
+edition = "2021"
+description = "Ziggurat firmware for the EFR32MG24 (Cortex-M33F), RAIL radio backend"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ziggurat-efr32"
+path = "src/main.rs"
+
+[dependencies]
+ziggurat-rail-sys = { path = "../ziggurat-rail-sys" }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+panic-halt = "1"
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = "fat"
+codegen-units = 1
+
+# Standalone workspace: only builds for thumbv8m.main-none-eabihf; excluded from the host
+# workspace.
+[workspace]
