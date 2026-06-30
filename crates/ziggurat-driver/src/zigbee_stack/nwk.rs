@@ -1096,7 +1096,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         attempts_remaining: u8,
         completion: Option<TxCompletion>,
     ) {
-        let next_attempt = self.core_now() + self.tunables.unicast_retry_delay;
+        let delay = self.tunables.unicast_retry_delay;
+
+        // The frame has a random jitter of up to one retry delay period
+        let jitter = delay.mul_f32(crate::rng::random_f32());
+        let next_attempt = self.core_now() + delay + jitter;
+
         self.state
             .pending_unicast_retries
             .lock()
