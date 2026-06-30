@@ -29,6 +29,7 @@ use esp_hal::Async;
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::uart::{Config as UartConfig, UartTx};
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 
 use ziggurat_driver::rng;
@@ -50,6 +51,11 @@ pub static OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, OUT
 /// stalling the FIFO.
 const INBOUND_DEPTH: usize = 32;
 static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Channel::new();
+
+/// Plaintext log lines bound for the UART console.
+const LOG_OUTBOUND_DEPTH: usize = 32;
+pub static LOG_OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, LOG_OUTBOUND_DEPTH> =
+    Channel::new();
 
 /// Cancels the packet-capture task. Each capture gets a fresh one; `stop_packet_capture`
 /// signals it so the task exits and frees the radio.
@@ -112,6 +118,18 @@ async fn writer_task(mut tx: UsbSerialJtagTx<'static, Async>) {
     }
 }
 
+/// Drains the log channel to the UART console. The actual (blocking) UART write happens
+/// here, off the stack's critical path, exactly like `writer_task` does for the JSON bus.
+#[embassy_executor::task]
+async fn uart_log_task(mut tx: UartTx<'static, Async>) {
+    loop {
+        let line = LOG_OUTBOUND.receive().await;
+        let _ = tx.write_all(line.as_bytes()).await;
+        let _ = tx.write_all(b"\r\n").await;
+        // No flush needed: the UART peripheral shifts the FIFO out autonomously.
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     let peripherals =
@@ -123,7 +141,14 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(size: 96 * 1024);
 
-    // Forward the stack's `tracing` records to the host as `log` notifications.
+    // Bring up the UART console
+    let log_uart = UartTx::new(peripherals.UART0, UartConfig::default().with_baudrate(460_800))
+        .expect("UART0 config")
+        .with_tx(peripherals.GPIO16)
+        .into_async();
+    spawner.spawn(uart_log_task(log_uart).unwrap());
+
+    // Route the stack's `tracing` records to the UART console.
     log_sink::install();
 
     // Route Zigbee crypto through the AES accelerator: CCM* runs as two DMA passes

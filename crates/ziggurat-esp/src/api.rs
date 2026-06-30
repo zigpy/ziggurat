@@ -38,20 +38,6 @@ pub async fn emit(value: Value) {
     }
 }
 
-/// Forward one log record as a `log` notification, without blocking. Called
-/// synchronously from the tracing subscriber (often while the stack holds a lock), so
-/// it must not `await`; a full outbound queue drops the record rather than stalling
-/// the stack.
-pub fn emit_log(level: &str, target: &str, message: &str) {
-    let line = notification(
-        "log",
-        json!({ "level": level, "target": target, "message": message }),
-    );
-    if let Ok(text) = serde_json::to_string(&line) {
-        let _ = OUTBOUND.try_send(text);
-    }
-}
-
 pub fn hello_message(configured: bool) -> Value {
     let state = if configured {
         "running"
@@ -221,27 +207,6 @@ struct SetProvisionalKeyRequest {
 }
 
 #[derive(Deserialize)]
-struct SetLogLevelRequest {
-    /// `off` / `error` / `warn` / `info` / `debug` / `trace`.
-    level: String,
-}
-
-/// Adjust the firmware log verbosity at runtime (records are forwarded as `log`
-/// notifications). Live-settable so a session can flip to `debug` without a
-/// reconfigure (which would reset the stack).
-fn handle_set_log_level(id: u64, params: Value) -> Value {
-    let request: SetLogLevelRequest = match serde_json::from_value(params) {
-        Ok(request) => request,
-        Err(e) => return error_response(id, "invalid_request", e),
-    };
-
-    match crate::log_sink::set_log_level(&request.level) {
-        Some(level) => response(id, json!({"status": "success", "level": level})),
-        None => error_response(id, "invalid_request", "unknown log level"),
-    }
-}
-
-#[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ResetType {
     /// Stop transient radio activity (packet capture) and return to idle. The configured
@@ -296,7 +261,6 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         }
         "set_nwk_update_id" => handle_set_nwk_update_id(app, id, params),
         "set_provisional_key" => handle_set_provisional_key(app, id, params),
-        "set_log_level" => handle_set_log_level(id, params),
         other => error_response(id, "unknown_method", other),
     };
 

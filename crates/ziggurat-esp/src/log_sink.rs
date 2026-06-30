@@ -1,52 +1,15 @@
-//! A `tracing` subscriber that forwards log records to the host as `log` notifications on
-//! the JSON API, rather than to a serial console — the USB-Serial-JTAG already carries the
-//! protocol, so println-style logging there would corrupt it.
+//! A `tracing` subscriber that writes log records to the UART.
 
 use alloc::string::String;
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use tracing::field::{Field, Visit};
 use tracing::subscriber::Interest;
 use tracing::{Event, Level, Metadata, Subscriber, span};
 
-use crate::api;
+use crate::LOG_OUTBOUND;
 
-/// Verbosity threshold as a rank; records at or below it are forwarded.
-static MAX_LEVEL: AtomicU8 = AtomicU8::new(3);
-
-const fn rank(level: &Level) -> u8 {
-    match *level {
-        Level::ERROR => 1,
-        Level::WARN => 2,
-        Level::INFO => 3,
-        Level::DEBUG => 4,
-        Level::TRACE => 5,
-    }
-}
-
-/// Set the verbosity threshold from a level name (`off`/`error`/`warn`/`info`/`debug`/
-/// `trace`); unknown names are ignored. Returns the level applied, if recognized.
-pub fn set_log_level(level: &str) -> Option<&'static str> {
-    let rank = match level {
-        "off" => 0,
-        "error" => 1,
-        "warn" => 2,
-        "info" => 3,
-        "debug" => 4,
-        "trace" => 5,
-        _ => return None,
-    };
-    MAX_LEVEL.store(rank, Ordering::Relaxed);
-    Some(match rank {
-        0 => "off",
-        1 => "error",
-        2 => "warn",
-        3 => "info",
-        4 => "debug",
-        _ => "trace",
-    })
-}
+const MAX_LEVEL: Level = Level::DEBUG;
 
 pub fn install() {
     let _ = tracing::subscriber::set_global_default(LogSink);
@@ -60,16 +23,17 @@ impl Subscriber for LogSink {
     }
 
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        rank(metadata.level()) <= MAX_LEVEL.load(Ordering::Relaxed)
+        *metadata.level() <= MAX_LEVEL
     }
 
     fn event(&self, event: &Event<'_>) {
         let metadata = event.metadata();
 
-        let mut message = String::new();
-        event.record(&mut MessageVisitor(&mut message));
+        let mut line = String::new();
+        let _ = write!(line, "{} {}: ", metadata.level().as_str(), metadata.target());
+        event.record(&mut MessageVisitor(&mut line));
 
-        api::emit_log(metadata.level().as_str(), metadata.target(), &message);
+        let _ = LOG_OUTBOUND.try_send(line);
     }
 
     // Events-only: spans are not used by the stack, so span bookkeeping is a no-op.
