@@ -26,8 +26,6 @@ use embedded_io_async::Write;
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::Async;
-use esp_hal::delay::Delay;
-use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
@@ -118,22 +116,6 @@ async fn writer_task(mut tx: UsbSerialJtagTx<'static, Async>) {
 async fn main(spawner: Spawner) -> ! {
     let peripherals =
         esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
-
-    // XIAO ESP32-C6 antenna RF switch: GPIO3 low powers the switch, then (after it
-    // settles) GPIO14 low selects the onboard ceramic antenna. Without this the board
-    // uses the U.FL external port. Leaked so the pins stay driven for the process
-    // lifetime.
-    core::mem::forget(Output::new(
-        peripherals.GPIO3,
-        Level::Low,
-        OutputConfig::default(),
-    ));
-    Delay::new().delay_millis(100);
-    core::mem::forget(Output::new(
-        peripherals.GPIO14,
-        Level::Low,
-        OutputConfig::default(),
-    ));
 
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
