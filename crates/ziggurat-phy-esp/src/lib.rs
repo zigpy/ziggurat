@@ -135,6 +135,8 @@ impl EspPhy {
     async fn transmit_inner(&self, frame: &TxFrame) -> Result<TxResult, RadioError> {
         let retries = frame.max_frame_retries;
         let mut attempt = 0;
+        let ack_requested = frame.psdu.first().is_some_and(|fcf| fcf & 0x20 != 0);
+
         loop {
             let result = {
                 let mut state = self.state.lock().await;
@@ -153,7 +155,7 @@ impl EspPhy {
                 // Hold the radio lock across the completion wait.
                 match select(TX_DONE.wait(), TX_FAILED.wait()).await {
                     Either::First(()) => {
-                        if state.radio.get_ack_frame().is_some() {
+                        if !ack_requested || state.radio.get_ack_frame().is_some() {
                             TxResult::Acked
                         } else {
                             TxResult::NoAck
