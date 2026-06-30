@@ -14,6 +14,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
 use embassy_futures::select::{Either, select};
@@ -33,6 +34,27 @@ use ziggurat_phy::{
 };
 
 const RX_DEPTH: usize = 16;
+
+// 802.15.4 unslotted CSMA-CA backoff, matching the OpenThread RCP's RAIL config
+// (`RAIL_CSMA_CONFIG_802_15_4_2003_2p4_GHz_OQPSK_CSMA`): a 20-symbol (320 us) unit backoff
+// period and a backoff exponent that grows from 3 to 5 across retries. esp-radio does only
+// a single hardware CCA with no backoff, so the stack performs the backoff itself.
+const CSMA_UNIT_BACKOFF_US: u64 = 320;
+const CSMA_MIN_BE: u32 = 3;
+const CSMA_MAX_BE: u32 = 5;
+
+/// xorshift32 mixed with the monotonic clock, for CSMA backoff jitter. Not cryptographic;
+/// the clock mix just keeps independent senders (and reboots) from sharing a sequence and
+/// colliding repeatedly on a busy channel.
+fn next_csma_random() -> u32 {
+    static STATE: AtomicU32 = AtomicU32::new(0x9E37_79B9);
+    let mut x = STATE.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    STATE.store(if x == 0 { 0x9E37_79B9 } else { x }, Ordering::Relaxed);
+    x ^ (embassy_time::Instant::now().as_ticks() as u32)
+}
 
 // There is exactly one IEEE802154 peripheral, so a single set of statics backs it. The
 // esp-radio completion callbacks are plain `fn()` (no captures), so they must reach the
@@ -135,6 +157,7 @@ impl EspPhy {
     async fn transmit_inner(&self, frame: &TxFrame) -> Result<TxResult, RadioError> {
         let retries = frame.max_frame_retries;
         let mut attempt = 0;
+        let mut csma_attempt = 0;
         let ack_requested = frame.psdu.first().is_some_and(|fcf| fcf & 0x20 != 0);
 
         loop {
@@ -167,6 +190,20 @@ impl EspPhy {
 
             match result {
                 TxResult::NoAck if attempt < retries => attempt += 1,
+                TxResult::ChannelAccessFailure
+                    if frame.csma_ca && csma_attempt < frame.max_csma_backoffs =>
+                {
+                    // esp-radio reports a busy channel after a single CCA. Back off a random
+                    // number of unit periods (exponent growing per retry, per 802.15.4
+                    // CSMA-CA) before re-attempting, instead of failing the send outright.
+                    let be = (CSMA_MIN_BE + u32::from(csma_attempt)).min(CSMA_MAX_BE);
+                    let slots = next_csma_random() & ((1 << be) - 1);
+                    Timer::after(embassy_time::Duration::from_micros(
+                        u64::from(slots) * CSMA_UNIT_BACKOFF_US,
+                    ))
+                    .await;
+                    csma_attempt += 1;
+                }
                 other => return Ok(other),
             }
         }
