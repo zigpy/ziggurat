@@ -233,7 +233,7 @@ mod embassy_impl {
     /// Each detached task runs in one slot of this fixed pool — embassy has no dynamic
     /// spawn, so the size bounds the stack's concurrent background tasks (long-lived
     /// reactors plus the transient ZDP/indirect/route-request ones).
-    #[embassy_executor::task(pool_size = 24)]
+    #[embassy_executor::task(pool_size = 32)]
     async fn task_runner(task: SpawnedTask) {
         task.await;
     }

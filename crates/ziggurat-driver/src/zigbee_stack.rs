@@ -59,6 +59,13 @@ const RADIO_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// counter, so that its persisted copy never lags far behind.
 const FRAME_COUNTER_NOTIFY_INTERVAL: u32 = 100;
 
+/// Upper bound on the unsent notification queue. The drainer stalls whenever the client
+/// stops reading the serial/WS link (e.g. a disconnected client), but the stack keeps
+/// producing events from live mesh traffic; without a ceiling the queue grows until it
+/// exhausts the heap (fatal on the MCU). When full we drop the oldest event: a client
+/// that wasn't reading has already missed it and re-syncs on reconnect.
+const NOTIFICATION_QUEUE_CAP: usize = 64;
+
 #[derive(Error, Debug)]
 pub enum ZigbeeStackError {
     #[error("route discovery timed out")]
@@ -842,9 +849,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    /// Queue a network event and wake the notification drainer.
+    /// Queue a network event and wake the notification drainer. Bounded: when the queue is
+    /// full (the client isn't draining the link) the oldest event is dropped rather than
+    /// growing the queue without bound, which would exhaust the heap on the MCU.
     pub(crate) fn push_notification(&self, notification: ZigbeeNotification) {
-        self.notifications.lock().push_back(notification);
+        let mut notifications = self.notifications.lock();
+        while notifications.len() >= NOTIFICATION_QUEUE_CAP {
+            notifications.pop_front();
+        }
+        notifications.push_back(notification);
+        drop(notifications);
+
         self.notification_wake.notify_one();
     }
 
