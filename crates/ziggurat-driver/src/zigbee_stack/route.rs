@@ -21,7 +21,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: &NwkFrame,
         route_reply_cmd: NwkRouteReplyCommand,
     ) {
-        tracing::debug!("Route reply command frame: {route_reply_cmd:?}");
+        tracing::trace!("Route reply command frame: {route_reply_cmd:?}");
 
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this

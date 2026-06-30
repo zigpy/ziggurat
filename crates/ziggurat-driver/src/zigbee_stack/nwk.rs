@@ -317,7 +317,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NwkCommand::LinkStatus(cmd) => self.handle_link_status(nwk_frame, cmd.clone(), lqi),
                 NwkCommand::RouteReply(cmd) => self.handle_route_reply(nwk_frame, cmd.clone()),
                 NwkCommand::RouteRecord(cmd) => {
-                    tracing::debug!("Route record command frame received: {cmd:?}");
+                    tracing::trace!("Route record command frame received: {cmd:?}");
                     self.core()
                         .nib
                         .routing

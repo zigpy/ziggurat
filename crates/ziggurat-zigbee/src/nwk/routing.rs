@@ -363,7 +363,7 @@ impl Routing {
                 destination_address: destination,
             });
 
-        tracing::debug!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
+        tracing::trace!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
 
         request_id
     }

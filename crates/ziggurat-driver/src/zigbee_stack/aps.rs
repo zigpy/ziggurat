@@ -78,7 +78,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Resolve an inbound APS ACK against the pending transmissions waiting for it.
     pub(super) fn handle_aps_ack(&self, nwk_frame: &NwkFrame, ack: &ApsAckFrame) {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
-        tracing::debug!("Received APS ack: {ack_data:?}");
+        tracing::trace!("Received APS ack: {ack_data:?}");
 
         let tx = self.state.pending_aps_acks.lock().remove(&ack_data);
         if let Some(tx) = tx {
@@ -246,7 +246,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
         };
 
-        tracing::debug!("Prepared APS frame: {aps_frame:?}");
+        tracing::trace!("Prepared APS frame: {aps_frame:?}");
 
         let aps_payload = if let Some(destination_eui64) = aps_security {
             let encrypted = self

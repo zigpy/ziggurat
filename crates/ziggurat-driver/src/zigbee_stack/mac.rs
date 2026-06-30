@@ -69,7 +69,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     pub fn send_802154_beacon(&self) {
         let permitting_joins = self.permitting_joins();
-        tracing::debug!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
+        tracing::trace!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
 
         let end_device_capacity =
             { self.core().nib.neighbors.child_count() } < usize::from(self.tunables.max_children);
@@ -393,7 +393,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             frame
         };
 
-        tracing::debug!("Sending 802.15.4 frame: {final_frame:?}");
+        tracing::trace!("Sending 802.15.4 frame: {final_frame:?}");
         tracing::trace!(
             "Sending 802.15.4 frame bytes: {:02X?}",
             final_frame.to_bytes()

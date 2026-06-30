@@ -937,7 +937,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         }
                     };
 
-                    tracing::debug!("Received APS data frame: {aps_frame:?}");
+                    tracing::trace!("Received APS data frame: {aps_frame:?}");
 
                     // Spec 2.2.8.4.2: a retransmission is still acknowledged so the
                     // sender stops, but must not be delivered to the application twice.
@@ -1003,7 +1003,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             match Ieee802154Frame::from_bytes_without_fcs(&packet.psdu) {
                 Ok(frame) => {
-                    tracing::debug!("Received 802.15.4 frame: {frame:?}");
+                    tracing::trace!("Received 802.15.4 frame: {frame:?}");
                     return (packet, frame);
                 }
                 Err(e) => {

@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod api;
 mod hw_crypto;
+mod log_sink;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -139,6 +140,9 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
     esp_alloc::heap_allocator!(size: 96 * 1024);
+
+    // Forward the stack's `tracing` records to the host as `log` notifications.
+    log_sink::install();
 
     // Route Zigbee crypto through the AES accelerator: CCM* runs as two DMA passes
     // (CBC-MAC + CTR) and AES-MMO rides the single-block path. Must happen before the
