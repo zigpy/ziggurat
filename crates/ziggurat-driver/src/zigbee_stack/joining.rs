@@ -18,6 +18,7 @@ use ziggurat_zigbee::aps::frame::{
     ApsTunnelCommandFrame, ApsUpdateDeviceCommandFrame, ApsUpdateDeviceStatus,
     ApsVerifyKeyCommandFrame, EncryptedApsCommandFrame,
 };
+use ziggurat_zigbee::aps::security::AppliedKey;
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
 };
@@ -474,9 +475,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         drop(core);
 
         match decrypted {
-            Some(command_frame) => {
+            Some((command_frame, applied_key)) => {
                 tracing::debug!("Decrypted APS command frame: {command_frame:?}");
-                self.handle_aps_command_frame(nwk_frame, &command_frame, Some(extended_source));
+                self.handle_aps_command_frame(
+                    nwk_frame,
+                    &command_frame,
+                    Some(extended_source),
+                    Some(applied_key),
+                );
             }
             None => {
                 tracing::warn!(
@@ -502,6 +508,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: &NwkFrame,
         command_frame: &ApsCommandFrame,
         aps_source_ieee: Option<Eui64>,
+        // Which key decrypted this command, when it was APS-secured.
+        applied_key: Option<AppliedKey>,
     ) {
         let source = nwk_frame.nwk_header.source;
 
@@ -521,7 +529,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
             ApsCommandFrameCommand::RequestKey(cmd) => {
                 if self.state.role == NwkDeviceType::Coordinator {
-                    self.handle_request_key(nwk_frame, command_frame, cmd, aps_source_ieee);
+                    self.handle_request_key(
+                        nwk_frame,
+                        command_frame,
+                        cmd,
+                        aps_source_ieee,
+                        applied_key,
+                    );
                 } else {
                     tracing::debug!("Ignoring request-key from {source:?}: not the trust center");
                 }
@@ -566,14 +580,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Zigbee spec 4.7.3.8: a device requests a unique trust center link key to replace
-    /// the well-known key it joined with. The new key is delivered encrypted with the
-    /// key-load key derived from the device's current link key.
+    /// the well-known key it joined with.
     fn handle_request_key(
         &self,
         nwk_frame: &NwkFrame,
         command_frame: &ApsCommandFrame,
         request: &ApsRequestKeyCommandFrame,
         aps_source_ieee: Option<Eui64>,
+        applied_key: Option<AppliedKey>,
     ) {
         if request.key_type != ApsRequestKeyType::TrustCenterLinkKey {
             tracing::warn!(
@@ -615,16 +629,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
+        // The reply reuses whichever key decrypted the request (spec 4.7.3.8 step 2): the
+        // key the device actually holds. A secured request always has one.
+        let Some(applied_key) = applied_key else {
+            return;
+        };
+
         tracing::info!("Sending a new trust center link key to {source_ieee:?}");
 
-        // The new key is delivered encrypted with the key it replaces
-        let mut core = self.core();
-        let current_key = core.aib.aps_security.device_link_key(source_ieee);
-        let new_key = core
+        let new_key = self
+            .core()
             .aib
             .aps_security
             .issue_device_key(source_ieee, Key(crate::rng::random_array()));
-        drop(core);
 
         // The key is persisted only once the device proves possession via Verify-Key
         // (see `handle_verify_key`); a device that never completes the exchange must not
@@ -652,11 +669,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }),
         };
 
-        let encrypted_command = self.core().aib.aps_security.encrypt_command_with_link_key(
-            &current_key,
-            NwkSecurityHeaderKeyId::KeyLoadKey,
-            &transport_key_command,
-        );
+        let Some(encrypted_command) = self
+            .core()
+            .aib
+            .aps_security
+            .encrypt_command_with_applied_key(
+                source_ieee,
+                applied_key,
+                NwkSecurityHeaderKeyId::KeyLoadKey,
+                &transport_key_command,
+            )
+        else {
+            return;
+        };
 
         self.send_secured_aps_payload(nwk_frame.nwk_header.source, encrypted_command.to_bytes());
     }

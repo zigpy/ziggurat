@@ -1008,7 +1008,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                             continue;
                         }
                         Ok(ApsFrame::Command(cmd)) => {
-                            self.handle_aps_command_frame(&nwk_frame, &cmd, None);
+                            self.handle_aps_command_frame(&nwk_frame, &cmd, None, None);
                             continue;
                         }
                         Ok(ApsFrame::EncryptedCommand(encrypted_cmd)) => {
