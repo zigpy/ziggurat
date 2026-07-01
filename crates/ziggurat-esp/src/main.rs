@@ -10,7 +10,6 @@ extern crate alloc;
 
 mod api;
 mod hw_crypto;
-mod log_sink;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -51,14 +50,6 @@ pub static OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, OUT
 /// stalling the FIFO.
 const INBOUND_DEPTH: usize = 32;
 static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Channel::new();
-
-pub const LOG_CHUNK: usize = 256;
-const LOG_OUTBOUND_DEPTH: usize = 32;
-pub static LOG_OUTBOUND: Channel<
-    CriticalSectionRawMutex,
-    heapless::Vec<u8, LOG_CHUNK>,
-    LOG_OUTBOUND_DEPTH,
-> = Channel::new();
 
 /// Cancels the packet-capture task. Each capture gets a fresh one; `stop_packet_capture`
 /// signals it so the task exits and frees the radio.
@@ -146,10 +137,10 @@ async fn main(spawner: Spawner) -> ! {
     // ~100-router network peaks at ~86 KB heap; ceiling is ~408 KB.
     esp_alloc::heap_allocator!(size: 320 * 1024);
 
-    // Bring up the UART console
-    let log_uart = UartTx::new(
+    // Configure UART0 for debug logging
+    let _debug_uart = UartTx::new(
         peripherals.UART0,
-        UartConfig::default().with_baudrate(460_800),
+        UartConfig::default().with_baudrate(115200),
     )
     .expect("UART0 config")
     .with_tx(peripherals.GPIO16)

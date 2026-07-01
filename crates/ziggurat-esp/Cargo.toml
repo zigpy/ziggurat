@@ -29,7 +29,12 @@ esp-backtrace = { version = "0.19.0", features = [
     "println",
 ] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c6"] }
-esp-println = { version = "0.17.0", features = ["esp32c6", "log-04"] }
+esp-println = { version = "0.17.0", default-features = false, features = [
+    "esp32c6",
+    "log-04",
+    "uart",
+    "critical-section",
+] }
 
 embassy-executor = "0.10"
 embassy-time = "0.5"
@@ -59,6 +64,6 @@ codegen-units = 1
 # so esp-hal must be patched alongside it to avoid two esp-hal copies; cargo resolves each
 # package by name within the git workspace.
 [patch.crates-io]
-esp-hal = { git = "https://github.com/puddly/esp-hal", rev = "711fe337f65c6dfe1b6851c41b71bca3bf3c4832" }
-esp-radio = { git = "https://github.com/puddly/esp-hal", rev = "711fe337f65c6dfe1b6851c41b71bca3bf3c4832" }
-esp-rom-sys = { git = "https://github.com/puddly/esp-hal", rev = "711fe337f65c6dfe1b6851c41b71bca3bf3c4832" }
+esp-hal = { git = "https://github.com/puddly/esp-hal", rev = "aff9840b75612b20d7101236a85a09e370d4c414" }
+esp-radio = { git = "https://github.com/puddly/esp-hal", rev = "aff9840b75612b20d7101236a85a09e370d4c414" }
+esp-rom-sys = { git = "https://github.com/puddly/esp-hal", rev = "aff9840b75612b20d7101236a85a09e370d4c414" }

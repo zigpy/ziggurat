@@ -44,7 +44,6 @@ fn push_outbound(mut line: String) {
             Err(embassy_sync::channel::TrySendError::Full(returned)) => {
                 line = returned;
                 let _ = OUTBOUND.try_receive();
-                crate::OUTBOUND_DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
         }
     }
