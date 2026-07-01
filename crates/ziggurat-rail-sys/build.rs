@@ -170,8 +170,12 @@ fn main() {
         .use_core()
         .ctypes_prefix("core::ffi")
         .allowlist_function("(sl_rail|RAIL)_.*")
+        .allowlist_function("sl_clock_manager_.*")
         .allowlist_type("(sl_rail|RAIL|sli_rail)_.*")
         .allowlist_var("(SL_RAIL|RAIL)_.*")
+        // The blob's built-in RX FIFO/packet-queue backing store (lowercase, so not
+        // covered by the SL_RAIL_ var pattern above).
+        .allowlist_var("sl_rail_builtin_.*")
         .default_enum_style(bindgen::EnumVariation::ModuleConsts)
         .generate()
         .expect("bindgen failed to generate RAIL FFI");

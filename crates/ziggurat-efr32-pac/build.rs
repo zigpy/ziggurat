@@ -49,6 +49,45 @@ fn svd_xml() -> String {
     fs::read_to_string(&svd).unwrap()
 }
 
+// The public Gecko DFP SVD deliberately omits the radio peripheral interrupts (AGC, FRC,
+// MODEM, PROTIMER, RAC_*, SYNTH, RFECA*, ...). Their NVIC vector slots (IRQ 30-39, 70-71)
+// therefore come out `Reserved` in the generated vector table, so the RAIL blob's radio
+// ISRs can never be wired in — a radio IRQ would vector to address 0 and hard fault.
+// Inject the missing interrupts (real IRQ numbers from the EFR32MG24 CMSIS header) so
+// svd2rust emits real vector slots + `PROVIDE(<name> = DefaultHandler)` weak aliases that
+// a binary can override with the blob's `*_IRQHandler`.
+fn inject_radio_interrupts(svd: String) -> String {
+    // (name, IRQ number). HOSTMAILBOX (38) and SYSRTC_SEQ (68) are already in the SVD.
+    const RADIO_IRQS: &[(&str, u32)] = &[
+        ("AGC", 30),
+        ("BUFC", 31),
+        ("FRC_PRI", 32),
+        ("FRC", 33),
+        ("MODEM", 34),
+        ("PROTIMER", 35),
+        ("RAC_RSM", 36),
+        ("RAC_SEQ", 37),
+        ("SYNTH", 39),
+        ("RFECA0", 70),
+        ("RFECA1", 71),
+    ];
+    let mut xml = String::new();
+    for (name, value) in RADIO_IRQS {
+        xml.push_str(&format!(
+            "<interrupt><name>{name}</name><description>Radio {name} (injected)</description><value>{value}</value></interrupt>"
+        ));
+    }
+    // svd2rust aggregates <interrupt> elements across all peripherals into one vector
+    // table indexed by value, so attaching them to the first peripheral is sufficient.
+    let anchor = "</peripheral>";
+    let pos = svd.find(anchor).expect("no <peripheral> in SVD");
+    let mut out = String::with_capacity(svd.len() + xml.len());
+    out.push_str(&svd[..pos]);
+    out.push_str(&xml);
+    out.push_str(&svd[pos..]);
+    out
+}
+
 // svd2rust emits crate-level inner attributes (#![no_std], #![allow(...)], …) at the
 // top. Those can't survive being `include!`d at the crate root, so strip the leading
 // inner-attr run (string-literal-aware: the `doc` attr contains `]`); lib.rs re-declares
@@ -114,7 +153,8 @@ fn main() {
 
     let mut config = svd2rust::Config::default();
     config.target = svd2rust::Target::CortexM;
-    let generated = svd2rust::generate(&svd_xml(), &config).expect("svd2rust generation failed");
+    let svd = inject_radio_interrupts(svd_xml());
+    let generated = svd2rust::generate(&svd, &config).expect("svd2rust generation failed");
 
     fs::write(out.join("pac.rs"), strip_leading_inner_attrs(&generated.lib_rs)).unwrap();
 
