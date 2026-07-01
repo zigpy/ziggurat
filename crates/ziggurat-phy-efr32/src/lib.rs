@@ -214,6 +214,15 @@ impl Efr32Phy {
             rail::sl_rail_ieee802154_config_2p4_ghz_radio(h);
             rail::sl_rail_set_rx_transitions(h, &stay_rx);
 
+            rail::sl_rail_util_pa_init();
+            let tx_power_config = rail::sl_rail_tx_power_config_t {
+                mode: rail::sl_rail_tx_power_mode_t_enum::SL_RAIL_TX_POWER_MODE_2P4_GHZ_HIGHEST
+                    as rail::sl_rail_tx_power_mode_t,
+                voltage_mv: 3300, // SL_RAIL_UTIL_PA_VOLTAGE_MV
+                ramp_time_us: 2,  // SL_RAIL_UTIL_PA_RAMP_TIME_US
+            };
+            rail::sl_rail_config_tx_power(h, &tx_power_config);
+
             rail::sl_rail_set_tx_fifo(
                 h,
                 core::ptr::addr_of_mut!(TX_FIFO) as *mut rail::sl_rail_fifo_buffer_align_t,

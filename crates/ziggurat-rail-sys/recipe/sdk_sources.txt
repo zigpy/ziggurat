@@ -14,6 +14,8 @@ platform_core/platform/service/clock_manager/src/sl_clock_manager.c
 platform_core/platform/service/device_manager/clocks/sl_device_clock_efr32xg24.c
 platform_core/platform/service/device_manager/src/sl_device_clock.c
 rail_library/plugin/pa-conversions/pa_conversions_efr32.c
+rail_library/plugin/pa-conversions/pa_curves_efr32.c
+rail_library/plugin/sl_rail_util_pa_conversions/sl_rail_util_pa_conversions.c
 rail_library/plugin/sl_rail_util_built_in_phys/efr32xg24/sl_rail_ble_config_38M4Hz.c
 rail_library/plugin/sl_rail_util_built_in_phys/efr32xg24/sl_rail_ble_config_39MHz.c
 rail_library/plugin/sl_rail_util_built_in_phys/efr32xg24/sl_rail_ble_config_40MHz.c

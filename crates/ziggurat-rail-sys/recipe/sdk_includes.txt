@@ -5,8 +5,8 @@ platform_core/platform/common/inc
 platform_core/platform/Device/SiliconLabs/EFR32MG24/Include
 platform_core/platform/driver/gpio/inc
 platform_core/platform/emlib/inc
-platform_core/platform/security/sl_component/sl_protocol_crypto/src
 platform_core/platform/peripheral/inc
+platform_core/platform/security/sl_component/sl_protocol_crypto/src
 platform_core/platform/service/clock_manager/inc
 platform_core/platform/service/clock_manager/src
 platform_core/platform/service/device_init/inc
@@ -24,6 +24,7 @@ rail_library/plugin/pa-conversions/efr32xg24
 rail_library/plugin/sl_rail_util_built_in_phys/efr32xg24
 rail_library/plugin/sl_rail_util_callbacks
 rail_library/plugin/sl_rail_util_compatible_pa
+rail_library/plugin/sl_rail_util_pa_conversions
 rail_library/plugin/sl_rail_util_protocol
 rail_library/plugin/sl_rail_util_pti
 rail_library/protocol/ble
