@@ -446,7 +446,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Originate a unicast: assign its NWK sequence number, resolve a next hop, and
     /// either enqueue it, queue it awaiting route discovery, or drop it
     /// (discovery suppressed).
-    fn originate_unicast(
+    pub(super) fn originate_unicast(
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,

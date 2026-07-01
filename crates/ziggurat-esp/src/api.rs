@@ -18,12 +18,11 @@ use crate::CaptureStop;
 use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables, TxPriority,
-    WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ApsSendResult, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
+    TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
-use ziggurat_phy_esp::EspPhy;
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 
 use crate::{App, OUTBOUND};
@@ -241,8 +240,8 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         "get_hw_address" => handle_get_hw_address(id),
         "get_network_info" => handle_get_network_info(app, id),
         "send_aps" => {
-            // A send blocks on route discovery (seconds) and the APS-ack wait, so it
-            // runs on its own task.
+            // Fire-and-forget: enqueues and returns. A no-ack send is answered inline; an
+            // ack send is answered later by an `ApsSendOutcome` notification.
             dispatch_send_aps(app, id, params).await;
             return;
         }
@@ -368,15 +367,10 @@ fn handle_get_hw_address(id: u64) -> Value {
     let mac = esp_hal::efuse::base_mac_address();
     let mac = mac.as_bytes();
     // Big-endian EUI-64: first 3 MAC bytes, FF FE, last 3 MAC bytes.
-    let big_endian = [
-        mac[0], mac[1], mac[2], 0xff, 0xfe, mac[3], mac[4], mac[5],
-    ];
+    let big_endian = [mac[0], mac[1], mac[2], 0xff, 0xfe, mac[3], mac[4], mac[5]];
     let mut le = big_endian;
     le.reverse();
-    response(
-        id,
-        json!({"ieee_address": eui64_to_string(Eui64(le))}),
-    )
+    response(id, json!({"ieee_address": eui64_to_string(Eui64(le))}))
 }
 
 fn handle_get_network_info(app: &App, id: u64) -> Value {
@@ -420,23 +414,16 @@ fn handle_get_network_info(app: &App, id: u64) -> Value {
     )
 }
 
-/// Validate that a stack is running, then spawn the send on its own task. Sends block
-/// on route discovery and the APS-ack wait, so handling one inline in the command loop
-/// would serialize the whole API behind each transmit. The task holds its own stack
-/// handle(`Arc`), so it outlives this borrow.
+/// Fire-and-forget APS send: build and enqueue the frame, then return. No task, no
+/// blocking — delivery is driven by the stack's tables. A no-ack send is answered
+/// `sent` right here; an ack send is answered later by an `ApsSendOutcome` notification
+/// (keyed by the request id) once the ack arrives or times out.
 async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
     let Some(stack) = app.stack.as_ref() else {
         emit(error_response(id, "not_configured", "no stack is running")).await;
         return;
     };
 
-    app.spawner
-        .spawn(Box::pin(run_send_aps(stack.clone(), id, params)));
-}
-
-/// Drives one send to completion (transmit, then APS-ack wait), emitting the lifecycle
-/// events and terminal response itself.
-async fn run_send_aps(stack: Arc<ZigbeeStack<EspPhy>>, id: u64, params: Value) {
     let request: SendApsRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return emit(error_response(id, "invalid_request", e)).await,
@@ -447,12 +434,21 @@ async fn run_send_aps(stack: Arc<ZigbeeStack<EspPhy>>, id: u64, params: Value) {
         (Some(eui64), None) => match stack.state.core.lock().nib.address_map.nwk_for(eui64) {
             Some(nwk) => nwk,
             None => {
-                return emit(error_response(id, "unknown_destination_eui64", format!("{eui64:?}")))
-                    .await;
+                return emit(error_response(
+                    id,
+                    "unknown_destination_eui64",
+                    format!("{eui64:?}"),
+                ))
+                .await;
             }
         },
         (None, None) => {
-            return emit(error_response(id, "missing_destination", "no destination given")).await;
+            return emit(error_response(
+                id,
+                "missing_destination",
+                "no destination given",
+            ))
+            .await;
         }
     };
 
@@ -477,39 +473,33 @@ async fn run_send_aps(stack: Arc<ZigbeeStack<EspPhy>>, id: u64, params: Value) {
         None
     };
 
-    let ack_waiter = match stack
-        .send_aps_command(
-            request.delivery_mode,
-            destination,
-            request.profile_id,
-            request.cluster_id,
-            request.src_ep,
-            request.dst_ep,
-            if request.aps_ack {
-                ApsAck::Request
-            } else {
-                ApsAck::None
-            },
-            request.radius,
-            request.aps_seq,
-            asdu,
-            aps_security,
-            TxPriority(request.priority),
-        )
-        .await
-    {
-        Ok(ack_waiter) => ack_waiter,
-        Err(e) => return emit(error_response(id, "transmit_failed", e)).await,
+    let aps_ack = if request.aps_ack {
+        ApsAck::Request
+    } else {
+        ApsAck::None
     };
 
-    emit(event(id, "transmitted")).await;
+    let outcome = stack.send_aps(
+        request.delivery_mode,
+        destination,
+        request.profile_id,
+        request.cluster_id,
+        request.src_ep,
+        request.dst_ep,
+        aps_ack,
+        request.radius,
+        request.aps_seq,
+        asdu,
+        aps_security,
+        TxPriority(request.priority),
+        id,
+    );
 
-    let message = match ack_waiter {
-        None => response(id, json!({"status": "sent"})),
-        Some(waiter) => match stack.wait_aps_ack(waiter).await {
-            Ok(()) => response(id, json!({"status": "delivered"})),
-            Err(e) => error_response(id, "aps_ack_timeout", e),
-        },
+    let message = match outcome {
+        // An ack send's terminal response arrives later as an `ApsSendOutcome`.
+        Ok(()) if request.aps_ack => return,
+        Ok(()) => response(id, json!({"status": "sent"})),
+        Err(e) => error_response(id, "transmit_failed", e),
     };
     emit(message).await;
 }
@@ -582,7 +572,12 @@ async fn handle_network_scan(app: &App, id: u64, params: Value) -> Value {
             break;
         }
         for beacon in batch {
-            emit(event_data(id, "network_found", network_beacon_json(&beacon))).await;
+            emit(event_data(
+                id,
+                "network_found",
+                network_beacon_json(&beacon),
+            ))
+            .await;
         }
     }
 
@@ -756,9 +751,10 @@ fn notification_to_json(notification_event: ZigbeeNotification) -> Value {
                 "lqi": lqi, "rssi": rssi, "data": hex::encode(data),
             }),
         ),
-        ZigbeeNotification::FrameCounterUpdate { frame_counter } => {
-            notification("frame_counter_update", json!({"frame_counter": frame_counter}))
-        }
+        ZigbeeNotification::FrameCounterUpdate { frame_counter } => notification(
+            "frame_counter_update",
+            json!({"frame_counter": frame_counter}),
+        ),
         ZigbeeNotification::LinkKeyUpdate { ieee, key } => notification(
             "link_key_update",
             json!({"ieee": eui64_to_string(ieee), "key": key_to_string(&key)}),
@@ -792,5 +788,11 @@ fn notification_to_json(notification_event: ZigbeeNotification) -> Value {
                 "key_id": key_id,
             }),
         ),
+        // A fire-and-forget `send_aps` outcome: the token is the request id, so this is
+        // the terminal response to that request, not a notification.
+        ZigbeeNotification::ApsSendOutcome { token, result } => match result {
+            ApsSendResult::Delivered => response(token, json!({"status": "delivered"})),
+            ApsSendResult::AckTimeout => error_response(token, "aps_ack_timeout", "no APS ack"),
+        },
     }
 }

@@ -270,6 +270,17 @@ pub struct ApsAckWaiter {
     pub(crate) ack_data: ApsAckData,
 }
 
+/// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end ack.
+#[derive(Debug)]
+pub enum ApsAckPending {
+    /// A caller awaits the ack via [`ZigbeeStack::wait_aps_ack`]; the ack resolves this
+    /// signal and the caller applies its own timeout.
+    Waiter(Signal<()>),
+    /// A fire-and-forget [`ZigbeeStack::send_aps`]: the ack (or its `deadline` passing)
+    /// is pushed as an [`ZigbeeNotification::ApsSendOutcome`] carrying `token`.
+    Notify { token: u64, deadline: CoreInstant },
+}
+
 /// A transmit queued for the single sender task ([`ZigbeeStack::sender_task`]). The NWK
 /// frame is unencrypted: the sender assigns the frame counter at dequeue, so on-air order
 /// always matches frame-counter order regardless of priority reordering in the queue.
@@ -523,7 +534,7 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub pending_aps_acks: Mutex<BTreeMap<ApsAckData, Signal<()>>>,
+    pub pending_aps_acks: Mutex<BTreeMap<ApsAckData, ApsAckPending>>,
     pub pending_routes: Mutex<BTreeMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
     pub pending_broadcasts: Mutex<BTreeMap<(Nwk, u8), PendingBroadcast>>,
@@ -740,6 +751,18 @@ pub enum ZigbeeNotification {
         frame_counter: u32,
         key_id: String,
     },
+    /// The outcome of a fire-and-forget application APS send, correlated by the `token`
+    /// the caller supplied to [`ZigbeeStack::send_aps`].
+    ApsSendOutcome { token: u64, result: ApsSendResult },
+}
+
+/// The end-to-end result of an ack-requested [`ZigbeeStack::send_aps`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApsSendResult {
+    /// The destination's APS ack arrived.
+    Delivered,
+    /// No APS ack arrived before the deadline (the frame may never have been routed).
+    AckTimeout,
 }
 
 #[derive(Debug, Clone)]
@@ -805,6 +828,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Wakes the unicast-retry reactor whenever a failed unicast is parked for a later
     /// re-enqueue.
     pub(crate) unicast_retry_wake: Notify,
+    /// Wakes the APS-ack timeout reactor when a fire-and-forget send registers a pending
+    /// ack with a deadline.
+    pub(crate) aps_ack_wake: Notify,
     /// Wakes the beacon-spam reactor when a beacon request opens its spray window.
     pub(crate) beacon_spam_wake: Notify,
     /// Wakes the maintenance task when a new indirect transaction or child entry
@@ -905,6 +931,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             link_status_received: Notify::new(),
             broadcast_retransmit_wake: Notify::new(),
             unicast_retry_wake: Notify::new(),
+            aps_ack_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
             send_queue: Mutex::new(BinaryHeap::new()),
@@ -1145,6 +1172,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.spawn_tracked(async move {
             arc_self.unicast_retry_task().await;
+        });
+
+        // Times out fire-and-forget APS sends whose ack never arrived, reporting the
+        // outcome as a notification.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.aps_ack_timeout_task().await;
         });
 
         // Sprays beacons while a beacon-spam window is open (the hack_beacon_spam_duration

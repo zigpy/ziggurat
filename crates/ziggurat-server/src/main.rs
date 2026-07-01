@@ -18,8 +18,8 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ziggurat_driver::runtime::TokioSpawner;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
-    TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ApsSendResult, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType,
+    TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
@@ -337,6 +337,18 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                 "source_ieee": eui64_to_string(source_ieee),
                 "frame_counter": frame_counter,
                 "key_id": key_id,
+            }),
+        ),
+        // The server uses the awaiting send path, so it never emits this; mapped for
+        // exhaustiveness.
+        ZigbeeNotification::ApsSendOutcome { token, result } => notification(
+            "aps_send_outcome",
+            json!({
+                "token": token,
+                "result": match result {
+                    ApsSendResult::Delivered => "delivered",
+                    ApsSendResult::AckTimeout => "aps_ack_timeout",
+                },
             }),
         ),
     }
