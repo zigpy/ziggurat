@@ -1,22 +1,20 @@
 //! Radio PHY abstraction.
 
-use std::future::Future;
-use std::time::Duration;
+#![no_std]
 
-use tokio::sync::mpsc;
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::future::Future;
+use core::time::Duration;
+
 use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 
-/// Transmit scheduling priority. Higher transmits first when the radio is contended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TxPriority(pub i8);
-
-impl TxPriority {
-    pub const BACKGROUND: Self = Self(-2);
-    pub const USER_LOW: Self = Self(-1);
-    pub const USER_NORMAL: Self = Self(0);
-    pub const USER_HIGH: Self = Self(1);
-    pub const USER_CRITICAL: Self = Self(2);
-    pub const STACK_CRITICAL: Self = Self(3);
+/// A pull-based stream of events the backend delivers spontaneously (received frames,
+/// reset notifications). `recv` resolves to `None` once the backend has shut down.
+pub trait Receiver<T>: Send {
+    fn recv(&mut self) -> impl Future<Output = Option<T>> + Send;
 }
 
 /// A frame to transmit. `psdu` is the serialized 802.15.4 frame; the backend supplies
@@ -90,6 +88,12 @@ pub trait RadioPhy: Send + Sync + 'static {
     where
         Self: 'a;
 
+    /// The backend's received-frame stream, handed out by [`subscribe_rx`].
+    type RxStream: Receiver<RxFrame>;
+
+    /// The backend's reset-notification stream, handed out by [`subscribe_reset`].
+    type ResetStream: Receiver<ResetEvent>;
+
     /// Reset the radio and wait for it to come back. Clears all configuration.
     fn reset(&self) -> impl Future<Output = Result<(), RadioError>> + Send;
 
@@ -106,11 +110,8 @@ pub trait RadioPhy: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), RadioError>> + Send;
 
     /// Transmit a frame, blocking while the radio is held exclusively (see [`lock`]).
-    fn transmit(
-        &self,
-        frame: TxFrame,
-        priority: TxPriority,
-    ) -> impl Future<Output = Result<TxResult, RadioError>> + Send;
+    fn transmit(&self, frame: TxFrame)
+    -> impl Future<Output = Result<TxResult, RadioError>> + Send;
 
     /// Energy-detect one channel for `duration`, returning peak RSSI in dBm. Exclusive;
     /// returns to the home channel when done.
@@ -123,11 +124,12 @@ pub trait RadioPhy: Send + Sync + 'static {
     /// Take exclusive control of the radio until the returned guard is dropped.
     fn lock(&self) -> impl Future<Output = Self::Exclusive<'_>> + Send;
 
-    /// Where received frames are delivered.
-    fn set_rx_sink(&self, sink: mpsc::Sender<RxFrame>);
+    /// Open a fresh received-frame stream, redirecting delivery to it. Called once per
+    /// driver instance; a later call supersedes the previous stream.
+    fn subscribe_rx(&self) -> Self::RxStream;
 
-    /// Where spontaneous reset notifications are delivered.
-    fn set_reset_sink(&self, sink: mpsc::Sender<ResetEvent>);
+    /// Open a fresh reset-notification stream, redirecting delivery to it.
+    fn subscribe_reset(&self) -> Self::ResetStream;
 }
 
 /// Exclusive radio access, held via [`RadioPhy::lock`].

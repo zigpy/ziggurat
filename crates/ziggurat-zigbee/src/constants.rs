@@ -1,4 +1,4 @@
-use std::time::Duration;
+use core::time::Duration;
 
 use ziggurat_ieee_802154::types::Key;
 
@@ -82,6 +82,12 @@ pub struct Tunables {
     pub unicast_retry_delay: Duration,
     pub broadcast_delivery_time: Duration,
 
+    /// How many route discoveries a frame parked awaiting a route will trigger before it
+    /// is discarded. `1` (the default) means a single discovery: if it fails, every frame
+    /// waiting on that destination inherits the failure. Higher values keep the parked
+    /// frames waiting while discovery is retried, the whole bucket riding along together.
+    pub pending_route_discovery_attempts: u8,
+
     /// The default timeout for any end device child that does not negotiate a
     /// different value via the End Device Timeout Request command (spec 3.6.10.2).
     pub end_device_timeout_default: EndDeviceTimeout,
@@ -148,6 +154,7 @@ impl Tunables {
             unicast_retries: 3,
             unicast_retry_delay: Duration::from_millis(50),
             broadcast_delivery_time: Duration::from_millis(9000),
+            pending_route_discovery_attempts: 1,
             end_device_timeout_default: EndDeviceTimeout::Minutes256,
             parent_annce_base_timer: Duration::from_secs(10),
             parent_annce_jitter_max: Duration::from_secs(10),

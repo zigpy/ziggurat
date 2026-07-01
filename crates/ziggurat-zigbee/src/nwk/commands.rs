@@ -1,4 +1,6 @@
 #![allow(clippy::useless_conversion)]
+use alloc::vec;
+use alloc::vec::Vec;
 
 use abstract_bits::{AbstractBits, abstract_bits};
 use num_enum::TryFromPrimitive;
@@ -44,12 +46,12 @@ pub enum NwkRouteRequestManyToOne {
 pub struct NwkRouteRequestCommand {
     reserved: u3,
     pub many_to_one: NwkRouteRequestManyToOne,
-    #[abstract_bits(presence_of = destination_eui64)]
-    reserved: bool,
+    has_destination_eui64: bool,
     reserved: u2,
     pub route_request_identifier: u8,
     pub destination_address: Nwk,
     pub path_cost: u8,
+    #[abstract_bits(presence_from = has_destination_eui64)]
     pub destination_eui64: Option<Eui64>,
 }
 
@@ -58,16 +60,16 @@ pub struct NwkRouteRequestCommand {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRouteReplyCommand {
     reserved: u4,
-    #[abstract_bits(presence_of = originator_eui64)]
-    reserved: bool,
-    #[abstract_bits(presence_of = responder_eui64)]
-    reserved: bool,
+    has_originator_eui64: bool,
+    has_responder_eui64: bool,
     reserved: u2,
     pub route_request_identifier: u8,
     pub originator_nwk: Nwk,
     pub responder_nwk: Nwk,
     pub path_cost: u8,
+    #[abstract_bits(presence_from = has_originator_eui64)]
     pub originator_eui64: Option<Eui64>,
+    #[abstract_bits(presence_from = has_responder_eui64)]
     pub responder_eui64: Option<Eui64>,
 }
 
@@ -149,8 +151,8 @@ pub struct NwkNetworkStatusCommand {
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkRouteRecordCommand {
-    #[abstract_bits(length_of = relays)]
-    reserved: u8,
+    relay_count: u8,
+    #[abstract_bits(length_from = relay_count)]
     pub relays: Vec<Nwk>,
 }
 
@@ -232,11 +234,11 @@ pub struct NwkRejoinResponseCommand {
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkLinkStatusCommand {
-    #[abstract_bits(length_of = link_statuses)]
-    reserved: u5,
+    link_statuses_len: u5,
     pub is_first_frame: bool,
     pub is_last_frame: bool,
     reserved: u1,
+    #[abstract_bits(length_from = link_statuses_len)]
     pub link_statuses: Vec<NwkLinkStatus>,
 }
 
@@ -305,13 +307,13 @@ pub enum NwkReportCommandIdentifier {
 #[abstract_bits]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NwkNetworkReportCommand {
-    #[abstract_bits(length_of = pan_ids)]
     report_information_count: u5,
     pub report_command_identifier: NwkReportCommandIdentifier,
     pub epid: Eui64,
     /// A list of 16-bit PAN identifiers that are in conflict. This field's format is
     /// determined by the `report_command_identifier` but the only defined type is
     /// `PanIdentifierConflict`.
+    #[abstract_bits(length_from = report_information_count)]
     pub pan_ids: Vec<PanId>,
 }
 
@@ -392,8 +394,8 @@ pub struct NwkPowerListEntry {
 pub struct NwkLinkPowerDeltaCommand {
     pub command_type: NwkLinkPowerDeltaType,
     reserved: u6,
-    #[abstract_bits(length_of = power_list)]
     list_count: u8,
+    #[abstract_bits(length_from = list_count)]
     pub power_list: Vec<NwkPowerListEntry>,
 }
 
@@ -524,30 +526,31 @@ impl NwkCommand {
     /// followed by the command body.
     pub fn to_bytes(&self) -> Vec<u8> {
         let (id, body) = match self {
-            Self::RouteRequest(c) => (NwkCommandId::RouteRequest, c.to_abstract_bits()),
-            Self::RouteReply(c) => (NwkCommandId::RouteReply, c.to_abstract_bits()),
-            Self::NetworkStatus(c) => (NwkCommandId::NetworkStatus, c.to_abstract_bits()),
-            Self::Leave(c) => (NwkCommandId::Leave, c.to_abstract_bits()),
-            Self::RouteRecord(c) => (NwkCommandId::RouteRecord, c.to_abstract_bits()),
-            Self::RejoinRequest(c) => (NwkCommandId::RejoinRequest, c.to_abstract_bits()),
-            Self::RejoinResponse(c) => (NwkCommandId::RejoinResponse, c.to_abstract_bits()),
-            Self::LinkStatus(c) => (NwkCommandId::LinkStatus, c.to_abstract_bits()),
-            Self::NetworkReport(c) => (NwkCommandId::NetworkReport, c.to_abstract_bits()),
-            Self::NetworkUpdate(c) => (NwkCommandId::NetworkUpdate, c.to_abstract_bits()),
+            Self::RouteRequest(c) => (NwkCommandId::RouteRequest, c.to_abstract_bytes()),
+            Self::RouteReply(c) => (NwkCommandId::RouteReply, c.to_abstract_bytes()),
+            Self::NetworkStatus(c) => (NwkCommandId::NetworkStatus, c.to_abstract_bytes()),
+            Self::Leave(c) => (NwkCommandId::Leave, c.to_abstract_bytes()),
+            Self::RouteRecord(c) => (NwkCommandId::RouteRecord, c.to_abstract_bytes()),
+            Self::RejoinRequest(c) => (NwkCommandId::RejoinRequest, c.to_abstract_bytes()),
+            Self::RejoinResponse(c) => (NwkCommandId::RejoinResponse, c.to_abstract_bytes()),
+            Self::LinkStatus(c) => (NwkCommandId::LinkStatus, c.to_abstract_bytes()),
+            Self::NetworkReport(c) => (NwkCommandId::NetworkReport, c.to_abstract_bytes()),
+            Self::NetworkUpdate(c) => (NwkCommandId::NetworkUpdate, c.to_abstract_bytes()),
             Self::EndDeviceTimeoutRequest(c) => {
-                (NwkCommandId::EndDeviceTimeoutRequest, c.to_abstract_bits())
+                (NwkCommandId::EndDeviceTimeoutRequest, c.to_abstract_bytes())
             }
-            Self::EndDeviceTimeoutResponse(c) => {
-                (NwkCommandId::EndDeviceTimeoutResponse, c.to_abstract_bits())
-            }
-            Self::LinkPowerDelta(c) => (NwkCommandId::LinkPowerDelta, c.to_abstract_bits()),
+            Self::EndDeviceTimeoutResponse(c) => (
+                NwkCommandId::EndDeviceTimeoutResponse,
+                c.to_abstract_bytes(),
+            ),
+            Self::LinkPowerDelta(c) => (NwkCommandId::LinkPowerDelta, c.to_abstract_bytes()),
             Self::NetworkCommissioningRequest(c) => (
                 NwkCommandId::NetworkCommissioningRequest,
-                c.to_abstract_bits(),
+                c.to_abstract_bytes(),
             ),
             Self::NetworkCommissioningResponse(c) => (
                 NwkCommandId::NetworkCommissioningResponse,
-                c.to_abstract_bits(),
+                c.to_abstract_bytes(),
             ),
             Self::Unparsed(raw) => return raw.to_vec(),
         };
@@ -559,7 +562,7 @@ impl NwkCommand {
 }
 
 fn parse_body<T: AbstractBits>(body: &[u8]) -> Option<T> {
-    T::from_abstract_bits(body).ok()
+    T::from_abstract_bytes(body).ok()
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -15,12 +15,15 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
+use ziggurat_driver::runtime::TokioSpawner;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
-    TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ApsAckResult, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType,
+    RequestId, SendResult, TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification,
+    ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
+use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_spinel::client::SpinelClient;
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
@@ -38,6 +41,22 @@ const NOTIFICATION_HUB_DEPTH: usize = 1024;
 
 /// The radio transmit power (in dBm) used when `configure` does not specify one.
 const DEFAULT_TX_POWER: i8 = 8;
+
+/// Radio programming for promiscuous capture: receive every frame on `channel`, no PAN/
+/// address filtering, no network required (dummy addresses).
+const fn capture_config(channel: u8) -> RadioConfig {
+    RadioConfig {
+        channel,
+        tx_power: DEFAULT_TX_POWER,
+        short_address: Nwk(0xFFFF),
+        extended_address: Eui64([0; 8]),
+        pan_id: PanId(0xFFFF),
+        promiscuous: true,
+        rx_on_when_idle: true,
+        frame_pending_short: Vec::new(),
+        frame_pending_extended: Vec::new(),
+    }
+}
 
 /// Big-endian colon-separated hex, the format used by zigpy for EUI64 addresses
 fn eui64_to_string(eui64: Eui64) -> String {
@@ -226,6 +245,20 @@ struct SetNwkUpdateIdRequest {
     nwk_update_id: u8,
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+enum ResetType {
+    /// Return to idle, leaving any configured network running.
+    Soft,
+    /// Reset the radio (RCP).
+    Hard,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResetRequest {
+    reset_type: ResetType,
+}
+
 fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json::Value {
     match notification_event {
         ZigbeeNotification::ReceivedApsCommand {
@@ -306,6 +339,35 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                 "frame_counter": frame_counter,
                 "key_id": key_id,
             }),
+        ),
+        ZigbeeNotification::SendConfirm { request_id, result } => notification(
+            "send_confirm",
+            match result {
+                SendResult::Confirmed { next_hop } => json!({
+                    "id": request_id,
+                    "status": "confirmed",
+                    "next_hop": next_hop.map(|nwk| format!("{:04x}", nwk.0)),
+                }),
+                SendResult::Failed { reason } => json!({
+                    "id": request_id,
+                    "status": "failed",
+                    "reason": reason,
+                }),
+            },
+        ),
+        ZigbeeNotification::ApsAckConfirm { request_id, result } => notification(
+            "aps_ack_confirm",
+            match result {
+                ApsAckResult::Acked => json!({
+                    "id": request_id,
+                    "status": "confirmed",
+                }),
+                ApsAckResult::Failed { reason } => json!({
+                    "id": request_id,
+                    "status": "failed",
+                    "reason": reason,
+                }),
+            },
         ),
     }
 }
@@ -414,6 +476,69 @@ impl ZigguratServer {
         Ok(new_phy)
     }
 
+    /// The greeting sent to every client on connect, advertising the protocol version
+    /// and whether the stack is already configured.
+    fn hello_message(&self) -> serde_json::Value {
+        let state = if self.current_stack().is_some() {
+            "running"
+        } else {
+            "awaiting_configuration"
+        };
+        json!({"type": "hello", "version": PROTOCOL_VERSION, "state": state})
+    }
+
+    /// Fan hub notifications out to one connection's outbound queue until it closes.
+    fn spawn_notification_forwarder(
+        self: &Arc<Self>,
+        outbound: mpsc::Sender<serde_json::Value>,
+        addr: String,
+    ) -> JoinHandle<()> {
+        let mut notification_rx = self.notification_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match notification_rx.recv().await {
+                    Ok(event) => {
+                        if outbound.send(notification_to_message(event)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!("Client {addr} lagged {count} notifications");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    }
+
+    /// Parse one inbound JSON request (a WebSocket text frame or a serial line) and
+    /// dispatch it. Returns `false` once the outbound queue is gone and the connection
+    /// should be torn down.
+    async fn handle_request_text(
+        self: &Arc<Self>,
+        text: &str,
+        addr: &str,
+        outbound: &mpsc::Sender<serde_json::Value>,
+    ) -> bool {
+        let request = match serde_json::from_str::<Request>(text) {
+            Ok(request) => request,
+            Err(e) => {
+                tracing::warn!("Invalid request from {addr}: {e}");
+                return outbound
+                    .send(error_response(0, "invalid_request", e))
+                    .await
+                    .is_ok();
+            }
+        };
+
+        tracing::debug!("Request from {addr}: {request:?}");
+        if outbound.send(event(request.id, "accepted")).await.is_err() {
+            return false;
+        }
+        self.dispatch(request, outbound.clone());
+        true
+    }
+
     async fn handle_connection<S>(
         self: &Arc<Self>,
         socket: S,
@@ -442,54 +567,16 @@ impl ZigguratServer {
             let _ = sink.close().await;
         });
 
-        let state = if self.current_stack().is_some() {
-            "running"
-        } else {
-            "awaiting_configuration"
-        };
-        outbound_tx
-            .send(json!({"type": "hello", "version": PROTOCOL_VERSION, "state": state}))
-            .await?;
-
-        // Forward hub notifications to this connection
-        let mut notification_rx = self.notification_tx.subscribe();
-        let notification_outbound = outbound_tx.clone();
-        let forwarder_addr = addr.to_owned();
-        let notification_forwarder = tokio::spawn(async move {
-            loop {
-                match notification_rx.recv().await {
-                    Ok(event) => {
-                        let message = notification_to_message(event);
-
-                        if notification_outbound.send(message).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!("Client {forwarder_addr} lagged {count} notifications");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        outbound_tx.send(self.hello_message()).await?;
+        let notification_forwarder =
+            self.spawn_notification_forwarder(outbound_tx.clone(), addr.to_owned());
 
         while let Some(message) = stream.next().await {
             match message {
                 Ok(Message::Text(text)) => {
-                    let request = match serde_json::from_str::<Request>(&text) {
-                        Ok(request) => request,
-                        Err(e) => {
-                            tracing::warn!("Invalid request from {addr}: {e}");
-                            let _ = outbound_tx
-                                .send(error_response(0, "invalid_request", e))
-                                .await;
-                            continue;
-                        }
-                    };
-
-                    tracing::debug!("Request from {addr}: {request:?}");
-                    outbound_tx.send(event(request.id, "accepted")).await?;
-                    self.dispatch(request, outbound_tx.clone());
+                    if !self.handle_request_text(&text, addr, &outbound_tx).await {
+                        break;
+                    }
                 }
                 Ok(Message::Close(_)) => break,
                 Ok(_) => {} // Pings and pongs are handled by tungstenite itself
@@ -507,6 +594,63 @@ impl ZigguratServer {
         Ok(())
     }
 
+    /// Serve the line-delimited JSON API over any byte stream (stdio, or a serial port
+    /// on the eventual embedded target). One request per inbound line; one JSON object
+    /// per outbound line. The dispatch and notification machinery is shared verbatim
+    /// with the WebSocket transport.
+    async fn handle_line_connection<R, W>(
+        self: &Arc<Self>,
+        reader: R,
+        mut writer: W,
+        addr: &str,
+    ) -> std::io::Result<()>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        tracing::info!("Client {addr} connected");
+
+        let (outbound_tx, mut outbound_rx) =
+            mpsc::channel::<serde_json::Value>(OUTBOUND_QUEUE_DEPTH);
+
+        let writer_task = tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                let mut line = message.to_string();
+                line.push('\n');
+                if writer.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                let _ = writer.flush().await;
+            }
+        });
+
+        let _ = outbound_tx.send(self.hello_message()).await;
+        let notification_forwarder =
+            self.spawn_notification_forwarder(outbound_tx.clone(), addr.to_owned());
+
+        let mut lines = BufReader::new(reader).lines();
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if !self.handle_request_text(&line, addr, &outbound_tx).await {
+                break;
+            }
+        }
+
+        notification_forwarder.abort();
+        drop(outbound_tx);
+        let _ = writer_task.await;
+
+        Ok(())
+    }
+
+    async fn run_stdio(self: Arc<Self>) -> std::io::Result<()> {
+        tracing::info!("Serving line-delimited JSON API on stdin/stdout");
+        self.handle_line_connection(tokio::io::stdin(), tokio::io::stdout(), "stdio")
+            .await
+    }
+
     /// Dispatches a request, spawning everything that can block on network activity:
     /// a command waiting on a slow device must never delay other commands.
     fn dispatch(self: &Arc<Self>, request: Request, outbound: mpsc::Sender<serde_json::Value>) {
@@ -522,16 +666,23 @@ impl ZigguratServer {
 
                 let message = match method.as_str() {
                     "ping" => server.handle_ping(id).await,
+                    "reset" => server.handle_reset(id, params).await,
                     "configure" => server.handle_configure(id, params).await,
                     "get_hw_address" => server.handle_get_hw_address(id).await,
                     "get_network_info" => server.handle_get_network_info(id),
-                    "send_aps" => server.handle_send_aps(id, params, &outbound).await,
+                    "send_aps" => server.handle_send_aps(id, params),
                     "energy_scan" => server.handle_energy_scan(id, params, &outbound).await,
                     "network_scan" => server.handle_network_scan(id, params, &outbound).await,
                     "permit_joins" => server.handle_permit_joins(id, params),
                     "set_provisional_key" => server.handle_set_provisional_key(id, params),
                     "set_nwk_update_id" => server.handle_set_nwk_update_id(id, params),
                     "set_channel" => server.handle_set_channel(id, params).await,
+                    "packet_capture" => server.handle_packet_capture(id, params, &outbound).await,
+                    "packet_capture_change_channel" => {
+                        server
+                            .handle_packet_capture_change_channel(id, params)
+                            .await
+                    }
                     _ => error_response(id, "unknown_method", method),
                 };
 
@@ -547,6 +698,28 @@ impl ZigguratServer {
         tokio::task::yield_now().await;
 
         response(id, json!({"status": "pong"}))
+    }
+
+    /// Soft or hard reset. A soft reset is a no-op success on the host (no transient
+    /// radio state outlives a connection here), kept for wire parity with the firmware. A
+    /// hard reset resets the radio (RCP); the stack's recovery task reprograms it.
+    async fn handle_reset(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
+        let request: ResetRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        if matches!(request.reset_type, ResetType::Hard) {
+            let phy = match self.phy() {
+                Ok(p) => p,
+                Err(e) => return error_response(id, "serial_port_error", e),
+            };
+            if let Err(e) = phy.reset().await {
+                return error_response(id, "reset_failed", e);
+            }
+        }
+
+        response(id, json!({"status": "success"}))
     }
 
     /// (Re)initializes the Zigbee stack. The stack deliberately outlives client
@@ -589,7 +762,7 @@ impl ZigguratServer {
             Err(e) => return error_response(id, "serial_port_error", e),
         };
 
-        let (stack, mut stack_notification_rx) = ZigbeeStack::new(
+        let stack = ZigbeeStack::new(
             phy,
             NetworkConfig {
                 role: request.role.into(),
@@ -608,6 +781,7 @@ impl ZigguratServer {
                 source_routing: request.source_routing,
             },
             Tunables::new(),
+            TokioSpawner::default(),
         );
 
         // Restore unique trust center link keys negotiated in earlier sessions
@@ -639,12 +813,17 @@ impl ZigguratServer {
             stack_clone.run().await;
         });
 
-        // Pump the stack's notifications into the server-level hub
+        // Drain the stack's notification outbox into the server-level hub. The task is
+        // aborted when the stack is replaced (see `handle_configure`), so it doesn't
+        // need to observe a closed channel to stop.
         let hub_tx = self.notification_tx.clone();
+        let notification_stack = stack.clone();
         let forwarder = tokio::spawn(async move {
-            while let Ok(event) = stack_notification_rx.recv().await {
-                // Send errors just mean no client is connected right now
-                let _ = hub_tx.send(event);
+            loop {
+                for event in notification_stack.next_notifications().await {
+                    // Send errors just mean no client is connected right now
+                    let _ = hub_tx.send(event);
+                }
             }
         });
 
@@ -685,6 +864,70 @@ impl ZigguratServer {
         };
 
         match stack.set_channel(request.channel).await {
+            Ok(()) => response(id, json!({"status": "success"})),
+            Err(e) => error_response(id, "set_channel_failed", e),
+        }
+    }
+
+    /// Put the radio in promiscuous mode and stream every received frame as a
+    /// `captured_packet` event until the client disconnects. No network is required (it
+    /// reprograms the radio directly), so a running stack is disrupted for the session.
+    async fn handle_packet_capture(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+        outbound: &mpsc::Sender<serde_json::Value>,
+    ) -> serde_json::Value {
+        let request: SetChannelRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let phy = match self.phy() {
+            Ok(p) => p,
+            Err(e) => return error_response(id, "serial_port_error", e),
+        };
+
+        if let Err(e) = phy.reconfigure(&capture_config(request.channel)).await {
+            return error_response(id, "packet_capture_failed", e);
+        }
+
+        let mut rx = phy.subscribe_rx();
+        while let Some(frame) = rx.recv().await {
+            let event = event_data(
+                id,
+                "captured_packet",
+                json!({
+                    "channel": frame.channel,
+                    "rssi": frame.rssi,
+                    "lqi": frame.lqi,
+                    "data": hex::encode(frame.psdu),
+                }),
+            );
+            if outbound.send(event).await.is_err() {
+                break; // client disconnected
+            }
+        }
+
+        response(id, json!({"status": "complete"}))
+    }
+
+    async fn handle_packet_capture_change_channel(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let request: SetChannelRequest = match serde_json::from_value(params) {
+            Ok(request) => request,
+            Err(e) => return error_response(id, "invalid_request", e),
+        };
+
+        let phy = match self.phy() {
+            Ok(p) => p,
+            Err(e) => return error_response(id, "serial_port_error", e),
+        };
+
+        match phy.reconfigure(&capture_config(request.channel)).await {
             Ok(()) => response(id, json!({"status": "success"})),
             Err(e) => error_response(id, "set_channel_failed", e),
         }
@@ -749,12 +992,7 @@ impl ZigguratServer {
         }
     }
 
-    async fn handle_send_aps(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-        outbound: &mpsc::Sender<serde_json::Value>,
-    ) -> serde_json::Value {
+    fn handle_send_aps(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
         let request: SendApsRequest = match serde_json::from_value(params) {
             Ok(request) => request,
             Err(e) => return error_response(id, "invalid_request", e),
@@ -808,41 +1046,30 @@ impl ZigguratServer {
             None
         };
 
-        let ack_waiter = match stack
-            .send_aps_command(
-                request.delivery_mode,
-                destination,
-                request.profile_id,
-                request.cluster_id,
-                request.src_ep,
-                request.dst_ep,
-                if request.aps_ack {
-                    ApsAck::Request
-                } else {
-                    ApsAck::None
-                },
-                request.radius,
-                request.aps_seq,
-                asdu,
-                aps_security,
-                TxPriority(request.priority),
-            )
-            .await
-        {
-            Ok(ack_waiter) => ack_waiter,
-            Err(e) => return error_response(id, "transmit_failed", e),
-        };
-
-        // The frame is on the air (or extracted from the indirect queue); the
-        // terminal response then reports end-to-end delivery when an ack was requested
-        let _ = outbound.send(event(id, "transmitted")).await;
-
-        match ack_waiter {
-            None => response(id, json!({"status": "sent"})),
-            Some(waiter) => match stack.wait_aps_ack(waiter).await {
-                Ok(()) => response(id, json!({"status": "delivered"})),
-                Err(e) => error_response(id, "aps_ack_timeout", e),
+        // The stack either accepts the frame for transmission or rejects it now. The
+        // delivery outcome arrives later as a `send_confirm` notification keyed by
+        // this request id (the send token).
+        match stack.send_aps(
+            request.delivery_mode,
+            destination,
+            request.profile_id,
+            request.cluster_id,
+            request.src_ep,
+            request.dst_ep,
+            if request.aps_ack {
+                ApsAck::Request
+            } else {
+                ApsAck::None
             },
+            request.radius,
+            request.aps_seq,
+            asdu,
+            aps_security,
+            TxPriority(request.priority),
+            id as RequestId,
+        ) {
+            Ok(()) => response(id, json!({"status": "accepted"})),
+            Err(e) => error_response(id, "transmit_failed", e),
         }
     }
 
@@ -857,37 +1084,32 @@ impl ZigguratServer {
             Err(e) => return error_response(id, "invalid_request", e),
         };
 
-        let Some(stack) = self.current_stack() else {
-            return error_response(id, "not_configured", "no stack is running");
+        // An energy detect is a radio operation, not a network one: it drives the radio
+        // directly and needs no configured stack.
+        let phy = match self.phy() {
+            Ok(p) => p,
+            Err(e) => return error_response(id, "serial_port_error", e),
         };
 
-        let (result_tx, mut result_rx) = mpsc::channel::<(u8, i8)>(32);
-
-        // The scan runs on its own task so it always reaches its channel restore, even if
-        // this request's task is dropped. Its only sender lives until the scan ends, so
-        // the drain loop below terminates exactly when the scan is done.
+        // An energy detect is self-contained per channel, so the manager owns the loop
+        // and streams each result as the channel completes.
         let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
-        let scan = tokio::spawn(async move {
-            stack
-                .energy_scan(&request.channels, duration, result_tx)
-                .await
-        });
-
-        while let Some((channel, rssi)) = result_rx.recv().await {
-            let _ = outbound
-                .send(event_data(
-                    id,
-                    "energy_result",
-                    json!({"channel": channel, "rssi": rssi}),
-                ))
-                .await;
+        for channel in request.channels {
+            match phy.energy_detect(channel, duration).await {
+                Ok(rssi) => {
+                    let _ = outbound
+                        .send(event_data(
+                            id,
+                            "energy_result",
+                            json!({"channel": channel, "rssi": rssi}),
+                        ))
+                        .await;
+                }
+                Err(e) => return error_response(id, "energy_scan_failed", e),
+            }
         }
 
-        match scan.await {
-            Ok(Ok(())) => response(id, json!({"status": "complete"})),
-            Ok(Err(e)) => error_response(id, "energy_scan_failed", e),
-            Err(e) => error_response(id, "energy_scan_failed", e),
-        }
+        response(id, json!({"status": "complete"}))
     }
 
     async fn handle_network_scan(
@@ -905,26 +1127,34 @@ impl ZigguratServer {
             return error_response(id, "not_configured", "no stack is running");
         };
 
-        let (found_tx, mut found_rx) = mpsc::channel::<NetworkBeacon>(32);
-
-        // The scan runs on its own task so it always reaches its channel restore, even if
-        // this request's task is dropped. Its only sender lives until the scan ends, so
-        // the drain loop below terminates exactly when the scan is done.
+        // Open the collection window before spawning, so the drain loop below cannot race
+        // ahead of the scan starting. The scan runs on its own task so it always reaches
+        // its channel restore even if this request's task is dropped.
+        stack.begin_network_scan();
         let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
+        let scan_stack = stack.clone();
         let scan = tokio::spawn(async move {
-            stack
-                .network_scan(&request.channels, duration, found_tx)
+            scan_stack
+                .run_network_scan(&request.channels, duration)
                 .await
         });
 
-        while let Some(beacon) = found_rx.recv().await {
-            let _ = outbound
-                .send(event_data(
-                    id,
-                    "network_found",
-                    network_beacon_json(&beacon),
-                ))
-                .await;
+        // `next_scan_beacons` delivers beacons as they arrive and returns empty once the
+        // window has closed and the queue is drained, which ends the loop.
+        loop {
+            let batch = stack.next_scan_beacons().await;
+            if batch.is_empty() {
+                break;
+            }
+            for beacon in batch {
+                let _ = outbound
+                    .send(event_data(
+                        id,
+                        "network_found",
+                        network_beacon_json(&beacon),
+                    ))
+                    .await;
+            }
         }
 
         match scan.await {
@@ -989,12 +1219,25 @@ pub struct SerialConfig {
     flow_control: FlowControlMode,
 }
 
+/// How the Zigbee API is exposed to clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ApiMode {
+    /// JSON-RPC over WebSocket on `--listen`
+    Ws,
+    /// Line-delimited JSON over stdin/stdout (logs go to stderr)
+    Stdio,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     version,
     about = "Host-side Zigbee stack speaking Spinel to an 802.15.4 RCP"
 )]
 struct Args {
+    /// How to expose the Zigbee API to clients
+    #[arg(long, value_enum, default_value_t = ApiMode::Ws)]
+    api: ApiMode,
+
     /// Serial device of the 802.15.4 RCP
     #[arg(long)]
     device: String,
@@ -1024,9 +1267,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rt.block_on(async {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(args.log_level.to_string()));
-        tracing_subscriber::registry()
-            .with(fmt::layer().with_filter(filter))
-            .init();
+
+        // In stdio mode stdout carries the JSON API, so logs must not touch it
+        if args.api == ApiMode::Stdio {
+            tracing_subscriber::registry()
+                .with(
+                    fmt::layer()
+                        .with_writer(std::io::stderr)
+                        .with_filter(filter),
+                )
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(fmt::layer().with_filter(filter))
+                .init();
+        }
 
         let server = Arc::new(ZigguratServer::new(SerialConfig {
             device: args.device,
@@ -1034,7 +1289,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             flow_control: args.flow_control,
         }));
 
-        server.run(&args.listen).await?;
+        match args.api {
+            ApiMode::Ws => server.run(&args.listen).await?,
+            ApiMode::Stdio => server.run_stdio().await?,
+        }
 
         Ok(())
     })

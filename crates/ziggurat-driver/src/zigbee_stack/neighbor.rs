@@ -1,16 +1,17 @@
-use tokio::time::Instant;
+use crate::runtime::Runtime;
+use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::RadioPhy;
 
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
-use super::{NwkSecurityMode, ZigbeeStack};
+use super::{NwkSecurityMode, TxPriority, ZigbeeStack};
 
 /// Maximum number of link status entries that can be carried in a single frame.
 const MAX_LINK_STATUSES: usize = 7;
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
         self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
     }
@@ -44,7 +45,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     pub(super) fn maybe_age_neighbors(&self) {
         // TODO: this function should be replaced by real timers
-        let stale_neighbors = self.core().nib.neighbors.age(Instant::now().into_std());
+        let stale_neighbors = self.core().nib.neighbors.age(self.core_now());
 
         for neighbor_nwk in stale_neighbors {
             self.invalidate_routes_via(neighbor_nwk);
@@ -71,7 +72,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             nwk_frame.nwk_header.source,
             lqi,
             &link_status_cmd,
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         // Spec 3.6.4.4.2: when the outgoing cost collapses to zero the link is
@@ -119,7 +120,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             // repeat one boundary entry (the last of frame N is the first of frame N+1)
             // so a receiver can stitch the advertised address range together (spec
             // 3.6.4.4.2). An empty list still emits a single first+last frame.
-            let end = std::cmp::min(start + MAX_LINK_STATUSES, total);
+            let end = core::cmp::min(start + MAX_LINK_STATUSES, total);
 
             let link_status_frame = self
                 .nwk_command_frame(
@@ -159,7 +160,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            tokio::time::sleep(self.tunables.link_status_period).await;
+            R::sleep(self.tunables.link_status_period).await;
 
             self.send_link_status_broadcast(false).await;
         }

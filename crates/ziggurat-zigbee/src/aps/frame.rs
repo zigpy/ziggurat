@@ -1,4 +1,6 @@
 use abstract_bits::{AbstractBits, abstract_bits};
+use alloc::vec;
+use alloc::vec::Vec;
 use educe::Educe;
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, format_hex};
@@ -90,7 +92,7 @@ impl ApsAckFrame {
             return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
         }
 
-        let frame_control = ApsAckFrameControl::from_abstract_bits(bytes)?;
+        let frame_control = ApsAckFrameControl::from_abstract_bytes(bytes)?;
         let remaining = &bytes[1..];
 
         if frame_control.frame_type != ApsFrameType::Ack {
@@ -179,7 +181,7 @@ impl ApsDataFrame {
             return Err(ParseError::UnexpectedEnd { ty: "ApsDataFrame" });
         }
 
-        let frame_control = ApsFrameControl::from_abstract_bits(bytes)?;
+        let frame_control = ApsFrameControl::from_abstract_bytes(bytes)?;
         let mut remaining = &bytes[1..];
 
         // Spec 2.2.5: reserved fields SHALL be zero on reception; a nonzero value marks
@@ -219,7 +221,7 @@ impl ApsDataFrame {
         // the ASDU. We don't encounter fragmentation in the wild but if we ever do, we
         // should not pass along a corrupted ASDU.
         if frame_control.extended_header {
-            let extended_frame_control = ApsExtendedFrameControl::from_abstract_bits(remaining)?;
+            let extended_frame_control = ApsExtendedFrameControl::from_abstract_bytes(remaining)?;
 
             // The extended frame control is one octet; a fragmented block is followed by
             // a one-octet block number (the block count on the first block).
@@ -360,16 +362,16 @@ impl ApsTransportKeyCommandFrame {
 
         let key_descriptor = match standard_key_type {
             ApsStandardKeyType::StandardNetworkKey => ApsTransportKeyDescriptor::NetworkKey(
-                ApsNetworkKeyDescriptor::from_abstract_bits(&bytes[1..])?,
+                ApsNetworkKeyDescriptor::from_abstract_bytes(&bytes[1..])?,
             ),
             ApsStandardKeyType::ApplicationLinkKey => {
                 ApsTransportKeyDescriptor::ApplicationLinkKey(
-                    ApsApplicationLinkKeyDescriptor::from_abstract_bits(&bytes[1..])?,
+                    ApsApplicationLinkKeyDescriptor::from_abstract_bytes(&bytes[1..])?,
                 )
             }
             ApsStandardKeyType::TrustCenterLinkKey => {
                 ApsTransportKeyDescriptor::TrustCenterLinkKey(
-                    ApsTrustCenterLinkKeyDescriptor::from_abstract_bits(&bytes[1..])?,
+                    ApsTrustCenterLinkKeyDescriptor::from_abstract_bytes(&bytes[1..])?,
                 )
             }
         };
@@ -386,13 +388,13 @@ impl ApsTransportKeyCommandFrame {
 
         match &self.key_descriptor {
             ApsTransportKeyDescriptor::TrustCenterLinkKey(desc) => {
-                bytes.extend(desc.to_abstract_bits().unwrap());
+                bytes.extend(desc.to_abstract_bytes().unwrap());
             }
             ApsTransportKeyDescriptor::NetworkKey(desc) => {
-                bytes.extend(desc.to_abstract_bits().unwrap());
+                bytes.extend(desc.to_abstract_bytes().unwrap());
             }
             ApsTransportKeyDescriptor::ApplicationLinkKey(desc) => {
-                bytes.extend(desc.to_abstract_bits().unwrap());
+                bytes.extend(desc.to_abstract_bytes().unwrap());
             }
         }
 
@@ -581,7 +583,7 @@ impl ApsCommandFrame {
             });
         }
 
-        let frame_control = ApsFrameControl::from_abstract_bits(bytes)?;
+        let frame_control = ApsFrameControl::from_abstract_bytes(bytes)?;
         let remaining = &bytes[1..];
 
         let counter = u8::from_le_bytes([remaining[0]]);
@@ -597,25 +599,25 @@ impl ApsCommandFrame {
                 ApsTransportKeyCommandFrame::from_bytes(payload)?,
             ),
             ApsCommandId::UpdateDevice => ApsCommandFrameCommand::UpdateDevice(
-                ApsUpdateDeviceCommandFrame::from_abstract_bits(payload)?,
+                ApsUpdateDeviceCommandFrame::from_abstract_bytes(payload)?,
             ),
             ApsCommandId::RemoveDevice => ApsCommandFrameCommand::RemoveDevice(
-                ApsRemoveDeviceCommandFrame::from_abstract_bits(payload)?,
+                ApsRemoveDeviceCommandFrame::from_abstract_bytes(payload)?,
             ),
             ApsCommandId::RequestKey => {
                 ApsCommandFrameCommand::RequestKey(ApsRequestKeyCommandFrame::from_bytes(payload)?)
             }
             ApsCommandId::SwitchKey => ApsCommandFrameCommand::SwitchKey(
-                ApsSwitchKeyCommandFrame::from_abstract_bits(payload)?,
+                ApsSwitchKeyCommandFrame::from_abstract_bytes(payload)?,
             ),
             ApsCommandId::Tunnel => {
                 ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame::from_bytes(payload)?)
             }
             ApsCommandId::VerifyKey => ApsCommandFrameCommand::VerifyKey(
-                ApsVerifyKeyCommandFrame::from_abstract_bits(payload)?,
+                ApsVerifyKeyCommandFrame::from_abstract_bytes(payload)?,
             ),
             ApsCommandId::ConfirmKey => ApsCommandFrameCommand::ConfirmKey(
-                ApsConfirmKeyCommandFrame::from_abstract_bits(payload)?,
+                ApsConfirmKeyCommandFrame::from_abstract_bytes(payload)?,
             ),
             _ => {
                 return Err(ParseError::Unsupported("command ID for ApsCommandFrame"));
@@ -636,13 +638,13 @@ impl ApsCommandFrame {
 
         bytes.extend(match &self.command {
             ApsCommandFrameCommand::TransportKey(cmd) => cmd.to_bytes(),
-            ApsCommandFrameCommand::UpdateDevice(cmd) => cmd.to_abstract_bits().unwrap(),
-            ApsCommandFrameCommand::RemoveDevice(cmd) => cmd.to_abstract_bits().unwrap(),
+            ApsCommandFrameCommand::UpdateDevice(cmd) => cmd.to_abstract_bytes().unwrap(),
+            ApsCommandFrameCommand::RemoveDevice(cmd) => cmd.to_abstract_bytes().unwrap(),
             ApsCommandFrameCommand::RequestKey(cmd) => cmd.to_bytes(),
-            ApsCommandFrameCommand::SwitchKey(cmd) => cmd.to_abstract_bits().unwrap(),
+            ApsCommandFrameCommand::SwitchKey(cmd) => cmd.to_abstract_bytes().unwrap(),
             ApsCommandFrameCommand::Tunnel(cmd) => cmd.to_bytes(),
-            ApsCommandFrameCommand::VerifyKey(cmd) => cmd.to_abstract_bits().unwrap(),
-            ApsCommandFrameCommand::ConfirmKey(cmd) => cmd.to_abstract_bits().unwrap(),
+            ApsCommandFrameCommand::VerifyKey(cmd) => cmd.to_abstract_bytes().unwrap(),
+            ApsCommandFrameCommand::ConfirmKey(cmd) => cmd.to_abstract_bytes().unwrap(),
         });
 
         bytes
@@ -701,7 +703,7 @@ impl ApsAuxHeader {
             return Err(ParseError::UnexpectedEnd { ty: "ApsAuxHeader" });
         }
 
-        let security_control = NwkSecurityHeaderControlField::from_abstract_bits(bytes)?;
+        let security_control = NwkSecurityHeaderControlField::from_abstract_bytes(bytes)?;
         let mut remaining = &bytes[1..];
 
         let frame_counter =
@@ -839,7 +841,7 @@ impl EncryptedApsCommandFrame {
             });
         }
 
-        let frame_control = ApsFrameControl::from_abstract_bits(bytes)?;
+        let frame_control = ApsFrameControl::from_abstract_bytes(bytes)?;
         let counter = bytes[1];
         let (aux_header, remaining) = ApsAuxHeader::deserialize(&bytes[2..])?;
 

@@ -1,0 +1,69 @@
+[package]
+name = "ziggurat-esp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "ESP32-C6 firmware running the Ziggurat stack with a line-delimited JSON API"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ziggurat-esp"
+path = "src/main.rs"
+
+[dependencies]
+ziggurat-driver = { path = "../ziggurat-driver", default-features = false, features = [
+    "embassy",
+] }
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-phy-esp = { path = "../ziggurat-phy-esp" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+ziggurat-zigbee = { path = "../ziggurat-zigbee" }
+
+esp-hal = { version = "1.1.0", features = ["esp32c6", "unstable"] }
+esp-radio = { version = "1.0.0-beta.0", features = ["esp32c6", "ieee802154", "unstable"] }
+esp-rtos = { version = "0.3.0", features = ["esp32c6", "embassy"] }
+esp-alloc = "0.10.0"
+esp-backtrace = { version = "0.19.0", features = [
+    "esp32c6",
+    "panic-handler",
+    "println",
+] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c6"] }
+esp-println = { version = "0.17.0", default-features = false, features = [
+    "esp32c6",
+    "log-04",
+    "uart",
+    "critical-section",
+] }
+
+embassy-executor = "0.10"
+embassy-time = "0.5"
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+embedded-io-async = "0.7"
+
+heapless = { version = "0.9", default-features = false }
+tracing = { version = "0.1", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+subtle = { version = "2", default-features = false }
+
+[profile.release]
+opt-level = "s"
+debug = true
+lto = "fat"
+codegen-units = 1
+
+# A standalone workspace: this crate only builds for the ESP32-C6 target and is excluded
+# from the host workspace.
+[workspace]
+
+# Build against the esp-hal fork so we can patch esp-radio's IEEE 802.15.4 driver to set
+# the auto-ACK frame-pending bit (RX_DONE ISR). esp-radio's intra-repo deps are path-based,
+# so esp-hal must be patched alongside it to avoid two esp-hal copies; cargo resolves each
+# package by name within the git workspace.
+[patch.crates-io]
+esp-hal = { git = "https://github.com/puddly/esp-hal", rev = "aff9840b75612b20d7101236a85a09e370d4c414" }
+esp-radio = { git = "https://github.com/puddly/esp-hal", rev = "aff9840b75612b20d7101236a85a09e370d4c414" }
+esp-rom-sys = { git = "https://github.com/puddly/esp-hal", rev = "aff9840b75612b20d7101236a85a09e370d4c414" }
