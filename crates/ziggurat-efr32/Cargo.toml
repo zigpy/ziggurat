@@ -20,6 +20,7 @@ ziggurat-zigbee = { path = "../ziggurat-zigbee" }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+heapless = { version = "0.9", default-features = false }
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.5", features = ["device"] }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }

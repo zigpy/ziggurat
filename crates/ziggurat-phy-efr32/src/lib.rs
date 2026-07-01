@@ -46,9 +46,11 @@ mod events {
     pub const TX_BLOCKED: u64 = 1 << e::SL_RAIL_EVENT_TX_BLOCKED_SHIFT as u64;
     pub const TX_UNDERFLOW: u64 = 1 << e::SL_RAIL_EVENT_TX_UNDERFLOW_SHIFT as u64;
     pub const RX_ACK_TIMEOUT: u64 = 1 << e::SL_RAIL_EVENT_RX_ACK_TIMEOUT_SHIFT as u64;
+    pub const RX_FIFO_OVERFLOW: u64 = 1 << e::SL_RAIL_EVENT_RX_FIFO_OVERFLOW_SHIFT as u64;
 
     /// Everything the backend acts on.
     pub const SUBSCRIBED: u64 = RX_PACKET_RECEIVED
+        | RX_FIFO_OVERFLOW
         | TX_PACKET_SENT
         | TX_CHANNEL_BUSY
         | TX_ABORTED
@@ -60,8 +62,13 @@ mod events {
 const TX_OPTION_WAIT_FOR_ACK: u64 =
     1 << rail::sl_rail_tx_options_t_enum::SL_RAIL_TX_OPTION_WAIT_FOR_ACK_SHIFT as u64;
 
-const RX_PACKET_HANDLE_NEWEST: rail::sl_rail_rx_packet_handle_t =
-    3 as rail::sl_rail_rx_packet_handle_t;
+const RX_PACKET_HANDLE_OLDEST_COMPLETE: rail::sl_rail_rx_packet_handle_t =
+    2 as rail::sl_rail_rx_packet_handle_t;
+// sl_rail_rx_packet_status_t values.
+const RX_PACKET_NONE: u32 = 0;
+const RX_PACKET_READY_SUCCESS: u32 = 7;
+// SL_RAIL_RF_STATE_RX: keep the radio receiving after each operation.
+const RF_STATE_RX: rail::sl_rail_radio_state_t = 2 as rail::sl_rail_radio_state_t;
 
 /// 802.15.4-2003 2.4 GHz OQPSK CSMA-CA parameters (from the SDK's
 /// `SL_RAIL_CSMA_CONFIG_802_15_4_2003_2P4_GHZ_OQPSK_CSMA` initializer).
@@ -106,19 +113,25 @@ pub fn rail_handle() -> rail::sl_rail_handle_t {
 unsafe extern "C" fn on_rail_event(rail_handle: rail::sl_rail_handle_t, events: rail::sl_rail_events_t) {
     let events = events as u64;
 
-    if events & self::events::RX_PACKET_RECEIVED != 0 {
-        let mut info: rail::sl_rail_rx_packet_info_t = unsafe { core::mem::zeroed() };
-        unsafe { rail::sl_rail_get_rx_packet_info(rail_handle, RX_PACKET_HANDLE_NEWEST, &mut info) };
-        if info.packet_bytes > 0 {
-            // RAIL hands us [PHR length byte][MAC frame without FCS]; the packet is
-            // auto-released when this callback returns, so copy it out now.
-            let mut buf = [0u8; 128];
-            let n = core::cmp::min(info.packet_bytes as usize, buf.len());
-            unsafe { rail::sl_rail_copy_rx_packet(rail_handle, buf.as_mut_ptr(), &info) };
-            if n >= 1 {
-                let psdu = buf[1..n].to_vec(); // drop the PHR length byte
+    // Drain the ENTIRE RX queue on a receive or FIFO-overflow event. On a busy network the
+    // radio queues several packets per interrupt (and the byte FIFO overflows and stalls RX
+    // if not drained promptly), so reading a single packet per event drops almost everything.
+    if events & (self::events::RX_PACKET_RECEIVED | self::events::RX_FIFO_OVERFLOW) != 0 {
+        loop {
+            let mut info: rail::sl_rail_rx_packet_info_t = unsafe { core::mem::zeroed() };
+            let handle = unsafe {
+                rail::sl_rail_get_rx_packet_info(rail_handle, RX_PACKET_HANDLE_OLDEST_COMPLETE, &mut info)
+            };
+            if info.packet_status as u32 == RX_PACKET_NONE {
+                break; // queue drained
+            }
+            if info.packet_status as u32 == RX_PACKET_READY_SUCCESS && info.packet_bytes >= 1 {
+                // RAIL hands us [PHR length byte][MAC frame without FCS].
+                let mut buf = [0u8; 128];
+                let n = core::cmp::min(info.packet_bytes as usize, buf.len());
+                unsafe { rail::sl_rail_copy_rx_packet(rail_handle, buf.as_mut_ptr(), &info) };
                 let frame = RxFrame {
-                    psdu,
+                    psdu: buf[1..n].to_vec(), // drop the PHR length byte
                     channel: CURRENT_CHANNEL.load(Ordering::Relaxed),
                     rssi: 0, // TODO: sl_rail_get_rx_packet_details
                     lqi: 0,  // TODO
@@ -126,6 +139,8 @@ unsafe extern "C" fn on_rail_event(rail_handle: rail::sl_rail_handle_t, events: 
                 };
                 let _ = RX_CHANNEL.try_send(frame);
             }
+            // Release to advance the queue and free FIFO space.
+            unsafe { rail::sl_rail_release_rx_packet(rail_handle, handle) };
         }
     }
 
@@ -184,8 +199,18 @@ impl Efr32Phy {
             ieee.timings.rx_to_tx = 192;
             ieee.ack_config.enable = true;
             ieee.ack_config.ack_timeout_us = 672;
+            // Stay in RX after every RX/TX/ACK. Left at 0 (INACTIVE) the radio drops to idle
+            // after the first received+acked frame and stops receiving — catching almost
+            // nothing on a busy network.
+            let stay_rx = rail::sl_rail_state_transitions_t {
+                success: RF_STATE_RX,
+                error: RF_STATE_RX,
+            };
+            ieee.ack_config.rx_transitions = stay_rx;
+            ieee.ack_config.tx_transitions = stay_rx;
             rail::sl_rail_ieee802154_init(h, &ieee);
             rail::sl_rail_ieee802154_config_2p4_ghz_radio(h);
+            rail::sl_rail_set_rx_transitions(h, &stay_rx);
 
             rail::sl_rail_set_tx_fifo(
                 h,

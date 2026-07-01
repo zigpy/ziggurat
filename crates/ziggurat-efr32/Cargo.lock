@@ -2032,6 +2032,7 @@ dependencies = [
  "embassy-time-driver",
  "embassy-time-queue-utils",
  "embedded-alloc",
+ "heapless",
  "hex",
  "panic-halt",
  "serde",
