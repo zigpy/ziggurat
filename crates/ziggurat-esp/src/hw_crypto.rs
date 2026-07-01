@@ -68,8 +68,20 @@ impl CryptoBackend for EspCrypto {
         HW.lock(|cell| {
             let mut guard = cell.borrow_mut();
             let dma = guard.as_mut().expect("hw_crypto::init was never called");
-            run(dma, &cbc_state, &key.0, &cbc_in[..cbc_len], &mut cbc_out[..cbc_len]);
-            run(dma, &ctr_state, &key.0, &ctr_in[..ctr_len], &mut ctr_out[..ctr_len]);
+            run(
+                dma,
+                &cbc_state,
+                &key.0,
+                &cbc_in[..cbc_len],
+                &mut cbc_out[..cbc_len],
+            );
+            run(
+                dma,
+                &ctr_state,
+                &key.0,
+                &ctr_in[..ctr_len],
+                &mut ctr_out[..ctr_len],
+            );
         });
 
         let tag = &cbc_out[cbc_len - 16..cbc_len];
@@ -79,7 +91,8 @@ impl CryptoBackend for EspCrypto {
         out.extend_from_slice(&ctr_out[16..16 + plen])
             .expect("ciphertext fits a frame");
         for i in 0..MIC_LENGTH {
-            out.push(tag[i] ^ s0[i]).expect("frame has room for the MIC");
+            out.push(tag[i] ^ s0[i])
+                .expect("frame has room for the MIC");
         }
         out
     }
@@ -110,10 +123,23 @@ impl CryptoBackend for EspCrypto {
         let cbc_len = HW.lock(|cell| {
             let mut guard = cell.borrow_mut();
             let dma = guard.as_mut().expect("hw_crypto::init was never called");
-            run(dma, &ctr_state, &key.0, &ctr_in[..ctr_len], &mut ctr_out[..ctr_len]);
+            run(
+                dma,
+                &ctr_state,
+                &key.0,
+                &ctr_in[..ctr_len],
+                &mut ctr_out[..ctr_len],
+            );
 
-            let cbc_len = format_cbc_mac_input(&mut cbc_in, nonce, auth_data, &ctr_out[16..16 + clen]);
-            run(dma, &cbc_state, &key.0, &cbc_in[..cbc_len], &mut cbc_out[..cbc_len]);
+            let cbc_len =
+                format_cbc_mac_input(&mut cbc_in, nonce, auth_data, &ctr_out[16..16 + clen]);
+            run(
+                dma,
+                &cbc_state,
+                &key.0,
+                &cbc_in[..cbc_len],
+                &mut cbc_out[..cbc_len],
+            );
             cbc_len
         });
 
