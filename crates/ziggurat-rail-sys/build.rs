@@ -149,6 +149,8 @@ fn main() {
     for src in read_lines(&recipe.join("sdk_sources.txt")) {
         build.file(sdk.join(src));
     }
+    // Minimal RADIOAES management (replaces the SDK's PSA-heavy sli_radioaes_management.c).
+    build.file(vendor.join("sli_radioaes_stub.c"));
     build.compile("ziggurat_rail_glue");
 
     // Generate Rust FFI for the public RAIL API. `-fshort-enums` matches the ARM EABI
@@ -171,6 +173,7 @@ fn main() {
         .ctypes_prefix("core::ffi")
         .allowlist_function("(sl_rail|RAIL)_.*")
         .allowlist_function("sl_clock_manager_.*")
+        .allowlist_function("sli_(ccm|aes|protocol_crypto)_.*")
         .allowlist_type("(sl_rail|RAIL|sli_rail)_.*")
         .allowlist_var("(SL_RAIL|RAIL)_.*")
         // The blob's built-in RX FIFO/packet-queue backing store (lowercase, so not

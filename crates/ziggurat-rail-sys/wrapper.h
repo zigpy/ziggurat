@@ -5,3 +5,5 @@
 // (enable -> wait-ready -> switch) before RAIL init.
 #include "sl_clock_manager.h"
 #include "sl_clock_manager_init.h"
+// Hardware AES-CCM* / AES-ECB on the RADIOAES peripheral (Zigbee crypto acceleration).
+#include "sli_protocol_crypto.h"

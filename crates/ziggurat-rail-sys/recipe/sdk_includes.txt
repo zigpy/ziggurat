@@ -5,6 +5,7 @@ platform_core/platform/common/inc
 platform_core/platform/Device/SiliconLabs/EFR32MG24/Include
 platform_core/platform/driver/gpio/inc
 platform_core/platform/emlib/inc
+platform_core/platform/security/sl_component/sl_protocol_crypto/src
 platform_core/platform/peripheral/inc
 platform_core/platform/service/clock_manager/inc
 platform_core/platform/service/clock_manager/src

@@ -40,3 +40,4 @@ rail_library/plugin/sl_rail_util_built_in_phys/sl_rail_util_built_in_phys.c
 rail_library/plugin/sl_rail_util_protocol/sl_rail_util_protocol.c
 rail_library/plugin/sl_rail_util_pti/sl_rail_util_pti.c
 rail_library/plugin/sl_rail_util_sequencer/sl_rail_util_sequencer.c
+platform_core/platform/security/sl_component/sl_protocol_crypto/src/sli_protocol_crypto_radioaes.c
