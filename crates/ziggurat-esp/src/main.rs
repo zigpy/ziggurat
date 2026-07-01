@@ -139,7 +139,7 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    esp_alloc::heap_allocator!(size: 96 * 1024);
+    esp_alloc::heap_allocator!(size: 240 * 1024);
 
     // Bring up the UART console
     let log_uart = UartTx::new(peripherals.UART0, UartConfig::default().with_baudrate(460_800))
