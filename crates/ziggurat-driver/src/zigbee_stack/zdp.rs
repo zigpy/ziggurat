@@ -1,9 +1,10 @@
+use crate::runtime::Runtime;
+use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
-use tokio::time::Instant;
 use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
     ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
@@ -11,7 +12,7 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, LOCK_ACQUIRE_TIMEOUT, MAX_DEPTH, NwkDeviceType, ZigbeeStack, ZigbeeStackError,
+    ApsAck, MAX_DEPTH, NwkDeviceType, TxOutcome, TxPriority, ZigbeeStack, ZigbeeStackError,
     neighbors, routing,
 };
 
@@ -25,7 +26,7 @@ const MGMT_LQI_DESCRIPTORS_PER_FRAME: usize = 2;
 /// Routing records per Mgmt_Rtg_rsp, keeping the ASDU within the NWK payload budget.
 const MGMT_RTG_DESCRIPTORS_PER_FRAME: usize = 10;
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Dispatch the ZDP commands the stack itself consumes: the neighbor table they
     /// maintain lives here. The client still observes the frames.
     pub(super) fn handle_zdp_frame(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
@@ -113,14 +114,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             neighbor_table_list: descriptors,
         };
 
-        self.spawn_tracked_self(|arc_self| async move {
-            if let Err(err) = arc_self
-                .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
-                .await
-            {
-                tracing::warn!("Failed to send a neighbor table response to {source:?}: {err}");
-            }
-        });
+        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+            tracing::warn!("Failed to send a neighbor table response to {source:?}: {err}");
+        }
     }
 
     /// Spec 2.4.4.3.3: answer a routing table query.
@@ -175,14 +171,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             routing_table_list: descriptors,
         };
 
-        self.spawn_tracked_self(|arc_self| async move {
-            if let Err(err) = arc_self
-                .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
-                .await
-            {
-                tracing::warn!("Failed to send a routing table response to {source:?}: {err}");
-            }
-        });
+        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+            tracing::warn!("Failed to send a routing table response to {source:?}: {err}");
+        }
     }
 
     /// Spec 2.4.3.1.11.2: a (re)joined device announced its address pair. The address
@@ -238,10 +229,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
         // Spec 2.4.3.1.12.2: another router's announcement restarts our own pending
         // announcement countdown to avoid a network-wide broadcast storm
-        *self
-            .parent_annce_received
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap() = Some(Instant::now());
+        *self.parent_annce_received.lock() = Some(self.core_now());
 
         let (claimed, removed) = self
             .core()
@@ -267,26 +255,20 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             children: claimed,
         };
 
-        self.spawn_tracked_self(|arc_self| async move {
-            if let Err(err) = arc_self
-                .send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to send a parent announcement response to {source:?}: {err}"
-                );
-            }
-        });
+        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+            tracing::warn!("Failed to send a parent announcement response to {source:?}: {err}");
+        }
     }
 
-    async fn send_zdp_command<T: ZdpCommand + Sync>(
+    /// Build and enqueue a ZDP command fire-and-forget.
+    fn send_zdp_command<T: ZdpCommand + Sync>(
         &self,
         destination: Nwk,
         delivery_mode: ApsDeliveryMode,
         tsn: u8,
         command: &T,
     ) -> Result<(), ZigbeeStackError> {
-        self.send_aps_command(
+        let (nwk_frame, _ack) = self.prepare_aps_send(
             delivery_mode,
             destination,
             ZDP_PROFILE_ID,
@@ -298,10 +280,10 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             self.next_aps_counter(),
             command.serialize(tsn).unwrap(),
             None,
-            TxPriority::USER_NORMAL,
-        )
-        .await
-        .map(|_| ())
+        )?;
+
+        self.enqueue_aps_frame(nwk_frame, TxPriority::USER_NORMAL, TxOutcome::Discard);
+        Ok(())
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming
@@ -338,16 +320,15 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             let jitter = self
                 .tunables
                 .parent_annce_jitter_max
-                .mul_f32(rand::random::<f32>());
-            let slept_at = Instant::now();
-            tokio::time::sleep(self.tunables.parent_annce_base_timer + jitter).await;
+                .mul_f32(crate::rng::random_f32());
+            let slept_at = self.core_now();
+            R::sleep(self.tunables.parent_annce_base_timer + jitter).await;
 
             // Spec 2.4.3.1.12.2: an announcement from another router restarts the
             // countdown
             if self
                 .parent_annce_received
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
+                .lock()
                 .is_some_and(|received_at| received_at > slept_at)
             {
                 continue;
@@ -384,15 +365,12 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             let announcement = ParentAnnce { children: chunk };
             let tsn = self.next_aps_counter();
 
-            if let Err(err) = self
-                .send_zdp_command(
-                    BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                    ApsDeliveryMode::Broadcast,
-                    tsn,
-                    &announcement,
-                )
-                .await
-            {
+            if let Err(err) = self.send_zdp_command(
+                BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                ApsDeliveryMode::Broadcast,
+                tsn,
+                &announcement,
+            ) {
                 tracing::warn!("Failed to broadcast a parent announcement: {err}");
             }
 

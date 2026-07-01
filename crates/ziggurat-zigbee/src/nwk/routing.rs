@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
+use crate::Instant;
 use crate::nwk::commands::NwkRouteRequestManyToOne;
-use std::time::{Duration, Instant};
+use core::time::Duration;
 use ziggurat_ieee_802154::types::Nwk;
 
 use crate::nwk::frame::BROADCAST_ALL_ROUTERS_AND_COORDINATOR;
 
-pub type RequestId = u8;
+pub type RouteRequestId = u8;
 
 const UNKNOWN_NEXT_HOP: Nwk = Nwk(0xFFFF);
 
@@ -102,7 +104,7 @@ pub struct DiscoveryEntry {
     /// distinct from the 16-bit Routing Sequence Number. The former is used to discern
     /// route requests originating in a particular router; the latter is used to
     /// identify stale routing information.
-    pub route_request_id: RequestId,
+    pub route_request_id: RouteRequestId,
     /// The 16-bit network address of the route request’s initiator.
     pub source_address: Nwk,
     /// The 16-bit network address of the device that has sent the most recent lowest
@@ -162,19 +164,19 @@ pub struct Routing {
     mtorr_route_error_threshold: u8,
     mtorr_delivery_failure_threshold: u8,
 
-    route_table: HashMap<Nwk, TableEntry>,
-    discovery_table: HashMap<(Nwk, RequestId), DiscoveryEntry>,
-    route_record_table: HashMap<Nwk, Vec<Nwk>>,
+    route_table: BTreeMap<Nwk, TableEntry>,
+    discovery_table: BTreeMap<(Nwk, RouteRequestId), DiscoveryEntry>,
+    route_record_table: BTreeMap<Nwk, Vec<Nwk>>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
     /// originating in a particular router; the latter is used to identify stale routing
     /// information."
-    request_sequence_number: RequestId,
+    request_sequence_number: RouteRequestId,
 }
 
 impl Routing {
-    pub fn new(
+    pub const fn new(
         network_address: Nwk,
         route_discovery_time: Duration,
         mtorr_route_error_threshold: u8,
@@ -187,9 +189,9 @@ impl Routing {
             mtorr_delivery_failures: 0,
             mtorr_route_error_threshold,
             mtorr_delivery_failure_threshold,
-            route_table: HashMap::new(),
-            discovery_table: HashMap::new(),
-            route_record_table: HashMap::new(),
+            route_table: BTreeMap::new(),
+            discovery_table: BTreeMap::new(),
+            route_record_table: BTreeMap::new(),
             request_sequence_number: 0,
         }
     }
@@ -312,6 +314,13 @@ impl Routing {
     /// mostly reverse-route side effects of their discoveries). This deviates from
     /// the spec's table-first order (3.6.4.3).
     pub fn route_to(&self, destination: Nwk, max_source_route: u8) -> Option<Route> {
+        // TODO: a route record wins unconditionally here, with no outgoing-link-cost check.
+        // For a concentrator this reverses the device->coordinator path and assumes the link
+        // is symmetric: a device reachable directly inbound advertises Relay Count 0, so we
+        // transmit direct even when our outbound link to it is poor (asymmetric radio). The
+        // cost-aware AODV path only runs in the `_` fallback. Fold the neighbor's
+        // `outgoing_cost` in so a Relay-Count-0 record only yields `NextHop` when the
+        // outbound link is actually good; otherwise fall through to cost-based routing.
         match self.route_record_table.get(&destination) {
             // Spec 3.6.4.3.1: no intermediate relays means direct transmission
             Some(relays) if relays.is_empty() => Some(Route::NextHop(destination)),
@@ -325,7 +334,7 @@ impl Routing {
     /// Prepare table state for a route discovery we originate: the routing entry enters
     /// `DiscoveryUnderway` and a discovery entry keyed by our own address is created.
     /// Returns the request identifier to put in the route request command.
-    pub fn begin_discovery(&mut self, destination: Nwk, now: Instant) -> RequestId {
+    pub fn begin_discovery(&mut self, destination: Nwk, now: Instant) -> RouteRequestId {
         // Expire stale discoveries before establishing the new one. A just-expired
         // discovery toward this same destination would otherwise tear down the
         // `DiscoveryUnderway` route entry created below.
@@ -354,14 +363,14 @@ impl Routing {
                 destination_address: destination,
             });
 
-        tracing::debug!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
+        tracing::trace!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
 
         request_id
     }
 
     /// Register the discovery entry backing a many-to-one route advertisement, which
     /// is addressed to a broadcast address and never answered with a reply.
-    pub fn begin_many_to_one_advertisement(&mut self, now: Instant) -> RequestId {
+    pub fn begin_many_to_one_advertisement(&mut self, now: Instant) -> RouteRequestId {
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
         let request_id = self.request_sequence_number;
 
@@ -406,7 +415,7 @@ impl Routing {
     pub fn accept_route_request(
         &mut self,
         originator: Nwk,
-        request_id: RequestId,
+        request_id: RouteRequestId,
         destination: Nwk,
         sender: Nwk,
         updated_path_cost: u8,
@@ -482,7 +491,7 @@ impl Routing {
     pub fn accept_route_reply(
         &mut self,
         originator: Nwk,
-        request_id: RequestId,
+        request_id: RouteRequestId,
         responder: Nwk,
         sender: Nwk,
         updated_path_cost: u8,

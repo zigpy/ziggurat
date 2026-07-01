@@ -1,4 +1,5 @@
 #![allow(clippy::useless_conversion)]
+use alloc::vec::Vec;
 
 use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
@@ -56,9 +57,9 @@ pub struct NwkFrameControl {
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwkSourceRoute {
-    #[abstract_bits(length_of = relays)]
     relay_count: u8,
     pub relay_index: u8,
+    #[abstract_bits(length_from = relay_count)]
     pub relays: Vec<Nwk>,
 }
 
@@ -222,7 +223,7 @@ pub struct NwkSecurityHeaderControlField {
 }
 
 impl NwkSecurityHeaderControlField {
-    /// The field's single serialized byte, without `to_abstract_bits`'s allocation:
+    /// The field's single serialized byte, without `to_abstract_bytes`'s allocation:
     /// it goes into every CCM* nonce.
     pub fn to_bytes(&self) -> [u8; 1] {
         let mut buffer = [0u8; 1];
@@ -577,6 +578,7 @@ impl NwkFrame {
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::vec;
     use hex_literal::hex;
 
     #[test]

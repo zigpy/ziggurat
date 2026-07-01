@@ -1,5 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use alloc::vec::Vec;
+use core::time::Duration;
+
+use alloc::collections::{BTreeMap, BTreeSet};
+
+use crate::Instant;
 
 use ziggurat_ieee_802154::types::Nwk;
 
@@ -14,7 +18,7 @@ struct Transaction {
     expected_relayers: Vec<Nwk>,
     /// Neighbors heard relaying this broadcast: their passive acknowledgments
     /// (spec 3.6.6)
-    heard_from: HashSet<Nwk>,
+    heard_from: BTreeSet<Nwk>,
 }
 
 /// The NWK broadcast transaction table: deduplication of received broadcasts and
@@ -26,15 +30,15 @@ pub struct Broadcasts {
     /// A broadcast with at least this many expected relayers is considered passively
     /// acknowledged once this many of them have been heard, instead of all of them
     quorum: usize,
-    table: HashMap<(Nwk, u8), Transaction>,
+    table: BTreeMap<(Nwk, u8), Transaction>,
 }
 
 impl Broadcasts {
-    pub fn new(delivery_time: Duration, quorum: usize) -> Self {
+    pub const fn new(delivery_time: Duration, quorum: usize) -> Self {
         Self {
             delivery_time,
             quorum,
-            table: HashMap::new(),
+            table: BTreeMap::new(),
         }
     }
 
@@ -65,7 +69,7 @@ impl Broadcasts {
                 expiration_time: now + self.delivery_time,
                 expected_relayers: audience,
                 // Whoever delivered the frame to us has already broadcast it
-                heard_from: HashSet::from([sender]),
+                heard_from: BTreeSet::from([sender]),
             },
         );
 
@@ -86,7 +90,7 @@ impl Broadcasts {
             Transaction {
                 expiration_time: now + self.delivery_time,
                 expected_relayers: audience,
-                heard_from: HashSet::new(),
+                heard_from: BTreeSet::new(),
             },
         );
     }

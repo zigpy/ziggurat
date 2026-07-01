@@ -1,5 +1,12 @@
+#![no_std]
+
+extern crate alloc;
+
 pub mod commands;
 pub mod types;
+
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::types::{Eui64, Nwk, PanId, format_hex};
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
@@ -14,7 +21,7 @@ pub const MAX_PHY_PACKET_SIZE: usize = 127;
 /// is ignored for now.
 pub type FrameBytes = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
 
-#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Hash, Copy, Clone, PartialOrd, Ord)]
 pub enum Ieee802154Address {
     Nwk(Nwk),
     Eui64(Eui64),
@@ -222,7 +229,7 @@ pub enum ParseError {
 
 /// Append a structure's serialized form to `bytes`.
 ///
-/// Avoids the intermediate Vec that [`AbstractBits::to_abstract_bits`] allocates; the
+/// Avoids the intermediate Vec that [`AbstractBits::to_abstract_bytes`] allocates; the
 /// scratch buffer fits anything that can go on the air (a full 802.15.4 frame is at
 /// most 127 bytes).
 pub fn extend_abstract_bits<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) {
@@ -276,19 +283,19 @@ impl Ieee802154CommandPayload {
 
         Some(match id {
             Ieee802154CommandId::AssociationRequest => {
-                Self::AssociationRequest(AbstractBits::from_abstract_bits(body).ok()?)
+                Self::AssociationRequest(AbstractBits::from_abstract_bytes(body).ok()?)
             }
             Ieee802154CommandId::AssociationResponse => {
-                Self::AssociationResponse(AbstractBits::from_abstract_bits(body).ok()?)
+                Self::AssociationResponse(AbstractBits::from_abstract_bytes(body).ok()?)
             }
             Ieee802154CommandId::DisassociationNotification => {
-                Self::DisassociationNotification(AbstractBits::from_abstract_bits(body).ok()?)
+                Self::DisassociationNotification(AbstractBits::from_abstract_bytes(body).ok()?)
             }
             Ieee802154CommandId::DataRequest => {
-                Self::DataRequest(AbstractBits::from_abstract_bits(body).ok()?)
+                Self::DataRequest(AbstractBits::from_abstract_bytes(body).ok()?)
             }
             Ieee802154CommandId::BeaconRequest => {
-                Self::BeaconRequest(AbstractBits::from_abstract_bits(body).ok()?)
+                Self::BeaconRequest(AbstractBits::from_abstract_bytes(body).ok()?)
             }
             // Known command ids the stack does not implement are kept verbatim
             _ => return None,
@@ -300,18 +307,18 @@ impl Ieee802154CommandPayload {
         let (id, body) = match self {
             Self::AssociationRequest(c) => (
                 Ieee802154CommandId::AssociationRequest,
-                c.to_abstract_bits(),
+                c.to_abstract_bytes(),
             ),
             Self::AssociationResponse(c) => (
                 Ieee802154CommandId::AssociationResponse,
-                c.to_abstract_bits(),
+                c.to_abstract_bytes(),
             ),
             Self::DisassociationNotification(c) => (
                 Ieee802154CommandId::DisassociationNotification,
-                c.to_abstract_bits(),
+                c.to_abstract_bytes(),
             ),
-            Self::DataRequest(c) => (Ieee802154CommandId::DataRequest, c.to_abstract_bits()),
-            Self::BeaconRequest(c) => (Ieee802154CommandId::BeaconRequest, c.to_abstract_bits()),
+            Self::DataRequest(c) => (Ieee802154CommandId::DataRequest, c.to_abstract_bytes()),
+            Self::BeaconRequest(c) => (Ieee802154CommandId::BeaconRequest, c.to_abstract_bytes()),
             Self::Unknown(raw) => return raw.clone(),
         };
 
@@ -429,7 +436,7 @@ impl Ieee802154Frame<FrameBytes> {
                     });
                 }
                 let superframe_specification =
-                    SuperframeSpecification::from_abstract_bits(&remaining[..4])?;
+                    SuperframeSpecification::from_abstract_bytes(&remaining[..4])?;
                 let gts_specification = remaining[2];
                 let pending_address_specification = remaining[3];
                 let beacon_payload = remaining[4..].to_vec();
@@ -590,7 +597,7 @@ mod test {
     #[test]
     fn test_frame_control() {
         let bytes = [0x61, 0x88, 0xFF];
-        let frame_control = Ieee802154FrameControl::from_abstract_bits(&bytes).unwrap();
+        let frame_control = Ieee802154FrameControl::from_abstract_bytes(&bytes).unwrap();
         let remaining = &bytes[2..];
 
         assert_eq!(frame_control.frame_type, Ieee802154FrameType::Data);
@@ -608,7 +615,7 @@ mod test {
         assert_eq!(frame_control.src_addr_mode, Ieee802154AddressingMode::Short);
 
         assert_eq!(remaining, [0xFF]);
-        assert_eq!(frame_control.to_abstract_bits().unwrap(), bytes[..2]);
+        assert_eq!(frame_control.to_abstract_bytes().unwrap(), bytes[..2]);
     }
 
     #[test]

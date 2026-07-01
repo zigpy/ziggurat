@@ -1,53 +1,46 @@
+use crate::runtime::Runtime;
+use crate::signal;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
+use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioPhy, TxPriority};
+use ziggurat_phy::RadioPhy;
 
-use tokio::sync::oneshot;
-use tokio::time::{Instant, timeout_at};
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
-use ziggurat_zigbee::nwk::frame::EncryptedNwkFrame;
 
 use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
-    DeviceLeaveReason, IndirectCompletion, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode,
-    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind, TxOutcome,
+    TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
-const fn set_frame_pending(frame: &mut Ieee802154Frame<EncryptedNwkFrame>) {
-    match frame {
-        Ieee802154Frame::Data(f) => f.header.frame_control.frame_pending = true,
-        Ieee802154Frame::Ack(f) => f.header.frame_control.frame_pending = true,
-        Ieee802154Frame::Beacon(f) => f.header.frame_control.frame_pending = true,
-        Ieee802154Frame::Command(f) => f.header.frame_control.frame_pending = true,
-    }
-}
-
-impl<P: RadioPhy> ZigbeeStack<P> {
-    /// Queue a finished 802.15.4 frame for indirect delivery and wait for the
-    /// destination to extract it with a MAC Data Request, or for the transaction to
-    /// expire (802.15.4 spec 6.7.3). There is no retry loop here: the destination
-    /// re-polling is the retry mechanism, expiry is the failure signal.
-    pub(super) async fn queue_indirect_frame(
-        &self,
-        destination: Ieee802154Address,
-        frame: Ieee802154Frame<EncryptedNwkFrame>,
-    ) -> Result<(), ZigbeeStackError> {
-        let (completion, result_rx) = oneshot::channel();
-
-        self.core().mac.indirect_queue.push(
-            destination,
-            frame,
-            completion,
-            Instant::now().into_std(),
-        );
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+    /// Queue a frame for a polling device (802.15.4 spec 6.7.3), under its own
+    /// `poll_address`. Its `outcome` is resolved when the device extracts the frame, or
+    /// with an error on expiry or eviction.
+    pub(super) fn enqueue_indirect_frame(&self, frame: IndirectFrame, outcome: TxOutcome) {
+        self.core()
+            .mac
+            .indirect_queue
+            .push(frame.poll_address, frame, outcome, self.core_now());
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
+    }
 
-        // Every transaction is eventually resolved by delivery, the expiry sweep, or
-        // child eviction; a dropped sender means the stack is shutting down
-        result_rx
+    /// Queue a frame and await its delivery: resolves once the device extracts it, or
+    /// with an error on expiry or eviction. A dropped sender (stack shutdown) reads as
+    /// expiry.
+    pub(super) async fn queue_indirect_frame(
+        &self,
+        frame: IndirectFrame,
+    ) -> Result<(), ZigbeeStackError> {
+        let destination = frame.poll_address;
+        let (completion, waiter) = signal::channel();
+        self.enqueue_indirect_frame(frame, TxOutcome::Signal(completion));
+        waiter
+            .wait()
             .await
             .unwrap_or(Err(ZigbeeStackError::IndirectExpired { destination }))
     }
@@ -77,7 +70,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         let known_device = self.core().nib.neighbors.refresh_child_timeout(
             source_eui64,
             source_nwk,
-            Instant::now().into_std(),
+            self.core_now(),
         );
 
         // The RCP only told the device to keep listening (frame-pending=1 in the
@@ -85,12 +78,8 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         // source address match table. If that write is still in flight, the device is
         // asleep again by now: everything stays queued for the next poll instead of
         // being transmitted into the void.
-        let fp_advertised = poll_source.is_some_and(|address| {
-            self.src_match_written
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
-                .contains(address)
-        });
+        let fp_advertised =
+            poll_source.is_some_and(|address| self.src_match_written.lock().contains(address));
 
         let delivered =
             fp_advertised && self.deliver_indirect_transaction(source_eui64, source_nwk);
@@ -113,16 +102,18 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         source_eui64: Option<Eui64>,
         source_nwk: Option<Nwk>,
     ) -> bool {
-        let outcome = self.core().mac.indirect_queue.extract(
-            source_eui64,
-            source_nwk,
-            Instant::now().into_std(),
-        );
+        let outcome =
+            self.core()
+                .mac
+                .indirect_queue
+                .extract(source_eui64, source_nwk, self.core_now());
 
         for (destination, transaction) in outcome.expired {
-            let _ = transaction
-                .completion
-                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
+            self.resolve_outcome(
+                transaction.completion,
+                None,
+                Err(ZigbeeStackError::IndirectExpired { destination }),
+            );
         }
 
         let Some(delivery) = outcome.delivery else {
@@ -146,31 +137,54 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         true
     }
 
-    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectCompletion>) {
+    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectFrame, TxOutcome>) {
         let Delivery {
             destination,
             transaction,
             more_pending,
         } = delivery;
 
-        let mut frame = transaction.frame.clone();
+        // Finish a deferred NWK frame now, at delivery time: this is where its frame
+        // counter is assigned (via `encrypt_nwk_frame`), just before the frame hits the
+        // air, rather than when it was queued. The transaction is left intact (we clone
+        // out of it) so a failed transmit can requeue the plaintext and earn a fresh
+        // counter on the next poll.
+        let mut frame = match &transaction.frame.payload {
+            IndirectPayload::Deferred {
+                nwk_frame,
+                next_hop,
+                security,
+            } => self.finish_unicast_nwk_frame(nwk_frame.clone(), *next_hop, *security),
+            IndirectPayload::Final(frame) => frame.clone(),
+        };
+
         if more_pending {
-            set_frame_pending(&mut frame);
+            match frame {
+                Ieee802154Frame::Data(ref mut f) => f.header.frame_control.frame_pending = true,
+                Ieee802154Frame::Ack(ref mut f) => f.header.frame_control.frame_pending = true,
+                Ieee802154Frame::Beacon(ref mut f) => f.header.frame_control.frame_pending = true,
+                Ieee802154Frame::Command(ref mut f) => f.header.frame_control.frame_pending = true,
+            }
         }
 
-        // Indirect delivery answers a sleepy child's poll within macResponseWaitTime — a
-        // deadline-bound path, so it takes the radio ahead of the baseline backlog.
+        // Indirect delivery answers a sleepy child's poll within `macResponseWaitTime`
+        let raw_frame = Ieee802154Frame::from_bytes_without_fcs(&frame.to_bytes_without_fcs())
+            .expect("a built indirect frame round-trips through bytes");
+
         match self
-            .send_802154_frame(frame, TxPriority::STACK_CRITICAL)
+            .send(
+                SendKind::Raw { frame: raw_frame },
+                TxPriority::STACK_CRITICAL,
+            )
             .await
         {
             Ok(()) => {
-                let _ = transaction.completion.send(Ok(()));
+                self.resolve_outcome(transaction.completion, None, Ok(()));
                 self.remove_indirect_queue_if_empty(destination);
             }
             // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
             // so a failed transmit goes back to the head of the queue for the next poll
-            Err(err) if Instant::now().into_std() < transaction.expires_at => {
+            Err(err) if self.core_now() < transaction.expires_at => {
                 tracing::warn!("Indirect transmit to {destination:?} failed ({err}), requeueing");
                 self.core()
                     .mac
@@ -178,7 +192,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                     .requeue(destination, transaction);
             }
             Err(err) => {
-                let _ = transaction.completion.send(Err(err));
+                self.resolve_outcome(transaction.completion, None, Err(err));
                 self.remove_indirect_queue_if_empty(destination);
             }
         }
@@ -199,9 +213,11 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         }
 
         for (destination, transaction) in dropped {
-            let _ = transaction
-                .completion
-                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
+            self.resolve_outcome(
+                transaction.completion,
+                None,
+                Err(ZigbeeStackError::IndirectExpired { destination }),
+            );
         }
 
         self.src_match_sync.notify_one();
@@ -239,10 +255,16 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            let frame =
-                arc_self.finish_unicast_nwk_frame(nwk_frame, nwk, NwkSecurityMode::NetworkKey);
+            let frame = IndirectFrame {
+                poll_address: destination,
+                payload: IndirectPayload::Deferred {
+                    nwk_frame,
+                    next_hop: nwk,
+                    security: NwkSecurityMode::NetworkKey,
+                },
+            };
 
-            if let Err(err) = arc_self.queue_indirect_frame(destination, frame).await {
+            if let Err(err) = arc_self.queue_indirect_frame(frame).await {
                 tracing::debug!("Queued leave to {nwk:?} was not extracted: {err}");
             }
         });
@@ -287,10 +309,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .set_frame_pending_table(&short, &extended)
             .await?;
 
-        *self
-            .src_match_written
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap() = table;
+        *self.src_match_written.lock() = table;
 
         Ok(())
     }
@@ -306,7 +325,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
             match self.next_maintenance_deadline() {
                 Some(deadline) => {
-                    let _ = timeout_at(deadline, self.maintenance_wake.notified()).await;
+                    let _ = self
+                        .timeout_at_core(deadline, self.maintenance_wake.notified())
+                        .await;
                 }
                 None => self.maintenance_wake.notified().await,
             }
@@ -315,30 +336,15 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     /// The earliest deadline the maintenance task has to act on: an indirect
     /// transaction expiry or a child keepalive timeout.
-    fn next_maintenance_deadline(&self) -> Option<Instant> {
-        let next_expiry = self
-            .core()
-            .mac
-            .indirect_queue
-            .next_expiry()
-            .map(Instant::from_std);
-
-        let next_eviction = self
-            .core()
-            .nib
-            .neighbors
-            .next_child_timeout()
-            .map(Instant::from_std);
+    fn next_maintenance_deadline(&self) -> Option<CoreInstant> {
+        let next_expiry = self.core().mac.indirect_queue.next_expiry();
+        let next_eviction = self.core().nib.neighbors.next_child_timeout();
 
         [next_expiry, next_eviction].into_iter().flatten().min()
     }
 
     fn expire_indirect_transactions(&self) {
-        let expired = self
-            .core()
-            .mac
-            .indirect_queue
-            .expire(Instant::now().into_std());
+        let expired = self.core().mac.indirect_queue.expire(self.core_now());
 
         if expired.is_empty() {
             return;
@@ -346,9 +352,11 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
         for (destination, transaction) in expired {
             tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
-            let _ = transaction
-                .completion
-                .send(Err(ZigbeeStackError::IndirectExpired { destination }));
+            self.resolve_outcome(
+                transaction.completion,
+                None,
+                Err(ZigbeeStackError::IndirectExpired { destination }),
+            );
         }
 
         self.src_match_sync.notify_one();
@@ -359,7 +367,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .core()
             .nib
             .neighbors
-            .evict_timed_out_children(Instant::now().into_std());
+            .evict_timed_out_children(self.core_now());
 
         for (eui64, nwk) in evicted {
             tracing::warn!("Child {eui64:?} ({nwk:?}) timed out without a keepalive, evicting");
@@ -369,7 +377,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             self.drop_indirect_transactions(Some(eui64), nwk);
             self.core().nib.routing.remove_route(nwk);
 
-            let _ = self.notification_tx.send(ZigbeeNotification::DeviceLeft {
+            self.push_notification(ZigbeeNotification::DeviceLeft {
                 nwk,
                 ieee: Some(eui64),
                 reason: DeviceLeaveReason::KeepaliveTimeout,

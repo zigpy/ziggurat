@@ -1,26 +1,31 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
+use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
+use crate::signal::Signal;
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
-use tokio::time::{sleep, timeout};
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{
-    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, ResetEvent, RxFrame, TxFrame, TxResult,
+    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult,
 };
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::aps::frame::{ApsAckFrame, ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 
 use thiserror::Error;
-use tokio::time::error::Elapsed;
 
-use parking_lot::{Mutex, MutexGuard};
-use std::collections::HashMap;
-use std::future::Future;
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Weak};
-use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot};
-use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant};
+use crate::sync::{AsyncMutex, Mutex, MutexGuard, Notify};
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
+use alloc::string::String;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::future::Future;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+use core::time::Duration;
+use ziggurat_zigbee::nwk::frame::{EncryptedNwkFrame, NwkFrame};
 
 mod aps;
 mod indirect;
@@ -31,7 +36,6 @@ mod nwk;
 mod route;
 mod zdp;
 
-pub use ziggurat_phy::TxPriority;
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use ziggurat_zigbee::constants::{
@@ -46,9 +50,6 @@ pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
 
-/// Hard deadline for acquiring a lock. Anything exceeding this is an error.
-const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(10);
-
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
 const RESET_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(2);
 const RESET_ATTEMPTS: u32 = 5;
@@ -58,6 +59,13 @@ const RADIO_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// counter, so that its persisted copy never lags far behind.
 const FRAME_COUNTER_NOTIFY_INTERVAL: u32 = 100;
 
+/// Upper bound on the unsent notification queue. The drainer stalls whenever the client
+/// stops reading the serial/WS link (e.g. a disconnected client), but the stack keeps
+/// producing events from live mesh traffic; without a ceiling the queue grows until it
+/// exhausts the heap (fatal on the MCU). When full we drop the oldest event: a client
+/// that wasn't reading has already missed it and re-syncs on reconnect.
+const NOTIFICATION_QUEUE_CAP: usize = 64;
+
 #[derive(Error, Debug)]
 pub enum ZigbeeStackError {
     #[error("route discovery timed out")]
@@ -66,6 +74,8 @@ pub enum ZigbeeStackError {
     RouteDiscoveryNoEntry,
     #[error("route not active after discovery completed")]
     RouteInactiveAfterDiscovery,
+    #[error("no route to destination and route discovery is suppressed")]
+    RouteDiscoverySuppressed,
     #[error("next hop {next_hop:?} did not ACK")]
     NwkNoAck { next_hop: Ieee802154Address },
     #[error("transmit rejected due to CCA failure")]
@@ -84,6 +94,19 @@ pub enum ZigbeeStackError {
     Radio(#[from] RadioError),
 }
 
+/// Transmit scheduling priority. Higher transmits first when the radio is contended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TxPriority(pub i8);
+
+impl TxPriority {
+    pub const BACKGROUND: Self = Self(-2);
+    pub const USER_LOW: Self = Self(-1);
+    pub const USER_NORMAL: Self = Self(0);
+    pub const USER_HIGH: Self = Self(1);
+    pub const USER_CRITICAL: Self = Self(2);
+    pub const STACK_CRITICAL: Self = Self(3);
+}
+
 /// How an outgoing NWK frame is secured. Frames carrying the network key to a joining
 /// device are sent without NWK security; the APS payload is encrypted instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +122,7 @@ pub enum SendMode {
     /// lookup (and route discovery suppressed). Used for frames to a one-hop neighbor,
     /// e.g. delivering the network key to a joining device.
     Direct,
-    /// Resolve the next hop through the routing layer — the route table or an applicable
+    /// Resolve the next hop through the routing layer: the route table or an applicable
     /// source route, discovering a route first if none is known.
     Route,
 }
@@ -203,11 +226,11 @@ pub struct NetworkConfig {
 /// cancelled when another device reported the same conflict first.
 #[derive(Debug, Clone, Copy)]
 pub struct AddressConflict {
-    pub handled_at: Instant,
+    pub handled_at: CoreInstant,
     pub heard_from_network: bool,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ApsAckData {
     pub src: Nwk,
     pub destination_endpoint: Option<u8>,
@@ -230,17 +253,153 @@ impl ApsAckData {
     }
 }
 
-/// Resolves an indirect transaction with its transmit result on extraction, or an
-/// error on expiry or drop.
-pub type IndirectCompletion = oneshot::Sender<Result<(), ZigbeeStackError>>;
+/// The pending half of a transmit's outcome.
+pub type TxCompletion = Signal<Result<(), ZigbeeStackError>>;
 
-/// The end-to-end delivery confirmation of a transmitted APS frame, pending until the
-/// destination's APS ack arrives. Resolved via [`ZigbeeStack::wait_aps_ack`].
+/// The client's request id, supplied to `send_aps` and echoed back in its confirmation.
+pub type RequestId = u32;
+
+/// Where a transmit's terminal outcome is reported.
 #[derive(Debug)]
-pub struct ApsAckWaiter {
-    pub(crate) receiver: oneshot::Receiver<()>,
-    pub(crate) timeout: Duration,
-    pub(crate) ack_data: ApsAckData,
+pub enum TxOutcome {
+    /// Nobody is waiting; a failure is only logged (internal background sends).
+    Discard,
+    /// Resolve an awaiting caller's signal (internal awaiters).
+    Signal(TxCompletion),
+    /// Confirm an application send by `request_id`. `aps_ack` present means the end-to-end
+    /// APS ack is the confirmation: this hop succeeding is silent, its failure fails
+    /// the send; absent means next-hop acceptance is itself the confirmation.
+    Confirm {
+        request_id: RequestId,
+        aps_ack: Option<ApsAckData>,
+    },
+}
+
+/// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
+/// ack, confirmed (or timed out) as a [`ZigbeeNotification::SendConfirm`] carrying
+/// `request_id`.
+#[derive(Debug)]
+pub struct PendingApsAck {
+    pub(crate) request_id: RequestId,
+    pub(crate) deadline: CoreInstant,
+}
+
+/// A transmit queued for the single sender task ([`ZigbeeStack::sender_task`]). The NWK
+/// frame is unencrypted: the sender assigns the frame counter at dequeue.
+#[derive(Debug)]
+pub struct SendRequest {
+    seq: u32,
+    priority: TxPriority,
+    pub(crate) kind: SendKind,
+    pub(crate) outcome: TxOutcome,
+}
+
+#[derive(Debug)]
+pub(crate) enum SendKind {
+    Unicast {
+        nwk_frame: NwkFrame,
+        next_hop: Nwk,
+        security: NwkSecurityMode,
+        /// NWK-layer retries left after the current attempt. Seeded from
+        /// `Tunables::unicast_retries`; a failed attempt with retries remaining is
+        /// re-enqueued (decremented) by the unicast-retry reactor rather than slept on
+        /// in the sender, so the single sender task never blocks on a retry delay.
+        attempts_remaining: u8,
+    },
+    Broadcast {
+        nwk_frame: NwkFrame,
+        security: NwkSecurityMode,
+    },
+    /// An already-finished 802.15.4 frame (a beacon response, or an indirect poll
+    /// delivery): transmitted as-is, only the MAC sequence number assigned at dequeue.
+    Raw { frame: Ieee802154Frame },
+}
+
+/// A unicast frame queued because its destination has no known route.
+///
+/// Held in [`State::pending_routes`] until route discovery resolves. The NWK sequence
+/// number is already assigned; the frame counter is still assigned at dequeue.
+#[derive(Debug)]
+pub struct PendingFrame {
+    pub(crate) nwk_frame: NwkFrame,
+    pub(crate) security: NwkSecurityMode,
+    pub(crate) priority: TxPriority,
+    pub(crate) outcome: TxOutcome,
+}
+
+/// All frames waiting on one destination's route discovery.
+///
+/// Discovery is started once per destination and the whole bucket is released or
+/// discarded together, so ten frames to one device ride a single discovery.
+#[derive(Debug)]
+pub struct PendingRoute {
+    pub(crate) frames: Vec<PendingFrame>,
+    /// Discoveries left before the bucket is discarded. Seeded from
+    /// `Tunables::pending_route_discovery_attempts` and decremented on each timeout.
+    pub(crate) attempts_remaining: u8,
+}
+
+/// A broadcast awaiting retransmission, held by the broadcast-retransmit reactor.
+///
+/// Spec 3.6.6: a broadcast is rebroadcast until its passive-ack quorum is heard or its
+/// attempts run out. This holds the frame to retransmit and the schedule; the passive-ack
+/// contract itself lives in the sans-io [`Broadcasts`] table.
+#[derive(Debug)]
+pub struct PendingBroadcast {
+    pub(crate) nwk_frame: NwkFrame,
+    pub(crate) security: NwkSecurityMode,
+    pub(crate) priority: TxPriority,
+    /// Retransmissions left before the broadcast is given up on.
+    pub(crate) attempts_remaining: u8,
+    /// When the next retransmission is due, unless the quorum is heard first.
+    pub(crate) next_attempt: CoreInstant,
+    /// An application send awaiting confirmation: `SendConfirm { via: Quorum }` when the
+    /// passive-ack quorum is heard, or `Failed` when attempts run out.
+    pub(crate) request_id: Option<RequestId>,
+}
+
+/// A unicast awaiting re-transmission after a failed attempt, held by the unicast-retry
+/// reactor ([`ZigbeeStack::unicast_retry_task`]).
+///
+/// Pulling the NWK retry delay out of the sender task is what keeps the single sender
+/// from ever sleeping mid-queue: a failed unicast is parked here and re-enqueued once
+/// its delay elapses, so the radio keeps draining other frames in the meantime. The
+/// frame is held as plaintext (no aux header / counter yet) so the next attempt earns
+/// a fresh frame counter at dequeue, keeping on-air order equal to counter order. The
+/// completion rides along and is resolved when the frame finally succeeds or exhausts
+/// its attempts.
+#[derive(Debug)]
+pub struct PendingUnicastRetry {
+    pub(crate) nwk_frame: NwkFrame,
+    pub(crate) next_hop: Nwk,
+    pub(crate) security: NwkSecurityMode,
+    pub(crate) priority: TxPriority,
+    /// Attempts left after the one that just failed.
+    pub(crate) attempts_remaining: u8,
+    /// When the re-enqueue is due.
+    pub(crate) next_attempt: CoreInstant,
+    pub(crate) outcome: TxOutcome,
+}
+
+impl PartialEq for SendRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.seq == other.seq
+    }
+}
+impl Eq for SendRequest {}
+impl Ord for SendRequest {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Max-heap: higher priority first; within a priority, the earlier (lower) seq
+        // wins, so equal-priority frames drain in FIFO order.
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+impl PartialOrd for SendRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// The NWK Information Base (spec Table 3-66): the network layer's mutable attributes
@@ -282,6 +441,45 @@ pub struct Aib {
     pub aps_security: ApsSecurity,
 }
 
+/// A frame queued for indirect delivery to a sleepy device, together with the address it
+/// is queued under (802.15.4 spec 6.7.3).
+///
+/// `poll_address` is the address the device polls with, which a MAC Data Request is
+/// matched against and so the indirect queue's key: the extended address before a device
+/// has joined (it has no short address yet), the short address once it has. It is neither
+/// the frame's NWK destination (`nwk_header.destination`) nor a [`Deferred`] payload's
+/// `next_hop` (the short address used to build the MAC header) — the same device can wear
+/// all three.
+///
+/// [`Deferred`]: IndirectPayload::Deferred
+#[derive(Debug)]
+pub struct IndirectFrame {
+    pub poll_address: Ieee802154Address,
+    pub payload: IndirectPayload,
+}
+
+/// The payload of an [`IndirectFrame`].
+///
+/// A NWK frame to a sleepy child is queued as [`Deferred`](Self::Deferred): it is
+/// finished (encrypted, with a fresh NWK frame counter assigned) only when the child
+/// polls, not when it is queued. A transaction can wait in the indirect queue for
+/// seconds; assigning the counter at enqueue would let the sender hand out higher
+/// counters in the meantime, so the frame would reach the air with a counter below
+/// ones already sent and the destination's replay window would reject it. Finishing at
+/// delivery keeps the counter in on-air order.
+///
+/// Frames with no NWK layer to encrypt (a MAC association response) are queued
+/// [`Final`](Self::Final) and transmitted as-is.
+#[derive(Debug)]
+pub enum IndirectPayload {
+    Deferred {
+        nwk_frame: NwkFrame,
+        next_hop: Nwk,
+        security: NwkSecurityMode,
+    },
+    Final(Ieee802154Frame<EncryptedNwkFrame>),
+}
+
 /// Host-side mirror of the MAC PIB attributes we drive on the RCP. The MAC sub-layer
 /// physically lives on the radio coprocessor; these are our authoritative copies.
 #[derive(Debug)]
@@ -291,17 +489,10 @@ pub struct MacState {
     pub pan_id: PanId,
     /// Frames awaiting extraction by a polling device. Completions are resolved
     /// with the transmit result on extraction, or an error on expiry or drop.
-    pub indirect_queue: IndirectQueue<IndirectCompletion>,
+    pub indirect_queue: IndirectQueue<IndirectFrame, TxOutcome>,
 }
 
 /// The driver's unified mutable protocol state, behind a single lock.
-///
-/// An operation spanning several layers takes one guard instead of juggling a lock per
-/// field (and can never deadlock against itself on lock ordering). This is also the
-/// shape the eventual no_std core will own directly — there with no lock, here behind
-/// one `Mutex` for the threaded driver. Spec attributes are grouped by their
-/// information base ([`Nib`],[`Aib`], [`MacState`]); a field directly on the core is,
-/// by that absence, one of our own constructs with no spec information-base home.
 #[derive(Debug)]
 pub struct ZigbeeCore {
     pub nib: Nib,
@@ -311,20 +502,22 @@ pub struct ZigbeeCore {
     /// Deadline until which the coordinator advertises `association_permit` in its
     /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
     /// renewals extend the window. `None` or past means direct joins are denied.
-    pub permitting_joins_until: Option<Instant>,
+    pub permitting_joins_until: Option<CoreInstant>,
 
     /// Deadline until which the trust center authorizes new devices joining through a
     /// router. Opened on every permit, independent of the beacon window, so a steered
     /// join completes while the coordinator's own beacon stays closed. Rejoins are
     /// never gated by this.
-    pub trust_center_joins_until: Option<Instant>,
+    pub trust_center_joins_until: Option<CoreInstant>,
+
+    /// While set and in the future, the beacon-spam reactor sends a beacon every 5 ms
+    /// (the `hack_beacon_spam_duration` hack). Each beacon request extends it.
+    pub beacon_spam_until: Option<CoreInstant>,
 }
 
-/// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It exists
-/// to encode the single-lock discipline in one place:
-///
-/// - It is `!Send` so holding it across an `.await` is a compile-time error.
-/// - It is acquired with a [`LOCK_ACQUIRE_TIMEOUT`] so we fail at runtime if this lapses.
+/// Guard over the protocol [`ZigbeeCore`], obtained from [`ZigbeeStack::core`]. It encodes
+/// the single-lock discipline: it is `!Send`, so holding it across an `.await` is a
+/// compile-time error.
 pub struct CoreGuard<'a>(MutexGuard<'a, ZigbeeCore>);
 
 impl Deref for CoreGuard<'_> {
@@ -346,18 +539,20 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    /// Async I/O bookkeeping, kept out of the core so transmit completions and client
-    /// notifications never contend with protocol work:
-    pub pending_aps_acks: Mutex<HashMap<ApsAckData, oneshot::Sender<()>>>,
-    pub pending_route_notifications: Mutex<HashMap<Nwk, broadcast::Sender<()>>>,
-    pub address_conflicts: Mutex<HashMap<Nwk, AddressConflict>>,
+    pub pending_aps_acks: Mutex<BTreeMap<ApsAckData, PendingApsAck>>,
+    pub pending_routes: Mutex<BTreeMap<Nwk, PendingRoute>>,
+    /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
+    pub pending_broadcasts: Mutex<BTreeMap<(Nwk, u8), PendingBroadcast>>,
+    /// Unicasts awaiting re-transmission after a failed attempt. Unordered: each entry
+    /// is an independent in-flight frame (no dedup key like broadcasts have), drained
+    /// by the unicast-retry reactor when due.
+    pub pending_unicast_retries: Mutex<Vec<PendingUnicastRetry>>,
+    pub address_conflicts: Mutex<BTreeMap<Nwk, AddressConflict>>,
 
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
     /// the receipt time; an inbound data frame matching a live entry is a retransmission
     /// to be acknowledged but not delivered to the application a second time.
-    pub aps_duplicates: Mutex<HashMap<(Nwk, u8), Instant>>,
-
-    pub start_time: Instant,
+    pub aps_duplicates: Mutex<BTreeMap<(Nwk, u8), CoreInstant>>,
 
     // We intentionally violate the spec with these options
     //
@@ -373,6 +568,10 @@ pub struct State {
     /// Instead of caching route information, always perform route discovery. This is
     /// much slower but ensures that routing logic is always followed.
     pub hack_force_route_discovery: bool,
+    /// While permitting joins, spray a beacon every 5 ms for this long after each beacon
+    /// request, to out-compete neighbouring networks that permanently permit joins. Zero
+    /// disables it (a single beacon per request, the spec behaviour).
+    pub hack_beacon_spam_duration: Duration,
 
     pub role: NwkDeviceType,
     pub capability_information: NwkCapabilityInformation,
@@ -451,16 +650,19 @@ impl State {
                 },
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
+                beacon_spam_until: None,
             }),
-            pending_aps_acks: Mutex::new(HashMap::new()),
-            pending_route_notifications: Mutex::new(HashMap::new()),
-            address_conflicts: Mutex::new(HashMap::new()),
-            aps_duplicates: Mutex::new(HashMap::new()),
-            start_time: Instant::now(),
+            pending_aps_acks: Mutex::new(BTreeMap::new()),
+            pending_routes: Mutex::new(BTreeMap::new()),
+            pending_broadcasts: Mutex::new(BTreeMap::new()),
+            pending_unicast_retries: Mutex::new(Vec::new()),
+            address_conflicts: Mutex::new(BTreeMap::new()),
+            aps_duplicates: Mutex::new(BTreeMap::new()),
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
             hack_force_route_discovery: false,
+            hack_beacon_spam_duration: Duration::from_millis(100),
 
             role: config.role,
             capability_information: NwkCapabilityInformation {
@@ -554,6 +756,31 @@ pub enum ZigbeeNotification {
         frame_counter: u32,
         key_id: String,
     },
+    SendConfirm {
+        request_id: RequestId,
+        result: SendResult,
+    },
+    ApsAckConfirm {
+        request_id: RequestId,
+        result: ApsAckResult,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum SendResult {
+    /// Handed off; `next_hop` is the neighbour it went to, `None` for a broadcast.
+    Confirmed {
+        next_hop: Option<Nwk>,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ApsAckResult {
+    Acked,
+    Failed { reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -575,19 +802,26 @@ pub struct NetworkBeacon {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStack<P: RadioPhy> {
+pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime> {
     self_weak: Weak<Self>,
+
+    /// The runtime clock baseline. `now` is converted to the sans-io [`CoreInstant`]
+    /// (microseconds since this instant) at the one boundary that reads the clock.
+    start_time: R::Instant,
 
     pub state: State,
     pub config: NetworkConfig,
     pub tunables: Tunables,
     pub radio: Arc<P>,
-    pub notification_tx: broadcast::Sender<ZigbeeNotification>,
-    pub raw_frame_rx: AsyncMutex<mpsc::Receiver<RxFrame>>,
-    pub reset_rx: AsyncMutex<mpsc::Receiver<ResetEvent>>,
-    /// Installed for the duration of a network scan; the receive loop forwards decoded
-    /// beacons here while it is set.
-    network_scan_tx: Mutex<Option<mpsc::Sender<NetworkBeacon>>>,
+    pub notifications: Mutex<VecDeque<ZigbeeNotification>>,
+    notification_wake: Notify,
+    pub raw_frame_rx: AsyncMutex<P::RxStream>,
+    pub reset_rx: AsyncMutex<P::ResetStream>,
+    /// Whether a network scan is collecting. The receive loop only queues beacons while
+    /// this is set, so stray beacons outside a scan are dropped.
+    scan_active: AtomicBool,
+    pub scan_beacons: Mutex<VecDeque<NetworkBeacon>>,
+    scan_beacon_wake: Notify,
 
     /// Wakes the task that rewrites the RCP source address match table whenever the
     /// set of devices with queued indirect transactions changes
@@ -597,7 +831,7 @@ pub struct ZigbeeStack<P: RadioPhy> {
     pub(crate) src_match_written: Mutex<SrcMatchTable>,
     /// When the last parent announcement was received; ours is deferred to avoid a
     /// network-wide broadcast storm (spec 2.4.3.1.12.2)
-    pub(crate) parent_annce_received: Mutex<Option<Instant>>,
+    pub(crate) parent_annce_received: Mutex<Option<CoreInstant>>,
 
     /// Wakes the MTORR scheduler before its max interval when accumulated route
     /// errors or delivery failures cross their thresholds
@@ -606,60 +840,152 @@ pub struct ZigbeeStack<P: RadioPhy> {
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
     pub(crate) link_status_received: Notify,
-    /// Signaled on every recorded broadcast passive ack, so retransmission loops can
-    /// re-evaluate completeness reactively instead of sleeping out the window
-    pub(crate) broadcast_acked: Notify,
+    /// Wakes the broadcast-retransmit reactor: signaled on every recorded passive ack
+    /// and whenever a broadcast is queued for retransmission.
+    pub(crate) broadcast_retransmit_wake: Notify,
+    /// Wakes the unicast-retry reactor whenever a failed unicast is parked for a later
+    /// re-enqueue.
+    pub(crate) unicast_retry_wake: Notify,
+    /// Wakes the APS-ack timeout reactor when a fire-and-forget send registers a pending
+    /// ack with a deadline.
+    pub(crate) aps_ack_wake: Notify,
+    /// Wakes the beacon-spam reactor when a beacon request opens its spray window.
+    pub(crate) beacon_spam_wake: Notify,
     /// Wakes the maintenance task when a new indirect transaction or child entry
     /// could move the earliest expiry deadline closer
     pub(crate) maintenance_wake: Notify,
 
-    /// All tasks spawned by the stack, so that a replaced stack can be fully stopped:
-    /// a leaked background task would keep the replaced stack processing frames and
-    /// transmitting alongside its successor
-    background_tasks: Mutex<JoinSet<()>>,
+    /// Outgoing frames awaiting the single sender task, ordered by priority then FIFO.
+    /// The sender encrypts at dequeue, so frame-counter order matches on-air order.
+    pub send_queue: Mutex<BinaryHeap<SendRequest>>,
+    /// Wakes the sender task when a frame is enqueued.
+    pub(crate) send_wake: Notify,
+    /// Wakes the pending-route reactor when a frame is queued awaiting a route, or when a
+    /// route is established for a destination with queued frames.
+    pub(crate) pending_route_wake: Notify,
+    /// Monotonic tiebreaker giving equal-priority sends FIFO order in `send_queue`.
+    pub(crate) send_seq: AtomicU32,
+
+    /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
+    /// stopped: a leaked background task would keep the replaced stack processing frames
+    /// and transmitting alongside its successor.
+    spawner: R::Spawner,
+
+    /// Per-task cancel signals, keyed by task id.
+    cancels: Mutex<BTreeMap<u32, Arc<Notify>>>,
+    /// Hands each spawned task a unique id for the `cancels` map.
+    next_task_id: AtomicU32,
+    /// Woken whenever a task removes itself from `cancels`, so `shutdown` can await the
+    /// set draining to empty.
+    tasks_drained: Notify,
 }
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Briefly lock the protocol core. See [`CoreGuard`] for the locking discipline the
     /// returned guard encodes.
     fn core(&self) -> CoreGuard<'_> {
-        CoreGuard(self.state.core.try_lock_for(LOCK_ACQUIRE_TIMEOUT).unwrap())
+        CoreGuard(self.state.core.lock())
+    }
+
+    /// The sans-io core's clock reads as microseconds since this stack started. This
+    /// converts the runtime clock to it, at the one boundary where the driver reads the
+    /// clock; every driver-side deadline is then a [`CoreInstant`] and no reverse
+    /// conversion is needed (deadlines are slept as a duration-from-now).
+    fn to_core_instant(&self, t: R::Instant) -> CoreInstant {
+        let micros = t.saturating_duration_since(self.start_time).as_micros();
+        CoreInstant::from_micros(micros as u64)
+    }
+
+    fn core_now(&self) -> CoreInstant {
+        self.to_core_instant(R::now())
+    }
+
+    /// Sleep until a [`CoreInstant`] deadline, computed as the remaining duration from
+    /// now. Past deadlines resolve immediately.
+    async fn sleep_until_core(&self, deadline: CoreInstant) {
+        R::sleep(deadline.saturating_duration_since(self.core_now())).await;
+    }
+
+    /// Run `future`, failing with [`Elapsed`] if a [`CoreInstant`] deadline passes first.
+    async fn timeout_at_core<F>(
+        &self,
+        deadline: CoreInstant,
+        future: F,
+    ) -> Result<F::Output, Elapsed>
+    where
+        F: Future + Send,
+        F::Output: Send,
+    {
+        R::timeout(deadline.saturating_duration_since(self.core_now()), future).await
     }
 
     pub fn new(
         radio: Arc<P>,
         config: NetworkConfig,
         tunables: Tunables,
-    ) -> (Arc<Self>, broadcast::Receiver<ZigbeeNotification>) {
-        let (notification_tx, notification_rx) = broadcast::channel::<ZigbeeNotification>(32);
+        spawner: R::Spawner,
+    ) -> Arc<Self> {
+        let raw_frame_rx = radio.subscribe_rx();
+        let reset_rx = radio.subscribe_reset();
 
-        let (raw_frame_tx, raw_frame_rx) = mpsc::channel::<RxFrame>(32);
-        radio.set_rx_sink(raw_frame_tx);
-
-        let (reset_tx, reset_rx) = mpsc::channel::<ResetEvent>(8);
-        radio.set_reset_sink(reset_tx);
-
-        let arc_stack = Arc::new_cyclic(|weak_self| Self {
+        Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
+            start_time: R::now(),
             state: State::new(&config, &tunables),
             config,
             tunables,
             radio,
-            notification_tx,
+            notifications: Mutex::new(VecDeque::new()),
+            notification_wake: Notify::new(),
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
-            network_scan_tx: Mutex::new(None),
+            scan_active: AtomicBool::new(false),
+            scan_beacons: Mutex::new(VecDeque::new()),
+            scan_beacon_wake: Notify::new(),
             src_match_sync: Notify::new(),
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
             mtorr_kick: Notify::new(),
             link_status_received: Notify::new(),
-            broadcast_acked: Notify::new(),
+            broadcast_retransmit_wake: Notify::new(),
+            unicast_retry_wake: Notify::new(),
+            aps_ack_wake: Notify::new(),
+            beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
-            background_tasks: Mutex::new(JoinSet::new()),
-        });
+            send_queue: Mutex::new(BinaryHeap::new()),
+            send_wake: Notify::new(),
+            pending_route_wake: Notify::new(),
+            send_seq: AtomicU32::new(0),
+            spawner,
+            cancels: Mutex::new(BTreeMap::new()),
+            next_task_id: AtomicU32::new(0),
+            tasks_drained: Notify::new(),
+        })
+    }
 
-        (arc_stack, notification_rx)
+    /// Queue a network event and wake the notification drainer. Bounded: when the queue is
+    /// full (the client isn't draining the link) the oldest event is dropped rather than
+    /// growing the queue without bound, which would exhaust the heap on the MCU.
+    pub(crate) fn push_notification(&self, notification: ZigbeeNotification) {
+        let mut notifications = self.notifications.lock();
+        while notifications.len() >= NOTIFICATION_QUEUE_CAP {
+            notifications.pop_front();
+        }
+        notifications.push_back(notification);
+        drop(notifications);
+
+        self.notification_wake.notify_one();
+    }
+
+    /// Wait for and take all queued network events.
+    pub async fn next_notifications(&self) -> Vec<ZigbeeNotification> {
+        loop {
+            let batch: Vec<ZigbeeNotification> = self.notifications.lock().drain(..).collect();
+            if !batch.is_empty() {
+                return batch;
+            }
+            self.notification_wake.notified().await;
+        }
     }
 
     // This function intentionally holds locks across await points to maintain
@@ -727,7 +1053,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                             continue;
                         }
                         Ok(ApsFrame::Command(cmd)) => {
-                            self.handle_aps_command_frame(&nwk_frame, &cmd, None);
+                            self.handle_aps_command_frame(&nwk_frame, &cmd, None, None);
                             continue;
                         }
                         Ok(ApsFrame::EncryptedCommand(encrypted_cmd)) => {
@@ -740,7 +1066,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                         }
                     };
 
-                    tracing::debug!("Received APS data frame: {aps_frame:?}");
+                    tracing::trace!("Received APS data frame: {aps_frame:?}");
 
                     // Spec 2.2.8.4.2: a retransmission is still acknowledged so the
                     // sender stops, but must not be delivered to the application twice.
@@ -777,7 +1103,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                         rssi: packet.rssi,
                         data: aps_frame.asdu.to_vec(),
                     };
-                    let _ = self.notification_tx.send(notification);
+                    self.push_notification(notification);
                 }
                 ziggurat_ieee_802154::Ieee802154Frame::Ack(_ack_frame) => {}
                 ziggurat_ieee_802154::Ieee802154Frame::Beacon(beacon_frame) => {
@@ -806,7 +1132,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
             match Ieee802154Frame::from_bytes_without_fcs(&packet.psdu) {
                 Ok(frame) => {
-                    tracing::debug!("Received 802.15.4 frame: {frame:?}");
+                    tracing::trace!("Received 802.15.4 frame: {frame:?}");
                     return (packet, frame);
                 }
                 Err(e) => {
@@ -820,6 +1146,73 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     pub async fn start_network(&self) -> Result<(), ZigbeeStackError> {
         self.reset_radio().await?;
         self.apply_radio_configuration().await?;
+
+        // The single sender task drains the transmit queue; it must run before anything
+        // enqueues a frame (the initial link status broadcast below would otherwise
+        // block on a completion nobody resolves).
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.sender_task().await;
+        });
+
+        // Drains frames queued awaiting route discovery, and discards them when
+        // discovery is exhausted. Must run before anything can queue one.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.pending_route_task().await;
+        });
+
+        // Retransmits broadcasts until their passive-ack quorum is heard or attempts run
+        // out. Must run before anything can queue a broadcast.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.broadcast_retransmit_task().await;
+        });
+
+        // Re-enqueues failed unicasts after their retry delay, so the sender task never
+        // sleeps mid-queue. Must run before anything can queue a unicast.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.unicast_retry_task().await;
+        });
+
+        // Times out fire-and-forget APS sends whose ack never arrived, reporting the
+        // outcome as a notification.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.aps_ack_timeout_task().await;
+        });
+
+        // Sprays beacons while a beacon-spam window is open (the hack_beacon_spam_duration
+        // hack). Idle unless beacon requests open the window.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.beacon_spam_task().await;
+        });
 
         // To kick things off, send a link status broadcast. Silicon Labs routers will
         // "respond" to empty link status broadcasts proactively, independent of the
@@ -900,7 +1293,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         for attempt in 1..=RESET_ATTEMPTS {
             self.radio.reset().await?;
 
-            match timeout(RESET_NOTIFICATION_TIMEOUT, reset_rx.recv()).await {
+            match R::timeout(RESET_NOTIFICATION_TIMEOUT, reset_rx.recv()).await {
                 Ok(Some(event)) => {
                     tracing::info!("Radio reset complete: {:?}", event.reason);
                     return Ok(());
@@ -944,10 +1337,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
         self.radio.reconfigure(&config).await?;
 
-        *self
-            .src_match_written
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap() = table;
+        *self.src_match_written.lock() = table;
 
         Ok(())
     }
@@ -971,15 +1361,16 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
             while let Err(err) = self.apply_radio_configuration().await {
                 tracing::error!("Failed to reprogram the radio: {err}, retrying");
-                sleep(RADIO_RECOVERY_RETRY_INTERVAL).await;
+                R::sleep(RADIO_RECOVERY_RETRY_INTERVAL).await;
             }
 
             tracing::info!("Radio reprogrammed, resuming normal operation");
         }
     }
 
-    /// Decode a received beacon and, if a network scan is in flight, forward it to the
-    /// scan's collector. Beacons received outside a scan are dropped.
+    /// Decode a received beacon and, if a network scan is in flight, collect it into
+    /// the scan's outbox for the collector to drain. Beacons received outside a scan
+    /// are dropped.
     fn handle_beacon(
         &self,
         beacon: &ziggurat_ieee_802154::Ieee802154BeaconFrame,
@@ -987,11 +1378,12 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         lqi: u8,
         rssi: i8,
     ) {
-        let Some(tx) = self.network_scan_tx.lock().clone() else {
+        // Skip the decode entirely when no scan is collecting.
+        if !self.scan_active.load(AtomicOrdering::Relaxed) {
             return;
-        };
+        }
 
-        let payload = match ZigbeeBeacon::from_abstract_bits(&beacon.beacon_payload) {
+        let payload = match ZigbeeBeacon::from_abstract_bytes(&beacon.beacon_payload) {
             Ok(payload) => payload,
             Err(e) => {
                 tracing::debug!("Ignoring non-Zigbee beacon: {e:?}");
@@ -1007,7 +1399,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             return;
         };
 
-        let _ = tx.try_send(NetworkBeacon {
+        let network_beacon = NetworkBeacon {
             channel,
             source,
             pan_id,
@@ -1021,18 +1413,25 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             update_id: payload.update_id,
             lqi,
             rssi,
-        });
+        };
+
+        self.scan_beacons.lock().push_back(network_beacon);
+        self.scan_beacon_wake.notify_one();
     }
 
-    /// Active scan: broadcast a beacon request on each channel and collect the beacons.
-    pub async fn network_scan(
+    /// Open the beacon-collection window for an active scan.
+    pub fn begin_network_scan(&self) {
+        self.scan_beacons.lock().clear();
+        self.scan_active.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// Active scan: broadcast a beacon request on each channel and dwell to collect
+    /// beacons.
+    pub async fn run_network_scan(
         &self,
         channels: &[u8],
         duration_per_channel: Duration,
-        found: mpsc::Sender<NetworkBeacon>,
     ) -> Result<(), ZigbeeStackError> {
-        *self.network_scan_tx.lock() = Some(found);
-
         let beacon_request = self.beacon_request_psdu();
         let home_channel = self.core().mac.channel;
 
@@ -1050,35 +1449,45 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                         security_processed: true,
                     })
                     .await?;
-                sleep(duration_per_channel).await;
+                R::sleep(duration_per_channel).await;
             }
             // Leave the radio on the home channel before releasing it.
             radio.set_channel(home_channel).await
         }
         .await;
 
-        *self.network_scan_tx.lock() = None;
+        // Close the window and wake the drainer so it delivers the last beacons and stops.
+        self.scan_active.store(false, AtomicOrdering::Relaxed);
+        self.scan_beacon_wake.notify_one();
 
         result.map_err(Into::into)
     }
 
-    /// Performs an energy detect scan, sending the maximum RSSI seen on each channel to
-    /// `results` as that channel completes.
-    pub async fn energy_scan(
-        &self,
-        channels: &[u8],
-        duration_per_channel: Duration,
-        results: mpsc::Sender<(u8, i8)>,
-    ) -> Result<(), ZigbeeStackError> {
-        for &channel in channels {
-            let max_rssi = self
-                .radio
-                .energy_detect(channel, duration_per_channel)
-                .await?;
-            let _ = results.send((channel, max_rssi)).await;
+    /// Wait for and take beacons collected so far by the active scan. Drains any
+    /// remaining beacons even after the window closes, then returns empty once both
+    /// the window is closed.
+    pub async fn next_scan_beacons(&self) -> Vec<NetworkBeacon> {
+        loop {
+            let batch: Vec<NetworkBeacon> = self.scan_beacons.lock().drain(..).collect();
+            if !batch.is_empty() {
+                return batch;
+            }
+            if !self.scan_active.load(AtomicOrdering::Relaxed) {
+                return Vec::new();
+            }
+            self.scan_beacon_wake.notified().await;
         }
+    }
 
-        Ok(())
+    /// One channel of an energy-detect scan: the maximum RSSI seen on `channel`. The
+    /// manager loops over channels and streams the results; no radio state is held
+    /// between calls.
+    pub async fn energy_detect(
+        &self,
+        channel: u8,
+        duration: Duration,
+    ) -> Result<i8, ZigbeeStackError> {
+        Ok(self.radio.energy_detect(channel, duration).await?)
     }
 
     /// Retune the radio to a new channel, the coordinator's half of a network-wide
@@ -1096,57 +1505,53 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         self.core().nib.update_id = update_id;
     }
 
-    /// Spawns a task tied to the stack's lifetime: it is aborted on `shutdown`.
+    /// Spawns a task tied to the stack's lifetime: it is stopped on `shutdown`.
     pub fn spawn_tracked<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut tasks = self
-            .background_tasks
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap();
+        let id = self.next_task_id.fetch_add(1, AtomicOrdering::Relaxed);
+        let cancel = Arc::new(Notify::new());
+        self.cancels.lock().insert(id, cancel.clone());
 
-        // A completed task's entire cell is retained until it is reaped from the
-        // set: drain here so the set tracks live tasks instead of growing by one
-        // dead entry per spawn
-        while let Some(result) = tasks.try_join_next() {
-            if let Err(e) = result
-                && e.is_panic()
+        // Hold a weak handle so a task that outlives `shutdown` (or finishes naturally) can
+        // still deregister without keeping the stack alive.
+        let weak = self.self_weak.clone();
+
+        self.spawner.spawn(Box::pin(async move {
+            // Run the task until it finishes or `shutdown` cancels it. Dropping the task
+            // future at an await point is safe: the stack never holds the blocking core
+            // lock across an await (enforced by `CoreGuard` being `!Send`).
             {
-                tracing::error!("Background task panicked: {e}");
+                let future = core::pin::pin!(future);
+                let cancelled = core::pin::pin!(cancel.notified());
+                let _ = futures::future::select(future, cancelled).await;
             }
-        }
 
-        tasks.spawn(future);
-    }
-
-    /// Spawns a tracked task that needs an owned handle to the stack.
-    fn spawn_tracked_self<F, Fut>(&self, f: F)
-    where
-        F: FnOnce(Arc<Self>) -> Fut,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let this = self
-            .self_weak
-            .upgrade()
-            .expect("stack dropped while running");
-
-        self.spawn_tracked(f(this));
+            if let Some(stack) = weak.upgrade() {
+                stack.cancels.lock().remove(&id);
+                stack.tasks_drained.notify_one();
+            }
+        }));
     }
 
     /// Stops all of the stack's tasks and waits for them to terminate, so that a
     /// replaced stack provably stops processing frames and transmitting before its
     /// successor takes over the shared Spinel client.
     pub async fn shutdown(&self) {
-        let mut tasks = std::mem::take(
-            &mut *self
-                .background_tasks
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap(),
-        );
+        // Cooperatively cancel every tracked task, then wait for each to deregister. This
+        // is what stops the tasks on embassy, where the spawner cannot abort them.
+        for cancel in self.cancels.lock().values() {
+            cancel.notify_one();
+        }
 
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
+        while !self.cancels.lock().is_empty() {
+            self.tasks_drained.notified().await;
+        }
+
+        // On executors that can abort (tokio), this also reaps the finished JoinSet
+        // entries; on embassy it is a no-op.
+        self.spawner.shutdown().await;
     }
 
     pub fn next_aps_counter(&self) -> u8 {
@@ -1160,11 +1565,9 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         let advance = self.core().nib.nwk_security.next_outgoing_frame_counter();
 
         if advance.should_persist {
-            let _ = self
-                .notification_tx
-                .send(ZigbeeNotification::FrameCounterUpdate {
-                    frame_counter: advance.value,
-                });
+            self.push_notification(ZigbeeNotification::FrameCounterUpdate {
+                frame_counter: advance.value,
+            });
         }
 
         advance.value

@@ -9,7 +9,6 @@ use tokio_serial::SerialStream;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::Eui64;
 
-use crate::priority_lock::PriorityLock;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -235,25 +234,6 @@ struct SpinelWriter {
     hdlc_scratch: Vec<u8>,
 }
 
-/// Radio transmit priority
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TxPriority(pub i8);
-
-impl TxPriority {
-    pub const BACKGROUND: Self = Self(-2);
-    pub const USER_LOW: Self = Self(-1);
-    pub const USER_NORMAL: Self = Self(0);
-    pub const USER_HIGH: Self = Self(1);
-    pub const USER_CRITICAL: Self = Self(2);
-    pub const STACK_CRITICAL: Self = Self(3);
-}
-
-impl Default for TxPriority {
-    fn default() -> Self {
-        Self::USER_NORMAL
-    }
-}
-
 #[derive(Debug)]
 pub struct SpinelClient {
     /// The reader half of the port, owned by the task spawned in `spawn_reader`.
@@ -262,12 +242,8 @@ pub struct SpinelClient {
     /// concurrent commands cannot interleave partial frames inside the byte stream.
     writer: AsyncMutex<SpinelWriter>,
     pub protocol: Arc<Mutex<SpinelProtocol>>,
-    /// Orders queued transmits among themselves; priority decides which goes first.
-    transmit_lock: PriorityLock<TxPriority>,
     /// Functional ownership of the radio (scan, reset recovery, channel retune), taken via
-    /// [`Self::lock_radio`]. A transmit locks it only for its send; an exclusive op holds it
-    /// throughout. Because transmits queue on `transmit_lock` first, an exclusive op waits
-    /// out only the in-flight frame, not the whole backlog.
+    /// [`Self::lock_radio`].
     exclusive_lock: AsyncMutex<()>,
     consecutive_timeouts: AtomicU32,
 }
@@ -285,7 +261,6 @@ impl SpinelClient {
                 hdlc_scratch: Vec::with_capacity(2 * SPINEL_FRAME_MAX_SIZE + 2),
             }),
             protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
-            transmit_lock: PriorityLock::new(),
             exclusive_lock: AsyncMutex::new(()),
             consecutive_timeouts: AtomicU32::new(0),
         }
@@ -552,14 +527,8 @@ impl SpinelClient {
     pub async fn transmit_frame(
         &self,
         tx_frame: &SpinelTxFrame,
-        priority: TxPriority,
     ) -> Result<SpinelStatus, SpinelError> {
-        // Wait our turn among transmits, then the radio-ownership gate. This order keeps
-        // the backlog on `transmit_lock`, so an exclusive op only outwaits the in-flight
-        // frame.
-        let _transmit_lock = self.transmit_lock.acquire(priority).await;
         let _exclusive_lock = self.exclusive_lock.lock().await;
-
         self.transmit_frame_inner(tx_frame).await
     }
 

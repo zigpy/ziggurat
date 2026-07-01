@@ -13,10 +13,45 @@ ziggurat-ieee-802154.workspace = true
 ziggurat-phy.workspace = true
 ziggurat-zigbee.workspace = true
 
-abstract-bits = "0.2.0"
+abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
 arbitrary-int = "2.1.1"
-tracing = "0.1"
-parking_lot = "0.12.4"
-rand = "0.10.1"
-thiserror = "2.0.12"
-tokio = { version = "1.43.0", features = ["rt", "macros", "time", "sync", "io-util"] }
+futures = { version = "0.3", default-features = false }
+tracing = { version = "0.1", default-features = false }
+thiserror = { version = "2.0.12", default-features = false }
+
+# Host (tokio) runtime backend.
+parking_lot = { version = "0.12.4", optional = true }
+rand = { version = "0.10.1", optional = true }
+tokio = { version = "1.43.0", features = [
+    "rt",
+    "macros",
+    "time",
+    "sync",
+    "io-util",
+], optional = true }
+
+# Embassy runtime adapter. The MCU binary provides the executor + arch (via esp-rtos), so
+# the base dependency pulls no arch feature; the `embassy-host` feature adds the std
+# executor so the same adapter can run on the host bridged to tokio.
+embassy-executor = { version = "0.10", optional = true }
+embassy-time = { version = "0.5", optional = true }
+embassy-sync = { version = "0.8", optional = true }
+spin = { version = "0.9", default-features = false, features = [
+    "spin_mutex",
+], optional = true }
+
+[features]
+default = ["tokio"]
+# The host runtime: tokio executor, parking_lot locks, OS randomness.
+tokio = ["dep:tokio", "dep:parking_lot", "dep:rand"]
+# The embassy runtime adapter (and its no_std-friendly sync primitives), for the MCU.
+# Mutually exclusive with `tokio` at the `sync`/`runtime`/`rng` seam.
+embassy = ["dep:embassy-executor", "dep:embassy-time", "dep:embassy-sync", "dep:spin"]
+# Run the embassy adapter on the host, bridged to a tokio reactor (for tests).
+embassy-host = [
+    "embassy",
+    "dep:tokio",
+    "embassy-executor/platform-std",
+    "embassy-executor/executor-thread",
+    "embassy-time/std",
+]

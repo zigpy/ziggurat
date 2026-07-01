@@ -70,7 +70,7 @@ mod test {
         };
 
         // The Zigbee beacon payload is exactly 15 bytes
-        let bytes = beacon.to_abstract_bits().unwrap();
+        let bytes = beacon.to_abstract_bytes().unwrap();
         assert_eq!(bytes, hex!("00 22 84 93cb3c0b 01449f3a ffffff 00").to_vec());
 
         let mut reader = BitReader::from(bytes.as_slice());

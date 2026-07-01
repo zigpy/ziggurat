@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
 
 use ziggurat_ieee_802154::types::{Eui64, Key};
 
@@ -11,7 +11,7 @@ enum NetworkKeyType {
 struct NwkSecurityDescriptor {
     key_seq_number: u8,
     outgoing_frame_counter: u32,
-    incoming_frame_counter_set: HashMap<Eui64, u32>,
+    incoming_frame_counter_set: BTreeMap<Eui64, u32>,
     key: Key,
     #[allow(dead_code)]
     network_key_type: NetworkKeyType,
@@ -56,14 +56,14 @@ impl NwkSecurity {
             primary: NwkSecurityDescriptor {
                 key_seq_number,
                 outgoing_frame_counter,
-                incoming_frame_counter_set: HashMap::new(),
+                incoming_frame_counter_set: BTreeMap::new(),
                 key,
                 network_key_type: NetworkKeyType::Standard,
             },
             alternate: NwkSecurityDescriptor {
                 key_seq_number: 0,
                 outgoing_frame_counter: 0,
-                incoming_frame_counter_set: HashMap::new(),
+                incoming_frame_counter_set: BTreeMap::new(),
                 key: Key::from_hex("00000000000000000000000000000000"),
                 network_key_type: NetworkKeyType::Standard,
             },

@@ -1,20 +1,32 @@
+use core::time::Duration;
+
+use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154CommandFrame, Ieee802154DataFrame,
     Ieee802154Frame, Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
 use abstract_bits::AbstractBits;
+use alloc::vec::Vec;
 use arbitrary_int::u24;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
-use ziggurat_phy::{RadioPhy, TxFrame, TxPriority, TxResult};
+use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::{RenamedU24, ZigbeeBeacon};
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
-use super::{NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, ZigbeeStack, ZigbeeStackError};
+use super::{
+    NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPriority, ZigbeeStack,
+    ZigbeeStackError,
+};
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+/// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
+///
+/// [`hack_beacon_spam_duration`]: super::State::hack_beacon_spam_duration
+const BEACON_SPAM_INTERVAL: Duration = Duration::from_millis(5);
+
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
         tracing::debug!(
             "Received 802.15.4 command frame: {:?}",
@@ -23,7 +35,16 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
         match &command_frame.command_payload {
             ziggurat_ieee_802154::Ieee802154CommandPayload::BeaconRequest(_) => {
-                self.send_802154_beacon();
+                let spam = self.state.hack_beacon_spam_duration;
+                if spam.is_zero() || !self.permitting_joins() {
+                    self.send_802154_beacon();
+                } else {
+                    // Open/extend the spray window and let the beacon-spam reactor drive
+                    // the cadence, so a storm of requests can't exceed one beacon per
+                    // BEACON_SPAM_INTERVAL.
+                    self.core().beacon_spam_until = Some(self.core_now() + spam);
+                    self.beacon_spam_wake.notify_one();
+                }
             }
             ziggurat_ieee_802154::Ieee802154CommandPayload::AssociationRequest(
                 ieee802154_association_request_command,
@@ -48,7 +69,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
 
     pub fn send_802154_beacon(&self) {
         let permitting_joins = self.permitting_joins();
-        tracing::debug!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
+        tracing::trace!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
 
         let end_device_capacity =
             { self.core().nib.neighbors.child_count() } < usize::from(self.tunables.max_children);
@@ -104,14 +125,49 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 tx_offset: RenamedU24(u24::new(0xFFFFFF)),
                 update_id,
             }
-            .to_abstract_bits()
+            .to_abstract_bytes()
             .unwrap(),
             gts_specification: 0x00,
             pending_address_specification: 0x00,
             fcs: 0x0000,
         });
 
-        self.background_send_802154_frame(beacon_frame, TxPriority::USER_NORMAL);
+        let tx_priority = if permitting_joins {
+            // We should try to win any beacon races during joins
+            TxPriority::STACK_CRITICAL
+        } else {
+            // Otherwise, unexpected beacon requests should never compete with normal traffic
+            TxPriority::BACKGROUND
+        };
+
+        self.enqueue_send(
+            SendKind::Raw {
+                frame: beacon_frame,
+            },
+            tx_priority,
+            TxOutcome::Discard,
+        );
+    }
+
+    /// The beacon-spam reactor (the [`hack_beacon_spam_duration`] hack): while a spray
+    /// window is open and joins are still permitting, send a beacon every
+    /// [`BEACON_SPAM_INTERVAL`], then idle on its wake. A beacon request opens or
+    /// extends the window; the fixed sleep (rather than racing the wake) is what caps
+    /// the rate at one beacon per interval no matter how many requests arrive.
+    ///
+    /// [`hack_beacon_spam_duration`]: super::State::hack_beacon_spam_duration
+    pub(super) async fn beacon_spam_task(&self) {
+        loop {
+            let until = self.core().beacon_spam_until;
+            if until.is_some_and(|deadline| deadline > self.core_now()) {
+                if self.permitting_joins() {
+                    self.send_802154_beacon();
+                }
+                R::sleep(BEACON_SPAM_INTERVAL).await;
+            } else {
+                self.beacon_spam_wake.notified().await;
+            }
+        }
     }
 
     pub(super) fn beacon_request_psdu(&self) -> Vec<u8> {
@@ -303,7 +359,6 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
         frame: Ieee802154Frame<Payload>,
-        priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         // Increment the 802.15.4 sequence number
         let final_frame = if !frame.header().frame_control.sequence_number_suppression {
@@ -312,6 +367,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 let mut core = self.core();
                 core.mac.ieee802154_sequence_number =
                     core.mac.ieee802154_sequence_number.wrapping_add(1);
+
                 core.mac.ieee802154_sequence_number
             };
 
@@ -337,7 +393,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             frame
         };
 
-        tracing::debug!("Sending 802.15.4 frame: {final_frame:?}");
+        tracing::trace!("Sending 802.15.4 frame: {final_frame:?}");
         tracing::trace!(
             "Sending 802.15.4 frame bytes: {:02X?}",
             final_frame.to_bytes()
@@ -351,37 +407,28 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         let channel = self.core().mac.channel;
         let result = self
             .radio
-            .transmit(
-                TxFrame {
-                    psdu: final_frame.to_bytes(),
-                    channel: Some(channel),
-                    csma_ca: true,
-                    max_frame_retries: self.tunables.mac_max_frame_retries,
-                    max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
-                    security_processed: true,
-                },
-                priority,
-            )
+            .transmit(TxFrame {
+                psdu: final_frame.to_bytes(),
+                channel: Some(channel),
+                csma_ca: true,
+                max_frame_retries: self.tunables.mac_max_frame_retries,
+                max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
+                security_processed: true,
+            })
             .await?;
 
         match result {
             TxResult::Acked => Ok(()),
-            TxResult::NoAck => Err(ZigbeeStackError::NwkNoAck {
-                next_hop: final_frame.header().dest_address.unwrap(),
-            }),
+            // A frame with no destination (e.g. a beacon) never requested an ACK, so
+            // "no ACK" is the expected outcome, not a failure.
+            TxResult::NoAck => final_frame
+                .header()
+                .dest_address
+                .map_or(Ok(()), |next_hop| {
+                    Err(ZigbeeStackError::NwkNoAck { next_hop })
+                }),
             TxResult::ChannelAccessFailure => Err(ZigbeeStackError::CcaFailure),
             other => Err(ZigbeeStackError::TransmitFailed(other)),
         }
-    }
-
-    pub fn background_send_802154_frame(&self, frame: Ieee802154Frame, priority: TxPriority) {
-        self.spawn_tracked_self(|arc_self| async move {
-            arc_self
-                .send_802154_frame(frame, priority)
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::error!("Failed to send 802.15.4 frame: {err}");
-                });
-        });
     }
 }

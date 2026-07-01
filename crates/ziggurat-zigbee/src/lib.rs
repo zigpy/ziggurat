@@ -1,10 +1,17 @@
+#![no_std]
+
+extern crate alloc;
+
 pub mod aps;
 pub mod beacon;
 pub mod constants;
 pub mod crypto;
 pub mod indirect;
 pub mod nwk;
+pub mod time;
 pub mod zdp;
+
+pub use time::Instant;
 
 /// Failure to parse an NWK or APS frame (or one of its fields) off the wire.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

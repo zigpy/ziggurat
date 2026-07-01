@@ -1,5 +1,4 @@
 pub mod client;
-pub mod priority_lock;
 
 use crc_all::CrcAlgo;
 use num_enum::TryFromPrimitive;

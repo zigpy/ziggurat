@@ -1,23 +1,28 @@
+use crate::runtime::Runtime;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_zigbee::aps::frame::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType,
     EncryptedApsAckFrame, EncryptedApsDataFrame,
 };
-use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
-
-use std::cmp;
-use std::collections::hash_map::Entry;
-use tokio::sync::oneshot;
-use tokio::time::Instant;
-use ziggurat_phy::{RadioPhy, TxPriority};
-
-use super::{
-    ApsAck, ApsAckData, ApsAckWaiter, LOCK_ACQUIRE_TIMEOUT, NwkSecurityMode, SendMode, ZigbeeStack,
-    ZigbeeStackError,
+use ziggurat_zigbee::nwk::frame::{
+    BROADCAST_LOW_POWER_ROUTERS, BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery,
 };
 
-impl<P: RadioPhy> ZigbeeStack<P> {
+use alloc::collections::btree_map::Entry;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use core::cmp;
+use core::time::Duration;
+use ziggurat_phy::RadioPhy;
+use ziggurat_zigbee::Instant as CoreInstant;
+
+use super::{
+    ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, SendMode,
+    TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+};
+
+impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// The EUI64 an inbound secured APS frame was encrypted by: the auxiliary header's
     /// extended source when present, otherwise resolved from the NWK frame (spec
     /// 4.4.1.2 step 2).
@@ -74,19 +79,18 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .decrypt_ack(source, frame, &network_key)
     }
 
-    /// Resolve an inbound APS ACK against the pending transmissions waiting for it.
+    /// Resolve an inbound APS ACK against the pending transmissions waiting for it: wake an
+    /// awaiting caller, or push the delivery outcome for a fire-and-forget send.
     pub(super) fn handle_aps_ack(&self, nwk_frame: &NwkFrame, ack: &ApsAckFrame) {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
-        tracing::debug!("Received APS ack: {ack_data:?}");
+        tracing::trace!("Received APS ack: {ack_data:?}");
 
-        let tx = self
-            .state
-            .pending_aps_acks
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap()
-            .remove(&ack_data);
-        if let Some(tx) = tx {
-            let _ = tx.send(());
+        let pending = self.state.pending_aps_acks.lock().remove(&ack_data);
+        if let Some(PendingApsAck { request_id, .. }) = pending {
+            self.push_notification(ZigbeeNotification::ApsAckConfirm {
+                request_id,
+                result: ApsAckResult::Acked,
+            });
         }
     }
 
@@ -95,15 +99,11 @@ impl<P: RadioPhy> ZigbeeStack<P> {
     /// stops retransmitting, but must not reach the application twice. Expired entries
     /// are swept on each call.
     pub(super) fn is_duplicate_aps_frame(&self, source: Nwk, counter: u8) -> bool {
-        let now = Instant::now();
+        let now = self.core_now();
         let timeout = self.tunables.aps_duplicate_rejection_timeout;
 
-        let mut table = self
-            .state
-            .aps_duplicates
-            .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-            .unwrap();
-        table.retain(|_, seen| now.duration_since(*seen) < timeout);
+        let mut table = self.state.aps_duplicates.lock();
+        table.retain(|_, seen| now.saturating_duration_since(*seen) < timeout);
 
         match table.entry((source, counter)) {
             Entry::Occupied(mut slot) => {
@@ -174,16 +174,14 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         self.background_send_nwk_frame(aps_ack_frame, NwkSecurityMode::NetworkKey, SendMode::Route);
     }
 
-    /// Send an APS data frame, returning once it has been transmitted (including
-    /// route discovery and the NWK retry loop; for sleepy children, once the frame is
-    /// extracted from the indirect queue). When an APS ack was requested, the
-    /// returned waiter resolves the end-to-end delivery via
-    /// [`ZigbeeStack::wait_aps_ack`].
+    /// Build the NWK frame carrying an APS data frame, plus the ack-correlation data when
+    /// an end-to-end ack was requested. Shared by the awaiting [`Self::send_aps_command`]
+    /// and the fire-and-forget [`Self::send_aps`].
     ///
     /// `aps_security` requests APS encryption of the ASDU with the link key shared
     /// with that device (unicast only: link keys are pairwise).
     #[allow(clippy::too_many_arguments)]
-    pub async fn send_aps_command(
+    pub(super) fn prepare_aps_send(
         &self,
         delivery_mode: ApsDeliveryMode,
         destination: Nwk,
@@ -196,8 +194,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
         aps_seq: u8,
         data: Vec<u8>,
         aps_security: Option<Eui64>,
-        priority: TxPriority,
-    ) -> Result<Option<ApsAckWaiter>, ZigbeeStackError> {
+    ) -> Result<(NwkFrame, Option<ApsAckData>), ZigbeeStackError> {
         let asdu = FrameBytes::from_slice(&data).map_err(|_| ZigbeeStackError::PayloadTooLong)?;
 
         let aps_frame = match delivery_mode {
@@ -216,7 +213,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 profile_id,
                 source_endpoint: src_ep,
                 counter: aps_seq,
-                asdu: asdu.clone(),
+                asdu,
             },
             ApsDeliveryMode::Broadcast => ApsDataFrame {
                 frame_control: ApsFrameControl {
@@ -233,7 +230,7 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 profile_id,
                 source_endpoint: src_ep,
                 counter: aps_seq,
-                asdu: asdu.clone(),
+                asdu,
             },
             ApsDeliveryMode::Multicast => ApsDataFrame {
                 frame_control: ApsFrameControl {
@@ -250,11 +247,11 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 profile_id,
                 source_endpoint: src_ep,
                 counter: aps_seq,
-                asdu: asdu.clone(),
+                asdu,
             },
         };
 
-        tracing::debug!("Prepared APS frame: {aps_frame:?}");
+        tracing::trace!("Prepared APS frame: {aps_frame:?}");
 
         let aps_payload = if let Some(destination_eui64) = aps_security {
             let encrypted = self
@@ -262,7 +259,6 @@ impl<P: RadioPhy> ZigbeeStack<P> {
                 .aib
                 .aps_security
                 .encrypt_data(destination_eui64, &aps_frame);
-
             match encrypted {
                 Some(encrypted) => encrypted.to_bytes(),
                 None => return Err(ZigbeeStackError::ApsSecurityFailed),
@@ -284,84 +280,171 @@ impl<P: RadioPhy> ZigbeeStack<P> {
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 
-        if aps_ack == ApsAck::None {
-            self.send_nwk_frame(
-                nwk_frame,
-                NwkSecurityMode::NetworkKey,
-                SendMode::Route,
-                priority,
-            )
-            .await?;
-            return Ok(None);
-        }
-
-        let ack_data = ApsAckData {
+        let ack_data = (aps_ack == ApsAck::Request).then_some(ApsAckData {
             src: destination,
             destination_endpoint: Some(src_ep), // These are swapped
             cluster_id: Some(cluster_id),
             profile_id: Some(profile_id),
             source_endpoint: Some(dst_ep), // These are swapped
             counter: aps_seq,
-        };
+        });
 
-        let (ack_tx, ack_rx) = oneshot::channel();
+        Ok((nwk_frame, ack_data))
+    }
 
-        tracing::debug!("APS ACK requested, waiting for {ack_data:?}");
-        {
-            self.state
-                .pending_aps_acks
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
-                .insert(ack_data.clone(), ack_tx);
+    /// How long to wait for a device's APS ack: longer for a sleepy child, which only
+    /// sees (and acks) the frame after polling.
+    fn aps_ack_timeout(&self, destination: Nwk) -> Duration {
+        if self.sleepy_child_eui64(destination).is_some() {
+            self.tunables.aps_ack_timeout_indirect
+        } else {
+            self.tunables.aps_ack_timeout
+        }
+    }
+
+    /// Build and enqueue the frame, then return an accept or reject. Delivery is
+    /// confirmed later as a [`ZigbeeNotification::SendConfirm`] carrying `request_id`,
+    /// triggered by the frame type: passive-ack quorum for a broadcast, next-hop
+    /// acceptance for a no-ack unicast, or the APS ack for an ack unicast.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_aps(
+        &self,
+        delivery_mode: ApsDeliveryMode,
+        destination: Nwk,
+        profile_id: u16,
+        cluster_id: u16,
+        src_ep: u8,
+        dst_ep: u8,
+        aps_ack: ApsAck,
+        radius: u8,
+        aps_seq: u8,
+        data: Vec<u8>,
+        aps_security: Option<Eui64>,
+        priority: TxPriority,
+        request_id: RequestId,
+    ) -> Result<(), ZigbeeStackError> {
+        let (nwk_frame, ack_data) = self.prepare_aps_send(
+            delivery_mode,
+            destination,
+            profile_id,
+            cluster_id,
+            src_ep,
+            dst_ep,
+            aps_ack,
+            radius,
+            aps_seq,
+            data,
+            aps_security,
+        )?;
+
+        // An APS-ack send is confirmed by the end-to-end ack: register it (with the
+        // deadline the timeout reactor uses) before enqueueing so a fast reply is caught.
+        if let Some(ack_data) = &ack_data {
+            let deadline = self.core_now() + self.aps_ack_timeout(destination);
+            self.state.pending_aps_acks.lock().insert(
+                ack_data.clone(),
+                PendingApsAck {
+                    request_id,
+                    deadline,
+                },
+            );
+            self.aps_ack_wake.notify_one();
         }
 
-        if let Err(err) = self
-            .send_nwk_frame(
+        self.enqueue_aps_frame(
+            nwk_frame,
+            priority,
+            TxOutcome::Confirm {
+                request_id,
+                aps_ack: ack_data,
+            },
+        );
+        Ok(())
+    }
+
+    /// Enqueue a built APS/NWK frame fire-and-forget, routing broadcasts and unicasts like
+    /// [`send_nwk_frame`](Self::send_nwk_frame). The `outcome` rides the unicast path (the
+    /// sender confirms next-hop acceptance / failure); a broadcast is confirmed by the
+    /// retransmit reactor on quorum, so only its `request_id` is carried over.
+    pub(super) fn enqueue_aps_frame(
+        &self,
+        nwk_frame: NwkFrame,
+        priority: TxPriority,
+        outcome: TxOutcome,
+    ) {
+        if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
+            let request_id = match outcome {
+                TxOutcome::Confirm { request_id, .. } => Some(request_id),
+                TxOutcome::Discard | TxOutcome::Signal(_) => None,
+            };
+            self.send_broadcast_nwk_frame(
+                nwk_frame,
+                NwkSecurityMode::NetworkKey,
+                priority,
+                request_id,
+            );
+        } else {
+            self.originate_unicast(
                 nwk_frame,
                 NwkSecurityMode::NetworkKey,
                 SendMode::Route,
                 priority,
-            )
-            .await
-        {
-            self.state
-                .pending_aps_acks
-                .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                .unwrap()
-                .remove(&ack_data);
-            return Err(err);
+                outcome,
+            );
         }
-
-        // A sleepy child only sees the frame (and acks it) after polling
-        let timeout = if self.sleepy_child_eui64(destination).is_some() {
-            self.tunables.aps_ack_timeout_indirect
-        } else {
-            self.tunables.aps_ack_timeout
-        };
-
-        Ok(Some(ApsAckWaiter {
-            receiver: ack_rx,
-            timeout,
-            ack_data,
-        }))
     }
 
-    /// Wait for the end-to-end APS ack of a previously transmitted frame.
-    pub async fn wait_aps_ack(&self, waiter: ApsAckWaiter) -> Result<(), ZigbeeStackError> {
-        match tokio::time::timeout(waiter.timeout, waiter.receiver).await {
-            Ok(Ok(())) => {
-                tracing::debug!("APS ACK received");
-                Ok(())
+    /// The APS-ack timeout reactor: sleeps to the earliest pending send's deadline, then
+    /// fails any whose ack never arrived.
+    pub(super) async fn aps_ack_timeout_task(&self) {
+        loop {
+            match self.earliest_aps_ack_deadline() {
+                Some(deadline) => {
+                    let _ = self
+                        .timeout_at_core(deadline, self.aps_ack_wake.notified())
+                        .await;
+                }
+                None => self.aps_ack_wake.notified().await,
             }
-            Ok(Err(_)) | Err(_) => {
-                tracing::warn!("APS ACK timed out for {:?}", waiter.ack_data);
-                self.state
-                    .pending_aps_acks
-                    .try_lock_for(LOCK_ACQUIRE_TIMEOUT)
-                    .unwrap()
-                    .remove(&waiter.ack_data);
-                Err(ZigbeeStackError::ApsAckTimeout)
+
+            self.expire_aps_acks();
+        }
+    }
+
+    fn earliest_aps_ack_deadline(&self) -> Option<CoreInstant> {
+        self.state
+            .pending_aps_acks
+            .lock()
+            .values()
+            .map(|pending| pending.deadline)
+            .min()
+    }
+
+    fn expire_aps_acks(&self) {
+        let now = self.core_now();
+
+        let expired: Vec<RequestId> = {
+            let mut pending = self.state.pending_aps_acks.lock();
+            let due: Vec<(ApsAckData, RequestId)> = pending
+                .iter()
+                .filter(|(_, p)| p.deadline <= now)
+                .map(|(key, p)| (key.clone(), p.request_id))
+                .collect();
+            for (key, _) in &due {
+                pending.remove(key);
             }
+            drop(pending);
+            due.into_iter().map(|(_, request_id)| request_id).collect()
+        };
+
+        for request_id in expired {
+            tracing::warn!("APS ack timed out for send {request_id}");
+            self.push_notification(ZigbeeNotification::ApsAckConfirm {
+                request_id,
+                result: ApsAckResult::Failed {
+                    reason: "APS ack timed out".to_string(),
+                },
+            });
         }
     }
 }

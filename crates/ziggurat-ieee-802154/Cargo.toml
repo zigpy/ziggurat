@@ -9,10 +9,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-abstract-bits = "0.2.0"
-num_enum = "0.7.3"
-hex = "0.4.3"
-thiserror = "2.0.12"
+abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
+num_enum = { version = "0.7.3", default-features = false }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+thiserror = { version = "2.0.12", default-features = false }
 serde = { version = "1.0.219", default-features = false, features = ["alloc"] }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 heapless = "0.9.3"

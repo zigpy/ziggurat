@@ -55,6 +55,19 @@ Ziggurat can be set up as a regular ZHA radio in **Home Assistant 2026.7.0** or 
 4. When ZHA asks for the radio type, pick **Ziggurat** and migrate your existing network (or set a new one up).
 5. Done.
 
+### ESP32-C6 firmware
+Ziggurat can also run on-chip on an ESP32-C6, using its built-in 802.15.4 radio and
+exposing the same JSON API over USB-Serial-JTAG: no separate RCP radio or host.
+
+```bash
+cd crates/ziggurat-esp
+cargo build --release
+espflash flash --no-stub --chip esp32c6 --port <PORT> \
+  target/riscv32imac-unknown-none-elf/release/ziggurat-esp
+```
+
+- USB-Serial-JTAG carries the JSON API; UART0 on GPIO16 @ 460800 carries logs, the debug heartbeat, and panic backtraces.
+
 ### Development
 Ziggurat aims to implement the portions of a Zigbee stack used by normal Home Assistant
 users, not the entire binder of Zigbee specification verbatim. It is nearly feature-complete
