@@ -41,11 +41,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 /// Outbound JSON lines (responses, events, notifications) converge here and a single
 /// writer task drains them to the serial port.
-const OUTBOUND_DEPTH: usize = 16;
+const OUTBOUND_DEPTH: usize = 256;
 pub static OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, OUTBOUND_DEPTH> =
     Channel::new();
 
-/// Complete inbound request lines, produced by `reader_task` and consumed by the
+/// Complete inbound request lines, produced by `serial_reader_task` and consumed by the
 /// processor loop in `main`. Decoupling the read from the (slower) handling keeps the
 /// USB RX FIFO drained promptly: a burst of commands fills this queue instead of
 /// stalling the FIFO.
@@ -80,13 +80,13 @@ async fn rx_task(phy: Arc<EspPhy>) {
 }
 
 /// How often the reader re-checks the USB RX FIFO when no byte has arrived. Bounds the
-/// recovery latency from a dropped esp-hal RX wakeup (see `reader_task`).
+/// recovery latency from a dropped esp-hal RX wakeup (see `serial_reader_task`).
 const RX_WATCHDOG: Duration = Duration::from_millis(50);
 
 /// Drains the USB-Serial-JTAG RX continuously, splitting on newlines and queueing each
 /// complete line for the processor.
 #[embassy_executor::task]
-async fn reader_task(mut rx: UsbSerialJtagRx<'static, Async>) {
+async fn serial_reader_task(mut rx: UsbSerialJtagRx<'static, Async>) {
     let mut buf = [0u8; 256];
     let mut line: Vec<u8> = Vec::with_capacity(2048);
     loop {
@@ -109,25 +109,28 @@ async fn reader_task(mut rx: UsbSerialJtagRx<'static, Async>) {
     }
 }
 
-/// The single serial writer: every outbound line goes through it, so concurrent
-/// producers (request handlers and the notification drainer) never interleave on the bus.
+/// How long the writer waits for the USB host to accept a line before giving up on it.
+const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+
 #[embassy_executor::task]
-async fn writer_task(mut tx: UsbSerialJtagTx<'static, Async>) {
+async fn serial_writer_task(mut tx: UsbSerialJtagTx<'static, Async>) {
+    let mut resync = false;
     loop {
         let line = OUTBOUND.receive().await;
-        let _ = tx.write_all(line.as_bytes()).await;
-        let _ = tx.write_all(b"\n").await;
-        let _ = tx.flush().await;
-    }
-}
-
-/// Drains the log channel to the UART console. The actual (blocking) UART write happens
-/// here, off the stack's critical path, exactly like `writer_task` does for the JSON bus.
-#[embassy_executor::task]
-async fn uart_log_task(mut tx: UartTx<'static, Async>) {
-    loop {
-        let chunk = LOG_OUTBOUND.receive().await;
-        let _ = tx.write_all(&chunk).await;
+        let write = async {
+            if resync {
+                let _ = tx.write_all(b"\n").await;
+            }
+            let _ = tx.write_all(line.as_bytes()).await;
+            let _ = tx.write_all(b"\n").await;
+            let _ = tx.flush().await;
+        };
+        match select(write, Timer::after(WRITE_TIMEOUT)).await {
+            Either::First(()) => resync = false,
+            Either::Second(()) => {
+                resync = true;
+            }
+        }
     }
 }
 
@@ -140,7 +143,8 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    esp_alloc::heap_allocator!(size: 240 * 1024);
+    // ~100-router network peaks at ~86 KB heap; ceiling is ~408 KB.
+    esp_alloc::heap_allocator!(size: 320 * 1024);
 
     // Bring up the UART console
     let log_uart = UartTx::new(
@@ -150,10 +154,6 @@ async fn main(spawner: Spawner) -> ! {
     .expect("UART0 config")
     .with_tx(peripherals.GPIO16)
     .into_async();
-    spawner.spawn(uart_log_task(log_uart).unwrap());
-
-    // Route the stack's `tracing` records to the UART console.
-    log_sink::install();
 
     // Route Zigbee crypto through the AES accelerator: CCM* runs as two DMA passes
     // (CBC-MAC + CTR) and AES-MMO rides the single-block path. Must happen before the
@@ -177,8 +177,8 @@ async fn main(spawner: Spawner) -> ! {
     let phy = Arc::new(EspPhy::new(peripherals.IEEE802154));
 
     spawner.spawn(rx_task(phy.clone()).unwrap());
-    spawner.spawn(reader_task(serial_rx).unwrap());
-    spawner.spawn(writer_task(serial_tx).unwrap());
+    spawner.spawn(serial_reader_task(serial_rx).unwrap());
+    spawner.spawn(serial_writer_task(serial_tx).unwrap());
 
     let mut app = App {
         phy,
@@ -189,11 +189,8 @@ async fn main(spawner: Spawner) -> ! {
 
     api::emit(api::hello_message(false)).await;
 
-    // The processor loop. `reader_task` owns the RX side and keeps the FIFO drained, so
-    // a slow handler here only backs up `INBOUND` (bounded) instead of stalling
-    // intake. `handle_line` spawns each `send_aps` on its own task so a slow transmit
-    // (route discovery, APS-ack wait) doesn't serialize every later command behind
-    // it.
+    // The processor loop. `serial_reader_task` owns the RX side and keeps the FIFO
+    // drained.
     loop {
         let line = INBOUND.receive().await;
         api::handle_line(&mut app, &line).await;

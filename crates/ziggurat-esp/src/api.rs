@@ -33,7 +33,20 @@ const DEFAULT_TX_POWER: i8 = 8;
 /// Queue one JSON object for the serial writer task.
 pub async fn emit(value: Value) {
     if let Ok(line) = serde_json::to_string(&value) {
-        OUTBOUND.send(line).await;
+        push_outbound(line);
+    }
+}
+
+fn push_outbound(mut line: String) {
+    loop {
+        match OUTBOUND.try_send(line) {
+            Ok(()) => break,
+            Err(embassy_sync::channel::TrySendError::Full(returned)) => {
+                line = returned;
+                let _ = OUTBOUND.try_receive();
+                crate::OUTBOUND_DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 }
 
