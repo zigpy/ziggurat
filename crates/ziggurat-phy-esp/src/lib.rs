@@ -210,14 +210,27 @@ impl EspPhy {
     }
 }
 
+fn rssi_to_lqi(rssi: i8) -> u8 {
+    if rssi < -80 {
+        0
+    } else if rssi > -30 {
+        255
+    } else {
+        ((i32::from(rssi) + 80) as u32 * 255 / 50) as u8
+    }
+}
+
 fn raw_to_rx_frame(data: &[u8], channel: u8) -> Option<RxFrame> {
-    let len = data[0] as usize;
+    let len = (data[0] & 0x7f) as usize;
     if len < 2 || 1 + len > data.len() {
         return None;
     }
     let psdu = &data[1..1 + len];
-    let rssi = psdu[len - 2] as i8;
-    let lqi = psdu[len - 1];
+
+    // TODO: the LQI doesn't exceed 11 and esp-idf also computes it from RSSI. Why?
+    let rssi = (psdu[len - 2] as i8);
+    let lqi = rssi_to_lqi(rssi);
+
     Some(RxFrame {
         psdu: psdu[..len - 2].to_vec(),
         channel,
