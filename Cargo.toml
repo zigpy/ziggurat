@@ -11,6 +11,7 @@ exclude = [
     "crates/ziggurat-efr32-pac",
     "crates/ziggurat-rail-sys",
     "crates/ziggurat-efr32",
+    "crates/ziggurat-phy-efr32",
 ]
 
 [workspace.package]

@@ -1,0 +1,19 @@
+[package]
+name = "ziggurat-phy-efr32"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Silicon Labs RAIL (EFR32MG24) backend implementing the ziggurat-phy RadioPhy trait"
+license = "Apache-2.0"
+
+[dependencies]
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+ziggurat-rail-sys = { path = "../ziggurat-rail-sys" }
+
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+
+# Standalone: only builds for thumbv8m.main-none-eabihf (via ziggurat-rail-sys); excluded
+# from the host workspace.
+[workspace]

@@ -12,8 +12,24 @@ path = "src/main.rs"
 [dependencies]
 ziggurat-rail-sys = { path = "../ziggurat-rail-sys" }
 ziggurat-efr32-pac = { path = "../ziggurat-efr32-pac", features = ["rt", "critical-section"] }
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-phy-efr32 = { path = "../ziggurat-phy-efr32" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+ziggurat-driver = { path = "../ziggurat-driver", default-features = false, features = ["embassy"] }
+ziggurat-zigbee = { path = "../ziggurat-zigbee" }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.5", features = ["device"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+embassy-time = "0.5"
+embassy-time-driver = "0.2"
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-16"] }
+critical-section = "1"
+embedded-alloc = "0.6"
 panic-halt = "1"
 
 [profile.release]
