@@ -1517,20 +1517,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }));
     }
 
-    /// Spawns a tracked task that needs an owned handle to the stack.
-    fn spawn_tracked_self<F, Fut>(&self, f: F)
-    where
-        F: FnOnce(Arc<Self>) -> Fut,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let this = self
-            .self_weak
-            .upgrade()
-            .expect("stack dropped while running");
-
-        self.spawn_tracked(f(this));
-    }
-
     /// Stops all of the stack's tasks and waits for them to terminate, so that a
     /// replaced stack provably stops processing frames and transmitting before its
     /// successor takes over the shared Spinel client.

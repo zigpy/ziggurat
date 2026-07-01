@@ -85,7 +85,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
         tracing::trace!("Received APS ack: {ack_data:?}");
 
-        match self.state.pending_aps_acks.lock().remove(&ack_data) {
+        let pending = self.state.pending_aps_acks.lock().remove(&ack_data);
+        match pending {
             Some(ApsAckPending::Waiter(tx)) => tx.signal(()),
             Some(ApsAckPending::Notify { token, .. }) => {
                 self.push_notification(ZigbeeNotification::ApsSendOutcome {
@@ -184,7 +185,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// `aps_security` requests APS encryption of the ASDU with the link key shared
     /// with that device (unicast only: link keys are pairwise).
     #[allow(clippy::too_many_arguments)]
-    fn prepare_aps_send(
+    pub(super) fn prepare_aps_send(
         &self,
         delivery_mode: ApsDeliveryMode,
         destination: Nwk,
@@ -257,12 +258,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::trace!("Prepared APS frame: {aps_frame:?}");
 
         let aps_payload = if let Some(destination_eui64) = aps_security {
-            match self
+            let encrypted = self
                 .core()
                 .aib
                 .aps_security
-                .encrypt_data(destination_eui64, &aps_frame)
-            {
+                .encrypt_data(destination_eui64, &aps_frame);
+            match encrypted {
                 Some(encrypted) => encrypted.to_bytes(),
                 None => return Err(ZigbeeStackError::ApsSecurityFailed),
             }
@@ -427,8 +428,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.aps_ack_wake.notify_one();
         }
 
-        // Fire-and-forget, mirroring send_nwk_frame's broadcast/unicast split without
-        // awaiting the outcome.
+        self.enqueue_aps_frame(nwk_frame, priority);
+        Ok(())
+    }
+
+    /// Enqueue a built APS/NWK frame fire-and-forget: routes broadcasts and unicasts like
+    /// [`send_nwk_frame`](Self::send_nwk_frame) but never awaits the outcome.
+    pub(super) fn enqueue_aps_frame(&self, nwk_frame: NwkFrame, priority: TxPriority) {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             self.send_broadcast_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, priority);
         } else {
@@ -440,8 +446,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 None,
             );
         }
-
-        Ok(())
     }
 
     /// The APS-ack timeout reactor: sleeps to the earliest pending fire-and-forget send's
@@ -491,6 +495,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             for (key, _) in &due {
                 pending.remove(key);
             }
+            drop(pending);
             due.into_iter().map(|(_, token)| token).collect()
         };
 
