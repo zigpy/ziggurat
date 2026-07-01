@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ziggurat-rail-sys = { path = "../ziggurat-rail-sys" }
+ziggurat-efr32-pac = { path = "../ziggurat-efr32-pac", features = ["critical-section"] }
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.5"
 panic-halt = "1"
