@@ -27,8 +27,8 @@ use super::routing::{Route, Status as RouteStatus};
 use super::{
     AddrConflictSource, ConfirmTrigger, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
     PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute, PendingUnicastRetry, SendKind,
-    SendMode, SendRequest, SendResult, TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack,
-    ZigbeeStackError,
+    SendMode, SendRequest, SendResult, RequestId, TxOutcome, TxPriority, ZigbeeNotification,
+    ZigbeeStack, ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -144,9 +144,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             if self.broadcast_passively_acked(key) {
                 tracing::debug!("Broadcast {key:?} passively acknowledged");
                 let removed = self.state.pending_broadcasts.lock().remove(&key);
-                if let Some(token) = removed.and_then(|broadcast| broadcast.token) {
+                if let Some(request_id) = removed.and_then(|broadcast| broadcast.request_id) {
                     self.push_notification(ZigbeeNotification::SendConfirm {
-                        token,
+                        request_id,
                         result: SendResult::Confirmed {
                             via: ConfirmTrigger::Quorum,
                         },
@@ -165,7 +165,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             enum Next {
                 Idle,
                 Retransmit(NwkFrame, NwkSecurityMode, TxPriority),
-                Exhausted(Option<u64>),
+                Exhausted(Option<RequestId>),
             }
 
             // Decide under the lock; if a copy is due, extract it to transmit after release.
@@ -178,9 +178,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 if broadcast.next_attempt > now {
                     Next::Idle
                 } else if broadcast.attempts_remaining == 0 {
-                    let token = broadcast.token;
+                    let request_id = broadcast.request_id;
                     pending.remove(&key);
-                    Next::Exhausted(token)
+                    Next::Exhausted(request_id)
                 } else {
                     broadcast.attempts_remaining -= 1;
                     broadcast.next_attempt = next_attempt;
@@ -205,11 +205,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         TxOutcome::Discard,
                     );
                 }
-                Next::Exhausted(token) => {
+                Next::Exhausted(request_id) => {
                     tracing::debug!("Broadcast {key:?} out of retransmit attempts");
-                    if let Some(token) = token {
+                    if let Some(request_id) = request_id {
                         self.push_notification(ZigbeeNotification::SendConfirm {
-                            token,
+                            request_id,
                             result: SendResult::Failed {
                                 reason: "passive-ack quorum not reached".to_string(),
                             },
@@ -230,11 +230,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
         first_delay: Duration,
         attempts: u8,
-        token: Option<u64>,
+        request_id: Option<RequestId>,
     ) {
-        // With a token we still track the broadcast even at zero retransmits, so the
+        // With a request_id we still track the broadcast even at zero retransmits, so the
         // reactor can confirm its quorum (or fail it); untracked broadcasts just return.
-        if attempts == 0 && token.is_none() {
+        if attempts == 0 && request_id.is_none() {
             return;
         }
 
@@ -246,7 +246,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority,
                 attempts_remaining: attempts,
                 next_attempt: self.core_now() + first_delay,
-                token,
+                request_id,
             },
         );
         self.broadcast_retransmit_wake.notify_one();
@@ -1052,13 +1052,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
             TxOutcome::Signal(signal) => signal.signal(result),
-            TxOutcome::Confirm { token, aps_ack } => match result {
+            TxOutcome::Confirm { request_id, aps_ack } => match result {
                 // Next-hop acceptance confirms a no-ack send; an ack send waits for the
                 // APS ack (the aps-ack table confirms it), so success here is silent.
                 Ok(()) => {
                     if aps_ack.is_none() {
                         self.push_notification(ZigbeeNotification::SendConfirm {
-                            token,
+                            request_id,
                             result: SendResult::Confirmed {
                                 via: ConfirmTrigger::NextHop,
                             },
@@ -1072,7 +1072,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         self.state.pending_aps_acks.lock().remove(&ack_data);
                     }
                     self.push_notification(ZigbeeNotification::SendConfirm {
-                        token,
+                        request_id,
                         result: SendResult::Failed {
                             reason: err.to_string(),
                         },
@@ -1328,7 +1328,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
         // An application send awaiting confirmation on passive-ack quorum; internal
         // broadcasts pass `None`.
-        token: Option<u64>,
+        request_id: Option<RequestId>,
     ) {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
@@ -1369,7 +1369,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             priority,
             self.tunables.passive_ack_timeout + self.broadcast_jitter(),
             self.tunables.max_broadcast_retries,
-            token,
+            request_id,
         );
     }
 

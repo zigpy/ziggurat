@@ -256,6 +256,9 @@ impl ApsAckData {
 /// The pending half of a transmit's outcome.
 pub type TxCompletion = Signal<Result<(), ZigbeeStackError>>;
 
+/// The client's request id, supplied to `send_aps` and echoed back in its confirmation.
+pub type RequestId = u32;
+
 /// Where a transmit's terminal outcome is reported.
 #[derive(Debug)]
 pub enum TxOutcome {
@@ -263,21 +266,21 @@ pub enum TxOutcome {
     Discard,
     /// Resolve an awaiting caller's signal (internal awaiters).
     Signal(TxCompletion),
-    /// Confirm an application send by `token`. `aps_ack` present means the end-to-end
+    /// Confirm an application send by `request_id`. `aps_ack` present means the end-to-end
     /// APS ack is the confirmation: this hop succeeding is silent, its failure fails
     /// the send; absent means next-hop acceptance is itself the confirmation.
     Confirm {
-        token: u64,
+        request_id: RequestId,
         aps_ack: Option<ApsAckData>,
     },
 }
 
 /// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
 /// ack, confirmed (or timed out) as a [`ZigbeeNotification::SendConfirm`] carrying
-/// `token`.
+/// `request_id`.
 #[derive(Debug)]
 pub struct PendingApsAck {
-    pub(crate) token: u64,
+    pub(crate) request_id: RequestId,
     pub(crate) deadline: CoreInstant,
 }
 
@@ -352,7 +355,7 @@ pub struct PendingBroadcast {
     pub(crate) next_attempt: CoreInstant,
     /// An application send awaiting confirmation: `SendConfirm { via: Quorum }` when the
     /// passive-ack quorum is heard, or `Failed` when attempts run out.
-    pub(crate) token: Option<u64>,
+    pub(crate) request_id: Option<RequestId>,
 }
 
 /// A unicast awaiting re-transmission after a failed attempt, held by the unicast-retry
@@ -753,9 +756,10 @@ pub enum ZigbeeNotification {
         frame_counter: u32,
         key_id: String,
     },
-    /// Stage 3 of a send: the confirmation of the application send `token` supplied to
-    /// [`ZigbeeStack::send_aps`].
-    SendConfirm { token: u64, result: SendResult },
+    SendConfirm {
+        request_id: RequestId,
+        result: SendResult,
+    },
 }
 
 /// The confirmation of an application send (spec-typed by the frame).

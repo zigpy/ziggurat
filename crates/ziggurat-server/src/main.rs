@@ -19,8 +19,8 @@ use ziggurat_driver::runtime::TokioSpawner;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, ConfirmTrigger, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType,
-    SendResult, TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification,
-    ZigbeeStack,
+    SendResult, RequestId, TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY,
+    ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
@@ -340,11 +340,11 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                 "key_id": key_id,
             }),
         ),
-        ZigbeeNotification::SendConfirm { token, result } => notification(
+        ZigbeeNotification::SendConfirm { request_id, result } => notification(
             "send_confirm",
             match result {
                 SendResult::Confirmed { via } => json!({
-                    "token": token,
+                    "id": request_id,
                     "status": "confirmed",
                     "via": match via {
                         ConfirmTrigger::Quorum => "quorum",
@@ -353,7 +353,7 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                     },
                 }),
                 SendResult::Failed { reason } => json!({
-                    "token": token,
+                    "id": request_id,
                     "status": "failed",
                     "reason": reason,
                 }),
@@ -1056,7 +1056,7 @@ impl ZigguratServer {
             asdu,
             aps_security,
             TxPriority(request.priority),
-            id,
+            id as RequestId,
         ) {
             Ok(()) => response(id, json!({"status": "accepted"})),
             Err(e) => error_response(id, "transmit_failed", e),

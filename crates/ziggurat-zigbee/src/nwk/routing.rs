@@ -8,7 +8,7 @@ use ziggurat_ieee_802154::types::Nwk;
 
 use crate::nwk::frame::BROADCAST_ALL_ROUTERS_AND_COORDINATOR;
 
-pub type RequestId = u8;
+pub type RouteRequestId = u8;
 
 const UNKNOWN_NEXT_HOP: Nwk = Nwk(0xFFFF);
 
@@ -104,7 +104,7 @@ pub struct DiscoveryEntry {
     /// distinct from the 16-bit Routing Sequence Number. The former is used to discern
     /// route requests originating in a particular router; the latter is used to
     /// identify stale routing information.
-    pub route_request_id: RequestId,
+    pub route_request_id: RouteRequestId,
     /// The 16-bit network address of the route request’s initiator.
     pub source_address: Nwk,
     /// The 16-bit network address of the device that has sent the most recent lowest
@@ -165,14 +165,14 @@ pub struct Routing {
     mtorr_delivery_failure_threshold: u8,
 
     route_table: BTreeMap<Nwk, TableEntry>,
-    discovery_table: BTreeMap<(Nwk, RequestId), DiscoveryEntry>,
+    discovery_table: BTreeMap<(Nwk, RouteRequestId), DiscoveryEntry>,
     route_record_table: BTreeMap<Nwk, Vec<Nwk>>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
     /// originating in a particular router; the latter is used to identify stale routing
     /// information."
-    request_sequence_number: RequestId,
+    request_sequence_number: RouteRequestId,
 }
 
 impl Routing {
@@ -334,7 +334,7 @@ impl Routing {
     /// Prepare table state for a route discovery we originate: the routing entry enters
     /// `DiscoveryUnderway` and a discovery entry keyed by our own address is created.
     /// Returns the request identifier to put in the route request command.
-    pub fn begin_discovery(&mut self, destination: Nwk, now: Instant) -> RequestId {
+    pub fn begin_discovery(&mut self, destination: Nwk, now: Instant) -> RouteRequestId {
         // Expire stale discoveries before establishing the new one. A just-expired
         // discovery toward this same destination would otherwise tear down the
         // `DiscoveryUnderway` route entry created below.
@@ -370,7 +370,7 @@ impl Routing {
 
     /// Register the discovery entry backing a many-to-one route advertisement, which
     /// is addressed to a broadcast address and never answered with a reply.
-    pub fn begin_many_to_one_advertisement(&mut self, now: Instant) -> RequestId {
+    pub fn begin_many_to_one_advertisement(&mut self, now: Instant) -> RouteRequestId {
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
         let request_id = self.request_sequence_number;
 
@@ -415,7 +415,7 @@ impl Routing {
     pub fn accept_route_request(
         &mut self,
         originator: Nwk,
-        request_id: RequestId,
+        request_id: RouteRequestId,
         destination: Nwk,
         sender: Nwk,
         updated_path_cost: u8,
@@ -491,7 +491,7 @@ impl Routing {
     pub fn accept_route_reply(
         &mut self,
         originator: Nwk,
-        request_id: RequestId,
+        request_id: RouteRequestId,
         responder: Nwk,
         sender: Nwk,
         updated_path_cost: u8,

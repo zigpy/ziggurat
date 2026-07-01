@@ -18,8 +18,8 @@ use crate::CaptureStop;
 use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ConfirmTrigger, NetworkBeacon, NetworkConfig, NwkDeviceType, SendResult, TclkSeed,
-    Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ConfirmTrigger, NetworkBeacon, NetworkConfig, NwkDeviceType, SendResult, RequestId,
+    TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
@@ -504,7 +504,7 @@ async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
         asdu,
         aps_security,
         TxPriority(request.priority),
-        id,
+        id as RequestId,
     );
 
     // The stack accepts the frame for transmission or rejects it now. The terminal
@@ -803,11 +803,11 @@ fn notification_to_json(notification_event: ZigbeeNotification) -> Value {
         ),
         // Stage three of a send: the terminal confirmation for the `token` the client
         // supplied as its `send_aps` request id. `via` names which trigger fired.
-        ZigbeeNotification::SendConfirm { token, result } => notification(
+        ZigbeeNotification::SendConfirm { request_id, result } => notification(
             "send_confirm",
             match result {
                 SendResult::Confirmed { via } => json!({
-                    "token": token,
+                    "id": request_id,
                     "status": "confirmed",
                     "via": match via {
                         ConfirmTrigger::Quorum => "quorum",
@@ -816,7 +816,7 @@ fn notification_to_json(notification_event: ZigbeeNotification) -> Value {
                     },
                 }),
                 SendResult::Failed { reason } => json!({
-                    "token": token,
+                    "id": request_id,
                     "status": "failed",
                     "reason": reason,
                 }),

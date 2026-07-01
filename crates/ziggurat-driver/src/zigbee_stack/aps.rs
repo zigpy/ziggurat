@@ -19,7 +19,7 @@ use ziggurat_zigbee::Instant as CoreInstant;
 
 use super::{
     ApsAck, ApsAckData, ConfirmTrigger, NwkSecurityMode, PendingApsAck, SendMode, SendResult,
-    TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    RequestId, TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -86,9 +86,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::trace!("Received APS ack: {ack_data:?}");
 
         let pending = self.state.pending_aps_acks.lock().remove(&ack_data);
-        if let Some(PendingApsAck { token, .. }) = pending {
+        if let Some(PendingApsAck { request_id, .. }) = pending {
             self.push_notification(ZigbeeNotification::SendConfirm {
-                token,
+                request_id,
                 result: SendResult::Confirmed {
                     via: ConfirmTrigger::ApsAck,
                 },
@@ -305,7 +305,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Build and enqueue the frame, then return an accept or reject. Delivery is
-    /// confirmed later as a [`ZigbeeNotification::SendConfirm`] carrying `token`,
+    /// confirmed later as a [`ZigbeeNotification::SendConfirm`] carrying `request_id`,
     /// triggered by the frame type: passive-ack quorum for a broadcast, next-hop
     /// acceptance for a no-ack unicast, or the APS ack for an ack unicast.
     #[allow(clippy::too_many_arguments)]
@@ -323,7 +323,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         data: Vec<u8>,
         aps_security: Option<Eui64>,
         priority: TxPriority,
-        token: u64,
+        request_id: RequestId,
     ) -> Result<(), ZigbeeStackError> {
         let (nwk_frame, ack_data) = self.prepare_aps_send(
             delivery_mode,
@@ -343,10 +343,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // deadline the timeout reactor uses) before enqueueing so a fast reply is caught.
         if let Some(ack_data) = &ack_data {
             let deadline = self.core_now() + self.aps_ack_timeout(destination);
-            self.state
-                .pending_aps_acks
-                .lock()
-                .insert(ack_data.clone(), PendingApsAck { token, deadline });
+            self.state.pending_aps_acks.lock().insert(
+                ack_data.clone(),
+                PendingApsAck {
+                    request_id,
+                    deadline,
+                },
+            );
             self.aps_ack_wake.notify_one();
         }
 
@@ -354,7 +357,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame,
             priority,
             TxOutcome::Confirm {
-                token,
+                request_id,
                 aps_ack: ack_data,
             },
         );
@@ -364,7 +367,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Enqueue a built APS/NWK frame fire-and-forget, routing broadcasts and unicasts like
     /// [`send_nwk_frame`](Self::send_nwk_frame). The `outcome` rides the unicast path (the
     /// sender confirms next-hop acceptance / failure); a broadcast is confirmed by the
-    /// retransmit reactor on quorum, so only its `token` is carried over.
+    /// retransmit reactor on quorum, so only its `request_id` is carried over.
     pub(super) fn enqueue_aps_frame(
         &self,
         nwk_frame: NwkFrame,
@@ -372,11 +375,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         outcome: TxOutcome,
     ) {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-            let token = match outcome {
-                TxOutcome::Confirm { token, .. } => Some(token),
+            let request_id = match outcome {
+                TxOutcome::Confirm { request_id, .. } => Some(request_id),
                 TxOutcome::Discard | TxOutcome::Signal(_) => None,
             };
-            self.send_broadcast_nwk_frame(nwk_frame, NwkSecurityMode::NetworkKey, priority, token);
+            self.send_broadcast_nwk_frame(
+                nwk_frame,
+                NwkSecurityMode::NetworkKey,
+                priority,
+                request_id,
+            );
         } else {
             self.originate_unicast(
                 nwk_frame,
@@ -417,24 +425,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn expire_aps_acks(&self) {
         let now = self.core_now();
 
-        let expired: Vec<u64> = {
+        let expired: Vec<RequestId> = {
             let mut pending = self.state.pending_aps_acks.lock();
-            let due: Vec<(ApsAckData, u64)> = pending
+            let due: Vec<(ApsAckData, RequestId)> = pending
                 .iter()
                 .filter(|(_, p)| p.deadline <= now)
-                .map(|(key, p)| (key.clone(), p.token))
+                .map(|(key, p)| (key.clone(), p.request_id))
                 .collect();
             for (key, _) in &due {
                 pending.remove(key);
             }
             drop(pending);
-            due.into_iter().map(|(_, token)| token).collect()
+            due.into_iter().map(|(_, request_id)| request_id).collect()
         };
 
-        for token in expired {
-            tracing::warn!("APS ack timed out for send {token}");
+        for request_id in expired {
+            tracing::warn!("APS ack timed out for send {request_id}");
             self.push_notification(ZigbeeNotification::SendConfirm {
-                token,
+                request_id,
                 result: SendResult::Failed {
                     reason: "APS ack timed out".to_string(),
                 },
