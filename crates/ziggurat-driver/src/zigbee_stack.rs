@@ -1,7 +1,7 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
 use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
-use crate::signal::{Signal, SignalWaiter};
+use crate::signal::Signal;
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -254,31 +254,30 @@ impl ApsAckData {
 }
 
 /// The pending half of a transmit's outcome.
-///
-/// Resolved `Ok` once the frame leaves the radio (or, for an indirect transaction, once
-/// the child extracts it), or `Err` on transmit failure, expiry, or drop. Shared by the
-/// sender queue, the indirect queue, and queued frames, since a completion can hand off
-/// between them.
 pub type TxCompletion = Signal<Result<(), ZigbeeStackError>>;
 
-/// The end-to-end delivery confirmation of a transmitted APS frame, pending until the
-/// destination's APS ack arrives. Resolved via [`ZigbeeStack::wait_aps_ack`].
+/// Where a transmit's terminal outcome is reported.
 #[derive(Debug)]
-pub struct ApsAckWaiter {
-    pub(crate) receiver: SignalWaiter<()>,
-    pub(crate) timeout: Duration,
-    pub(crate) ack_data: ApsAckData,
+pub enum TxOutcome {
+    /// Nobody is waiting; a failure is only logged (internal background sends).
+    Discard,
+    /// Resolve an awaiting caller's signal (internal awaiters).
+    Signal(TxCompletion),
+    /// Confirm an application send by `token`. `aps_ack` present means the end-to-end APS
+    /// ack is the confirmation — this hop succeeding is silent, its failure fails the
+    /// send; absent means next-hop acceptance is itself the confirmation.
+    Confirm {
+        token: u64,
+        aps_ack: Option<ApsAckData>,
+    },
 }
 
-/// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end ack.
+/// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end ack,
+/// confirmed (or timed out) as a [`ZigbeeNotification::SendConfirm`] carrying `token`.
 #[derive(Debug)]
-pub enum ApsAckPending {
-    /// A caller awaits the ack via [`ZigbeeStack::wait_aps_ack`]; the ack resolves this
-    /// signal and the caller applies its own timeout.
-    Waiter(Signal<()>),
-    /// A fire-and-forget [`ZigbeeStack::send_aps`]: the ack (or its `deadline` passing)
-    /// is pushed as an [`ZigbeeNotification::ApsSendOutcome`] carrying `token`.
-    Notify { token: u64, deadline: CoreInstant },
+pub struct PendingApsAck {
+    pub(crate) token: u64,
+    pub(crate) deadline: CoreInstant,
 }
 
 /// A transmit queued for the single sender task ([`ZigbeeStack::sender_task`]). The NWK
@@ -289,7 +288,7 @@ pub(crate) struct SendRequest {
     seq: u32,
     priority: TxPriority,
     pub(crate) kind: SendKind,
-    pub(crate) completion: Option<TxCompletion>,
+    pub(crate) outcome: TxOutcome,
 }
 
 #[derive(Debug)]
@@ -322,7 +321,7 @@ pub struct PendingFrame {
     pub(crate) nwk_frame: NwkFrame,
     pub(crate) security: NwkSecurityMode,
     pub(crate) priority: TxPriority,
-    pub(crate) completion: Option<TxCompletion>,
+    pub(crate) outcome: TxOutcome,
 }
 
 /// All frames waiting on one destination's route discovery.
@@ -351,6 +350,9 @@ pub struct PendingBroadcast {
     pub(crate) attempts_remaining: u8,
     /// When the next retransmission is due, unless the quorum is heard first.
     pub(crate) next_attempt: CoreInstant,
+    /// An application send awaiting confirmation: `SendConfirm { via: Quorum }` when the
+    /// passive-ack quorum is heard, or `Failed` when attempts run out.
+    pub(crate) token: Option<u64>,
 }
 
 /// A unicast awaiting re-transmission after a failed attempt, held by the unicast-retry
@@ -373,7 +375,7 @@ pub struct PendingUnicastRetry {
     pub(crate) attempts_remaining: u8,
     /// When the re-enqueue is due.
     pub(crate) next_attempt: CoreInstant,
-    pub(crate) completion: Option<TxCompletion>,
+    pub(crate) outcome: TxOutcome,
 }
 
 impl PartialEq for SendRequest {
@@ -484,7 +486,7 @@ pub struct MacState {
     pub pan_id: PanId,
     /// Frames awaiting extraction by a polling device. Completions are resolved
     /// with the transmit result on extraction, or an error on expiry or drop.
-    pub indirect_queue: IndirectQueue<IndirectFrame, TxCompletion>,
+    pub indirect_queue: IndirectQueue<IndirectFrame, TxOutcome>,
 }
 
 /// The driver's unified mutable protocol state, behind a single lock.
@@ -534,7 +536,7 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub pending_aps_acks: Mutex<BTreeMap<ApsAckData, ApsAckPending>>,
+    pub pending_aps_acks: Mutex<BTreeMap<ApsAckData, PendingApsAck>>,
     pub pending_routes: Mutex<BTreeMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
     pub pending_broadcasts: Mutex<BTreeMap<(Nwk, u8), PendingBroadcast>>,
@@ -751,18 +753,29 @@ pub enum ZigbeeNotification {
         frame_counter: u32,
         key_id: String,
     },
-    /// The outcome of a fire-and-forget application APS send, correlated by the `token`
-    /// the caller supplied to [`ZigbeeStack::send_aps`].
-    ApsSendOutcome { token: u64, result: ApsSendResult },
+    /// Stage 3 of a send: the confirmation of the application send `token` supplied to
+    /// [`ZigbeeStack::send_aps`].
+    SendConfirm { token: u64, result: SendResult },
 }
 
-/// The end-to-end result of an ack-requested [`ZigbeeStack::send_aps`].
+/// The confirmation of an application send (spec-typed by the frame).
+#[derive(Debug, Clone)]
+pub enum SendResult {
+    /// The send was confirmed; `via` names the trigger.
+    Confirmed { via: ConfirmTrigger },
+    /// The send failed before confirmation.
+    Failed { reason: String },
+}
+
+/// Which delivery event confirmed a send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApsSendResult {
-    /// The destination's APS ack arrived.
-    Delivered,
-    /// No APS ack arrived before the deadline (the frame may never have been routed).
-    AckTimeout,
+pub enum ConfirmTrigger {
+    /// Broadcast: the passive-ack quorum was heard.
+    Quorum,
+    /// Unicast with no APS ack requested: the next hop acknowledged the frame.
+    NextHop,
+    /// Unicast with an APS ack requested: the end-to-end APS ack arrived.
+    ApsAck,
 }
 
 #[derive(Debug, Clone)]

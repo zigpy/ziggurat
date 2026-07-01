@@ -4,6 +4,7 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering as AtomicOrdering;
 use core::time::Duration;
@@ -24,9 +25,10 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
+    AddrConflictSource, ConfirmTrigger, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
     PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute, PendingUnicastRetry, SendKind,
-    SendMode, SendRequest, TxCompletion, TxPriority, ZigbeeStack, ZigbeeStackError,
+    SendMode, SendRequest, SendResult, TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack,
+    ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -141,7 +143,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for key in keys {
             if self.broadcast_passively_acked(key) {
                 tracing::debug!("Broadcast {key:?} passively acknowledged");
-                self.state.pending_broadcasts.lock().remove(&key);
+                let removed = self.state.pending_broadcasts.lock().remove(&key);
+                if let Some(token) = removed.and_then(|broadcast| broadcast.token) {
+                    self.push_notification(ZigbeeNotification::SendConfirm {
+                        token,
+                        result: SendResult::Confirmed {
+                            via: ConfirmTrigger::Quorum,
+                        },
+                    });
+                }
                 continue;
             }
 
@@ -149,47 +159,69 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // under it.
             let next_attempt = now + self.tunables.passive_ack_timeout + self.broadcast_jitter();
 
+            // A single stack local, matched immediately after the lock is released, so the
+            // size-amplification the lint warns about does not apply.
+            #[allow(clippy::large_enum_variant)]
+            enum Next {
+                Idle,
+                Retransmit(NwkFrame, NwkSecurityMode, TxPriority),
+                Exhausted(Option<u64>),
+            }
+
             // Decide under the lock; if a copy is due, extract it to transmit after release.
-            let retransmit = {
+            let action = {
                 let mut pending = self.state.pending_broadcasts.lock();
                 let Some(broadcast) = pending.get_mut(&key) else {
                     continue;
                 };
 
                 if broadcast.next_attempt > now {
-                    None
+                    Next::Idle
                 } else if broadcast.attempts_remaining == 0 {
-                    tracing::debug!("Broadcast {key:?} out of retransmit attempts");
+                    let token = broadcast.token;
                     pending.remove(&key);
-
-                    None
+                    Next::Exhausted(token)
                 } else {
                     broadcast.attempts_remaining -= 1;
                     broadcast.next_attempt = next_attempt;
-
-                    Some((
+                    Next::Retransmit(
                         broadcast.nwk_frame.clone(),
                         broadcast.security,
                         broadcast.priority,
-                    ))
+                    )
                 }
             };
 
-            if let Some((nwk_frame, security, priority)) = retransmit {
-                tracing::debug!("Retransmitting broadcast {key:?}");
-                self.enqueue_send(
-                    SendKind::Broadcast {
-                        nwk_frame,
-                        security,
-                    },
-                    priority,
-                    None,
-                );
+            match action {
+                Next::Idle => {}
+                Next::Retransmit(nwk_frame, security, priority) => {
+                    tracing::debug!("Retransmitting broadcast {key:?}");
+                    self.enqueue_send(
+                        SendKind::Broadcast {
+                            nwk_frame,
+                            security,
+                        },
+                        priority,
+                        TxOutcome::Discard,
+                    );
+                }
+                Next::Exhausted(token) => {
+                    tracing::debug!("Broadcast {key:?} out of retransmit attempts");
+                    if let Some(token) = token {
+                        self.push_notification(ZigbeeNotification::SendConfirm {
+                            token,
+                            result: SendResult::Failed {
+                                reason: "passive-ack quorum not reached".to_string(),
+                            },
+                        });
+                    }
+                }
             }
         }
     }
 
     /// Insert a broadcast into the pending-retransmit map and wake the reactor.
+    #[allow(clippy::too_many_arguments)]
     fn schedule_broadcast(
         &self,
         key: (Nwk, u8),
@@ -198,8 +230,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
         first_delay: Duration,
         attempts: u8,
+        token: Option<u64>,
     ) {
-        if attempts == 0 {
+        // With a token we still track the broadcast even at zero retransmits, so the
+        // reactor can confirm its quorum (or fail it); untracked broadcasts just return.
+        if attempts == 0 && token.is_none() {
             return;
         }
 
@@ -211,6 +246,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority,
                 attempts_remaining: attempts,
                 next_attempt: self.core_now() + first_delay,
+                token,
             },
         );
         self.broadcast_retransmit_wake.notify_one();
@@ -440,7 +476,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             "background_send_nwk_frame is unicast only; got broadcast {:?}",
             nwk_frame.nwk_header.destination
         );
-        self.originate_unicast(nwk_frame, security, mode, TxPriority::USER_NORMAL, None);
+        self.originate_unicast(
+            nwk_frame,
+            security,
+            mode,
+            TxPriority::USER_NORMAL,
+            TxOutcome::Discard,
+        );
     }
 
     /// Originate a unicast: assign its NWK sequence number, resolve a next hop, and
@@ -452,25 +494,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         mode: SendMode,
         priority: TxPriority,
-        completion: Option<TxCompletion>,
+        outcome: TxOutcome,
     ) {
         let destination = nwk_frame.nwk_header.destination;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
         match self.resolve_next_hop(&mut nwk_frame, mode) {
             NextHop::Resolved(next_hop) => {
-                self.enqueue_unicast(nwk_frame, next_hop, security, priority, completion);
+                self.enqueue_unicast(nwk_frame, next_hop, security, priority, outcome);
             }
             NextHop::NeedDiscovery => {
-                self.enqueue_awaiting_route(nwk_frame, security, priority, completion)
+                self.enqueue_awaiting_route(nwk_frame, security, priority, outcome)
             }
             NextHop::Discard => {
                 tracing::debug!(
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
                 );
-                if let Some(completion) = completion {
-                    completion.signal(Err(ZigbeeStackError::RouteDiscoverySuppressed));
-                }
+                self.resolve_outcome(outcome, Err(ZigbeeStackError::RouteDiscoverySuppressed));
             }
         }
     }
@@ -536,7 +576,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             // Broadcasts are fire-and-forget: the retransmit reactor owns delivery, and
             // there is no end-to-end result to await.
-            self.send_broadcast_nwk_frame(nwk_frame, security, priority);
+            self.send_broadcast_nwk_frame(nwk_frame, security, priority, None);
             Ok(())
         } else {
             self.send_unicast_nwk_frame(nwk_frame, security, mode, priority)
@@ -631,7 +671,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         let (completion_tx, completion_rx) = signal::channel();
-        self.originate_unicast(nwk_frame, security, mode, priority, Some(completion_tx));
+        self.originate_unicast(
+            nwk_frame,
+            security,
+            mode,
+            priority,
+            TxOutcome::Signal(completion_tx),
+        );
         completion_rx
             .wait()
             .await
@@ -690,18 +736,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Enqueue a send into the priority queue and wake the sender task.
-    pub(super) fn enqueue_send(
-        &self,
-        kind: SendKind,
-        priority: TxPriority,
-        completion: Option<TxCompletion>,
-    ) {
+    pub(super) fn enqueue_send(&self, kind: SendKind, priority: TxPriority, outcome: TxOutcome) {
         let seq = self.send_seq.fetch_add(1, AtomicOrdering::Relaxed);
         self.send_queue.lock().push(SendRequest {
             seq,
             priority,
             kind,
-            completion,
+            outcome,
         });
         self.send_wake.notify_one();
     }
@@ -718,7 +759,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         next_hop: Nwk,
         security: NwkSecurityMode,
         priority: TxPriority,
-        completion: Option<TxCompletion>,
+        outcome: TxOutcome,
     ) {
         if let Some(child_eui64) = self.sleepy_child_eui64(next_hop) {
             // The frame is left as plaintext and finished (encrypted, counter assigned)
@@ -734,7 +775,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             };
             self.increment_tx_total();
 
-            self.enqueue_indirect_frame(frame, completion);
+            self.enqueue_indirect_frame(frame, outcome);
             return;
         }
 
@@ -746,7 +787,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 attempts_remaining: self.tunables.unicast_retries,
             },
             priority,
-            completion,
+            outcome,
         );
     }
 
@@ -757,7 +798,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
     ) -> Result<(), ZigbeeStackError> {
         let (completion_tx, completion_rx) = signal::channel();
-        self.enqueue_send(kind, priority, Some(completion_tx));
+        self.enqueue_send(kind, priority, TxOutcome::Signal(completion_tx));
         completion_rx
             .wait()
             .await
@@ -770,7 +811,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         priority: TxPriority,
-        completion: Option<TxCompletion>,
+        outcome: TxOutcome,
     ) {
         let destination = nwk_frame.nwk_header.destination;
 
@@ -788,7 +829,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     nwk_frame,
                     security,
                     priority,
-                    completion,
+                    outcome,
                 });
             is_new
         };
@@ -893,17 +934,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 mut nwk_frame,
                 security,
                 priority,
-                completion,
+                outcome,
             } = queued;
 
             match self.resolve_next_hop(&mut nwk_frame, SendMode::Route) {
                 NextHop::Resolved(next_hop) => {
-                    self.enqueue_unicast(nwk_frame, next_hop, security, priority, completion);
+                    self.enqueue_unicast(nwk_frame, next_hop, security, priority, outcome);
                 }
                 NextHop::NeedDiscovery | NextHop::Discard => {
-                    if let Some(completion) = completion {
-                        completion.signal(Err(ZigbeeStackError::RouteInactiveAfterDiscovery));
-                    }
+                    self.resolve_outcome(
+                        outcome,
+                        Err(ZigbeeStackError::RouteInactiveAfterDiscovery),
+                    );
                 }
             }
         }
@@ -940,10 +982,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     "Route discovery to {destination:?} failed, dropping {} frame(s)",
                     frames.len()
                 );
-                for PendingFrame { completion, .. } in frames {
-                    if let Some(completion) = completion {
-                        completion.signal(Err(ZigbeeStackError::RouteDiscoveryTimeout(Elapsed)));
-                    }
+                for PendingFrame { outcome, .. } in frames {
+                    self.resolve_outcome(
+                        outcome,
+                        Err(ZigbeeStackError::RouteDiscoveryTimeout(Elapsed)),
+                    );
                 }
             }
         }
@@ -969,15 +1012,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         security,
                         attempts_remaining,
                     } => {
-                        // Owns the completion: resolves it on success or terminal
-                        // failure, or hands it to the retry reactor.
+                        // Owns the outcome: reports it on success or terminal failure, or
+                        // hands it to the retry reactor.
                         self.attempt_unicast_send(
                             nwk_frame,
                             next_hop,
                             security,
                             request.priority,
                             attempts_remaining,
-                            request.completion,
+                            request.outcome,
                         )
                         .await;
                     }
@@ -986,11 +1029,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         security,
                     } => {
                         let result = self.process_broadcast_send(nwk_frame, security).await;
-                        Self::resolve_completion(request.completion, result);
+                        self.resolve_outcome(request.outcome, result);
                     }
                     SendKind::Raw { frame } => {
                         let result = self.send_802154_frame(frame).await;
-                        Self::resolve_completion(request.completion, result);
+                        self.resolve_outcome(request.outcome, result);
                     }
                 }
             }
@@ -999,16 +1042,43 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Resolve a send's completion (if any) with its outcome, logging a dropped
-    /// background failure that nothing is waiting on.
-    fn resolve_completion(completion: Option<TxCompletion>, result: Result<(), ZigbeeStackError>) {
-        match completion {
-            Some(completion) => completion.signal(result),
-            None => {
+    /// Deliver a transmit's terminal outcome to wherever it is owed: log a dropped
+    /// background failure, wake an awaiting caller, or confirm an application send.
+    pub(super) fn resolve_outcome(&self, outcome: TxOutcome, result: Result<(), ZigbeeStackError>) {
+        match outcome {
+            TxOutcome::Discard => {
                 if let Err(err) = result {
                     tracing::warn!("Background send failed: {err}");
                 }
             }
+            TxOutcome::Signal(signal) => signal.signal(result),
+            TxOutcome::Confirm { token, aps_ack } => match result {
+                // Next-hop acceptance confirms a no-ack send; an ack send waits for the
+                // APS ack (the aps-ack table confirms it), so success here is silent.
+                Ok(()) => {
+                    if aps_ack.is_none() {
+                        self.push_notification(ZigbeeNotification::SendConfirm {
+                            token,
+                            result: SendResult::Confirmed {
+                                via: ConfirmTrigger::NextHop,
+                            },
+                        });
+                    }
+                }
+                // The frame never reached its next hop: fail the send and drop any pending
+                // aps-ack so a late or spurious ack cannot double-confirm.
+                Err(err) => {
+                    if let Some(ack_data) = aps_ack {
+                        self.state.pending_aps_acks.lock().remove(&ack_data);
+                    }
+                    self.push_notification(ZigbeeNotification::SendConfirm {
+                        token,
+                        result: SendResult::Failed {
+                            reason: err.to_string(),
+                        },
+                    });
+                }
+            },
         }
     }
 
@@ -1023,7 +1093,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         priority: TxPriority,
         attempts_remaining: u8,
-        completion: Option<TxCompletion>,
+        outcome: TxOutcome,
     ) {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
         let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
@@ -1048,7 +1118,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.increment_tx_total();
 
         let Err(e) = self.send_802154_frame(ieee802154_frame).await else {
-            Self::resolve_completion(completion, Ok(()));
+            self.resolve_outcome(outcome, Ok(()));
             return;
         };
 
@@ -1067,7 +1137,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if attempts_remaining == 0 {
             tracing::error!("Failed to send unicast frame after all attempts");
             self.handle_unicast_send_failure(&nwk_frame, next_hop_address);
-            Self::resolve_completion(completion, Err(e));
+            self.resolve_outcome(outcome, Err(e));
             return;
         }
 
@@ -1081,7 +1151,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security,
             priority,
             attempts_remaining - 1,
-            completion,
+            outcome,
         );
     }
 
@@ -1094,7 +1164,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         priority: TxPriority,
         attempts_remaining: u8,
-        completion: Option<TxCompletion>,
+        outcome: TxOutcome,
     ) {
         let delay = self.tunables.unicast_retry_delay;
 
@@ -1112,7 +1182,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority,
                 attempts_remaining,
                 next_attempt,
-                completion,
+                outcome,
             });
         self.unicast_retry_wake.notify_one();
     }
@@ -1178,7 +1248,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     attempts_remaining: retry.attempts_remaining,
                 },
                 retry.priority,
-                retry.completion,
+                retry.outcome,
             );
         }
     }
@@ -1243,7 +1313,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.increment_tx_total();
 
             // Fire-and-forget: a broadcast copy has no end-to-end result to await.
-            self.enqueue_indirect_frame(frame, None);
+            self.enqueue_indirect_frame(frame, TxOutcome::Discard);
         }
     }
 
@@ -1256,6 +1326,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         priority: TxPriority,
+        // An application send awaiting confirmation on passive-ack quorum; internal
+        // broadcasts pass `None`.
+        token: Option<u64>,
     ) {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
@@ -1287,7 +1360,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 security,
             },
             priority,
-            None,
+            TxOutcome::Discard,
         );
         self.schedule_broadcast(
             key,
@@ -1296,6 +1369,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             priority,
             self.tunables.passive_ack_timeout + self.broadcast_jitter(),
             self.tunables.max_broadcast_retries,
+            token,
         );
     }
 
@@ -1491,7 +1565,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             next_hop_address,
             NwkSecurityMode::NetworkKey,
             TxPriority::USER_NORMAL,
-            None,
+            TxOutcome::Discard,
         );
     }
 
@@ -1577,6 +1651,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             TxPriority::USER_NORMAL,
             self.broadcast_jitter(),
             self.tunables.max_broadcast_retries + 1,
+            None,
         );
     }
 }

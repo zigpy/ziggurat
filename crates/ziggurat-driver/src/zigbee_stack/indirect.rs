@@ -11,28 +11,19 @@ use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
-    DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind, TxCompletion,
+    DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind, TxOutcome,
     TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Queue a frame for a polling device (802.15.4 spec 6.7.3), under its own
-    /// `poll_address`. A `completion`, if supplied, is resolved with the transmit result
-    /// when the device extracts the frame, or with an error on expiry or eviction; a
-    /// fire-and-forget caller passes `None`.
-    pub(super) fn enqueue_indirect_frame(
-        &self,
-        frame: IndirectFrame,
-        completion: Option<TxCompletion>,
-    ) {
-        // The queue stores a completion unconditionally; a fire-and-forget caller gets
-        // a throwaway whose waiter is dropped, so resolving it later is a no-op.
-        let completion = completion.unwrap_or_else(|| signal::channel().0);
-
+    /// `poll_address`. Its `outcome` is resolved when the device extracts the frame, or
+    /// with an error on expiry or eviction.
+    pub(super) fn enqueue_indirect_frame(&self, frame: IndirectFrame, outcome: TxOutcome) {
         self.core()
             .mac
             .indirect_queue
-            .push(frame.poll_address, frame, completion, self.core_now());
+            .push(frame.poll_address, frame, outcome, self.core_now());
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
@@ -47,7 +38,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     ) -> Result<(), ZigbeeStackError> {
         let destination = frame.poll_address;
         let (completion, waiter) = signal::channel();
-        self.enqueue_indirect_frame(frame, Some(completion));
+        self.enqueue_indirect_frame(frame, TxOutcome::Signal(completion));
         waiter
             .wait()
             .await
@@ -118,9 +109,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .extract(source_eui64, source_nwk, self.core_now());
 
         for (destination, transaction) in outcome.expired {
-            transaction
-                .completion
-                .signal(Err(ZigbeeStackError::IndirectExpired { destination }));
+            self.resolve_outcome(
+                transaction.completion,
+                Err(ZigbeeStackError::IndirectExpired { destination }),
+            );
         }
 
         let Some(delivery) = outcome.delivery else {
@@ -144,7 +136,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         true
     }
 
-    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectFrame, TxCompletion>) {
+    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectFrame, TxOutcome>) {
         let Delivery {
             destination,
             transaction,
@@ -186,7 +178,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .await
         {
             Ok(()) => {
-                transaction.completion.signal(Ok(()));
+                self.resolve_outcome(transaction.completion, Ok(()));
                 self.remove_indirect_queue_if_empty(destination);
             }
             // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
@@ -199,7 +191,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .requeue(destination, transaction);
             }
             Err(err) => {
-                transaction.completion.signal(Err(err));
+                self.resolve_outcome(transaction.completion, Err(err));
                 self.remove_indirect_queue_if_empty(destination);
             }
         }
@@ -220,9 +212,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         for (destination, transaction) in dropped {
-            transaction
-                .completion
-                .signal(Err(ZigbeeStackError::IndirectExpired { destination }));
+            self.resolve_outcome(
+                transaction.completion,
+                Err(ZigbeeStackError::IndirectExpired { destination }),
+            );
         }
 
         self.src_match_sync.notify_one();
@@ -357,9 +350,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         for (destination, transaction) in expired {
             tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
-            transaction
-                .completion
-                .signal(Err(ZigbeeStackError::IndirectExpired { destination }));
+            self.resolve_outcome(
+                transaction.completion,
+                Err(ZigbeeStackError::IndirectExpired { destination }),
+            );
         }
 
         self.src_match_sync.notify_one();

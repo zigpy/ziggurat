@@ -17,7 +17,7 @@ use ziggurat_zigbee::nwk::frame::{
 };
 
 use super::{
-    NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxPriority, ZigbeeStack,
+    NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPriority, ZigbeeStack,
     ZigbeeStackError,
 };
 
@@ -145,7 +145,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 frame: beacon_frame,
             },
             tx_priority,
-            None,
+            TxOutcome::Discard,
         );
     }
 

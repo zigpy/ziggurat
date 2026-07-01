@@ -12,7 +12,8 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, MAX_DEPTH, NwkDeviceType, TxPriority, ZigbeeStack, ZigbeeStackError, neighbors, routing,
+    ApsAck, MAX_DEPTH, NwkDeviceType, TxOutcome, TxPriority, ZigbeeStack, ZigbeeStackError,
+    neighbors, routing,
 };
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
@@ -281,7 +282,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             None,
         )?;
 
-        self.enqueue_aps_frame(nwk_frame, TxPriority::USER_NORMAL);
+        self.enqueue_aps_frame(nwk_frame, TxPriority::USER_NORMAL, TxOutcome::Discard);
         Ok(())
     }
 

@@ -287,6 +287,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 conflict_frame,
                 NwkSecurityMode::NetworkKey,
                 TxPriority::USER_NORMAL,
+                None,
             );
         });
     }

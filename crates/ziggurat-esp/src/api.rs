@@ -18,8 +18,8 @@ use crate::CaptureStop;
 use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ApsSendResult, NetworkBeacon, NetworkConfig, NwkDeviceType, TclkSeed, Tunables,
-    TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ConfirmTrigger, NetworkBeacon, NetworkConfig, NwkDeviceType, SendResult, TclkSeed,
+    Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
@@ -240,8 +240,8 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         "get_hw_address" => handle_get_hw_address(id),
         "get_network_info" => handle_get_network_info(app, id),
         "send_aps" => {
-            // Fire-and-forget: enqueues and returns. A no-ack send is answered inline; an
-            // ack send is answered later by an `ApsSendOutcome` notification.
+            // Fire-and-forget: the stack accepts or rejects now, and the terminal outcome
+            // arrives later as a `send_confirm` notification keyed by the request id.
             dispatch_send_aps(app, id, params).await;
             return;
         }
@@ -415,9 +415,9 @@ fn handle_get_network_info(app: &App, id: u64) -> Value {
 }
 
 /// Fire-and-forget APS send: build and enqueue the frame, then return. No task, no
-/// blocking — delivery is driven by the stack's tables. A no-ack send is answered
-/// `sent` right here; an ack send is answered later by an `ApsSendOutcome` notification
-/// (keyed by the request id) once the ack arrives or times out.
+/// blocking — delivery is driven by the stack's tables. The stack accepts or rejects the
+/// frame now (the `accepted`/error response); its terminal outcome arrives later as a
+/// `send_confirm` notification keyed by the request id.
 async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
     let Some(stack) = app.stack.as_ref() else {
         emit(error_response(id, "not_configured", "no stack is running")).await;
@@ -495,10 +495,11 @@ async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
         id,
     );
 
+    // The stack accepts the frame for transmission or rejects it now. The terminal
+    // delivery outcome arrives later as a `send_confirm` notification keyed by this
+    // request id (the send token).
     let message = match outcome {
-        // An ack send's terminal response arrives later as an `ApsSendOutcome`.
-        Ok(()) if request.aps_ack => return,
-        Ok(()) => response(id, json!({"status": "sent"})),
+        Ok(()) => response(id, json!({"status": "accepted"})),
         Err(e) => error_response(id, "transmit_failed", e),
     };
     emit(message).await;
@@ -788,11 +789,26 @@ fn notification_to_json(notification_event: ZigbeeNotification) -> Value {
                 "key_id": key_id,
             }),
         ),
-        // A fire-and-forget `send_aps` outcome: the token is the request id, so this is
-        // the terminal response to that request, not a notification.
-        ZigbeeNotification::ApsSendOutcome { token, result } => match result {
-            ApsSendResult::Delivered => response(token, json!({"status": "delivered"})),
-            ApsSendResult::AckTimeout => error_response(token, "aps_ack_timeout", "no APS ack"),
-        },
+        // Stage three of a send: the terminal confirmation for the `token` the client
+        // supplied as its `send_aps` request id. `via` names which trigger fired.
+        ZigbeeNotification::SendConfirm { token, result } => notification(
+            "send_confirm",
+            match result {
+                SendResult::Confirmed { via } => json!({
+                    "token": token,
+                    "status": "confirmed",
+                    "via": match via {
+                        ConfirmTrigger::Quorum => "quorum",
+                        ConfirmTrigger::NextHop => "next_hop",
+                        ConfirmTrigger::ApsAck => "aps_ack",
+                    },
+                }),
+                SendResult::Failed { reason } => json!({
+                    "token": token,
+                    "status": "failed",
+                    "reason": reason,
+                }),
+            },
+        ),
     }
 }

@@ -18,8 +18,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ziggurat_driver::runtime::TokioSpawner;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ApsSendResult, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType,
-    TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ConfirmTrigger, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType,
+    SendResult, TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification,
+    ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
@@ -339,17 +340,24 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                 "key_id": key_id,
             }),
         ),
-        // The server uses the awaiting send path, so it never emits this; mapped for
-        // exhaustiveness.
-        ZigbeeNotification::ApsSendOutcome { token, result } => notification(
-            "aps_send_outcome",
-            json!({
-                "token": token,
-                "result": match result {
-                    ApsSendResult::Delivered => "delivered",
-                    ApsSendResult::AckTimeout => "aps_ack_timeout",
-                },
-            }),
+        ZigbeeNotification::SendConfirm { token, result } => notification(
+            "send_confirm",
+            match result {
+                SendResult::Confirmed { via } => json!({
+                    "token": token,
+                    "status": "confirmed",
+                    "via": match via {
+                        ConfirmTrigger::Quorum => "quorum",
+                        ConfirmTrigger::NextHop => "next_hop",
+                        ConfirmTrigger::ApsAck => "aps_ack",
+                    },
+                }),
+                SendResult::Failed { reason } => json!({
+                    "token": token,
+                    "status": "failed",
+                    "reason": reason,
+                }),
+            },
         ),
     }
 }
@@ -652,7 +660,7 @@ impl ZigguratServer {
                     "configure" => server.handle_configure(id, params).await,
                     "get_hw_address" => server.handle_get_hw_address(id).await,
                     "get_network_info" => server.handle_get_network_info(id),
-                    "send_aps" => server.handle_send_aps(id, params, &outbound).await,
+                    "send_aps" => server.handle_send_aps(id, params),
                     "energy_scan" => server.handle_energy_scan(id, params, &outbound).await,
                     "network_scan" => server.handle_network_scan(id, params, &outbound).await,
                     "permit_joins" => server.handle_permit_joins(id, params),
@@ -974,12 +982,7 @@ impl ZigguratServer {
         }
     }
 
-    async fn handle_send_aps(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-        outbound: &mpsc::Sender<serde_json::Value>,
-    ) -> serde_json::Value {
+    fn handle_send_aps(&self, id: u64, params: serde_json::Value) -> serde_json::Value {
         let request: SendApsRequest = match serde_json::from_value(params) {
             Ok(request) => request,
             Err(e) => return error_response(id, "invalid_request", e),
@@ -1033,41 +1036,30 @@ impl ZigguratServer {
             None
         };
 
-        let ack_waiter = match stack
-            .send_aps_command(
-                request.delivery_mode,
-                destination,
-                request.profile_id,
-                request.cluster_id,
-                request.src_ep,
-                request.dst_ep,
-                if request.aps_ack {
-                    ApsAck::Request
-                } else {
-                    ApsAck::None
-                },
-                request.radius,
-                request.aps_seq,
-                asdu,
-                aps_security,
-                TxPriority(request.priority),
-            )
-            .await
-        {
-            Ok(ack_waiter) => ack_waiter,
-            Err(e) => return error_response(id, "transmit_failed", e),
-        };
-
-        // The frame is on the air (or extracted from the indirect queue); the
-        // terminal response then reports end-to-end delivery when an ack was requested
-        let _ = outbound.send(event(id, "transmitted")).await;
-
-        match ack_waiter {
-            None => response(id, json!({"status": "sent"})),
-            Some(waiter) => match stack.wait_aps_ack(waiter).await {
-                Ok(()) => response(id, json!({"status": "delivered"})),
-                Err(e) => error_response(id, "aps_ack_timeout", e),
+        // The stack either accepts the frame for transmission or rejects it now. The
+        // delivery outcome arrives later as a `send_confirm` notification keyed by
+        // this request id (the send token).
+        match stack.send_aps(
+            request.delivery_mode,
+            destination,
+            request.profile_id,
+            request.cluster_id,
+            request.src_ep,
+            request.dst_ep,
+            if request.aps_ack {
+                ApsAck::Request
+            } else {
+                ApsAck::None
             },
+            request.radius,
+            request.aps_seq,
+            asdu,
+            aps_security,
+            TxPriority(request.priority),
+            id,
+        ) {
+            Ok(()) => response(id, json!({"status": "accepted"})),
+            Err(e) => error_response(id, "transmit_failed", e),
         }
     }
 
