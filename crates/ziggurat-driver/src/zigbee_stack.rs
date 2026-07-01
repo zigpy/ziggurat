@@ -263,17 +263,18 @@ pub enum TxOutcome {
     Discard,
     /// Resolve an awaiting caller's signal (internal awaiters).
     Signal(TxCompletion),
-    /// Confirm an application send by `token`. `aps_ack` present means the end-to-end APS
-    /// ack is the confirmation — this hop succeeding is silent, its failure fails the
-    /// send; absent means next-hop acceptance is itself the confirmation.
+    /// Confirm an application send by `token`. `aps_ack` present means the end-to-end
+    /// APS ack is the confirmation: this hop succeeding is silent, its failure fails
+    /// the send; absent means next-hop acceptance is itself the confirmation.
     Confirm {
         token: u64,
         aps_ack: Option<ApsAckData>,
     },
 }
 
-/// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end ack,
-/// confirmed (or timed out) as a [`ZigbeeNotification::SendConfirm`] carrying `token`.
+/// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
+/// ack, confirmed (or timed out) as a [`ZigbeeNotification::SendConfirm`] carrying
+/// `token`.
 #[derive(Debug)]
 pub struct PendingApsAck {
     pub(crate) token: u64,
@@ -281,10 +282,9 @@ pub struct PendingApsAck {
 }
 
 /// A transmit queued for the single sender task ([`ZigbeeStack::sender_task`]). The NWK
-/// frame is unencrypted: the sender assigns the frame counter at dequeue, so on-air order
-/// always matches frame-counter order regardless of priority reordering in the queue.
+/// frame is unencrypted: the sender assigns the frame counter at dequeue.
 #[derive(Debug)]
-pub(crate) struct SendRequest {
+pub struct SendRequest {
     seq: u32,
     priority: TxPriority,
     pub(crate) kind: SendKind,
@@ -808,14 +808,14 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     pub config: NetworkConfig,
     pub tunables: Tunables,
     pub radio: Arc<P>,
-    notifications: Mutex<VecDeque<ZigbeeNotification>>,
+    pub notifications: Mutex<VecDeque<ZigbeeNotification>>,
     notification_wake: Notify,
     pub raw_frame_rx: AsyncMutex<P::RxStream>,
     pub reset_rx: AsyncMutex<P::ResetStream>,
     /// Whether a network scan is collecting. The receive loop only queues beacons while
     /// this is set, so stray beacons outside a scan are dropped.
     scan_active: AtomicBool,
-    scan_beacons: Mutex<VecDeque<NetworkBeacon>>,
+    pub scan_beacons: Mutex<VecDeque<NetworkBeacon>>,
     scan_beacon_wake: Notify,
 
     /// Wakes the task that rewrites the RCP source address match table whenever the
@@ -852,7 +852,7 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
 
     /// Outgoing frames awaiting the single sender task, ordered by priority then FIFO.
     /// The sender encrypts at dequeue, so frame-counter order matches on-air order.
-    pub(crate) send_queue: Mutex<BinaryHeap<SendRequest>>,
+    pub send_queue: Mutex<BinaryHeap<SendRequest>>,
     /// Wakes the sender task when a frame is enqueued.
     pub(crate) send_wake: Notify,
     /// Wakes the pending-route reactor when a frame is queued awaiting a route, or when a

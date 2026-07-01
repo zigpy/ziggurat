@@ -228,7 +228,7 @@ fn raw_to_rx_frame(data: &[u8], channel: u8) -> Option<RxFrame> {
     let psdu = &data[1..1 + len];
 
     // TODO: the LQI doesn't exceed 11 and esp-idf also computes it from RSSI. Why?
-    let rssi = (psdu[len - 2] as i8);
+    let rssi = psdu[len - 2] as i8;
     let lqi = rssi_to_lqi(rssi);
 
     Some(RxFrame {
