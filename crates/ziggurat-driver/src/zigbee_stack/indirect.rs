@@ -111,6 +111,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (destination, transaction) in outcome.expired {
             self.resolve_outcome(
                 transaction.completion,
+                None,
                 Err(ZigbeeStackError::IndirectExpired { destination }),
             );
         }
@@ -178,7 +179,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .await
         {
             Ok(()) => {
-                self.resolve_outcome(transaction.completion, Ok(()));
+                self.resolve_outcome(transaction.completion, None, Ok(()));
                 self.remove_indirect_queue_if_empty(destination);
             }
             // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
@@ -191,7 +192,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .requeue(destination, transaction);
             }
             Err(err) => {
-                self.resolve_outcome(transaction.completion, Err(err));
+                self.resolve_outcome(transaction.completion, None, Err(err));
                 self.remove_indirect_queue_if_empty(destination);
             }
         }
@@ -214,6 +215,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (destination, transaction) in dropped {
             self.resolve_outcome(
                 transaction.completion,
+                None,
                 Err(ZigbeeStackError::IndirectExpired { destination }),
             );
         }
@@ -352,6 +354,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
             self.resolve_outcome(
                 transaction.completion,
+                None,
                 Err(ZigbeeStackError::IndirectExpired { destination }),
             );
         }

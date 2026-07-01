@@ -760,26 +760,27 @@ pub enum ZigbeeNotification {
         request_id: RequestId,
         result: SendResult,
     },
+    ApsAckConfirm {
+        request_id: RequestId,
+        result: ApsAckResult,
+    },
 }
 
-/// The confirmation of an application send (spec-typed by the frame).
 #[derive(Debug, Clone)]
 pub enum SendResult {
-    /// The send was confirmed; `via` names the trigger.
-    Confirmed { via: ConfirmTrigger },
-    /// The send failed before confirmation.
-    Failed { reason: String },
+    /// Handed off; `next_hop` is the neighbour it went to, `None` for a broadcast.
+    Confirmed {
+        next_hop: Option<Nwk>,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
-/// Which delivery event confirmed a send.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfirmTrigger {
-    /// Broadcast: the passive-ack quorum was heard.
-    Quorum,
-    /// Unicast with no APS ack requested: the next hop acknowledged the frame.
-    NextHop,
-    /// Unicast with an APS ack requested: the end-to-end APS ack arrived.
-    ApsAck,
+#[derive(Debug, Clone)]
+pub enum ApsAckResult {
+    Acked,
+    Failed { reason: String },
 }
 
 #[derive(Debug, Clone)]

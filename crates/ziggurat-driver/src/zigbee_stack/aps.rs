@@ -18,8 +18,8 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
 
 use super::{
-    ApsAck, ApsAckData, ConfirmTrigger, NwkSecurityMode, PendingApsAck, SendMode, SendResult,
-    RequestId, TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, SendMode,
+    TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -87,11 +87,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let pending = self.state.pending_aps_acks.lock().remove(&ack_data);
         if let Some(PendingApsAck { request_id, .. }) = pending {
-            self.push_notification(ZigbeeNotification::SendConfirm {
+            self.push_notification(ZigbeeNotification::ApsAckConfirm {
                 request_id,
-                result: SendResult::Confirmed {
-                    via: ConfirmTrigger::ApsAck,
-                },
+                result: ApsAckResult::Acked,
             });
         }
     }
@@ -441,9 +439,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         for request_id in expired {
             tracing::warn!("APS ack timed out for send {request_id}");
-            self.push_notification(ZigbeeNotification::SendConfirm {
+            self.push_notification(ZigbeeNotification::ApsAckConfirm {
                 request_id,
-                result: SendResult::Failed {
+                result: ApsAckResult::Failed {
                     reason: "APS ack timed out".to_string(),
                 },
             });

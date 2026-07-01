@@ -25,9 +25,9 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, ConfirmTrigger, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
-    PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute, PendingUnicastRetry, SendKind,
-    SendMode, SendRequest, SendResult, RequestId, TxOutcome, TxPriority, ZigbeeNotification,
+    AddrConflictSource, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
+    PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute, PendingUnicastRetry, RequestId,
+    SendKind, SendMode, SendRequest, SendResult, TxOutcome, TxPriority, ZigbeeNotification,
     ZigbeeStack, ZigbeeStackError,
 };
 
@@ -147,9 +147,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 if let Some(request_id) = removed.and_then(|broadcast| broadcast.request_id) {
                     self.push_notification(ZigbeeNotification::SendConfirm {
                         request_id,
-                        result: SendResult::Confirmed {
-                            via: ConfirmTrigger::Quorum,
-                        },
+                        result: SendResult::Confirmed { next_hop: None },
                     });
                 }
                 continue;
@@ -510,7 +508,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 tracing::debug!(
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
                 );
-                self.resolve_outcome(outcome, Err(ZigbeeStackError::RouteDiscoverySuppressed));
+                self.resolve_outcome(
+                    outcome,
+                    None,
+                    Err(ZigbeeStackError::RouteDiscoverySuppressed),
+                );
             }
         }
     }
@@ -944,6 +946,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NextHop::NeedDiscovery | NextHop::Discard => {
                     self.resolve_outcome(
                         outcome,
+                        None,
                         Err(ZigbeeStackError::RouteInactiveAfterDiscovery),
                     );
                 }
@@ -985,6 +988,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 for PendingFrame { outcome, .. } in frames {
                     self.resolve_outcome(
                         outcome,
+                        None,
                         Err(ZigbeeStackError::RouteDiscoveryTimeout(Elapsed)),
                     );
                 }
@@ -1029,11 +1033,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         security,
                     } => {
                         let result = self.process_broadcast_send(nwk_frame, security).await;
-                        self.resolve_outcome(request.outcome, result);
+                        self.resolve_outcome(request.outcome, None, result);
                     }
                     SendKind::Raw { frame } => {
                         let result = self.send_802154_frame(frame).await;
-                        self.resolve_outcome(request.outcome, result);
+                        self.resolve_outcome(request.outcome, None, result);
                     }
                 }
             }
@@ -1044,7 +1048,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Deliver a transmit's terminal outcome to wherever it is owed: log a dropped
     /// background failure, wake an awaiting caller, or confirm an application send.
-    pub(super) fn resolve_outcome(&self, outcome: TxOutcome, result: Result<(), ZigbeeStackError>) {
+    pub(super) fn resolve_outcome(
+        &self,
+        outcome: TxOutcome,
+        next_hop: Option<Nwk>,
+        result: Result<(), ZigbeeStackError>,
+    ) {
         match outcome {
             TxOutcome::Discard => {
                 if let Err(err) = result {
@@ -1052,22 +1061,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
             TxOutcome::Signal(signal) => signal.signal(result),
-            TxOutcome::Confirm { request_id, aps_ack } => match result {
-                // Next-hop acceptance confirms a no-ack send; an ack send waits for the
-                // APS ack (the aps-ack table confirms it), so success here is silent.
+            TxOutcome::Confirm {
+                request_id,
+                aps_ack,
+            } => match result {
                 Ok(()) => {
-                    if aps_ack.is_none() {
-                        self.push_notification(ZigbeeNotification::SendConfirm {
-                            request_id,
-                            result: SendResult::Confirmed {
-                                via: ConfirmTrigger::NextHop,
-                            },
-                        });
-                    }
+                    self.push_notification(ZigbeeNotification::SendConfirm {
+                        request_id,
+                        result: SendResult::Confirmed { next_hop },
+                    });
                 }
-                // The frame never reached its next hop: fail the send and drop any pending
-                // aps-ack so a late or spurious ack cannot double-confirm.
                 Err(err) => {
+                    // Drop any pending aps-ack so a late ack can't emit a stray ApsAckConfirm.
                     if let Some(ack_data) = aps_ack {
                         self.state.pending_aps_acks.lock().remove(&ack_data);
                     }
@@ -1118,7 +1123,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.increment_tx_total();
 
         let Err(e) = self.send_802154_frame(ieee802154_frame).await else {
-            self.resolve_outcome(outcome, Ok(()));
+            self.resolve_outcome(outcome, Some(next_hop_address), Ok(()));
             return;
         };
 
@@ -1137,7 +1142,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if attempts_remaining == 0 {
             tracing::error!("Failed to send unicast frame after all attempts");
             self.handle_unicast_send_failure(&nwk_frame, next_hop_address);
-            self.resolve_outcome(outcome, Err(e));
+            self.resolve_outcome(outcome, Some(next_hop_address), Err(e));
             return;
         }
 

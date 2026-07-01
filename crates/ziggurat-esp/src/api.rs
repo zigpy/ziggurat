@@ -18,7 +18,7 @@ use crate::CaptureStop;
 use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ConfirmTrigger, NetworkBeacon, NetworkConfig, NwkDeviceType, SendResult, RequestId,
+    ApsAck, ApsAckResult, NetworkBeacon, NetworkConfig, NwkDeviceType, RequestId, SendResult,
     TclkSeed, Tunables, TxPriority, WELL_KNOWN_LINK_KEY, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -801,21 +801,29 @@ fn notification_to_json(notification_event: ZigbeeNotification) -> Value {
                 "key_id": key_id,
             }),
         ),
-        // Stage three of a send: the terminal confirmation for the `token` the client
-        // supplied as its `send_aps` request id. `via` names which trigger fired.
         ZigbeeNotification::SendConfirm { request_id, result } => notification(
             "send_confirm",
             match result {
-                SendResult::Confirmed { via } => json!({
+                SendResult::Confirmed { next_hop } => json!({
                     "id": request_id,
                     "status": "confirmed",
-                    "via": match via {
-                        ConfirmTrigger::Quorum => "quorum",
-                        ConfirmTrigger::NextHop => "next_hop",
-                        ConfirmTrigger::ApsAck => "aps_ack",
-                    },
+                    "next_hop": next_hop.map(|nwk| format!("{:04x}", nwk.0)),
                 }),
                 SendResult::Failed { reason } => json!({
+                    "id": request_id,
+                    "status": "failed",
+                    "reason": reason,
+                }),
+            },
+        ),
+        ZigbeeNotification::ApsAckConfirm { request_id, result } => notification(
+            "aps_ack_confirm",
+            match result {
+                ApsAckResult::Acked => json!({
+                    "id": request_id,
+                    "status": "confirmed",
+                }),
+                ApsAckResult::Failed { reason } => json!({
                     "id": request_id,
                     "status": "failed",
                     "reason": reason,
