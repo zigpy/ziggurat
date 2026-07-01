@@ -52,10 +52,13 @@ pub static OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, OUT
 const INBOUND_DEPTH: usize = 32;
 static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Channel::new();
 
-/// Plaintext log lines bound for the UART console.
+pub const LOG_CHUNK: usize = 256;
 const LOG_OUTBOUND_DEPTH: usize = 32;
-pub static LOG_OUTBOUND: Channel<CriticalSectionRawMutex, alloc::string::String, LOG_OUTBOUND_DEPTH> =
-    Channel::new();
+pub static LOG_OUTBOUND: Channel<
+    CriticalSectionRawMutex,
+    heapless::Vec<u8, LOG_CHUNK>,
+    LOG_OUTBOUND_DEPTH,
+> = Channel::new();
 
 /// Cancels the packet-capture task. Each capture gets a fresh one; `stop_packet_capture`
 /// signals it so the task exits and frees the radio.
@@ -123,10 +126,8 @@ async fn writer_task(mut tx: UsbSerialJtagTx<'static, Async>) {
 #[embassy_executor::task]
 async fn uart_log_task(mut tx: UartTx<'static, Async>) {
     loop {
-        let line = LOG_OUTBOUND.receive().await;
-        let _ = tx.write_all(line.as_bytes()).await;
-        let _ = tx.write_all(b"\r\n").await;
-        // No flush needed: the UART peripheral shifts the FIFO out autonomously.
+        let chunk = LOG_OUTBOUND.receive().await;
+        let _ = tx.write_all(&chunk).await;
     }
 }
 
@@ -142,10 +143,13 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(size: 240 * 1024);
 
     // Bring up the UART console
-    let log_uart = UartTx::new(peripherals.UART0, UartConfig::default().with_baudrate(460_800))
-        .expect("UART0 config")
-        .with_tx(peripherals.GPIO16)
-        .into_async();
+    let log_uart = UartTx::new(
+        peripherals.UART0,
+        UartConfig::default().with_baudrate(460_800),
+    )
+    .expect("UART0 config")
+    .with_tx(peripherals.GPIO16)
+    .into_async();
     spawner.spawn(uart_log_task(log_uart).unwrap());
 
     // Route the stack's `tracing` records to the UART console.

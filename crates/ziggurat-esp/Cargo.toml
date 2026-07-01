@@ -37,6 +37,7 @@ embassy-sync = "0.8"
 embassy-futures = "0.1"
 embedded-io-async = "0.7"
 
+heapless = { version = "0.9", default-features = false }
 tracing = { version = "0.1", default-features = false }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
