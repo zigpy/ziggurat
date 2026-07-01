@@ -126,6 +126,8 @@ unsafe extern "C" fn on_rail_event(rail_handle: rail::sl_rail_handle_t, events: 
                 break; // queue drained
             }
             if info.packet_status as u32 == RX_PACKET_READY_SUCCESS && info.packet_bytes >= 1 {
+                let mut details: rail::sl_rail_rx_packet_details_t = unsafe { core::mem::zeroed() };
+                unsafe { rail::sl_rail_get_rx_packet_details(rail_handle, handle, &mut details) };
                 // RAIL hands us [PHR length byte][MAC frame without FCS].
                 let mut buf = [0u8; 128];
                 let n = core::cmp::min(info.packet_bytes as usize, buf.len());
@@ -133,9 +135,9 @@ unsafe extern "C" fn on_rail_event(rail_handle: rail::sl_rail_handle_t, events: 
                 let frame = RxFrame {
                     psdu: buf[1..n].to_vec(), // drop the PHR length byte
                     channel: CURRENT_CHANNEL.load(Ordering::Relaxed),
-                    rssi: 0, // TODO: sl_rail_get_rx_packet_details
-                    lqi: 0,  // TODO
-                    timestamp_us: 0, // TODO
+                    rssi: details.rssi_dbm,
+                    lqi: details.lqi,
+                    timestamp_us: u64::from(details.time_received.packet_time),
                 };
                 let _ = RX_CHANNEL.try_send(frame);
             }
