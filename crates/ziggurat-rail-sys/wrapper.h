@@ -9,3 +9,7 @@
 #include "sli_protocol_crypto.h"
 // PA / TX power configuration (needed to transmit).
 #include "sl_rail_util_pa_conversions.h"
+// Accessors surfacing the board's compile-time RF config macros (see vendor/ziggurat_board.c).
+#include <stdint.h>
+uint16_t ziggurat_pa_voltage_mv(void);
+uint16_t ziggurat_pa_ramp_time_us(void);

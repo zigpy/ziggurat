@@ -213,9 +213,9 @@ impl Efr32Phy {
             ieee.timings.rx_to_tx = 192;
             ieee.ack_config.enable = true;
             ieee.ack_config.ack_timeout_us = 672;
-            // Stay in RX after every RX/TX/ACK. Left at 0 (INACTIVE) the radio drops to idle
-            // after the first received+acked frame and stops receiving — catching almost
-            // nothing on a busy network.
+            // Stay in RX after every RX/TX/ACK. Left at 0 (INACTIVE) the radio drops to
+            // idle after the first received+acked frame and stops receiving, catching
+            // almost nothing on a busy network.
             let stay_rx = rail::sl_rail_state_transitions_t {
                 success: RF_STATE_RX,
                 error: RF_STATE_RX,
@@ -230,8 +230,8 @@ impl Efr32Phy {
             let tx_power_config = rail::sl_rail_tx_power_config_t {
                 mode: rail::sl_rail_tx_power_mode_t_enum::SL_RAIL_TX_POWER_MODE_2P4_GHZ_HIGHEST
                     as rail::sl_rail_tx_power_mode_t,
-                voltage_mv: 3300,  // SL_RAIL_UTIL_PA_VOLTAGE_MV
-                ramp_time_us: 10,  // SL_RAIL_UTIL_PA_RAMP_TIME_US
+                voltage_mv: rail::ziggurat_pa_voltage_mv(),
+                ramp_time_us: rail::ziggurat_pa_ramp_time_us(),
             };
             rail::sl_rail_config_tx_power(h, &tx_power_config);
 
