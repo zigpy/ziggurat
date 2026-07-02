@@ -994,7 +994,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         loop {
             let (packet, ieee802154_frame) = self.recv_frame().await;
 
-            if !matches!(
+            if matches!(
                 ieee802154_frame,
                 ziggurat_ieee_802154::Ieee802154Frame::Beacon(_)
             ) {
