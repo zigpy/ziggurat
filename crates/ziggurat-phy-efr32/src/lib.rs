@@ -47,6 +47,7 @@ mod events {
     pub const TX_UNDERFLOW: u64 = 1 << e::SL_RAIL_EVENT_TX_UNDERFLOW_SHIFT as u64;
     pub const RX_ACK_TIMEOUT: u64 = 1 << e::SL_RAIL_EVENT_RX_ACK_TIMEOUT_SHIFT as u64;
     pub const RX_FIFO_OVERFLOW: u64 = 1 << e::SL_RAIL_EVENT_RX_FIFO_OVERFLOW_SHIFT as u64;
+    pub const CAL_NEEDED: u64 = 1 << e::SL_RAIL_EVENT_CAL_NEEDED_SHIFT as u64;
 
     /// Everything the backend acts on.
     pub const SUBSCRIBED: u64 = RX_PACKET_RECEIVED
@@ -56,7 +57,8 @@ mod events {
         | TX_ABORTED
         | TX_BLOCKED
         | TX_UNDERFLOW
-        | RX_ACK_TIMEOUT;
+        | RX_ACK_TIMEOUT
+        | CAL_NEEDED;
 }
 
 const TX_OPTION_WAIT_FOR_ACK: u64 =
@@ -163,6 +165,16 @@ unsafe extern "C" fn on_rail_event(rail_handle: rail::sl_rail_handle_t, events: 
     };
     if let Some(result) = tx_result {
         TX_COMPLETE.signal(result);
+    }
+
+    if events & self::events::CAL_NEEDED != 0 {
+        unsafe {
+            rail::sl_rail_calibrate(
+                rail_handle,
+                core::ptr::null_mut(),
+                rail::SL_RAIL_CAL_ALL_PENDING as rail::sl_rail_cal_mask_t,
+            )
+        };
     }
 }
 
