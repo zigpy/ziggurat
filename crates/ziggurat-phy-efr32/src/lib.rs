@@ -230,8 +230,8 @@ impl Efr32Phy {
             let tx_power_config = rail::sl_rail_tx_power_config_t {
                 mode: rail::sl_rail_tx_power_mode_t_enum::SL_RAIL_TX_POWER_MODE_2P4_GHZ_HIGHEST
                     as rail::sl_rail_tx_power_mode_t,
-                voltage_mv: 3300, // SL_RAIL_UTIL_PA_VOLTAGE_MV
-                ramp_time_us: 2,  // SL_RAIL_UTIL_PA_RAMP_TIME_US
+                voltage_mv: 3300,  // SL_RAIL_UTIL_PA_VOLTAGE_MV
+                ramp_time_us: 10,  // SL_RAIL_UTIL_PA_RAMP_TIME_US
             };
             rail::sl_rail_config_tx_power(h, &tx_power_config);
 

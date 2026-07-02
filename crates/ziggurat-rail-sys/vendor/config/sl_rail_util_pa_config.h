@@ -46,7 +46,7 @@
 // <o SL_RAIL_UTIL_PA_VOLTAGE_MV> Milli-volts on PA supply pin (PA_VDD)
 // <0-65535:1>
 // <i> Default: 3300
-#define SL_RAIL_UTIL_PA_VOLTAGE_MV          3300
+#define SL_RAIL_UTIL_PA_VOLTAGE_MV          1800
 
 // <o SL_RAIL_UTIL_PA_SELECTION_2P4GHZ> 2.4 GHz PA Selection
 // <RAIL_TX_POWER_MODE_2P4GIG_HIGHEST=> Highest Possible
@@ -81,4 +81,3 @@
 // <<< end of configuration section >>>
 
 #endif // SL_RAIL_UTIL_PA_CONFIG_H
-
