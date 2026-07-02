@@ -138,4 +138,14 @@ pub trait ExclusiveRadio: Send {
 
     fn transmit(&self, frame: TxFrame)
     -> impl Future<Output = Result<TxResult, RadioError>> + Send;
+
+    fn set_promiscuous(
+        &self,
+        promiscuous: bool,
+    ) -> impl Future<Output = Result<(), RadioError>> + Send {
+        async move {
+            let _ = promiscuous;
+            Ok(())
+        }
+    }
 }

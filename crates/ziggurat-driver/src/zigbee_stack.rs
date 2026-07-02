@@ -1437,9 +1437,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let result: Result<(), RadioError> = async {
             let radio = self.radio.lock().await;
+            radio.set_promiscuous(true).await?;
+
+            let mut sweep: Result<(), RadioError> = Ok(());
             for &channel in channels {
-                radio.set_channel(channel).await?;
-                radio
+                if let Err(e) = radio.set_channel(channel).await {
+                    sweep = Err(e);
+                    break;
+                }
+                let tx = radio
                     .transmit(TxFrame {
                         psdu: beacon_request.clone(),
                         channel: None,
@@ -1448,11 +1454,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
                         security_processed: true,
                     })
-                    .await?;
+                    .await;
+                if let Err(e) = tx {
+                    sweep = Err(e);
+                    break;
+                }
                 R::sleep(duration_per_channel).await;
             }
-            // Leave the radio on the home channel before releasing it.
-            radio.set_channel(home_channel).await
+
+            radio.set_promiscuous(false).await?;
+            radio.set_channel(home_channel).await?;
+            sweep
         }
         .await;
 

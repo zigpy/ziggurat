@@ -334,6 +334,12 @@ impl ExclusiveRadio for Efr32Exclusive<'_> {
     async fn transmit(&self, frame: TxFrame) -> Result<TxResult, RadioError> {
         self.phy.transmit_inner(&frame).await
     }
+
+    async fn set_promiscuous(&self, promiscuous: bool) -> Result<(), RadioError> {
+        let _state = self.phy.state.lock().await;
+        unsafe { rail::sl_rail_ieee802154_set_promiscuous_mode(handle(), promiscuous) };
+        Ok(())
+    }
 }
 
 impl RadioPhy for Efr32Phy {
