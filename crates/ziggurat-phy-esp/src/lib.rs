@@ -28,6 +28,7 @@ use esp_hal::peripherals::{IEEE802154, Interrupt};
 use esp_hal::system::Cpu;
 use esp_radio::ieee802154::{Config, Ieee802154};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_ieee_802154::{FrameBytes, Ieee802154Frame};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
@@ -160,6 +161,11 @@ impl EspPhy {
         let mut csma_attempt = 0;
         let ack_requested = frame.psdu.first().is_some_and(|fcf| fcf & 0x20 != 0);
 
+        // esp-radio's frame length must include the FCS
+        let mut raw = frame.psdu.clone();
+        let fcs = Ieee802154Frame::<FrameBytes>::compute_fcs(&raw).to_le_bytes();
+        raw.extend_from_slice(&fcs);
+
         loop {
             let result = {
                 let mut state = self.state.lock().await;
@@ -172,7 +178,7 @@ impl EspPhy {
                 TX_FAILED.reset();
                 state
                     .radio
-                    .transmit_raw(&frame.psdu, frame.csma_ca)
+                    .transmit_raw(&raw, frame.csma_ca)
                     .map_err(|e| RadioError::Other(String::from(esp_err(e))))?;
 
                 // Hold the radio lock across the completion wait.

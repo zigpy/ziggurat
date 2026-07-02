@@ -205,7 +205,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             fcs: 0x0000,
         });
 
-        frame.to_bytes()
+        frame.to_bytes_without_fcs()
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -396,7 +396,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::trace!("Sending 802.15.4 frame: {final_frame:?}");
         tracing::trace!(
             "Sending 802.15.4 frame bytes: {:02X?}",
-            final_frame.to_bytes()
+            final_frame.to_bytes_without_fcs()
         );
 
         if self.state.hack_disable_tx {
@@ -408,7 +408,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let result = self
             .radio
             .transmit(TxFrame {
-                psdu: final_frame.to_bytes(),
+                psdu: final_frame.to_bytes_without_fcs(),
                 channel: Some(channel),
                 csma_ca: true,
                 max_frame_retries: self.tunables.mac_max_frame_retries,

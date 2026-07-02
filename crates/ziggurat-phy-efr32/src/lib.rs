@@ -276,7 +276,9 @@ impl Efr32Phy {
             let result = {
                 let _state = self.state.lock().await;
                 let h = handle();
-                let phr: u8 = (frame.psdu.len() + 2) as u8; // PHY length includes the 2 FCS bytes
+                // RAIL computes and appends the 2-byte FCS in hardware, so the PHR
+                // length counts those extra 2 bytes.
+                let phr: u8 = (frame.psdu.len() + 2) as u8;
                 let csma = csma_802154();
                 TX_COMPLETE.reset();
                 unsafe {
