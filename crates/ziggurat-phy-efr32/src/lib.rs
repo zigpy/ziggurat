@@ -334,11 +334,17 @@ pub struct Efr32Exclusive<'a> {
 
 impl ExclusiveRadio for Efr32Exclusive<'_> {
     async fn set_channel(&self, channel: u8) -> Result<(), RadioError> {
-        let _state = self.phy.state.lock().await;
+        let state = self.phy.state.lock().await;
         CURRENT_CHANNEL.store(channel, Ordering::Relaxed);
-        let status = unsafe { rail::sl_rail_start_rx(handle(), u16::from(channel), core::ptr::null()) };
-        if status != 0 {
-            return Err(RadioError::Other(String::from("start_rx failed")));
+        let h = handle();
+        unsafe {
+            if let Some(config) = state.config.as_ref() {
+                rail::sl_rail_set_tx_power_dbm(h, rail::sl_rail_tx_power_t::from(config.tx_power) * 10);
+            }
+            let status = rail::sl_rail_start_rx(h, u16::from(channel), core::ptr::null());
+            if status != 0 {
+                return Err(RadioError::Other(String::from("start_rx failed")));
+            }
         }
         Ok(())
     }
