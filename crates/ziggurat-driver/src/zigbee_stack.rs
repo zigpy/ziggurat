@@ -820,6 +820,8 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Whether a network scan is collecting. The receive loop only queues beacons while
     /// this is set, so stray beacons outside a scan are dropped.
     scan_active: AtomicBool,
+    /// Diagnostic: beacon frames that reached [`Self::handle_beacon`] during a scan.
+    pub scan_beacon_frames: AtomicU32,
     pub scan_beacons: Mutex<VecDeque<NetworkBeacon>>,
     scan_beacon_wake: Notify,
 
@@ -940,6 +942,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
             scan_active: AtomicBool::new(false),
+            scan_beacon_frames: AtomicU32::new(0),
             scan_beacons: Mutex::new(VecDeque::new()),
             scan_beacon_wake: Notify::new(),
             src_match_sync: Notify::new(),
@@ -1382,6 +1385,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if !self.scan_active.load(AtomicOrdering::Relaxed) {
             return;
         }
+        self.scan_beacon_frames
+            .fetch_add(1, AtomicOrdering::Relaxed);
 
         let payload = match ZigbeeBeacon::from_abstract_bytes(&beacon.beacon_payload) {
             Ok(payload) => payload,

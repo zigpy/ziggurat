@@ -1,0 +1,22 @@
+[package]
+name = "ziggurat-ncp-api"
+version = "0.1.0"
+edition = "2021"
+description = "Line-delimited JSON-RPC NCP surface shared by the embedded Ziggurat firmwares"
+license = "Apache-2.0"
+
+[dependencies]
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+ziggurat-driver = { path = "../ziggurat-driver", default-features = false, features = ["embassy"] }
+ziggurat-zigbee = { path = "../ziggurat-zigbee" }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+
+# Standalone workspace: consumed only by the MCU firmware crates (ziggurat-efr32,
+# ziggurat-ot), which pin ziggurat-driver to the embassy runtime; excluded from the host
+# workspace so its feature selection doesn't unify with the tokio build.
+[workspace]

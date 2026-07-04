@@ -12,6 +12,9 @@ exclude = [
     "crates/ziggurat-rail-sys",
     "crates/ziggurat-efr32",
     "crates/ziggurat-phy-efr32",
+    "crates/ziggurat-ncp-api",
+    "crates/ziggurat-ot",
+    "crates/ziggurat-phy-otlink",
 ]
 
 [workspace.package]

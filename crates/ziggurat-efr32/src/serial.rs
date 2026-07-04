@@ -69,9 +69,14 @@ pub fn init(cmu: &CmuS, gpio: &GpioS, _eusart: Eusart0S) -> (SerialTx, SerialRx)
     e.en().write(|w| w.en().set_bit());
     e.cmd().write(|w| w.txen().set_bit().rxen().set_bit());
 
-    // Interrupt when the RX FIFO has data; the ISR drains it into RX_RING.
-    e.ien().write(|w| w.rxfl().set_bit());
-    unsafe { cortex_m::peripheral::NVIC::unmask(Interrupt::EUSART0_RX) };
+    // Interrupt when the RX FIFO has data; the ISR drains it into RX_RING. Demoted well
+    // below the radio IRQs (which RAIL leaves at a high priority) so serial bursts never
+    // delay RAIL's state machine; the EUSART FIFO plus RTS flow control tolerate the
+    // added service latency without losing bytes.
+    unsafe {
+        (*cortex_m::peripheral::NVIC::PTR).ipr[Interrupt::EUSART0_RX as usize].write(0xC0);
+        cortex_m::peripheral::NVIC::unmask(Interrupt::EUSART0_RX);
+    }
 
     (SerialTx, SerialRx)
 }

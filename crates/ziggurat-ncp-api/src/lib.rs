@@ -1,6 +1,15 @@
 //! The line-delimited JSON-RPC surface, mirroring the host server's wire protocol. One
 //! request per line; each is answered with an `accepted` event then a `response`.
 //! Unsolicited `notification` lines carry network events.
+//!
+//! Shared by the embedded firmwares: the standalone EFR32/ESP NCPs frame lines over a
+//! UART, the OpenThread-RCP-embedded build tunnels them through a vendor Spinel
+//! property. Board specifics (hardware EUI-64, MCU reset, RX diagnostics) enter through
+//! [`Platform`]; the transport drains [`OUTBOUND`] and feeds [`handle_line`].
+
+#![no_std]
+
+extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -10,12 +19,12 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use embassy_futures::select::{Either, select};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::CaptureStop;
-
-use ziggurat_driver::runtime::Spawn;
+use ziggurat_driver::runtime::{EmbassySpawner, Spawn};
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, ApsAckResult, NetworkBeacon, NetworkConfig, NwkDeviceType, RequestId, SendResult,
@@ -25,18 +34,43 @@ use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 
-use crate::{App, OUTBOUND};
-
 const PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_TX_POWER: i8 = 8;
 
-// The EFR32 factory unique ID (from em_system.c in the RAIL glue), used as the coordinator
-// EUI-64 by `get_hw_address`.
-extern "C" {
-    fn SYSTEM_GetUnique() -> u64;
+/// Outbound JSON lines converge here; the transport (UART writer task, Spinel tunnel
+/// pump) drains them.
+const OUTBOUND_DEPTH: usize = 64;
+pub static OUTBOUND: Channel<CriticalSectionRawMutex, String, OUTBOUND_DEPTH> = Channel::new();
+
+/// Cancels an in-progress packet capture (see `handle_reset`).
+pub type CaptureStop = embassy_sync::signal::Signal<CriticalSectionRawMutex, ()>;
+
+/// Board specifics the protocol surface needs but the transport-agnostic core can't know.
+pub trait Platform: Send + Sync {
+    /// The factory-programmed EUI-64, used as the coordinator IEEE address.
+    fn hw_eui64(&self) -> Eui64;
+
+    /// Reboot the MCU (the `reset {"reset_type": "hard"}` request). Divergent: the
+    /// serial link drops and the client reconnects.
+    fn hard_reset(&self) -> !;
+
+    /// RX diagnostics for `network_scan` results: (total frames, frames dropped on a
+    /// full queue) since boot.
+    fn rx_counters(&self) -> (usize, usize) {
+        (0, 0)
+    }
 }
 
-/// Queue one JSON object for the serial writer task.
+/// Firmware state, owned by the processor loop.
+pub struct App<P: RadioPhy> {
+    pub phy: Arc<P>,
+    pub spawner: EmbassySpawner,
+    pub platform: &'static dyn Platform,
+    pub stack: Option<Arc<ZigbeeStack<P>>>,
+    pub capture_stop: Option<Arc<CaptureStop>>,
+}
+
+/// Queue one JSON object for the outbound transport.
 pub async fn emit(value: Value) {
     if let Ok(line) = serde_json::to_string(&value) {
         push_outbound(line);
@@ -239,7 +273,7 @@ struct ResetRequest {
 }
 
 /// Parse and dispatch one inbound line, emitting the `accepted` event and the response.
-pub async fn handle_line(app: &mut App, line: &[u8]) {
+pub async fn handle_line<P: RadioPhy>(app: &mut App<P>, line: &[u8]) {
     let request: Request = match serde_json::from_slice(line) {
         Ok(request) => request,
         Err(e) => {
@@ -255,7 +289,7 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
         "ping" => response(id, json!({"status": "pong"})),
         "reset" => handle_reset(app, id, params),
         "configure" => handle_configure(app, id, params).await,
-        "get_hw_address" => handle_get_hw_address(id),
+        "get_hw_address" => handle_get_hw_address(app, id),
         "get_network_info" => handle_get_network_info(app, id),
         "send_aps" => {
             // Fire-and-forget: the stack accepts or rejects now, and the terminal outcome
@@ -287,7 +321,7 @@ pub async fn handle_line(app: &mut App, line: &[u8]) {
 /// Soft or hard reset. Both stop any in-progress packet capture (freeing the radio); a hard
 /// reset additionally reboots the MCU. The configured network is left running on a soft
 /// reset — it must survive client reconnects.
-fn handle_reset(app: &mut App, id: u64, params: Value) -> Value {
+fn handle_reset<P: RadioPhy>(app: &mut App<P>, id: u64, params: Value) -> Value {
     let request: ResetRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -298,13 +332,13 @@ fn handle_reset(app: &mut App, id: u64, params: Value) -> Value {
     }
 
     if matches!(request.reset_type, ResetType::Hard) {
-        cortex_m::peripheral::SCB::sys_reset(); // diverges; the link drops and the client reconnects
+        app.platform.hard_reset(); // diverges; the link drops and the client reconnects
     }
 
     response(id, json!({"status": "success"}))
 }
 
-async fn handle_configure(app: &mut App, id: u64, params: Value) -> Value {
+async fn handle_configure<P: RadioPhy>(app: &mut App<P>, id: u64, params: Value) -> Value {
     let request: ConfigureRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -366,7 +400,7 @@ async fn handle_configure(app: &mut App, id: u64, params: Value) -> Value {
         run_stack.run().await;
     });
 
-    // Drain network events to the serial writer.
+    // Drain network events to the outbound transport.
     let notify_stack = stack.clone();
     stack.spawn_tracked(async move {
         loop {
@@ -380,15 +414,13 @@ async fn handle_configure(app: &mut App, id: u64, params: Value) -> Value {
     response(id, json!({"status": "success"}))
 }
 
-/// The factory IEEE address, derived from the SoC's eFuse base MAC (EUI-48 → EUI-64).
-fn handle_get_hw_address(id: u64) -> Value {
-    // The EFR32's factory-programmed 64-bit DEVINFO unique ID is the coordinator EUI-64.
-    // `Eui64` stores bytes little-endian (see the reversal in the host/ESP paths).
-    let ieee = Eui64(unsafe { SYSTEM_GetUnique() }.to_le_bytes());
+/// The factory IEEE address, from the platform (SoC eFuse / DEVINFO unique ID).
+fn handle_get_hw_address<P: RadioPhy>(app: &App<P>, id: u64) -> Value {
+    let ieee = app.platform.hw_eui64();
     response(id, json!({"ieee_address": eui64_to_string(ieee)}))
 }
 
-fn handle_get_network_info(app: &App, id: u64) -> Value {
+fn handle_get_network_info<P: RadioPhy>(app: &App<P>, id: u64) -> Value {
     let Some(stack) = app.stack.as_ref() else {
         return error_response(id, "not_configured", "no stack is running");
     };
@@ -433,7 +465,7 @@ fn handle_get_network_info(app: &App, id: u64) -> Value {
 /// blocking — delivery is driven by the stack's tables. The stack accepts or rejects the
 /// frame now (the `accepted`/error response); its terminal outcome arrives later as a
 /// `send_confirm` notification keyed by the request id.
-async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
+async fn dispatch_send_aps<P: RadioPhy>(app: &App<P>, id: u64, params: Value) {
     let Some(stack) = app.stack.as_ref() else {
         emit(error_response(id, "not_configured", "no stack is running")).await;
         return;
@@ -521,8 +553,8 @@ async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
 }
 
 /// Energy scan: per-channel hardware energy detection, streamed as `energy_result`
-/// events. The radio's ED is driven directly through its registers (see ziggurat-phy-esp).
-async fn handle_energy_scan(app: &App, id: u64, params: Value) -> Value {
+/// events.
+async fn handle_energy_scan<P: RadioPhy>(app: &App<P>, id: u64, params: Value) -> Value {
     let request: EnergyScanRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -568,7 +600,7 @@ fn network_beacon_json(beacon: &NetworkBeacon) -> Value {
 /// Active scan: beacon-request each channel and stream the beacons heard. Runs inline —
 /// the receive loop collects beacons concurrently during the per-channel dwell, so they
 /// are all queued by the time the scan returns and we drain them.
-async fn handle_network_scan(app: &App, id: u64, params: Value) -> Value {
+async fn handle_network_scan<P: RadioPhy>(app: &App<P>, id: u64, params: Value) -> Value {
     let request: NetworkScanRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -579,8 +611,19 @@ async fn handle_network_scan(app: &App, id: u64, params: Value) -> Value {
     };
 
     stack.begin_network_scan();
+    let (rx_before, drop_before) = app.platform.rx_counters();
+    let bf_before = stack
+        .scan_beacon_frames
+        .load(core::sync::atomic::Ordering::Relaxed);
     let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
     let result = stack.run_network_scan(&request.channels, duration).await;
+    let (rx_after, drop_after) = app.platform.rx_counters();
+    let rx_total = rx_after - rx_before;
+    let rx_dropped = drop_after - drop_before;
+    let beacon_frames = stack
+        .scan_beacon_frames
+        .load(core::sync::atomic::Ordering::Relaxed)
+        - bf_before;
 
     loop {
         let batch = stack.next_scan_beacons().await;
@@ -598,12 +641,15 @@ async fn handle_network_scan(app: &App, id: u64, params: Value) -> Value {
     }
 
     match result {
-        Ok(()) => response(id, json!({"status": "complete"})),
+        Ok(()) => response(
+            id,
+            json!({"status": "complete", "rx_total": rx_total, "rx_dropped": rx_dropped, "beacon_frames": beacon_frames}),
+        ),
         Err(e) => error_response(id, "network_scan_failed", e),
     }
 }
 
-fn handle_permit_joins(app: &App, id: u64, params: Value) -> Value {
+fn handle_permit_joins<P: RadioPhy>(app: &App<P>, id: u64, params: Value) -> Value {
     let request: PermitJoinsRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -617,7 +663,7 @@ fn handle_permit_joins(app: &App, id: u64, params: Value) -> Value {
     response(id, json!({"status": "success"}))
 }
 
-async fn handle_set_channel(app: &App, id: u64, params: Value) -> Value {
+async fn handle_set_channel<P: RadioPhy>(app: &App<P>, id: u64, params: Value) -> Value {
     let request: SetChannelRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -653,7 +699,7 @@ const fn capture_config(channel: u8) -> RadioConfig {
 /// event. No configured stack needed (only `connect()`). Singleton: a second call just
 /// retunes. Stopped by `reset` (the client sends a soft reset on connect, clearing any stale
 /// capture). There is no terminal response.
-async fn handle_packet_capture(app: &mut App, id: u64, params: Value) {
+async fn handle_packet_capture<P: RadioPhy>(app: &mut App<P>, id: u64, params: Value) {
     let request: SetChannelRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => {
@@ -703,7 +749,11 @@ async fn handle_packet_capture(app: &mut App, id: u64, params: Value) {
     }));
 }
 
-async fn handle_packet_capture_change_channel(app: &App, id: u64, params: Value) -> Value {
+async fn handle_packet_capture_change_channel<P: RadioPhy>(
+    app: &App<P>,
+    id: u64,
+    params: Value,
+) -> Value {
     let request: SetChannelRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -715,7 +765,7 @@ async fn handle_packet_capture_change_channel(app: &App, id: u64, params: Value)
     }
 }
 
-fn handle_set_nwk_update_id(app: &App, id: u64, params: Value) -> Value {
+fn handle_set_nwk_update_id<P: RadioPhy>(app: &App<P>, id: u64, params: Value) -> Value {
     let request: SetNwkUpdateIdRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),
@@ -729,7 +779,7 @@ fn handle_set_nwk_update_id(app: &App, id: u64, params: Value) -> Value {
     response(id, json!({"status": "success"}))
 }
 
-fn handle_set_provisional_key(app: &App, id: u64, params: Value) -> Value {
+fn handle_set_provisional_key<P: RadioPhy>(app: &App<P>, id: u64, params: Value) -> Value {
     let request: SetProvisionalKeyRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(e) => return error_response(id, "invalid_request", e),

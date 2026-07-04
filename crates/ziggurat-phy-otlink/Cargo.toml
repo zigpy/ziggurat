@@ -1,0 +1,14 @@
+[package]
+name = "ziggurat-phy-otlink"
+version = "0.1.0"
+edition = "2021"
+description = "RadioPhy over the OpenThread link-raw API (for Ziggurat embedded in an OT RCP)"
+license = "Apache-2.0"
+
+[dependencies]
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+embassy-sync = "0.8"
+
+# Standalone workspace, like the other MCU crates.
+[workspace]
