@@ -16,7 +16,7 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 embassy-sync = "0.8"
 embassy-futures = "0.1"
 
-# Standalone workspace: consumed only by the MCU firmware crates (ziggurat-efr32,
-# ziggurat-ot), which pin ziggurat-driver to the embassy runtime; excluded from the host
+# Standalone workspace: consumed only by the MCU firmware crates (ziggurat-ot,
+# ziggurat-esp), which pin ziggurat-driver to the embassy runtime; excluded from the host
 # workspace so its feature selection doesn't unify with the tokio build.
 [workspace]

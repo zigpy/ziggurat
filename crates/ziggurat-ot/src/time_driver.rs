@@ -1,8 +1,7 @@
 //! `embassy-time` driver over the import vtable: `now` reads the firmware's monotonic
 //! microsecond clock (`otPlatTimeGet`), alarms use the glue's single one-shot timer
-//! whose completion calls `zig_timer_fired`. Structure mirrors the RAIL driver in
-//! `ziggurat-efr32/src/time.rs`, minus the 32-bit wrap extension (the clock is already
-//! 64-bit). Tick rate is embassy-time's default 1 MHz, so ticks are microseconds.
+//! whose completion calls `zig_timer_fired`. Tick rate is embassy-time's default 1 MHz,
+//! so ticks are microseconds.
 
 use core::cell::RefCell;
 use core::task::Waker;

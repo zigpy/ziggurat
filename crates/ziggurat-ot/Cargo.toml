@@ -19,7 +19,6 @@ ziggurat-ncp-api = { path = "../ziggurat-ncp-api" }
 # zig_process(), with __pender provided here.
 embassy-executor = "0.10"
 embassy-sync = "0.8"
-embassy-futures = "0.1"
 embassy-time = "0.5"
 embassy-time-driver = "0.2"
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-16"] }

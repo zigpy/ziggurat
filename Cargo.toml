@@ -3,15 +3,12 @@ resolver = "2"
 members = ["crates/*"]
 # ziggurat-phy-esp and ziggurat-esp only build for an ESP32-C6 (riscv32imac) with esp-hal;
 # excluded so host `cargo build` over the workspace doesn't try (and fail) to compile them.
-# The EFR32MG24 crates likewise only build for thumbv8m.main-none-eabihf (Cortex-M33F).
+# ziggurat-ot (and its ziggurat-ncp-api / ziggurat-phy-otlink deps) likewise only build
+# for thumbv8m.main-none-eabihf, as the staticlib embedded in the OpenThread RCP firmware.
 exclude = [
     "fuzz",
     "crates/ziggurat-phy-esp",
     "crates/ziggurat-esp",
-    "crates/ziggurat-efr32-pac",
-    "crates/ziggurat-rail-sys",
-    "crates/ziggurat-efr32",
-    "crates/ziggurat-phy-efr32",
     "crates/ziggurat-ncp-api",
     "crates/ziggurat-ot",
     "crates/ziggurat-phy-otlink",

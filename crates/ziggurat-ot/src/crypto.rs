@@ -1,7 +1,6 @@
 //! Zigbee crypto routed through the import vtable: the glue backs `ccm_crypt` /
 //! `aes128_encrypt_block` with the platform's hardware AES (RADIOAES via `sli_*` on
-//! EFR32, or `otPlatCryptoAesEncrypt` on platforms without a CCM engine). Mirrors
-//! `ziggurat-efr32/src/hw_crypto.rs`.
+//! EFR32, or `otPlatCryptoAesEncrypt` on platforms without a CCM engine).
 
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::Key;

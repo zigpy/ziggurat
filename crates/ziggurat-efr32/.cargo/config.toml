@@ -1,5 +1,0 @@
-[target.thumbv8m.main-none-eabihf]
-rustflags = ["-C", "link-arg=-Tlink.x"]
-
-[build]
-target = "thumbv8m.main-none-eabihf"
