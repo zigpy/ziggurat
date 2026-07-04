@@ -16,7 +16,7 @@ ziggurat-zigbee = { path = "../ziggurat-zigbee" }
 ziggurat-driver = { path = "../ziggurat-driver", default-features = false, features = ["embassy"] }
 ziggurat-ncp-api = { path = "../ziggurat-ncp-api" }
 # No arch/executor feature: the raw executor is polled from OpenThread's superloop via
-# zig_process(), with __pender provided here.
+# ziggurat_process(), with __pender provided here.
 embassy-executor = "0.10"
 embassy-sync = "0.8"
 embassy-time = "0.5"

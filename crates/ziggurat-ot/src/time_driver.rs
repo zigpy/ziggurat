@@ -1,7 +1,7 @@
-//! `embassy-time` driver over the import vtable: `now` reads the firmware's monotonic
+//! `embassy-time` driver over the platform layer: `now` reads the firmware's monotonic
 //! microsecond clock (`otPlatTimeGet`), alarms use the glue's single one-shot timer
-//! whose completion calls `zig_timer_fired`. Tick rate is embassy-time's default 1 MHz,
-//! so ticks are microseconds.
+//! whose completion calls `ziggurat_timer_fired`. Tick rate is embassy-time's default
+//! 1 MHz, so ticks are microseconds.
 
 use core::cell::RefCell;
 use core::task::Waker;
@@ -10,7 +10,7 @@ use critical_section::Mutex;
 use embassy_time_driver::Driver;
 use embassy_time_queue_utils::Queue;
 
-use crate::imports::{imports, ready};
+use crate::platform;
 
 struct OtTimeDriver {
     queue: Mutex<RefCell<Queue>>,
@@ -24,10 +24,7 @@ embassy_time_driver::time_driver_impl!(
 
 impl OtTimeDriver {
     fn now64(&self) -> u64 {
-        if !ready() {
-            return 0;
-        }
-        unsafe { (imports().time_now_us)() }
+        unsafe { platform::ziggurat_platform_time_now_us() }
     }
 
     /// Try to program (or cancel) the glue timer for deadline `at`. Returns `false` if
@@ -35,13 +32,13 @@ impl OtTimeDriver {
     /// `u64::MAX` disables the timer and returns `true`.
     fn set_alarm(&self, at: u64) -> bool {
         if at == u64::MAX {
-            unsafe { (imports().timer_arm)(u64::MAX) };
+            unsafe { platform::ziggurat_platform_timer_arm(u64::MAX) };
             return true;
         }
         if at <= self.now64() {
             return false;
         }
-        unsafe { (imports().timer_arm)(at) };
+        unsafe { platform::ziggurat_platform_timer_arm(at) };
         true
     }
 

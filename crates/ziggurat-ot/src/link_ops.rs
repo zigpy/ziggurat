@@ -1,4 +1,4 @@
-//! [`LinkOps`] over the import vtable's radio operations.
+//! [`LinkOps`] over the platform layer's radio operations.
 
 use alloc::string::String;
 use core::time::Duration;
@@ -7,11 +7,11 @@ use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioConfig, RadioError};
 use ziggurat_phy_otlink::LinkOps;
 
-use crate::imports::{ZigRadioConfig, imports};
+use crate::platform::{self, ZigguratRadioConfig};
 
-pub struct VtableLinkOps;
+pub struct PlatformLinkOps;
 
-pub static LINK_OPS: VtableLinkOps = VtableLinkOps;
+pub static LINK_OPS: PlatformLinkOps = PlatformLinkOps;
 
 fn check(status: i32, what: &str) -> Result<(), RadioError> {
     if status == 0 {
@@ -21,9 +21,9 @@ fn check(status: i32, what: &str) -> Result<(), RadioError> {
     }
 }
 
-impl LinkOps for VtableLinkOps {
+impl LinkOps for PlatformLinkOps {
     fn configure(&self, config: &RadioConfig) -> Result<(), RadioError> {
-        let raw = ZigRadioConfig {
+        let raw = ZigguratRadioConfig {
             channel: config.channel,
             tx_power_dbm: config.tx_power,
             short_address: config.short_address.as_u16(),
@@ -35,19 +35,22 @@ impl LinkOps for VtableLinkOps {
             // accepts frames with no destination address.
             pan_coordinator: config.short_address.as_u16() == 0,
         };
-        check(unsafe { (imports().radio_configure)(&raw) }, "radio_configure failed")
+        check(
+            unsafe { platform::ziggurat_platform_radio_configure(&raw) },
+            "radio_configure failed",
+        )
     }
 
     fn set_channel(&self, channel: u8) -> Result<(), RadioError> {
         check(
-            unsafe { (imports().radio_set_channel)(channel) },
+            unsafe { platform::ziggurat_platform_radio_set_channel(channel) },
             "radio_set_channel failed",
         )
     }
 
     fn set_promiscuous(&self, promiscuous: bool) -> Result<(), RadioError> {
         check(
-            unsafe { (imports().radio_set_promiscuous)(promiscuous) },
+            unsafe { platform::ziggurat_platform_radio_set_promiscuous(promiscuous) },
             "radio_set_promiscuous failed",
         )
     }
@@ -57,19 +60,18 @@ impl LinkOps for VtableLinkOps {
         short: &[Nwk],
         extended: &[Eui64],
     ) -> Result<(), RadioError> {
-        let vtable = imports();
         unsafe {
-            (vtable.radio_src_match_clear)();
+            platform::ziggurat_platform_radio_src_match_clear();
             for nwk in short {
                 check(
-                    (vtable.radio_src_match_add_short)(nwk.as_u16()),
+                    platform::ziggurat_platform_radio_src_match_add_short(nwk.as_u16()),
                     "radio_src_match_add_short failed",
                 )?;
             }
             for eui in extended {
                 let bytes = eui.to_bytes();
                 check(
-                    (vtable.radio_src_match_add_ext)(bytes.as_ptr()),
+                    platform::ziggurat_platform_radio_src_match_add_ext(bytes.as_ptr()),
                     "radio_src_match_add_ext failed",
                 )?;
             }
@@ -87,7 +89,7 @@ impl LinkOps for VtableLinkOps {
     ) -> Result<(), RadioError> {
         check(
             unsafe {
-                (imports().radio_transmit)(
+                platform::ziggurat_platform_radio_transmit(
                     psdu.as_ptr(),
                     psdu.len(),
                     channel,
@@ -102,7 +104,9 @@ impl LinkOps for VtableLinkOps {
 
     fn energy_scan(&self, channel: u8, duration: Duration) -> Result<(), RadioError> {
         check(
-            unsafe { (imports().radio_energy_scan)(channel, duration.as_millis() as u16) },
+            unsafe {
+                platform::ziggurat_platform_radio_energy_scan(channel, duration.as_millis() as u16)
+            },
             "radio_energy_scan failed",
         )
     }

@@ -20,7 +20,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use core::time::Duration;
 

@@ -1,11 +1,12 @@
 //! Ziggurat as a C staticlib embedded inside OpenThread RCP firmware.
 //!
-//! The firmware glue (see `include/ziggurat.h`) calls `zig_start` once with the import
-//! vtable, then `zig_process` from the OpenThread superloop whenever `wake` requested
-//! it. Radio completions, timer expiry, and host tunnel frames enter through the other
-//! `zig_*` exports — all from OpenThread's main-loop context, never an ISR.
+//! The firmware glue (see `include/ziggurat.h`) implements the `ziggurat_platform_*`
+//! functions, calls `ziggurat_start` once, then `ziggurat_process` from the OpenThread
+//! superloop whenever `ziggurat_platform_wake` requested it. Radio completions, timer
+//! expiry, and host tunnel frames enter through the other `ziggurat_*` exports — all
+//! from OpenThread's main-loop context, never an ISR.
 //!
-//! Everything above the FFI boundary is the same machinery as the standalone EFR32
+//! Everything above the FFI boundary is the same machinery as the standalone ESP
 //! firmware: `ziggurat-driver` on the embassy runtime, the `ziggurat-ncp-api` JSON
 //! protocol, and a `RadioPhy` (here `ziggurat-phy-otlink` over `otLinkRaw*`).
 
@@ -18,8 +19,8 @@ extern crate alloc;
 use cortex_m as _;
 
 mod crypto;
-mod imports;
 mod link_ops;
+mod platform;
 mod time_driver;
 
 use alloc::boxed::Box;
@@ -38,14 +39,13 @@ use ziggurat_ncp_api::{self as api, App, OUTBOUND, Platform};
 use ziggurat_phy::TxResult;
 use ziggurat_phy_otlink::OtLinkPhy;
 
-use imports::{ZigImports, imports};
 use link_ops::LINK_OPS;
 
 /// Complete inbound request lines from the host tunnel.
 const INBOUND_DEPTH: usize = 16;
 static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Channel::new();
 
-/// NCP buffer space became available; retry a failed `host_send`.
+/// NCP buffer space became available; retry a failed `ziggurat_platform_host_send`.
 static HOST_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[cfg(target_os = "none")]
@@ -86,9 +86,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         len: 0,
     };
     let _ = write!(buf, "{info}");
-    if imports::ready() {
-        unsafe { (imports().panic)(buf.bytes.as_ptr(), buf.len) };
-    }
+    unsafe { platform::ziggurat_platform_panic(buf.bytes.as_ptr(), buf.len) };
     loop {}
 }
 
@@ -104,9 +102,7 @@ mod executor {
     #[unsafe(export_name = "__pender")]
     fn pender(_context: *mut ()) {
         PENDING.store(true, Ordering::Release);
-        if crate::imports::ready() {
-            unsafe { (crate::imports::imports().wake)() };
-        }
+        unsafe { crate::platform::ziggurat_platform_wake() };
     }
 
     pub fn init() -> embassy_executor::Spawner {
@@ -130,12 +126,12 @@ struct OtPlatform;
 impl Platform for OtPlatform {
     fn hw_eui64(&self) -> Eui64 {
         let mut bytes = [0u8; 8];
-        unsafe { (imports().hw_eui64)(bytes.as_mut_ptr()) };
+        unsafe { platform::ziggurat_platform_hw_eui64(bytes.as_mut_ptr()) };
         Eui64(bytes)
     }
 
     fn hard_reset(&self) -> ! {
-        unsafe { (imports().hard_reset)() };
+        unsafe { platform::ziggurat_platform_hard_reset() };
         loop {}
     }
 
@@ -147,7 +143,7 @@ impl Platform for OtPlatform {
 static PLATFORM: OtPlatform = OtPlatform;
 
 #[embassy_executor::task]
-async fn zig_main(spawner: embassy_executor::SendSpawner) {
+async fn ziggurat_main(spawner: embassy_executor::SendSpawner) {
     let phy = Arc::new(OtLinkPhy::new(&LINK_OPS));
 
     let mut app = App {
@@ -173,7 +169,7 @@ async fn host_pump() {
         let line = OUTBOUND.receive().await;
         loop {
             HOST_READY.reset();
-            if unsafe { (imports().host_send)(line.as_ptr(), line.len()) } {
+            if unsafe { platform::ziggurat_platform_host_send(line.as_ptr(), line.len()) } {
                 break;
             }
             HOST_READY.wait().await;
@@ -183,57 +179,56 @@ async fn host_pump() {
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-/// Initialize and start the embedded stack. Called once, after OpenThread's instances
-/// and the NCP exist. Idle until the first host frame arrives.
+/// Initialize and start the embedded stack. Called once, after OpenThread's instance
+/// and the NCP exist — there is no stop; switching the firmware back to plain-RCP use
+/// is an MCU reset. Idle until the first host frame arrives.
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_start(imports_in: *const ZigImports) {
+pub extern "C" fn ziggurat_start() {
     assert!(!STARTED.swap(true, Ordering::AcqRel));
-
-    imports::install(unsafe { &*imports_in });
 
     #[cfg(target_os = "none")]
     heap::init();
 
     rng::install(Box::new(|buf: &mut [u8]| unsafe {
-        (imports().entropy)(buf.as_mut_ptr(), buf.len());
+        platform::ziggurat_platform_entropy(buf.as_mut_ptr(), buf.len());
     }));
     crypto::init();
 
     let spawner = executor::init();
     let send_spawner = spawner.make_send();
-    spawner.spawn(zig_main(send_spawner).unwrap());
+    spawner.spawn(ziggurat_main(send_spawner).unwrap());
     spawner.spawn(host_pump().unwrap());
 }
 
-/// Poll the executor. Call from the superloop whenever `wake` was requested (extra
-/// calls are harmless).
+/// Poll the executor. Call from the superloop whenever `ziggurat_platform_wake` was
+/// requested (extra calls are harmless).
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_process() {
+pub extern "C" fn ziggurat_process() {
     executor::process();
 }
 
 /// One inbound control-protocol frame from the host tunnel.
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_host_frame(data: *const u8, len: usize) {
+pub extern "C" fn ziggurat_host_frame(data: *const u8, len: usize) {
     let line = unsafe { core::slice::from_raw_parts(data, len) }.to_vec();
     let _ = INBOUND.try_send(line);
 }
 
 /// NCP buffer space became available (VendorHandleFrameRemovedFromNcpBuffer).
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_host_send_ready() {
+pub extern "C" fn ziggurat_host_send_ready() {
     HOST_READY.signal(());
 }
 
-/// The glue's one-shot timer fired.
+/// The one-shot timer armed via `ziggurat_platform_timer_arm` fired.
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_timer_fired() {
+pub extern "C" fn ziggurat_timer_fired() {
     time_driver::timer_fired();
 }
 
 /// A frame was received on Ziggurat's instance (PSDU without FCS).
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_radio_rx(
+pub extern "C" fn ziggurat_radio_rx(
     psdu: *const u8,
     len: usize,
     channel: u8,
@@ -245,9 +240,9 @@ pub extern "C" fn zig_radio_rx(
     ziggurat_phy_otlink::deliver_rx(psdu, channel, rssi, lqi, timestamp_us);
 }
 
-/// The in-flight transmit finished. Status values match `zig_tx_status_t`.
+/// The in-flight transmit finished. Status values match `ziggurat_tx_status_t`.
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_radio_tx_done(status: u8) {
+pub extern "C" fn ziggurat_radio_tx_done(status: u8) {
     let result = match status {
         0 => TxResult::Acked,
         1 => TxResult::NoAck,
@@ -260,6 +255,6 @@ pub extern "C" fn zig_radio_tx_done(status: u8) {
 
 /// The energy scan finished with this peak RSSI.
 #[unsafe(no_mangle)]
-pub extern "C" fn zig_radio_energy_scan_done(max_rssi_dbm: i8) {
+pub extern "C" fn ziggurat_radio_energy_scan_done(max_rssi_dbm: i8) {
     ziggurat_phy_otlink::deliver_energy_result(max_rssi_dbm);
 }
