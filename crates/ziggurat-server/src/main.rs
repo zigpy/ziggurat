@@ -337,7 +337,7 @@ fn notification_to_message(notification_event: ZigbeeNotification) -> serde_json
                 "source": hex::encode(source.to_bytes()),
                 "source_ieee": eui64_to_string(source_ieee),
                 "frame_counter": frame_counter,
-                "key_id": key_id,
+                "key_id": key_id as u8,
             }),
         ),
         ZigbeeNotification::SendConfirm { request_id, result } => notification(

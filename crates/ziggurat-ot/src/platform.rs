@@ -81,4 +81,9 @@ unsafe extern "C" {
 
     // Fatal error reporting (panic message), before the firmware's crash handling.
     pub fn ziggurat_platform_panic(msg: *const u8, len: usize);
+
+    // Post-mortem: describe the previous reset if it was abnormal (a fault dump or
+    // the stored panic message), writing up to `cap` UTF-8 bytes into `buf` and
+    // returning the length. Zero when the previous reset was clean.
+    pub fn ziggurat_platform_last_reset(buf: *mut u8, cap: usize) -> usize;
 }

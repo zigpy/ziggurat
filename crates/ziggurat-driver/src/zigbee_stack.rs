@@ -25,7 +25,7 @@ use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
-use ziggurat_zigbee::nwk::frame::{EncryptedNwkFrame, NwkFrame};
+use ziggurat_zigbee::nwk::frame::{EncryptedNwkFrame, NwkFrame, NwkSecurityHeaderKeyId};
 
 mod aps;
 mod indirect;
@@ -754,7 +754,7 @@ pub enum ZigbeeNotification {
         source: Nwk,
         source_ieee: Eui64,
         frame_counter: u32,
-        key_id: String,
+        key_id: NwkSecurityHeaderKeyId,
     },
     SendConfirm {
         request_id: RequestId,
@@ -898,7 +898,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         CoreInstant::from_micros(micros as u64)
     }
 
-    fn core_now(&self) -> CoreInstant {
+    pub fn core_now(&self) -> CoreInstant {
         self.to_core_instant(R::now())
     }
 

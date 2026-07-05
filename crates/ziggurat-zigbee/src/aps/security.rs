@@ -159,6 +159,31 @@ impl ApsSecurity {
         });
     }
 
+    /// Restore a device's incoming (replay) frame counter persisted by the client.
+    pub fn restore_incoming_frame_counter(&mut self, eui64: Eui64, counter: u32) {
+        self.devices
+            .entry(eui64)
+            .or_default()
+            .incoming_frame_counter = Some(counter);
+    }
+
+    /// A device's incoming (replay) frame counter, for the client to persist.
+    pub fn incoming_frame_counter(&self, eui64: Eui64) -> Option<u32> {
+        self.devices.get(&eui64)?.incoming_frame_counter
+    }
+
+    /// The outgoing frame counter shared by all link-key-encrypted frames, for the
+    /// client to persist.
+    pub const fn outgoing_frame_counter(&self) -> u32 {
+        self.outgoing_frame_counter
+    }
+
+    /// Restore the shared outgoing frame counter persisted by the client. Never
+    /// moves it backwards.
+    pub fn restore_outgoing_frame_counter(&mut self, counter: u32) {
+        self.outgoing_frame_counter = self.outgoing_frame_counter.max(counter);
+    }
+
     /// Register a link key provisioned out of band (derived from an install code)
     /// for a device expected to join: an `apsDeviceKeyPairSet` entry with
     /// `PROVISIONAL_KEY` attributes, replacing the well-known key for that device.

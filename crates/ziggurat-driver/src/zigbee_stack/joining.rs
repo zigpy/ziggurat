@@ -23,7 +23,6 @@ use ziggurat_zigbee::nwk::frame::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
 };
 
-use alloc::format;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_zigbee::nwk::commands::{
@@ -495,10 +494,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     source: nwk_frame.nwk_header.source,
                     source_ieee: extended_source,
                     frame_counter: encrypted_command_frame.aux_header.frame_counter,
-                    key_id: format!(
-                        "{:?}",
-                        encrypted_command_frame.aux_header.security_control.key_id
-                    ),
+                    key_id: encrypted_command_frame.aux_header.security_control.key_id,
                 });
             }
         }

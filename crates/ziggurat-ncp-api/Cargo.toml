@@ -2,7 +2,7 @@
 name = "ziggurat-ncp-api"
 version = "0.1.0"
 edition = "2021"
-description = "Line-delimited JSON-RPC NCP surface shared by the embedded Ziggurat firmwares"
+description = "Binary NCP control protocol shared by the embedded Ziggurat firmwares"
 license = "Apache-2.0"
 
 [dependencies]
@@ -10,9 +10,9 @@ ziggurat-phy = { path = "../ziggurat-phy" }
 ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
 ziggurat-driver = { path = "../ziggurat-driver", default-features = false, features = ["embassy"] }
 ziggurat-zigbee = { path = "../ziggurat-zigbee" }
-serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
-hex = { version = "0.4", default-features = false, features = ["alloc"] }
+abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
+arbitrary-int = "2.1.1"
+num_enum = { version = "0.7.3", default-features = false }
 embassy-sync = "0.8"
 embassy-futures = "0.1"
 

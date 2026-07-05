@@ -7,7 +7,7 @@
 //! from OpenThread's main-loop context, never an ISR.
 //!
 //! Everything above the FFI boundary is the same machinery as the standalone ESP
-//! firmware: `ziggurat-driver` on the embassy runtime, the `ziggurat-ncp-api` JSON
+//! firmware: `ziggurat-driver` on the embassy runtime, the `ziggurat-ncp-api`
 //! protocol, and a `RadioPhy` (here `ziggurat-phy-otlink` over `otLinkRaw*`).
 
 #![no_std]
@@ -151,14 +151,25 @@ async fn ziggurat_main(spawner: embassy_executor::SendSpawner) {
         spawner: EmbassySpawner::new(spawner),
         platform: &PLATFORM,
         stack: None,
+        started: false,
         capture_stop: None,
     };
 
-    api::emit(api::hello_message(false)).await;
+    api::emit_hello(false).await;
+
+    let mut reset_info = [0u8; 512];
+    let len = unsafe {
+        platform::ziggurat_platform_last_reset(reset_info.as_mut_ptr(), reset_info.len())
+    };
+    if let Ok(message) = core::str::from_utf8(&reset_info[..len]) {
+        if !message.is_empty() {
+            api::emit_last_reset(message).await;
+        }
+    }
 
     loop {
-        let line = INBOUND.receive().await;
-        api::handle_line(&mut app, &line).await;
+        let frame = INBOUND.receive().await;
+        api::handle_frame(&mut app, &frame).await;
     }
 }
 

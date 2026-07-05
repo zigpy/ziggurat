@@ -32,6 +32,14 @@ impl AddressMap {
             .find_map(|(&eui64, &mapped)| (mapped == nwk).then_some(eui64))
     }
 
+    /// Every known mapping except our own, for the client to persist.
+    pub fn entries(&self) -> impl Iterator<Item = (Eui64, Nwk)> + '_ {
+        self.map
+            .iter()
+            .map(|(&eui64, &nwk)| (eui64, nwk))
+            .filter(|&(_, nwk)| nwk != self.own_address)
+    }
+
     /// Record a mapping learned from a frame. Returns true when the network address
     /// is already claimed by a second IEEE address — an address conflict
     /// (spec 3.6.1.10.2); the mapping is left untouched in that case.
