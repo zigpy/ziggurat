@@ -33,6 +33,10 @@ cbindgen = "0.29"
 # (bin/thumbv8m...o) that arm-none-eabi-objcopy --strip-debug chokes on.
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core", "inline-asm"] }
 
+# ESP32-C6 (firmwares/esp32-c6): single-hart machine-mode critical section.
+[target.'cfg(all(target_arch = "riscv32", target_os = "none"))'.dependencies]
+riscv = { version = "0.12", features = ["critical-section-single-hart"] }
+
 # debug = false: the firmware builder's DWARF-reproducibility check rejects the
 # absolute cargo/rustup paths Rust debug info carries.
 [profile.release]

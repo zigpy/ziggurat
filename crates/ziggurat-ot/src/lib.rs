@@ -17,6 +17,9 @@ extern crate alloc;
 // Provides the critical-section implementation (PRIMASK, single-core).
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 use cortex_m as _;
+// Provides the critical-section implementation (mstatus.MIE, single-hart).
+#[cfg(all(target_arch = "riscv32", target_os = "none"))]
+use riscv as _;
 
 mod crypto;
 mod link_ops;
