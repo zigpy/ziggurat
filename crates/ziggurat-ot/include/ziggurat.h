@@ -67,6 +67,9 @@ void ziggurat_process(void);
 
 /*
  One inbound control-protocol frame from the host tunnel.
+
+ # Safety
+ `data` must point to `len` readable bytes.
  */
 void ziggurat_host_frame(const uint8_t *data,
                          size_t len);
@@ -83,6 +86,9 @@ void ziggurat_timer_fired(void);
 
 /*
  A frame was received on Ziggurat's instance (PSDU without FCS).
+
+ # Safety
+ `psdu` must point to `len` readable bytes.
  */
 void ziggurat_radio_rx(const uint8_t *psdu,
                        size_t len,

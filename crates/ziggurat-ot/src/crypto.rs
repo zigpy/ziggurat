@@ -2,8 +2,8 @@
 //! / `ziggurat_platform_aes128_encrypt_block` with the platform's hardware AES (RADIOAES via
 //! `sli_*` on EFR32, or `otPlatCryptoAesEncrypt` on platforms without a CCM engine).
 
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::Key;
+use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_zigbee::crypto::{self, CryptoBackend, DecryptionError, MIC_LENGTH};
 
 use crate::platform;
@@ -15,7 +15,9 @@ struct PlatformCryptoBackend;
 
 impl CryptoBackend for PlatformCryptoBackend {
     fn aes128_encrypt_block(&self, key: &[u8; 16], block: &mut [u8; 16]) {
-        unsafe { platform::ziggurat_platform_aes128_encrypt_block(key.as_ptr(), block.as_mut_ptr()) };
+        unsafe {
+            platform::ziggurat_platform_aes128_encrypt_block(key.as_ptr(), block.as_mut_ptr())
+        };
     }
 
     fn encrypt_ccm(

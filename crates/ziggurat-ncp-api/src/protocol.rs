@@ -1,8 +1,8 @@
-//! The binary command set (see claude/docs/serial-wire-format.md in the repo
-//! root): request/response keyed by request id, streamed events, unsolicited
-//! notifications, fixed-layout payloads, and index-free scan/load state transfer.
+//! The binary command set: request/response keyed by request id, streamed events,
+//! unsolicited notifications, fixed-layout payloads, and index-free scan/load state
+//! transfer.
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -29,9 +29,6 @@ use crate::{App, CaptureStop, capture_config, push_outbound, send_outbound, spaw
 pub const PROTOCOL_VERSION: u8 = 1;
 pub type RequestId = u16;
 
-/// Every command and notification, keyed by its wire id. The frame header carries
-/// the raw byte (so an unknown id still parses far enough to reply with an error);
-/// dispatch converts to this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum CommandId {
@@ -83,22 +80,21 @@ impl From<CommandId> for u8 {
 /// first keepalive; until then they age out after a conservative day.
 const RESTORED_CHILD_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// How the host must route a frame. `Error` folds into `Response`: a response
-/// carries a [`Status`], so `Status::Ok` + payload is success and any other status
-/// + message is failure — one terminal path for the client. `Request` exists only
-/// so the header is identical in both directions.
+/// How the host must route a device -> host frame. Inbound frames are always
+/// requests, so they carry no frame type. `Error` folds into `Response`: a
+/// response carries a [`Status`], so `Status::Ok` + payload is success and any
+/// other status + message is failure — one terminal path for the client.
 #[abstract_bits(bits = 8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum FrameType {
-    Request = 1,
-    Response = 2,
-    Event = 3,
-    Notification = 4,
+    Response = 1,
+    Event = 2,
+    Notification = 3,
 }
 
 /// Response status. `Ok` carries the response payload; any other value carries a
-/// diagnostic message string instead (see [`error`]).
+/// diagnostic message string instead (see [`Error`]).
 #[abstract_bits(bits = 8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
@@ -168,29 +164,24 @@ pub enum LeaveReason {
     KeepaliveTimeout = 2,
 }
 
+/// The 3-byte header of every host -> device frame (always a request).
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameHeader {
+pub struct RequestHeader {
+    pub command: u8,
+    pub request_id: RequestId,
+}
+
+/// The 4-byte header of every device -> host frame.
+#[abstract_bits]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyHeader {
     pub frame_type: FrameType,
     pub command: u8,
     pub request_id: RequestId,
 }
 
 // -- payload structs -------------------------------------------------------------
-
-/// A bool padded to one byte, keeping the protocol byte-aligned.
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct BoolFlag {
-    value: bool,
-    reserved: u7,
-}
-
-impl From<bool> for BoolFlag {
-    fn from(value: bool) -> Self {
-        Self { value }
-    }
-}
 
 #[abstract_bits]
 #[derive(Debug, Clone)]
@@ -203,7 +194,7 @@ struct ResetPayload {
 #[derive(Debug, Clone)]
 struct FirmwareInfoPayload {
     protocol_version: u8,
-    version_len: u8,
+    version_len: u16,
     // A human-readable firmware version ("ziggurat/0.1.0"); inherently a string.
     #[abstract_bits(length_from = version_len)]
     version: Vec<u8>,
@@ -229,7 +220,8 @@ struct NetworkState {
     network_key_seq: u8,
     network_key_tx_counter: u32,
     tc_link_key: Key,
-    has_tclk_seed: BoolFlag,
+    has_tclk_seed: bool,
+    reserved: u7,
     tclk_seed: Key,
     tclk_flavor: TclkFlavorId,
     tx_power: u8, // i8 two's complement (abstract-bits has no signed types)
@@ -240,7 +232,8 @@ struct NetworkState {
 #[derive(Debug, Clone)]
 struct ConfigurePayload {
     role: NodeRole,
-    source_routing: BoolFlag,
+    source_routing: bool,
+    reserved: u7,
     state: NetworkState,
 }
 
@@ -257,7 +250,7 @@ struct KeyEntry {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct LoadKeyTablePayload {
-    count: u8,
+    count: u16,
     #[abstract_bits(length_from = count)]
     entries: Vec<KeyEntry>,
 }
@@ -281,7 +274,7 @@ struct ChildEntry {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct LoadChildrenPayload {
-    count: u8,
+    count: u16,
     #[abstract_bits(length_from = count)]
     entries: Vec<ChildEntry>,
 }
@@ -296,7 +289,7 @@ struct AddressEntry {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct LoadAddressCachePayload {
-    count: u8,
+    count: u16,
     #[abstract_bits(length_from = count)]
     entries: Vec<AddressEntry>,
 }
@@ -306,7 +299,8 @@ struct LoadAddressCachePayload {
 struct NetworkInfoPayload {
     state: NetworkState,
     key_count: u16,
-    started: BoolFlag,
+    started: bool,
+    reserved: u7,
 }
 
 #[abstract_bits]
@@ -355,7 +349,8 @@ struct SendApsPayload {
 #[derive(Debug, Clone)]
 struct PermitJoinsPayload {
     duration: u16,
-    accept_direct_joins: BoolFlag,
+    accept_direct_joins: bool,
+    reserved: u7,
 }
 
 #[abstract_bits]
@@ -380,7 +375,7 @@ struct ProvisionalKeyPayload {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct ScanRequestPayload {
-    count: u8,
+    count: u16,
     #[abstract_bits(length_from = count)]
     channels: Vec<u8>,
     duration_per_channel_ms: u16,
@@ -400,11 +395,12 @@ struct BeaconPayload {
     source: Nwk, // 0xFFFF when the beacon had no short source
     pan_id: PanId,
     extended_pan_id: Eui64,
-    permit_joining: BoolFlag,
+    permit_joining: bool,
+    router_capacity: bool,
+    end_device_capacity: bool,
+    reserved: u5,
     stack_profile: u8,
     protocol_version: u8,
-    router_capacity: BoolFlag,
-    end_device_capacity: BoolFlag,
     device_depth: u8,
     update_id: u8,
     lqi: u8,
@@ -428,7 +424,7 @@ struct CapturedPacketPayload {
 #[derive(Debug, Clone)]
 struct ErrorPayload {
     status: Status,
-    message_len: u8,
+    message_len: u16,
     #[abstract_bits(length_from = message_len)]
     message: Vec<u8>,
 }
@@ -437,7 +433,8 @@ struct ErrorPayload {
 #[derive(Debug, Clone)]
 struct HelloPayload {
     protocol_version: u8,
-    configured: BoolFlag,
+    configured: bool,
+    reserved: u7,
 }
 
 /// Why the MCU last rebooted, when the reboot was abnormal (a fault dump or the
@@ -445,7 +442,7 @@ struct HelloPayload {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct LastResetPayload {
-    message_len: u8,
+    message_len: u16,
     #[abstract_bits(length_from = message_len)]
     message: Vec<u8>,
 }
@@ -455,7 +452,8 @@ struct LastResetPayload {
 struct ReceivedApsPayload {
     source: Nwk,
     destination: Nwk,
-    has_group: BoolFlag,
+    has_group: bool,
+    reserved: u7,
     group: u16,
     profile_id: u16,
     cluster_id: u16,
@@ -471,9 +469,10 @@ struct ReceivedApsPayload {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct SendConfirmPayload {
-    confirmed: BoolFlag,
+    confirmed: bool,
+    reserved: u7,
     next_hop: Nwk, // 0xFFFF when unknown
-    reason_len: u8,
+    reason_len: u16,
     #[abstract_bits(length_from = reason_len)]
     reason: Vec<u8>,
 }
@@ -481,8 +480,9 @@ struct SendConfirmPayload {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct ApsAckConfirmPayload {
-    acked: BoolFlag,
-    reason_len: u8,
+    acked: bool,
+    reserved: u7,
+    reason_len: u16,
     #[abstract_bits(length_from = reason_len)]
     reason: Vec<u8>,
 }
@@ -499,12 +499,13 @@ struct DeviceJoinedPayload {
 #[derive(Debug, Clone)]
 struct DeviceLeftPayload {
     nwk: Nwk,
-    has_ieee: BoolFlag,
+    has_ieee: bool,
+    rejoin: bool,
+    has_router_ieee: bool,
+    reserved: u5,
     ieee: Eui64,
     reason: LeaveReason,
-    rejoin: BoolFlag,
     router: Nwk, // 0xFFFF when not router_reported
-    has_router_ieee: BoolFlag,
     router_ieee: Eui64,
 }
 
@@ -530,82 +531,261 @@ struct ApsDecryptFailPayload {
     key_id: KeyId,
 }
 
+// -- typed frames ------------------------------------------------------------------
+
+/// A parsed host -> device request.
+enum Request {
+    Ping,
+    Reset(ResetPayload),
+    GetFirmwareInfo,
+    GetHwAddress,
+    Configure(ConfigurePayload),
+    LoadKeyTable(LoadKeyTablePayload),
+    LoadChildren(LoadChildrenPayload),
+    LoadAddressCache(LoadAddressCachePayload),
+    StartNetwork,
+    GetNetworkInfo,
+    ScanKeyTable,
+    ScanChildren,
+    ScanAddressCache,
+    ScanRouteTable,
+    SendAps(SendApsPayload),
+    PermitJoins(PermitJoinsPayload),
+    SetChannel(ChannelPayload),
+    SetNwkUpdateId(NwkUpdateIdPayload),
+    SetProvisionalKey(ProvisionalKeyPayload),
+    EnergyScan(ScanRequestPayload),
+    NetworkScan(ScanRequestPayload),
+    PacketCapture(ChannelPayload),
+    PacketCaptureChannel(ChannelPayload),
+}
+
+impl Request {
+    fn parse(command: CommandId, payload: &[u8]) -> Result<Self, Error> {
+        Ok(match command {
+            CommandId::Ping => Self::Ping,
+            CommandId::Reset => Self::Reset(require(payload, "reset")?),
+            CommandId::GetFirmwareInfo => Self::GetFirmwareInfo,
+            CommandId::GetHwAddress => Self::GetHwAddress,
+            CommandId::Configure => Self::Configure(require(payload, "configure")?),
+            CommandId::LoadKeyTable => Self::LoadKeyTable(require(payload, "key entries")?),
+            CommandId::LoadChildren => Self::LoadChildren(require(payload, "child entries")?),
+            CommandId::LoadAddressCache => {
+                Self::LoadAddressCache(require(payload, "addr entries")?)
+            }
+            CommandId::StartNetwork => Self::StartNetwork,
+            CommandId::GetNetworkInfo => Self::GetNetworkInfo,
+            CommandId::ScanKeyTable => Self::ScanKeyTable,
+            CommandId::ScanChildren => Self::ScanChildren,
+            CommandId::ScanAddressCache => Self::ScanAddressCache,
+            CommandId::ScanRouteTable => Self::ScanRouteTable,
+            CommandId::SendAps => Self::SendAps(require(payload, "send_aps")?),
+            CommandId::PermitJoins => Self::PermitJoins(require(payload, "permit_joins")?),
+            CommandId::SetChannel => Self::SetChannel(require(payload, "channel")?),
+            CommandId::SetNwkUpdateId => Self::SetNwkUpdateId(require(payload, "update id")?),
+            CommandId::SetProvisionalKey => Self::SetProvisionalKey(require(payload, "key")?),
+            CommandId::EnergyScan => Self::EnergyScan(require(payload, "energy_scan")?),
+            CommandId::NetworkScan => Self::NetworkScan(require(payload, "network_scan")?),
+            CommandId::PacketCapture => Self::PacketCapture(require(payload, "channel")?),
+            CommandId::PacketCaptureChannel => {
+                Self::PacketCaptureChannel(require(payload, "channel")?)
+            }
+            CommandId::Hello
+            | CommandId::ReceivedAps
+            | CommandId::SendConfirm
+            | CommandId::ApsAckConfirm
+            | CommandId::DeviceJoined
+            | CommandId::DeviceLeft
+            | CommandId::FrameCounter
+            | CommandId::LinkKey
+            | CommandId::ApsDecryptFailure
+            | CommandId::LastReset => {
+                return Err(Error::new(Status::UnknownCommand, "not a request"));
+            }
+        })
+    }
+}
+
+/// The typed body of a successful response.
+enum Response {
+    Empty,
+    FirmwareInfo(FirmwareInfoPayload),
+    HwAddress(HwAddressPayload),
+    NetworkInfo(NetworkInfoPayload),
+    ScanCount(ScanCountPayload),
+}
+
+impl Response {
+    fn frame(&self, command: u8, request_id: RequestId) -> Vec<u8> {
+        let mut bytes = envelope(FrameType::Response, command, request_id);
+        append(&mut bytes, &Status::Ok);
+        let fits = match self {
+            Self::Empty => true,
+            Self::FirmwareInfo(payload) => append(&mut bytes, payload),
+            Self::HwAddress(payload) => append(&mut bytes, payload),
+            Self::NetworkInfo(payload) => append(&mut bytes, payload),
+            Self::ScanCount(payload) => append(&mut bytes, payload),
+        };
+        if !fits {
+            return Error::new(Status::InvalidRequest, "reply too large").frame(command, request_id);
+        }
+        bytes
+    }
+}
+
+/// A failed reply: any non-`Ok` [`Status`] plus a diagnostic message. The client
+/// branches on the status; the text is for humans.
+struct Error {
+    status: Status,
+    message: String,
+}
+
+impl Error {
+    fn new(status: Status, message: &str) -> Self {
+        Self {
+            status,
+            message: message.to_string(),
+        }
+    }
+
+    fn parse(what: &str) -> Self {
+        Self::new(Status::Parse, what)
+    }
+
+    fn not_configured() -> Self {
+        Self::new(Status::NotConfigured, "")
+    }
+
+    fn frame(&self, command: u8, request_id: RequestId) -> Vec<u8> {
+        let message = &self.message.as_bytes()[..self.message.len().min(255)];
+        let mut bytes = envelope(FrameType::Response, command, request_id);
+        append(
+            &mut bytes,
+            &ErrorPayload {
+                status: self.status,
+                message: message.to_vec(),
+            },
+        );
+        bytes
+    }
+}
+
+/// A streamed item, sent before its request's terminal response, carrying the
+/// request's id.
+enum Event {
+    KeyEntry(KeyEntry),
+    Child(ChildEntry),
+    Address(AddressEntry),
+    Route(RouteEntry),
+    EnergyResult(EnergyResultPayload),
+    Beacon(BeaconPayload),
+    CapturedPacket(CapturedPacketPayload),
+}
+
+impl Event {
+    fn frame(&self, request_id: RequestId) -> Option<Vec<u8>> {
+        let command = match self {
+            Self::KeyEntry(_) => CommandId::ScanKeyTable,
+            Self::Child(_) => CommandId::ScanChildren,
+            Self::Address(_) => CommandId::ScanAddressCache,
+            Self::Route(_) => CommandId::ScanRouteTable,
+            Self::EnergyResult(_) => CommandId::EnergyScan,
+            Self::Beacon(_) => CommandId::NetworkScan,
+            Self::CapturedPacket(_) => CommandId::PacketCapture,
+        };
+        let mut bytes = envelope(FrameType::Event, command.into(), request_id);
+        let fits = match self {
+            Self::KeyEntry(payload) => append(&mut bytes, payload),
+            Self::Child(payload) => append(&mut bytes, payload),
+            Self::Address(payload) => append(&mut bytes, payload),
+            Self::Route(payload) => append(&mut bytes, payload),
+            Self::EnergyResult(payload) => append(&mut bytes, payload),
+            Self::Beacon(payload) => append(&mut bytes, payload),
+            Self::CapturedPacket(payload) => append(&mut bytes, payload),
+        };
+        fits.then_some(bytes)
+    }
+}
+
+async fn send_event(request_id: RequestId, event: Event) {
+    if let Some(frame) = event.frame(request_id) {
+        send_outbound(frame).await;
+    }
+}
+
+/// An unsolicited device -> host frame. Confirms carry their originating send's
+/// request id; everything else uses 0.
+enum Notification {
+    Hello(HelloPayload),
+    LastReset(LastResetPayload),
+    ReceivedAps(ReceivedApsPayload),
+    SendConfirm(RequestId, SendConfirmPayload),
+    ApsAckConfirm(RequestId, ApsAckConfirmPayload),
+    DeviceJoined(DeviceJoinedPayload),
+    DeviceLeft(DeviceLeftPayload),
+    FrameCounter(FrameCounterPayload),
+    LinkKey(LinkKeyPayload),
+    ApsDecryptFailure(ApsDecryptFailPayload),
+}
+
+impl Notification {
+    fn frame(&self) -> Option<Vec<u8>> {
+        let (command, request_id) = match self {
+            Self::Hello(_) => (CommandId::Hello, 0),
+            Self::LastReset(_) => (CommandId::LastReset, 0),
+            Self::ReceivedAps(_) => (CommandId::ReceivedAps, 0),
+            Self::SendConfirm(request_id, _) => (CommandId::SendConfirm, *request_id),
+            Self::ApsAckConfirm(request_id, _) => (CommandId::ApsAckConfirm, *request_id),
+            Self::DeviceJoined(_) => (CommandId::DeviceJoined, 0),
+            Self::DeviceLeft(_) => (CommandId::DeviceLeft, 0),
+            Self::FrameCounter(_) => (CommandId::FrameCounter, 0),
+            Self::LinkKey(_) => (CommandId::LinkKey, 0),
+            Self::ApsDecryptFailure(_) => (CommandId::ApsDecryptFailure, 0),
+        };
+        let mut bytes = envelope(FrameType::Notification, command.into(), request_id);
+        let fits = match self {
+            Self::Hello(payload) => append(&mut bytes, payload),
+            Self::LastReset(payload) => append(&mut bytes, payload),
+            Self::ReceivedAps(payload) => append(&mut bytes, payload),
+            Self::SendConfirm(_, payload) => append(&mut bytes, payload),
+            Self::ApsAckConfirm(_, payload) => append(&mut bytes, payload),
+            Self::DeviceJoined(payload) => append(&mut bytes, payload),
+            Self::DeviceLeft(payload) => append(&mut bytes, payload),
+            Self::FrameCounter(payload) => append(&mut bytes, payload),
+            Self::LinkKey(payload) => append(&mut bytes, payload),
+            Self::ApsDecryptFailure(payload) => append(&mut bytes, payload),
+        };
+        fits.then_some(bytes)
+    }
+}
+
 // -- frame assembly ----------------------------------------------------------------
 
 /// Bounds one encoded frame: the envelope plus the largest payload (a captured
 /// packet or an error string).
 const MAX_FRAME: usize = 512;
 
-fn append<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) {
+/// Append `value`'s serialization; false (nothing appended) if it exceeds
+/// [`MAX_FRAME`].
+fn append<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) -> bool {
     let mut buffer = [0u8; MAX_FRAME];
     let mut writer = abstract_bits::BitWriter::from(&mut buffer[..]);
-    value.write_abstract_bits(&mut writer).unwrap();
+    if value.write_abstract_bits(&mut writer).is_err() {
+        return false;
+    }
     let written = writer.bytes_written();
     bytes.extend_from_slice(&buffer[..written]);
+    true
 }
 
 fn envelope(frame_type: FrameType, command: u8, request_id: RequestId) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(32);
     append(
         &mut bytes,
-        &FrameHeader {
+        &ReplyHeader {
             frame_type,
             command,
             request_id,
-        },
-    );
-    bytes
-}
-
-fn frame<T: AbstractBits>(
-    frame_type: FrameType,
-    command: CommandId,
-    request_id: RequestId,
-    payload: &T,
-) -> Vec<u8> {
-    let mut bytes = envelope(frame_type, command.into(), request_id);
-    append(&mut bytes, payload);
-    bytes
-}
-
-/// A successful response: `Status::Ok` then the typed payload.
-fn response<T: AbstractBits>(command: CommandId, request_id: RequestId, payload: &T) -> Vec<u8> {
-    let mut bytes = envelope(FrameType::Response, command.into(), request_id);
-    append(&mut bytes, &Status::Ok);
-    append(&mut bytes, payload);
-    bytes
-}
-
-/// A successful response with no payload: just `Status::Ok`.
-fn ok(command: CommandId, request_id: RequestId) -> Vec<u8> {
-    let mut bytes = envelope(FrameType::Response, command.into(), request_id);
-    append(&mut bytes, &Status::Ok);
-    bytes
-}
-
-fn event<T: AbstractBits>(command: CommandId, request_id: RequestId, payload: &T) -> Vec<u8> {
-    frame(FrameType::Event, command, request_id, payload)
-}
-
-fn notification<T: AbstractBits>(id: CommandId, request_id: RequestId, payload: &T) -> Vec<u8> {
-    frame(FrameType::Notification, id, request_id, payload)
-}
-
-fn error(command: CommandId, request_id: RequestId, status: Status, message: &str) -> Vec<u8> {
-    error_raw(command.into(), request_id, status, message)
-}
-
-/// A failed response for a possibly-unknown command byte (the header parsed but the
-/// command did not resolve): a `Response` carrying a non-`Ok` status and a
-/// diagnostic message.
-fn error_raw(command: u8, request_id: RequestId, status: Status, message: &str) -> Vec<u8> {
-    let message = &message.as_bytes()[..message.len().min(255)];
-    let mut bytes = envelope(FrameType::Response, command, request_id);
-    append(
-        &mut bytes,
-        &ErrorPayload {
-            status,
-            message: message.to_vec(),
         },
     );
     bytes
@@ -617,26 +797,24 @@ fn parse<T: AbstractBits>(payload: &[u8]) -> Option<T> {
     T::read_abstract_bits(&mut reader).ok()
 }
 
-pub fn hello_frame(configured: bool) -> Vec<u8> {
-    notification(
-        CommandId::Hello,
-        0,
-        &HelloPayload {
-            protocol_version: PROTOCOL_VERSION,
-            configured: configured.into(),
-        },
-    )
+fn require<T: AbstractBits>(payload: &[u8], what: &str) -> Result<T, Error> {
+    parse(payload).ok_or_else(|| Error::parse(what))
 }
 
-pub fn last_reset_frame(message: &str) -> Vec<u8> {
+pub fn hello_frame(configured: bool) -> Option<Vec<u8>> {
+    Notification::Hello(HelloPayload {
+        protocol_version: PROTOCOL_VERSION,
+        configured,
+    })
+    .frame()
+}
+
+pub fn last_reset_frame(message: &str) -> Option<Vec<u8>> {
     let message = &message.as_bytes()[..message.len().min(255)];
-    notification(
-        CommandId::LastReset,
-        0,
-        &LastResetPayload {
-            message: message.to_vec(),
-        },
-    )
+    Notification::LastReset(LastResetPayload {
+        message: message.to_vec(),
+    })
+    .frame()
 }
 
 // -- dispatch ------------------------------------------------------------------------
@@ -645,83 +823,167 @@ pub fn last_reset_frame(message: &str) -> Vec<u8> {
 /// preceded by any streamed events.
 pub async fn handle_frame<P: RadioPhy>(app: &mut App<P>, bytes: &[u8]) {
     let mut reader = BitReader::from(bytes);
-    let Ok(header) = FrameHeader::read_abstract_bits(&mut reader) else {
-        send_outbound(error_raw(0, 0, Status::Parse, "truncated envelope")).await;
+    let Ok(header) = RequestHeader::read_abstract_bits(&mut reader) else {
+        send_outbound(Error::parse("truncated header").frame(0, 0)).await;
         return;
     };
     let payload = &bytes[reader.bytes_read()..];
     let request_id = header.request_id;
 
-    if header.frame_type != FrameType::Request {
-        send_outbound(error_raw(
-            header.command,
-            request_id,
-            Status::Parse,
-            "not a request",
-        ))
-        .await;
-        return;
-    }
+    let request = CommandId::try_from(header.command)
+        .map_err(|_| Error::new(Status::UnknownCommand, ""))
+        .and_then(|command| Request::parse(command, payload));
 
-    let Ok(command) = CommandId::try_from(header.command) else {
-        send_outbound(error_raw(header.command, request_id, Status::UnknownCommand, "")).await;
-        return;
+    let reply = match request {
+        Ok(request) => dispatch(app, request_id, request).await,
+        Err(e) => Err(e),
     };
 
-    let reply = match command {
-        CommandId::Ping => ok(CommandId::Ping, request_id),
-        CommandId::Reset => handle_reset(app, request_id, payload),
-        CommandId::GetFirmwareInfo => {
-            let version = concat!("ziggurat/", env!("CARGO_PKG_VERSION"));
-            response(
-                CommandId::GetFirmwareInfo,
-                request_id,
-                &FirmwareInfoPayload {
-                    protocol_version: PROTOCOL_VERSION,
-                    version: version.as_bytes().to_vec(),
-                },
-            )
-        }
-        CommandId::GetHwAddress => response(
-            CommandId::GetHwAddress,
-            request_id,
-            &HwAddressPayload {
-                ieee: app.platform.hw_eui64(),
-            },
-        ),
-        CommandId::Configure => handle_configure(app, request_id, payload).await,
-        CommandId::LoadKeyTable => handle_load_key_table(app, request_id, payload),
-        CommandId::LoadChildren => handle_load_children(app, request_id, payload),
-        CommandId::LoadAddressCache => handle_load_address_cache(app, request_id, payload),
-        CommandId::StartNetwork => handle_start_network(app, request_id).await,
-        CommandId::GetNetworkInfo => handle_get_network_info(app, request_id),
-        CommandId::ScanKeyTable => handle_scan_key_table(app, request_id).await,
-        CommandId::ScanChildren => handle_scan_children(app, request_id).await,
-        CommandId::ScanAddressCache => handle_scan_address_cache(app, request_id).await,
-        CommandId::ScanRouteTable => handle_scan_route_table(app, request_id).await,
-        CommandId::SendAps => handle_send_aps(app, request_id, payload),
-        CommandId::PermitJoins => handle_permit_joins(app, request_id, payload),
-        CommandId::SetChannel => handle_set_channel(app, request_id, payload).await,
-        CommandId::SetNwkUpdateId => handle_set_nwk_update_id(app, request_id, payload),
-        CommandId::SetProvisionalKey => handle_set_provisional_key(app, request_id, payload),
-        CommandId::EnergyScan => handle_energy_scan(app, request_id, payload).await,
-        CommandId::NetworkScan => handle_network_scan(app, request_id, payload).await,
-        CommandId::PacketCapture => handle_packet_capture(app, request_id, payload).await,
-        CommandId::PacketCaptureChannel => {
-            handle_packet_capture_channel(app, request_id, payload).await
-        }
-        other => error(other, request_id, Status::UnknownCommand, ""),
+    let frame = match reply {
+        Ok(response) => response.frame(header.command, request_id),
+        Err(e) => e.frame(header.command, request_id),
     };
-
-    send_outbound(reply).await;
+    send_outbound(frame).await;
 }
 
-/// Soft reset stops transient radio activity; hard reset reboots (diverges).
-fn handle_reset<P: RadioPhy>(app: &mut App<P>, request_id: RequestId, payload: &[u8]) -> Vec<u8> {
-    let Some(request) = parse::<ResetPayload>(payload) else {
-        return error(CommandId::Reset, request_id, Status::Parse, "reset type");
-    };
+async fn dispatch<P: RadioPhy>(
+    app: &mut App<P>,
+    request_id: RequestId,
+    request: Request,
+) -> Result<Response, Error> {
+    match request {
+        Request::Ping => Ok(Response::Empty),
+        Request::Reset(payload) => handle_reset(app, payload),
+        Request::GetFirmwareInfo => {
+            let version = concat!("ziggurat/", env!("CARGO_PKG_VERSION"));
+            Ok(Response::FirmwareInfo(FirmwareInfoPayload {
+                protocol_version: PROTOCOL_VERSION,
+                version: version.as_bytes().to_vec(),
+            }))
+        }
+        Request::GetHwAddress => Ok(Response::HwAddress(HwAddressPayload {
+            ieee: app.platform.hw_eui64(),
+        })),
+        Request::Configure(payload) => handle_configure(app, payload).await,
+        Request::LoadKeyTable(payload) => handle_load_key_table(app, payload),
+        Request::LoadChildren(payload) => handle_load_children(app, payload),
+        Request::LoadAddressCache(payload) => handle_load_address_cache(app, payload),
+        Request::StartNetwork => handle_start_network(app).await,
+        Request::GetNetworkInfo => handle_get_network_info(app),
+        Request::ScanKeyTable => {
+            scan_table(app, request_id, |stack| {
+                let core = stack.state.core.lock();
+                let aps = &core.aib.aps_security;
+                let outgoing = aps.outgoing_frame_counter();
+                aps.device_keys()
+                    .map(|(partner, entry)| {
+                        Event::KeyEntry(KeyEntry {
+                            key: entry.key.clone(),
+                            tx_counter: outgoing,
+                            rx_counter: aps.incoming_frame_counter(partner).unwrap_or(0),
+                            seq: 0,
+                            partner_ieee: partner,
+                        })
+                    })
+                    .collect()
+            })
+            .await
+        }
+        Request::ScanChildren => {
+            scan_table(app, request_id, |stack| {
+                let core = stack.state.core.lock();
+                core.nib
+                    .neighbors
+                    .entries()
+                    .filter(|entry| entry.is_child())
+                    .map(|entry| {
+                        Event::Child(ChildEntry {
+                            ieee: entry.extended_address,
+                            nwk: entry.network_address,
+                            flags: ChildFlags {
+                                rx_on_when_idle: entry.rx_on_when_idle,
+                                device_type: match entry.device_type {
+                                    NwkDeviceType::Router => ChildDeviceType::Router,
+                                    _ => ChildDeviceType::EndDevice,
+                                },
+                            },
+                        })
+                    })
+                    .collect()
+            })
+            .await
+        }
+        Request::ScanAddressCache => {
+            scan_table(app, request_id, |stack| {
+                let core = stack.state.core.lock();
+                core.nib
+                    .address_map
+                    .entries()
+                    .map(|(ieee, nwk)| Event::Address(AddressEntry { ieee, nwk }))
+                    .collect()
+            })
+            .await
+        }
+        Request::ScanRouteTable => {
+            scan_table(app, request_id, |stack| {
+                let core = stack.state.core.lock();
+                core.nib
+                    .routing
+                    .entries()
+                    .filter(|entry| matches!(entry.status, routing::Status::Active))
+                    .map(|entry| {
+                        Event::Route(RouteEntry {
+                            destination: entry.destination,
+                            next_hop: entry.next_hop_address,
+                            path_cost: entry.path_cost,
+                        })
+                    })
+                    .collect()
+            })
+            .await
+        }
+        Request::SendAps(payload) => handle_send_aps(app, request_id, payload),
+        Request::PermitJoins(payload) => handle_permit_joins(app, payload),
+        Request::SetChannel(payload) => handle_set_channel(app, payload).await,
+        Request::SetNwkUpdateId(payload) => handle_set_nwk_update_id(app, payload),
+        Request::SetProvisionalKey(payload) => handle_set_provisional_key(app, payload),
+        Request::EnergyScan(payload) => handle_energy_scan(app, request_id, payload).await,
+        Request::NetworkScan(payload) => handle_network_scan(app, request_id, payload).await,
+        Request::PacketCapture(payload) => handle_packet_capture(app, request_id, payload).await,
+        Request::PacketCaptureChannel(payload) => {
+            handle_packet_capture_channel(app, payload).await
+        }
+    }
+}
 
+// -- guards ------------------------------------------------------------------------
+
+/// The stack, in any state after `configure`.
+fn configured<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
+    app.stack.as_ref().ok_or_else(Error::not_configured)
+}
+
+/// The stack, if it is in the load window (configured but not started).
+fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
+    match app.stack.as_ref() {
+        Some(stack) if !app.started => Ok(stack),
+        Some(_) => Err(Error::new(Status::InvalidState, "network already started")),
+        None => Err(Error::not_configured()),
+    }
+}
+
+/// The stack, if it is running.
+fn running<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
+    match app.stack.as_ref() {
+        Some(stack) if app.started => Ok(stack),
+        _ => Err(Error::not_configured()),
+    }
+}
+
+// -- handlers ----------------------------------------------------------------------
+
+/// Soft reset stops transient radio activity; hard reset reboots (diverges).
+fn handle_reset<P: RadioPhy>(app: &mut App<P>, request: ResetPayload) -> Result<Response, Error> {
     if let Some(stop) = app.capture_stop.take() {
         stop.signal(());
     }
@@ -730,17 +992,13 @@ fn handle_reset<P: RadioPhy>(app: &mut App<P>, request_id: RequestId, payload: &
         app.platform.hard_reset();
     }
 
-    ok(CommandId::Reset, request_id)
+    Ok(Response::Empty)
 }
 
 async fn handle_configure<P: RadioPhy>(
     app: &mut App<P>,
-    request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let Some(request) = parse::<ConfigurePayload>(payload) else {
-        return error(CommandId::Configure, request_id, Status::Parse, "configure");
-    };
+    request: ConfigurePayload,
+) -> Result<Response, Error> {
     let state = request.state;
 
     let config = NetworkConfig {
@@ -758,7 +1016,7 @@ async fn handle_configure<P: RadioPhy>(
         network_key_seq_number: state.network_key_seq,
         network_key_tx_counter: state.network_key_tx_counter,
         tc_link_key: state.tc_link_key,
-        tclk_seed: state.has_tclk_seed.value.then_some(TclkSeed {
+        tclk_seed: state.has_tclk_seed.then_some(TclkSeed {
             seed: state.tclk_seed,
             flavor: match state.tclk_flavor {
                 TclkFlavorId::Ezsp => TclkFlavor::Ezsp,
@@ -766,7 +1024,7 @@ async fn handle_configure<P: RadioPhy>(
             },
         }),
         tx_power: state.tx_power as i8,
-        source_routing: request.source_routing.value,
+        source_routing: request.source_routing,
     };
 
     if let Some(old_stack) = app.stack.take() {
@@ -784,52 +1042,14 @@ async fn handle_configure<P: RadioPhy>(
         .restore_outgoing_frame_counter(state.aps_frame_counter);
     app.stack = Some(stack);
 
-    ok(CommandId::Configure, request_id)
-}
-
-/// The stack, if it is in the load window (configured but not started).
-fn loadable<P: RadioPhy>(
-    app: &App<P>,
-    command: CommandId,
-    request_id: RequestId,
-) -> Result<&Arc<ZigbeeStack<P>>, Vec<u8>> {
-    match app.stack.as_ref() {
-        Some(stack) if !app.started => Ok(stack),
-        Some(_) => Err(error(
-            command,
-            request_id,
-            Status::InvalidState,
-            "network already started",
-        )),
-        None => Err(error(command, request_id, Status::NotConfigured, "")),
-    }
-}
-
-/// The stack, if it is running.
-fn running<P: RadioPhy>(
-    app: &App<P>,
-    command: CommandId,
-    request_id: RequestId,
-) -> Result<&Arc<ZigbeeStack<P>>, Vec<u8>> {
-    match app.stack.as_ref() {
-        Some(stack) if app.started => Ok(stack),
-        _ => Err(error(command, request_id, Status::NotConfigured, "")),
-    }
+    Ok(Response::Empty)
 }
 
 fn handle_load_key_table<P: RadioPhy>(
     app: &mut App<P>,
-    request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let stack = match loadable(app, CommandId::LoadKeyTable, request_id) {
-        Ok(stack) => stack,
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<LoadKeyTablePayload>(payload) else {
-        return error(CommandId::LoadKeyTable, request_id, Status::Parse, "key entries");
-    };
+    request: LoadKeyTablePayload,
+) -> Result<Response, Error> {
+    let stack = loadable(app)?;
 
     let mut core = stack.state.core.lock();
     for entry in request.entries {
@@ -843,22 +1063,14 @@ fn handle_load_key_table<P: RadioPhy>(
         }
     }
 
-    ok(CommandId::LoadKeyTable, request_id)
+    Ok(Response::Empty)
 }
 
 fn handle_load_children<P: RadioPhy>(
     app: &mut App<P>,
-    request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let stack = match loadable(app, CommandId::LoadChildren, request_id) {
-        Ok(stack) => stack,
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<LoadChildrenPayload>(payload) else {
-        return error(CommandId::LoadChildren, request_id, Status::Parse, "child entries");
-    };
+    request: LoadChildrenPayload,
+) -> Result<Response, Error> {
+    let stack = loadable(app)?;
 
     let now = stack.core_now();
     let mut core = stack.state.core.lock();
@@ -882,55 +1094,37 @@ fn handle_load_children<P: RadioPhy>(
         core.nib.address_map.update_mapping(entry.ieee, entry.nwk);
     }
 
-    ok(CommandId::LoadChildren, request_id)
+    Ok(Response::Empty)
 }
 
 fn handle_load_address_cache<P: RadioPhy>(
     app: &mut App<P>,
-    request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let stack = match loadable(app, CommandId::LoadAddressCache, request_id) {
-        Ok(stack) => stack,
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<LoadAddressCachePayload>(payload) else {
-        return error(CommandId::LoadAddressCache, request_id, Status::Parse, "addr entries");
-    };
+    request: LoadAddressCachePayload,
+) -> Result<Response, Error> {
+    let stack = loadable(app)?;
 
     let mut core = stack.state.core.lock();
     for entry in request.entries {
         core.nib.address_map.update_mapping(entry.ieee, entry.nwk);
     }
 
-    ok(CommandId::LoadAddressCache, request_id)
+    Ok(Response::Empty)
 }
 
-async fn handle_start_network<P: RadioPhy>(app: &mut App<P>, request_id: RequestId) -> Vec<u8> {
-    let stack = match loadable(app, CommandId::StartNetwork, request_id) {
-        Ok(stack) => stack.clone(),
-        Err(e) => return e,
-    };
+async fn handle_start_network<P: RadioPhy>(app: &mut App<P>) -> Result<Response, Error> {
+    let stack = loadable(app)?.clone();
 
     if let Err(e) = stack.start_network().await {
-        return error(
-            CommandId::StartNetwork,
-            request_id,
-            Status::NetworkStartFailed,
-            &e.to_string(),
-        );
+        return Err(Error::new(Status::NetworkStartFailed, &e.to_string()));
     }
 
     spawn_stack_pumps(&stack);
     app.started = true;
-    ok(CommandId::StartNetwork, request_id)
+    Ok(Response::Empty)
 }
 
-fn handle_get_network_info<P: RadioPhy>(app: &App<P>, request_id: RequestId) -> Vec<u8> {
-    let Some(stack) = app.stack.as_ref() else {
-        return error(CommandId::GetNetworkInfo, request_id, Status::NotConfigured, "");
-    };
+fn handle_get_network_info<P: RadioPhy>(app: &App<P>) -> Result<Response, Error> {
+    let stack = configured(app)?;
 
     let stack_state = &stack.state;
     let core = stack_state.core.lock();
@@ -949,154 +1143,53 @@ fn handle_get_network_info<P: RadioPhy>(app: &App<P>, request_id: RequestId) -> 
         None => (false, Key([0; 16]), TclkFlavorId::ZStack),
     };
 
-    response(
-        CommandId::GetNetworkInfo,
-        request_id,
-        &NetworkInfoPayload {
-            state: NetworkState {
-                channel: core.mac.channel,
-                nwk_update_id: core.nib.update_id,
-                pan_id: core.mac.pan_id,
-                extended_pan_id: stack_state.extended_pan_id,
-                nwk_address: stack_state.network_address,
-                ieee_address: stack_state.ieee_address,
-                network_key: nwk_security.network_key(),
-                network_key_seq: nwk_security.key_seq_number(),
-                network_key_tx_counter: nwk_security.outgoing_frame_counter(),
-                tc_link_key: stack.config.tc_link_key.clone(),
-                has_tclk_seed: has_tclk_seed.into(),
-                tclk_seed,
-                tclk_flavor,
-                tx_power: stack.config.tx_power as u8,
-                aps_frame_counter: aps_security.outgoing_frame_counter(),
-            },
-            key_count: aps_security.device_key_count() as u16,
-            started: app.started.into(),
+    Ok(Response::NetworkInfo(NetworkInfoPayload {
+        state: NetworkState {
+            channel: core.mac.channel,
+            nwk_update_id: core.nib.update_id,
+            pan_id: core.mac.pan_id,
+            extended_pan_id: stack_state.extended_pan_id,
+            nwk_address: stack_state.network_address,
+            ieee_address: stack_state.ieee_address,
+            network_key: nwk_security.network_key(),
+            network_key_seq: nwk_security.key_seq_number(),
+            network_key_tx_counter: nwk_security.outgoing_frame_counter(),
+            tc_link_key: stack.config.tc_link_key.clone(),
+            has_tclk_seed,
+            tclk_seed,
+            tclk_flavor,
+            tx_power: stack.config.tx_power as u8,
+            aps_frame_counter: aps_security.outgoing_frame_counter(),
         },
-    )
+        key_count: aps_security.device_key_count() as u16,
+        started: app.started,
+    }))
 }
 
-async fn handle_scan_key_table<P: RadioPhy>(app: &App<P>, request_id: RequestId) -> Vec<u8> {
-    let Some(stack) = app.stack.as_ref() else {
-        return error(CommandId::ScanKeyTable, request_id, Status::NotConfigured, "");
-    };
+/// Stream one table scan: snapshot under the core lock, then stream outside it
+/// (the awaiting sends must not hold the mutex), then respond with the count.
+async fn scan_table<P: RadioPhy>(
+    app: &App<P>,
+    request_id: RequestId,
+    snapshot: impl FnOnce(&ZigbeeStack<P>) -> Vec<Event>,
+) -> Result<Response, Error> {
+    let stack = configured(app)?;
 
-    // Snapshot under the lock, stream outside it: the awaiting sends must not hold
-    // the core mutex.
-    let entries: Vec<KeyEntry> = {
-        let core = stack.state.core.lock();
-        let aps = &core.aib.aps_security;
-        let outgoing = aps.outgoing_frame_counter();
-        aps.device_keys()
-            .map(|(partner, entry)| KeyEntry {
-                key: entry.key.clone(),
-                tx_counter: outgoing,
-                rx_counter: aps.incoming_frame_counter(partner).unwrap_or(0),
-                seq: 0,
-                partner_ieee: partner,
-            })
-            .collect()
-    };
-
-    let count = entries.len() as u16;
-    for entry in entries {
-        send_outbound(event(CommandId::ScanKeyTable, request_id, &entry)).await;
+    let events = snapshot(stack);
+    let count = events.len() as u16;
+    for event in events {
+        send_event(request_id, event).await;
     }
 
-    response(CommandId::ScanKeyTable, request_id, &ScanCountPayload { count })
+    Ok(Response::ScanCount(ScanCountPayload { count }))
 }
 
-async fn handle_scan_children<P: RadioPhy>(app: &App<P>, request_id: RequestId) -> Vec<u8> {
-    let Some(stack) = app.stack.as_ref() else {
-        return error(CommandId::ScanChildren, request_id, Status::NotConfigured, "");
-    };
-
-    let entries: Vec<ChildEntry> = {
-        let core = stack.state.core.lock();
-        core.nib
-            .neighbors
-            .entries()
-            .filter(|entry| entry.is_child())
-            .map(|entry| ChildEntry {
-                ieee: entry.extended_address,
-                nwk: entry.network_address,
-                flags: ChildFlags {
-                    rx_on_when_idle: entry.rx_on_when_idle,
-                    device_type: match entry.device_type {
-                        NwkDeviceType::Router => ChildDeviceType::Router,
-                        _ => ChildDeviceType::EndDevice,
-                    },
-                },
-            })
-            .collect()
-    };
-
-    let count = entries.len() as u16;
-    for entry in entries {
-        send_outbound(event(CommandId::ScanChildren, request_id, &entry)).await;
-    }
-
-    response(CommandId::ScanChildren, request_id, &ScanCountPayload { count })
-}
-
-async fn handle_scan_address_cache<P: RadioPhy>(app: &App<P>, request_id: RequestId) -> Vec<u8> {
-    let Some(stack) = app.stack.as_ref() else {
-        return error(CommandId::ScanAddressCache, request_id, Status::NotConfigured, "");
-    };
-
-    let entries: Vec<AddressEntry> = {
-        let core = stack.state.core.lock();
-        core.nib
-            .address_map
-            .entries()
-            .map(|(ieee, nwk)| AddressEntry { ieee, nwk })
-            .collect()
-    };
-
-    let count = entries.len() as u16;
-    for entry in entries {
-        send_outbound(event(CommandId::ScanAddressCache, request_id, &entry)).await;
-    }
-
-    response(CommandId::ScanAddressCache, request_id, &ScanCountPayload { count })
-}
-
-async fn handle_scan_route_table<P: RadioPhy>(app: &App<P>, request_id: RequestId) -> Vec<u8> {
-    let Some(stack) = app.stack.as_ref() else {
-        return error(CommandId::ScanRouteTable, request_id, Status::NotConfigured, "");
-    };
-
-    let entries: Vec<RouteEntry> = {
-        let core = stack.state.core.lock();
-        core.nib
-            .routing
-            .entries()
-            .filter(|entry| matches!(entry.status, routing::Status::Active))
-            .map(|entry| RouteEntry {
-                destination: entry.destination,
-                next_hop: entry.next_hop_address,
-                path_cost: entry.path_cost,
-            })
-            .collect()
-    };
-
-    let count = entries.len() as u16;
-    for entry in entries {
-        send_outbound(event(CommandId::ScanRouteTable, request_id, &entry)).await;
-    }
-
-    response(CommandId::ScanRouteTable, request_id, &ScanCountPayload { count })
-}
-
-fn handle_send_aps<P: RadioPhy>(app: &App<P>, request_id: RequestId, payload: &[u8]) -> Vec<u8> {
-    let stack = match running(app, CommandId::SendAps, request_id) {
-        Ok(stack) => stack,
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<SendApsPayload>(payload) else {
-        return error(CommandId::SendAps, request_id, Status::Parse, "send_aps");
-    };
+fn handle_send_aps<P: RadioPhy>(
+    app: &App<P>,
+    request_id: RequestId,
+    request: SendApsPayload,
+) -> Result<Response, Error> {
+    let stack = running(app)?;
 
     let aps_security = (request.flags.aps_encryption && request.flags.has_eui64)
         .then_some(request.destination_eui64);
@@ -1124,118 +1217,84 @@ fn handle_send_aps<P: RadioPhy>(app: &App<P>, request_id: RequestId, payload: &[
     );
 
     match outcome {
-        Ok(()) => ok(CommandId::SendAps, request_id),
-        Err(e) => error(CommandId::SendAps, request_id, Status::TransmitFailed, &e.to_string()),
+        Ok(()) => Ok(Response::Empty),
+        Err(e) => Err(Error::new(Status::TransmitFailed, &e.to_string())),
     }
 }
 
-fn handle_permit_joins<P: RadioPhy>(app: &App<P>, request_id: RequestId, payload: &[u8]) -> Vec<u8> {
-    let stack = match running(app, CommandId::PermitJoins, request_id) {
-        Ok(stack) => stack,
-        Err(e) => return e,
-    };
+fn handle_permit_joins<P: RadioPhy>(
+    app: &App<P>,
+    request: PermitJoinsPayload,
+) -> Result<Response, Error> {
+    let stack = running(app)?;
 
-    let Some(request) = parse::<PermitJoinsPayload>(payload) else {
-        return error(CommandId::PermitJoins, request_id, Status::Parse, "permit_joins");
-    };
-
-    stack.permit_joins(u64::from(request.duration), request.accept_direct_joins.value);
-    ok(CommandId::PermitJoins, request_id)
+    stack.permit_joins(u64::from(request.duration), request.accept_direct_joins);
+    Ok(Response::Empty)
 }
 
-async fn handle_set_channel<P: RadioPhy>(app: &App<P>, request_id: RequestId, payload: &[u8]) -> Vec<u8> {
-    let stack = match running(app, CommandId::SetChannel, request_id) {
-        Ok(stack) => stack.clone(),
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<ChannelPayload>(payload) else {
-        return error(CommandId::SetChannel, request_id, Status::Parse, "channel");
-    };
+async fn handle_set_channel<P: RadioPhy>(
+    app: &App<P>,
+    request: ChannelPayload,
+) -> Result<Response, Error> {
+    let stack = running(app)?.clone();
 
     match stack.set_channel(request.channel).await {
-        Ok(()) => ok(CommandId::SetChannel, request_id),
-        Err(e) => error(CommandId::SetChannel, request_id, Status::RadioError, &e.to_string()),
+        Ok(()) => Ok(Response::Empty),
+        Err(e) => Err(Error::new(Status::RadioError, &e.to_string())),
     }
 }
 
 fn handle_set_nwk_update_id<P: RadioPhy>(
     app: &App<P>,
-    request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let stack = match running(app, CommandId::SetNwkUpdateId, request_id) {
-        Ok(stack) => stack,
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<NwkUpdateIdPayload>(payload) else {
-        return error(CommandId::SetNwkUpdateId, request_id, Status::Parse, "update id");
-    };
+    request: NwkUpdateIdPayload,
+) -> Result<Response, Error> {
+    let stack = running(app)?;
 
     stack.set_nwk_update_id(request.nwk_update_id);
-    ok(CommandId::SetNwkUpdateId, request_id)
+    Ok(Response::Empty)
 }
 
 fn handle_set_provisional_key<P: RadioPhy>(
     app: &App<P>,
-    request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let stack = match running(app, CommandId::SetProvisionalKey, request_id) {
-        Ok(stack) => stack,
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<ProvisionalKeyPayload>(payload) else {
-        return error(CommandId::SetProvisionalKey, request_id, Status::Parse, "key");
-    };
+    request: ProvisionalKeyPayload,
+) -> Result<Response, Error> {
+    let stack = running(app)?;
 
     stack.set_provisional_key(request.ieee, request.key);
-    ok(CommandId::SetProvisionalKey, request_id)
+    Ok(Response::Empty)
 }
 
-async fn handle_energy_scan<P: RadioPhy>(app: &App<P>, request_id: RequestId, payload: &[u8]) -> Vec<u8> {
-    let Some(request) = parse::<ScanRequestPayload>(payload) else {
-        return error(CommandId::EnergyScan, request_id, Status::Parse, "energy_scan");
-    };
-
+async fn handle_energy_scan<P: RadioPhy>(
+    app: &App<P>,
+    request_id: RequestId,
+    request: ScanRequestPayload,
+) -> Result<Response, Error> {
     let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
     for channel in request.channels {
         match app.phy.energy_detect(channel, duration).await {
             Ok(rssi) => {
-                send_outbound(event(
-                    CommandId::EnergyScan,
+                send_event(
                     request_id,
-                    &EnergyResultPayload {
+                    Event::EnergyResult(EnergyResultPayload {
                         channel,
                         rssi: rssi as u8,
-                    },
-                ))
+                    }),
+                )
                 .await;
             }
-            Err(e) => {
-                return error(CommandId::EnergyScan, request_id, Status::ScanFailed, &e.to_string());
-            }
+            Err(e) => return Err(Error::new(Status::ScanFailed, &e.to_string())),
         }
     }
 
-    ok(CommandId::EnergyScan, request_id)
+    Ok(Response::Empty)
 }
 
 async fn handle_network_scan<P: RadioPhy>(
     app: &App<P>,
     request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let stack = match running(app, CommandId::NetworkScan, request_id) {
-        Ok(stack) => stack.clone(),
-        Err(e) => return e,
-    };
-
-    let Some(request) = parse::<ScanRequestPayload>(payload) else {
-        return error(CommandId::NetworkScan, request_id, Status::Parse, "network_scan");
-    };
+    request: ScanRequestPayload,
+) -> Result<Response, Error> {
+    let stack = running(app)?.clone();
 
     stack.begin_network_scan();
     let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
@@ -1247,46 +1306,41 @@ async fn handle_network_scan<P: RadioPhy>(
             break;
         }
         for beacon in batch {
-            send_outbound(event(
-                CommandId::NetworkScan,
+            send_event(
                 request_id,
-                &BeaconPayload {
+                Event::Beacon(BeaconPayload {
                     channel: beacon.channel,
                     source: beacon.source.unwrap_or(Nwk(0xFFFF)),
                     pan_id: beacon.pan_id,
                     extended_pan_id: beacon.extended_pan_id,
-                    permit_joining: beacon.permit_joining.into(),
+                    permit_joining: beacon.permit_joining,
+                    router_capacity: beacon.router_capacity,
+                    end_device_capacity: beacon.end_device_capacity,
                     stack_profile: beacon.stack_profile,
                     protocol_version: beacon.protocol_version,
-                    router_capacity: beacon.router_capacity.into(),
-                    end_device_capacity: beacon.end_device_capacity.into(),
                     device_depth: beacon.device_depth,
                     update_id: beacon.update_id,
                     lqi: beacon.lqi,
                     rssi: beacon.rssi as u8,
-                },
-            ))
+                }),
+            )
             .await;
         }
     }
 
     match result {
-        Ok(()) => ok(CommandId::NetworkScan, request_id),
-        Err(e) => error(CommandId::NetworkScan, request_id, Status::ScanFailed, &e.to_string()),
+        Ok(()) => Ok(Response::Empty),
+        Err(e) => Err(Error::new(Status::ScanFailed, &e.to_string())),
     }
 }
 
 async fn handle_packet_capture<P: RadioPhy>(
     app: &mut App<P>,
     request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let Some(request) = parse::<ChannelPayload>(payload) else {
-        return error(CommandId::PacketCapture, request_id, Status::Parse, "channel");
-    };
-
+    request: ChannelPayload,
+) -> Result<Response, Error> {
     if let Err(e) = app.phy.reconfigure(&capture_config(request.channel)).await {
-        return error(CommandId::PacketCapture, request_id, Status::RadioError, &e.to_string());
+        return Err(Error::new(Status::RadioError, &e.to_string()));
     }
 
     // Already capturing: the reconfigure above retuned it; don't spawn a second task.
@@ -1300,17 +1354,16 @@ async fn handle_packet_capture<P: RadioPhy>(
             loop {
                 match embassy_futures::select::select(rx.recv(), stop.wait()).await {
                     embassy_futures::select::Either::First(Some(frame)) => {
+                        let event = Event::CapturedPacket(CapturedPacketPayload {
+                            channel: frame.channel,
+                            rssi: frame.rssi as u8,
+                            lqi: frame.lqi,
+                            psdu: frame.psdu,
+                        });
                         // Drop on a full queue: a sniffer must not block.
-                        push_outbound(event(
-                            CommandId::PacketCapture,
-                            request_id,
-                            &CapturedPacketPayload {
-                                channel: frame.channel,
-                                rssi: frame.rssi as u8,
-                                lqi: frame.lqi,
-                                psdu: frame.psdu,
-                            },
-                        ));
+                        if let Some(bytes) = event.frame(request_id) {
+                            push_outbound(bytes);
+                        }
                     }
                     _ => break,
                 }
@@ -1318,26 +1371,16 @@ async fn handle_packet_capture<P: RadioPhy>(
         }));
     }
 
-    ok(CommandId::PacketCapture, request_id)
+    Ok(Response::Empty)
 }
 
 async fn handle_packet_capture_channel<P: RadioPhy>(
     app: &App<P>,
-    request_id: RequestId,
-    payload: &[u8],
-) -> Vec<u8> {
-    let Some(request) = parse::<ChannelPayload>(payload) else {
-        return error(CommandId::PacketCaptureChannel, request_id, Status::Parse, "channel");
-    };
-
+    request: ChannelPayload,
+) -> Result<Response, Error> {
     match app.phy.reconfigure(&capture_config(request.channel)).await {
-        Ok(()) => ok(CommandId::PacketCaptureChannel, request_id),
-        Err(e) => error(
-            CommandId::PacketCaptureChannel,
-            request_id,
-            Status::RadioError,
-            &e.to_string(),
-        ),
+        Ok(()) => Ok(Response::Empty),
+        Err(e) => Err(Error::new(Status::RadioError, &e.to_string())),
     }
 }
 
@@ -1345,8 +1388,8 @@ async fn handle_packet_capture_channel<P: RadioPhy>(
 
 /// Encode one unsolicited notification. `send_confirm`/`aps_ack_confirm` carry
 /// their originating request id in the envelope.
-pub fn notification_frame(update: &ZigbeeNotification) -> Vec<u8> {
-    match update {
+pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
+    let notification = match update {
         ZigbeeNotification::ReceivedApsCommand {
             source,
             destination,
@@ -1358,23 +1401,19 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Vec<u8> {
             lqi,
             rssi,
             data,
-        } => notification(
-            CommandId::ReceivedAps,
-            0,
-            &ReceivedApsPayload {
-                source: *source,
-                destination: *destination,
-                has_group: group.is_some().into(),
-                group: group.unwrap_or(0),
-                profile_id: *profile_id,
-                cluster_id: *cluster_id,
-                src_ep: *src_ep,
-                dst_ep: *dst_ep,
-                lqi: *lqi,
-                rssi: *rssi as u8,
-                data: data.clone(),
-            },
-        ),
+        } => Notification::ReceivedAps(ReceivedApsPayload {
+            source: *source,
+            destination: *destination,
+            has_group: group.is_some(),
+            group: group.unwrap_or(0),
+            profile_id: *profile_id,
+            cluster_id: *cluster_id,
+            src_ep: *src_ep,
+            dst_ep: *dst_ep,
+            lqi: *lqi,
+            rssi: *rssi as u8,
+            data: data.clone(),
+        }),
         ZigbeeNotification::SendConfirm { request_id, result } => {
             let (confirmed, next_hop, reason) = match result {
                 SendResult::Confirmed { next_hop } => {
@@ -1384,11 +1423,10 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Vec<u8> {
                     (false, Nwk(0xFFFF), reason.to_string().into_bytes())
                 }
             };
-            notification(
-                CommandId::SendConfirm,
+            Notification::SendConfirm(
                 *request_id as u16,
-                &SendConfirmPayload {
-                    confirmed: confirmed.into(),
+                SendConfirmPayload {
+                    confirmed,
                     next_hop,
                     reason,
                 },
@@ -1399,24 +1437,15 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Vec<u8> {
                 ApsAckResult::Acked => (true, Vec::new()),
                 ApsAckResult::Failed { reason } => (false, reason.to_string().into_bytes()),
             };
-            notification(
-                CommandId::ApsAckConfirm,
-                *request_id as u16,
-                &ApsAckConfirmPayload {
-                    acked: acked.into(),
-                    reason,
-                },
-            )
+            Notification::ApsAckConfirm(*request_id as u16, ApsAckConfirmPayload { acked, reason })
         }
-        ZigbeeNotification::DeviceJoined { nwk, ieee, parent } => notification(
-            CommandId::DeviceJoined,
-            0,
-            &DeviceJoinedPayload {
+        ZigbeeNotification::DeviceJoined { nwk, ieee, parent } => {
+            Notification::DeviceJoined(DeviceJoinedPayload {
                 nwk: *nwk,
                 ieee: *ieee,
                 parent: *parent,
-            },
-        ),
+            })
+        }
         ZigbeeNotification::DeviceLeft { nwk, ieee, reason } => {
             let (reason_code, rejoin, router, router_ieee) = match reason {
                 DeviceLeaveReason::Announced { rejoin } => {
@@ -1425,41 +1454,36 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Vec<u8> {
                 DeviceLeaveReason::RouterReported {
                     router,
                     router_ieee,
-                } => (LeaveReason::RouterReported, false, Some(*router), *router_ieee),
+                } => (
+                    LeaveReason::RouterReported,
+                    false,
+                    Some(*router),
+                    *router_ieee,
+                ),
                 DeviceLeaveReason::KeepaliveTimeout => {
                     (LeaveReason::KeepaliveTimeout, false, None, None)
                 }
             };
-            notification(
-                CommandId::DeviceLeft,
-                0,
-                &DeviceLeftPayload {
-                    nwk: *nwk,
-                    has_ieee: ieee.is_some().into(),
-                    ieee: ieee.unwrap_or(Eui64([0; 8])),
-                    reason: reason_code,
-                    rejoin: rejoin.into(),
-                    router: router.unwrap_or(Nwk(0xFFFF)),
-                    has_router_ieee: router_ieee.is_some().into(),
-                    router_ieee: router_ieee.unwrap_or(Eui64([0; 8])),
-                },
-            )
+            Notification::DeviceLeft(DeviceLeftPayload {
+                nwk: *nwk,
+                has_ieee: ieee.is_some(),
+                rejoin,
+                has_router_ieee: router_ieee.is_some(),
+                ieee: ieee.unwrap_or(Eui64([0; 8])),
+                reason: reason_code,
+                router: router.unwrap_or(Nwk(0xFFFF)),
+                router_ieee: router_ieee.unwrap_or(Eui64([0; 8])),
+            })
         }
-        ZigbeeNotification::FrameCounterUpdate { frame_counter } => notification(
-            CommandId::FrameCounter,
-            0,
-            &FrameCounterPayload {
+        ZigbeeNotification::FrameCounterUpdate { frame_counter } => {
+            Notification::FrameCounter(FrameCounterPayload {
                 frame_counter: *frame_counter,
-            },
-        ),
-        ZigbeeNotification::LinkKeyUpdate { ieee, key } => notification(
-            CommandId::LinkKey,
-            0,
-            &LinkKeyPayload {
-                ieee: *ieee,
-                key: key.clone(),
-            },
-        ),
+            })
+        }
+        ZigbeeNotification::LinkKeyUpdate { ieee, key } => Notification::LinkKey(LinkKeyPayload {
+            ieee: *ieee,
+            key: key.clone(),
+        }),
         ZigbeeNotification::ApsDecryptionFailure {
             source,
             source_ieee,
@@ -1472,16 +1496,13 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Vec<u8> {
                 NwkSecurityHeaderKeyId::KeyTransportKey => KeyId::KeyTransport,
                 NwkSecurityHeaderKeyId::KeyLoadKey => KeyId::KeyLoad,
             };
-            notification(
-                CommandId::ApsDecryptFailure,
-                0,
-                &ApsDecryptFailPayload {
-                    source: *source,
-                    source_ieee: *source_ieee,
-                    frame_counter: *frame_counter,
-                    key_id,
-                },
-            )
+            Notification::ApsDecryptFailure(ApsDecryptFailPayload {
+                source: *source,
+                source_ieee: *source_ieee,
+                frame_counter: *frame_counter,
+                key_id,
+            })
         }
-    }
+    };
+    notification.frame()
 }

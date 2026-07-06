@@ -35,7 +35,7 @@ use embassy_sync::signal::Signal;
 use ziggurat_driver::rng;
 use ziggurat_driver::runtime::EmbassySpawner;
 use ziggurat_ieee_802154::types::Eui64;
-use ziggurat_ncp_api::{self as api, App, OUTBOUND, Platform};
+use ziggurat_ncp_api::{self as api, App, Platform, OUTBOUND};
 use ziggurat_phy::TxResult;
 use ziggurat_phy_otlink::OtLinkPhy;
 
@@ -132,11 +132,16 @@ impl Platform for OtPlatform {
 
     fn hard_reset(&self) -> ! {
         unsafe { platform::ziggurat_platform_hard_reset() };
-        loop {}
+        loop {
+            core::hint::spin_loop();
+        }
     }
 
     fn rx_counters(&self) -> (usize, usize) {
-        (ziggurat_phy_otlink::rx_total(), ziggurat_phy_otlink::rx_dropped())
+        (
+            ziggurat_phy_otlink::rx_total(),
+            ziggurat_phy_otlink::rx_dropped(),
+        )
     }
 }
 
@@ -219,8 +224,11 @@ pub extern "C" fn ziggurat_process() {
 }
 
 /// One inbound control-protocol frame from the host tunnel.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn ziggurat_host_frame(data: *const u8, len: usize) {
+pub unsafe extern "C" fn ziggurat_host_frame(data: *const u8, len: usize) {
     let line = unsafe { core::slice::from_raw_parts(data, len) }.to_vec();
     let _ = INBOUND.try_send(line);
 }
@@ -238,8 +246,11 @@ pub extern "C" fn ziggurat_timer_fired() {
 }
 
 /// A frame was received on Ziggurat's instance (PSDU without FCS).
+///
+/// # Safety
+/// `psdu` must point to `len` readable bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn ziggurat_radio_rx(
+pub unsafe extern "C" fn ziggurat_radio_rx(
     psdu: *const u8,
     len: usize,
     channel: u8,

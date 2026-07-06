@@ -82,13 +82,17 @@ pub(crate) async fn send_outbound(frame: Vec<u8>) {
 
 /// The unsolicited hello, sent once at startup.
 pub async fn emit_hello(configured: bool) {
-    push_outbound(protocol::hello_frame(configured));
+    if let Some(frame) = protocol::hello_frame(configured) {
+        push_outbound(frame);
+    }
 }
 
 /// The unsolicited last-reset diagnostic, sent once after `hello` when the
 /// previous reset was abnormal (a fault or a panic).
 pub async fn emit_last_reset(message: &str) {
-    push_outbound(protocol::last_reset_frame(message));
+    if let Some(frame) = protocol::last_reset_frame(message) {
+        push_outbound(frame);
+    }
 }
 
 /// Dispatch one inbound protocol frame.
@@ -107,7 +111,9 @@ pub(crate) fn spawn_stack_pumps<P: RadioPhy>(stack: &Arc<ZigbeeStack<P>>) {
     stack.spawn_tracked(async move {
         loop {
             for notification in notify_stack.next_notifications().await {
-                push_outbound(protocol::notification_frame(&notification));
+                if let Some(frame) = protocol::notification_frame(&notification) {
+                    push_outbound(frame);
+                }
             }
         }
     });

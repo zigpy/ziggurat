@@ -52,11 +52,7 @@ impl LinkOps for PlatformLinkOps {
         )
     }
 
-    fn set_frame_pending_table(
-        &self,
-        short: &[Nwk],
-        extended: &[Eui64],
-    ) -> Result<(), RadioError> {
+    fn set_frame_pending_table(&self, short: &[Nwk], extended: &[Eui64]) -> Result<(), RadioError> {
         unsafe {
             platform::ziggurat_platform_radio_src_match_clear();
             for nwk in short {
