@@ -1,0 +1,63 @@
+# Based on the ESP-IDF ot_rcp example defaults, plus the ziggurat additions at
+# the bottom.
+
+#
+# Partition Table
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_PARTITION_TABLE_MD5=y
+
+#
+# Wireless Coexistence
+#
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=n
+
+#
+# OpenThread
+#
+CONFIG_OPENTHREAD_ENABLED=y
+CONFIG_OPENTHREAD_RADIO=y
+CONFIG_OPENTHREAD_DIAG=n
+CONFIG_OPENTHREAD_COMMISSIONER=n
+CONFIG_OPENTHREAD_JOINER=n
+CONFIG_OPENTHREAD_BORDER_ROUTER=n
+CONFIG_OPENTHREAD_CLI=n
+CONFIG_OPENTHREAD_SRP_CLIENT=n
+CONFIG_OPENTHREAD_DNS_CLIENT=n
+CONFIG_OPENTHREAD_CONSOLE_ENABLE=n
+
+#
+# Size optimization (silent logs also keep the UART clean for Spinel)
+#
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+CONFIG_COMPILER_OPTIMIZATION_CHECKS_SILENT=y
+CONFIG_COMPILER_SAVE_RESTORE_LIBCALLS=y
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_LIBC_NEWLIB_NANO_FORMAT=y
+CONFIG_OPENTHREAD_LOG_LEVEL_DYNAMIC=n
+CONFIG_OPENTHREAD_LOG_LEVEL_NONE=y
+CONFIG_OPENTHREAD_TIMING_OPTIMIZATION=y
+CONFIG_FREERTOS_HZ=1000
+
+#
+# Ziggurat
+#
+# The embedded Rust stack runs on the OpenThread task's stack; the EFR32 build
+# overflowed a 4 KiB stack at ~4.7 KiB deep. Do not shrink this.
+CONFIG_OPENTHREAD_TASK_SIZE=16384
+# The vendor Spinel properties (owned by the ziggurat NCP hook, see build.sh).
+CONFIG_OPENTHREAD_NCP_VENDOR_HOOK=y
+# CCM* for the Zigbee crypto glue.
+CONFIG_MBEDTLS_CCM_C=y
+# Single-cable devkit use: the RCP link over USB-Serial-JTAG. For a real UART
+# link (production shape), replace with CONFIG_OPENTHREAD_RCP_UART=y.
+CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y
+# Panics must reboot (the panic message survives in RTC noinit RAM and is
+# reported through the last_reset notification on the next connect).
+CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT=y
