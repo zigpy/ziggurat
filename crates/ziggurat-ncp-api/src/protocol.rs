@@ -13,8 +13,9 @@ use num_enum::TryFromPrimitive;
 use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ApsAckResult, DeviceLeaveReason, NetworkConfig, NwkDeviceType, RequestId, SendResult,
-    TclkSeed, Tunables, TxPriority, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ApsAckResult, DeviceLeaveReason, NetworkConfig, NwkDeviceType,
+    RequestId as StackRequestId, SendResult, TclkSeed, Tunables, TxPriority, ZigbeeNotification,
+    ZigbeeStack,
 };
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{RadioPhy, Receiver};
@@ -1119,7 +1120,7 @@ fn handle_send_aps<P: RadioPhy>(app: &App<P>, request_id: RequestId, payload: &[
         request.asdu,
         aps_security,
         TxPriority(request.priority as i8),
-        RequestId::from(request_id),
+        StackRequestId::from(request_id),
     );
 
     match outcome {

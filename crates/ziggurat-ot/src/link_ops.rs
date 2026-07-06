@@ -31,9 +31,6 @@ impl LinkOps for PlatformLinkOps {
             extended_address: config.extended_address.to_bytes(),
             promiscuous: config.promiscuous,
             rx_on_when_idle: config.rx_on_when_idle,
-            // The PAN coordinator (Zigbee coordinator, always short address 0x0000) also
-            // accepts frames with no destination address.
-            pan_coordinator: config.short_address.as_u16() == 0,
         };
         check(
             unsafe { platform::ziggurat_platform_radio_configure(&raw) },

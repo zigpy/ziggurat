@@ -25,6 +25,9 @@ embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-16"] }
 critical-section = "1"
 embedded-alloc = "0.6"
 
+[build-dependencies]
+cbindgen = "0.29"
+
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 # inline-asm: without it cortex-m injects prebuilt path-named archive members
 # (bin/thumbv8m...o) that arm-none-eabi-objcopy --strip-debug chokes on.

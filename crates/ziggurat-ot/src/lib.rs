@@ -251,15 +251,15 @@ pub extern "C" fn ziggurat_radio_rx(
     ziggurat_phy_otlink::deliver_rx(psdu, channel, rssi, lqi, timestamp_us);
 }
 
-/// The in-flight transmit finished. Status values match `ziggurat_tx_status_t`.
+/// The in-flight transmit finished.
 #[unsafe(no_mangle)]
-pub extern "C" fn ziggurat_radio_tx_done(status: u8) {
+pub extern "C" fn ziggurat_radio_tx_done(status: platform::ZigguratTxStatus) {
     let result = match status {
-        0 => TxResult::Acked,
-        1 => TxResult::NoAck,
-        2 => TxResult::ChannelAccessFailure,
-        3 => TxResult::Aborted,
-        _ => TxResult::Failed,
+        platform::ZigguratTxStatus::Acked => TxResult::Acked,
+        platform::ZigguratTxStatus::NoAck => TxResult::NoAck,
+        platform::ZigguratTxStatus::ChannelAccessFailure => TxResult::ChannelAccessFailure,
+        platform::ZigguratTxStatus::Aborted => TxResult::Aborted,
+        platform::ZigguratTxStatus::Failed => TxResult::Failed,
     };
     ziggurat_phy_otlink::deliver_tx_result(result);
 }
