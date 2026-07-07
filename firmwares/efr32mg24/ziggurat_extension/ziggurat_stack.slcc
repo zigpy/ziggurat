@@ -6,7 +6,7 @@ quality: experimental
 description: >
   Embeds the Ziggurat Zigbee stack into an OpenThread RCP. Takes over
   the NCP vendor hook: owns otAppNcpInit and the vendor Spinel property range,
-  tunneling Ziggurat's binary control protocol over PROP_ZIGGURAT_STREAM.
+  tunneling Ziggurat's binary control protocol over PROP_ZIGGURAT.
 provides:
   - name: ziggurat_stack
 requires:

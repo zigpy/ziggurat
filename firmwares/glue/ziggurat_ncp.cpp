@@ -7,10 +7,12 @@
  * ot_ncp_vendor_extension component); on ESP-IDF, Espressif's otAppNcpInit and
  * transport are reused and only otNcpHdlcInit is replaced.
  *
- * Properties:
- *   +0x20 ZIGGURAT_VERSION  (GET)      presence/version probe
- *   +0x21 ZIGGURAT_ENABLE   (GET/SET)  start the stack (enable-once; reset to leave)
- *   +0x22 ZIGGURAT_STREAM   (SET, unsolicited VALUE_IS) the binary control tunnel
+ * One property:
+ *   +0x20 ZIGGURAT  GET (empty value) is the presence probe; a plain RCP returns
+ *                   PROP_NOT_FOUND instead. SET tunnels one binary control frame,
+ *                   starting the embedded stack on first use. Unsolicited VALUE_IS
+ *                   carries frames back to the host. The firmware version lives in
+ *                   the binary protocol (get_firmware_info / hello), not here.
  */
 
 #include "openthread-core-config.h"
@@ -36,14 +38,8 @@
 namespace ot {
 namespace Ncp {
 
-static constexpr spinel_prop_key_t kPropZigguratVersion =
+static constexpr spinel_prop_key_t kPropZiggurat =
     static_cast<spinel_prop_key_t>(SPINEL_PROP_VENDOR__BEGIN + 0x20);
-static constexpr spinel_prop_key_t kPropZigguratEnable =
-    static_cast<spinel_prop_key_t>(SPINEL_PROP_VENDOR__BEGIN + 0x21);
-static constexpr spinel_prop_key_t kPropZigguratStream =
-    static_cast<spinel_prop_key_t>(SPINEL_PROP_VENDOR__BEGIN + 0x22);
-
-static const char kZigguratVersion[] = "ziggurat-rcp/0.1.0";
 
 class NcpZiggurat : public NcpHdlc
 {
@@ -58,7 +54,7 @@ public:
         otError error  = OT_ERROR_NONE;
         uint8_t header = SPINEL_HEADER_FLAG | SPINEL_HEADER_IID_0;
 
-        SuccessOrExit(error = mEncoder.BeginFrame(header, SPINEL_CMD_PROP_VALUE_IS, kPropZigguratStream));
+        SuccessOrExit(error = mEncoder.BeginFrame(header, SPINEL_CMD_PROP_VALUE_IS, kPropZiggurat));
         SuccessOrExit(error = mEncoder.WriteDataWithLen(aData, aLength));
         SuccessOrExit(error = mEncoder.EndFrame());
 
@@ -123,29 +119,7 @@ void NcpBase::VendorHandleFrameRemovedFromNcpBuffer(Spinel::Buffer::FrameTag aFr
 
 otError NcpBase::VendorGetPropertyHandler(spinel_prop_key_t aPropKey)
 {
-    otError error = OT_ERROR_NONE;
-
-    switch (aPropKey)
-    {
-    case kPropZigguratVersion:
-        error = mEncoder.WriteUtf8(kZigguratVersion);
-        break;
-
-    case kPropZigguratEnable:
-        error = mEncoder.WriteBool(ziggurat_glue_started());
-        break;
-
-    case kPropZigguratStream:
-        // SET responses are built from this handler; the stream carries no
-        // retrievable state.
-        break;
-
-    default:
-        error = OT_ERROR_NOT_FOUND;
-        break;
-    }
-
-    return error;
+    return aPropKey == kPropZiggurat ? OT_ERROR_NONE : OT_ERROR_NOT_FOUND;
 }
 
 otError NcpBase::VendorSetPropertyHandler(spinel_prop_key_t aPropKey)
@@ -154,25 +128,15 @@ otError NcpBase::VendorSetPropertyHandler(spinel_prop_key_t aPropKey)
 
     switch (aPropKey)
     {
-    case kPropZigguratEnable:
-    {
-        bool enable = false;
-
-        SuccessOrExit(error = mDecoder.ReadBool(enable));
-        // Enable-once: there is no detach. Switching the firmware back to plain-RCP
-        // use is a reset (which clients perform per-session anyway).
-        VerifyOrExit(enable, error = OT_ERROR_INVALID_ARGS);
-        ziggurat_glue_start();
-        break;
-    }
-
-    case kPropZigguratStream:
+    case kPropZiggurat:
     {
         const uint8_t *data = nullptr;
         uint16_t       len  = 0;
 
         SuccessOrExit(error = mDecoder.ReadDataWithLen(data, len));
-        VerifyOrExit(ziggurat_glue_started(), error = OT_ERROR_INVALID_STATE);
+        // Start the embedded stack on first use (idempotent), then tunnel the frame.
+        // The stack stays started until a reset; a plain-RCP host never writes here.
+        ziggurat_glue_start();
         ziggurat_host_frame(data, len);
         break;
     }

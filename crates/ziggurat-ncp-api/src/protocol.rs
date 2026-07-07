@@ -39,6 +39,7 @@ pub enum CommandId {
     Reset = 0x02,
     GetFirmwareInfo = 0x03,
     GetHwAddress = 0x04,
+    Shutdown = 0x05,
     Configure = 0x10,
     LoadKeyTable = 0x11,
     LoadChildren = 0x12,
@@ -539,6 +540,7 @@ enum Request {
     Reset(ResetPayload),
     GetFirmwareInfo,
     GetHwAddress,
+    Shutdown,
     Configure(ConfigurePayload),
     LoadKeyTable(LoadKeyTablePayload),
     LoadChildren(LoadChildrenPayload),
@@ -567,6 +569,7 @@ impl Request {
             CommandId::Reset => Self::Reset(require(payload, "reset")?),
             CommandId::GetFirmwareInfo => Self::GetFirmwareInfo,
             CommandId::GetHwAddress => Self::GetHwAddress,
+            CommandId::Shutdown => Self::Shutdown,
             CommandId::Configure => Self::Configure(require(payload, "configure")?),
             CommandId::LoadKeyTable => Self::LoadKeyTable(require(payload, "key entries")?),
             CommandId::LoadChildren => Self::LoadChildren(require(payload, "child entries")?),
@@ -864,6 +867,7 @@ async fn dispatch<P: RadioPhy>(
         Request::GetHwAddress => Ok(Response::HwAddress(HwAddressPayload {
             ieee: app.platform.hw_eui64(),
         })),
+        Request::Shutdown => handle_shutdown(app).await,
         Request::Configure(payload) => handle_configure(app, payload).await,
         Request::LoadKeyTable(payload) => handle_load_key_table(app, payload),
         Request::LoadChildren(payload) => handle_load_children(app, payload),
@@ -990,6 +994,25 @@ fn handle_reset<P: RadioPhy>(app: &mut App<P>, request: ResetPayload) -> Result<
 
     if request.hard {
         app.platform.hard_reset();
+    }
+
+    Ok(Response::Empty)
+}
+
+/// Tear the stack fully down.
+async fn handle_shutdown<P: RadioPhy>(app: &mut App<P>) -> Result<Response, Error> {
+    if let Some(stop) = app.capture_stop.take() {
+        stop.signal(());
+    }
+
+    if let Some(stack) = app.stack.take() {
+        stack.shutdown().await;
+    }
+    app.started = false;
+
+    // Clear the source-match table
+    if let Err(e) = app.phy.set_frame_pending_table(&[], &[]).await {
+        return Err(Error::new(Status::RadioError, &e.to_string()));
     }
 
     Ok(Response::Empty)
