@@ -339,16 +339,26 @@ pub struct PendingRoute {
     pub(crate) attempts_remaining: u8,
 }
 
+/// How the broadcast-retransmit reactor paces a [`PendingBroadcast`] and decides when
+/// it is done.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BroadcastSchedule {
+    PassiveAck,
+    FixedInterval { interval: Duration },
+}
+
 /// A broadcast awaiting retransmission, held by the broadcast-retransmit reactor.
 ///
-/// Spec 3.6.6: a broadcast is rebroadcast until its passive-ack quorum is heard or its
-/// attempts run out. This holds the frame to retransmit and the schedule; the passive-ack
-/// contract itself lives in the sans-io [`Broadcasts`] table.
+/// Spec 3.6.6: a data broadcast is rebroadcast until its passive-ack quorum is heard or
+/// its attempts run out; a route request (`FixedInterval`) is simply sent a fixed
+/// number of times. This holds the frame to retransmit and the schedule; the
+/// passive-ack contract itself lives in the sans-io [`Broadcasts`] table.
 #[derive(Debug)]
 pub struct PendingBroadcast {
     pub(crate) nwk_frame: NwkFrame,
     pub(crate) security: NwkSecurityMode,
     pub(crate) priority: TxPriority,
+    pub(crate) schedule: BroadcastSchedule,
     /// Retransmissions left before the broadcast is given up on.
     pub(crate) attempts_remaining: u8,
     /// When the next retransmission is due, unless the quorum is heard first.

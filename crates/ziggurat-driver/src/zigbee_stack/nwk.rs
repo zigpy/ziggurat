@@ -25,7 +25,7 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
+    AddrConflictSource, BroadcastSchedule, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
     PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute, PendingUnicastRetry, RequestId,
     SendKind, SendMode, SendRequest, SendResult, TxOutcome, TxPriority, ZigbeeNotification,
     ZigbeeStack, ZigbeeStackError,
@@ -130,18 +130,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// otherwise retransmit a copy if it is due (and not out of attempts).
     #[allow(clippy::significant_drop_tightening)]
     fn drive_broadcast_retransmits(&self) {
-        let keys: Vec<(Nwk, u8)> = self
+        let keys: Vec<((Nwk, u8), BroadcastSchedule)> = self
             .state
             .pending_broadcasts
             .lock()
-            .keys()
-            .copied()
+            .iter()
+            .map(|(key, broadcast)| (*key, broadcast.schedule))
             .collect();
 
         let now = self.core_now();
 
-        for key in keys {
-            if self.broadcast_passively_acked(key) {
+        for (key, schedule) in keys {
+            // Route requests have no passive ack; only a data broadcast is retired early.
+            if matches!(schedule, BroadcastSchedule::PassiveAck)
+                && self.broadcast_passively_acked(key)
+            {
                 tracing::debug!("Broadcast {key:?} passively acknowledged");
                 let removed = self.state.pending_broadcasts.lock().remove(&key);
                 if let Some(request_id) = removed.and_then(|broadcast| broadcast.request_id) {
@@ -153,9 +156,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 continue;
             }
 
-            // Fresh jitter, computed before taking the lock so nothing non-trivial runs
-            // under it.
-            let next_attempt = now + self.tunables.passive_ack_timeout + self.broadcast_jitter();
+            let next_attempt = match schedule {
+                BroadcastSchedule::PassiveAck => {
+                    now + self.tunables.passive_ack_timeout + self.broadcast_jitter()
+                }
+                BroadcastSchedule::FixedInterval { interval } => now + interval,
+            };
 
             // A single stack local, matched immediately after the lock is released, so the
             // size-amplification the lint warns about does not apply.
@@ -226,6 +232,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         priority: TxPriority,
+        schedule: BroadcastSchedule,
         first_delay: Duration,
         attempts: u8,
         request_id: Option<RequestId>,
@@ -242,12 +249,38 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 nwk_frame,
                 security,
                 priority,
+                schedule,
                 attempts_remaining: attempts,
                 next_attempt: self.core_now() + first_delay,
                 request_id,
             },
         );
         self.broadcast_retransmit_wake.notify_one();
+    }
+
+    pub(super) fn broadcast_route_request(
+        &self,
+        nwk_frame: NwkFrame,
+        attempts: u8,
+        initial_delay: Duration,
+    ) {
+        let key = (
+            nwk_frame.nwk_header.source,
+            nwk_frame.nwk_header.sequence_number,
+        );
+
+        self.schedule_broadcast(
+            key,
+            nwk_frame,
+            NwkSecurityMode::NetworkKey,
+            TxPriority::USER_NORMAL,
+            BroadcastSchedule::FixedInterval {
+                interval: self.tunables.rreq_retry_interval,
+            },
+            initial_delay,
+            attempts,
+            None,
+        );
     }
 
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
@@ -1372,6 +1405,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame,
             security,
             priority,
+            BroadcastSchedule::PassiveAck,
             self.tunables.passive_ack_timeout + self.broadcast_jitter(),
             self.tunables.max_broadcast_retries,
             request_id,
@@ -1654,6 +1688,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             relayed_frame,
             NwkSecurityMode::NetworkKey,
             TxPriority::USER_NORMAL,
+            BroadcastSchedule::PassiveAck,
             self.broadcast_jitter(),
             self.tunables.max_broadcast_retries + 1,
             None,

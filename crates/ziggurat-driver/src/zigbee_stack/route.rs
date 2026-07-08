@@ -240,53 +240,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .mul_f32(crate::rng::random_f32()))
             * 2;
 
-        self.background_broadcast_route_request(
+        self.broadcast_route_request(
             relayed_route_request_cmd,
             self.tunables.rreq_retries + 1,
             jitter,
         );
-    }
-
-    /// Broadcast a route request `attempts` times, separated by the RREQ retry
-    /// interval. The frame's sequence number must already be assigned: route request
-    /// retries and relays are not new frames.
-    ///
-    // TODO: this is the last per-broadcast spawn. Route requests are a distinct
-    // retransmit regime from data broadcasts: no passive-ack, a fixed count at a fixed
-    // interval when originated (spec 3.6.4.5.1.4) and jittered per-retransmission when
-    // relayed. They were left out of the broadcast-retransmit reactor. Fold them in
-    // (as a non-passive-ack schedule variant) to remove this spawn.
-    fn background_broadcast_route_request(
-        &self,
-        nwk_frame: NwkFrame,
-        attempts: u8,
-        initial_delay: Duration,
-    ) {
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
-            R::sleep(initial_delay).await;
-
-            for attempt in 0..attempts {
-                if attempt > 0 {
-                    R::sleep(arc_self.tunables.rreq_retry_interval).await;
-                }
-
-                if let Err(err) = arc_self
-                    .transmit_broadcast_nwk_frame(
-                        nwk_frame.clone(),
-                        NwkSecurityMode::NetworkKey,
-                        TxPriority::USER_NORMAL,
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to broadcast route request: {err}");
-                }
-            }
-        });
     }
 
     /// Zigbee spec 3.6.4.5.1: advertise a many-to-one route to ourselves so that every
@@ -505,7 +463,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.4.5.1: the initial broadcast is repeated `nwkcInitialRREQRetries`
         // times, separated by the retry interval
-        self.background_broadcast_route_request(
+        self.broadcast_route_request(
             route_request_frame,
             self.tunables.initial_rreq_retries + 1,
             Duration::ZERO,
