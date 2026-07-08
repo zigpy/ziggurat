@@ -290,7 +290,8 @@ pub struct PendingApsAck {
 pub struct SendRequest {
     seq: u32,
     priority: TxPriority,
-    pub(crate) kind: SendKind,
+    // Boxed so the `BinaryHeap<SendRequest>` backing array stays small
+    pub(crate) kind: Box<SendKind>,
     pub(crate) outcome: TxOutcome,
 }
 

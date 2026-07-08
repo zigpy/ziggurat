@@ -4,6 +4,7 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
+use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering as AtomicOrdering;
@@ -25,10 +26,10 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, BroadcastSchedule, IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode,
-    PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute, PendingUnicastRetry, RequestId,
-    SendKind, SendMode, SendRequest, SendResult, TxOutcome, TxPriority, ZigbeeNotification,
-    ZigbeeStack, ZigbeeStackError,
+    AddrConflictSource, BroadcastSchedule, IndirectFrame, IndirectPayload, MAX_DEPTH,
+    NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute,
+    PendingUnicastRetry, RequestId, SendKind, SendMode, SendRequest, SendResult, TxOutcome,
+    TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -776,7 +777,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.send_queue.lock().push(SendRequest {
             seq,
             priority,
-            kind,
+            kind: Box::new(kind),
             outcome,
         });
         self.send_wake.notify_one();
@@ -1042,7 +1043,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     break;
                 };
 
-                match request.kind {
+                match *request.kind {
                     SendKind::Unicast {
                         nwk_frame,
                         next_hop,
