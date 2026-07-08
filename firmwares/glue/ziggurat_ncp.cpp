@@ -39,7 +39,7 @@ namespace ot {
 namespace Ncp {
 
 static constexpr spinel_prop_key_t kPropZiggurat =
-    static_cast<spinel_prop_key_t>(SPINEL_PROP_VENDOR__BEGIN + 0x20);
+    static_cast<spinel_prop_key_t>(SPINEL_PROP_VENDOR__BEGIN + 346);  // 0x3D5A
 
 class NcpZiggurat : public NcpHdlc
 {
