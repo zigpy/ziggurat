@@ -868,9 +868,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Monotonic tiebreaker giving equal-priority sends FIFO order in `send_queue`.
     pub(crate) send_seq: AtomicU32,
 
-    /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
-    /// stopped: a leaked background task would keep the replaced stack processing frames
-    /// and transmitting alongside its successor.
+    /// Spawns and owns the stack's background tasks, so that a replaced stack can be
+    /// fully stopped: a leaked background task would keep the replaced stack
+    /// processing frames and transmitting alongside its successor.
     spawner: R::Spawner,
 
     /// Per-task cancel signals, keyed by task id.
@@ -882,11 +882,78 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     tasks_drained: Notify,
 }
 
+/// A snapshot of the stack's table and queue sizes, for the `get_diagnostics` command.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StackDiagnostics {
+    pub tx_total: u16,
+    pub neighbors_total: u16,
+    pub neighbors_children: u16,
+    pub route_table: u16,
+    pub route_discovery: u16,
+    pub route_records: u16,
+    pub address_map: u16,
+    pub aps_device_keys: u16,
+    pub indirect_transactions: u16,
+    pub pending_aps_acks: u16,
+    pub pending_routes: u16,
+    pub pending_broadcasts: u16,
+    pub pending_unicast_retries: u16,
+    pub address_conflicts: u16,
+    pub aps_duplicates: u16,
+    pub notifications_queued: u16,
+    pub scan_beacons_queued: u16,
+    pub scan_beacon_frames: u32,
+}
+
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Briefly lock the protocol core. See [`CoreGuard`] for the locking discipline the
     /// returned guard encodes.
     fn core(&self) -> CoreGuard<'_> {
         CoreGuard(self.state.core.lock())
+    }
+
+    /// Snapshot the table and queue sizes. Each lock is taken briefly and released before
+    /// the next, so this never nests locks and cannot deadlock against the reactors.
+    pub fn diagnostics(&self) -> StackDiagnostics {
+        fn clamp(n: usize) -> u16 {
+            n.min(u16::MAX as usize) as u16
+        }
+
+        let mut diag = StackDiagnostics::default();
+
+        {
+            let core = self.core();
+            diag.tx_total = core.nib.tx_total;
+            diag.neighbors_total = clamp(core.nib.neighbors.entries().count());
+            diag.neighbors_children = clamp(
+                core.nib
+                    .neighbors
+                    .entries()
+                    .filter(|e| e.is_child())
+                    .count(),
+            );
+            let (routes, discovery, records) = core.nib.routing.table_sizes();
+            diag.route_table = clamp(routes);
+            diag.route_discovery = clamp(discovery);
+            diag.route_records = clamp(records);
+            diag.address_map = clamp(core.nib.address_map.entries().count());
+            diag.aps_device_keys = clamp(core.aib.aps_security.device_key_count());
+            diag.indirect_transactions = clamp(core.mac.indirect_queue.transaction_count());
+        }
+
+        diag.pending_aps_acks = clamp(self.state.pending_aps_acks.lock().len());
+        diag.pending_routes = clamp(self.state.pending_routes.lock().len());
+        diag.pending_broadcasts = clamp(self.state.pending_broadcasts.lock().len());
+        diag.pending_unicast_retries = clamp(self.state.pending_unicast_retries.lock().len());
+        diag.address_conflicts = clamp(self.state.address_conflicts.lock().len());
+        diag.aps_duplicates = clamp(self.state.aps_duplicates.lock().len());
+        diag.notifications_queued = clamp(self.notifications.lock().len());
+        diag.scan_beacons_queued = clamp(self.scan_beacons.lock().len());
+        diag.scan_beacon_frames = self
+            .scan_beacon_frames
+            .load(core::sync::atomic::Ordering::Relaxed);
+
+        diag
     }
 
     /// The sans-io core's clock reads as microseconds since this stack started. This

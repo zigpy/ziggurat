@@ -225,6 +225,15 @@ impl Routing {
         self.route_table.values()
     }
 
+    /// Diagnostic entry counts: (route table, in-flight discoveries, stored source routes).
+    pub fn table_sizes(&self) -> (usize, usize, usize) {
+        (
+            self.route_table.len(),
+            self.discovery_table.len(),
+            self.route_record_table.len(),
+        )
+    }
+
     /// The next hop toward a destination with an active route.
     pub fn next_hop(&self, destination: Nwk) -> Option<Nwk> {
         self.route_table

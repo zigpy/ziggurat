@@ -40,6 +40,7 @@ pub enum CommandId {
     GetFirmwareInfo = 0x03,
     GetHwAddress = 0x04,
     Shutdown = 0x05,
+    GetDiagnostics = 0x06,
     Configure = 0x10,
     LoadKeyTable = 0x11,
     LoadChildren = 0x12,
@@ -310,6 +311,51 @@ struct ScanCountPayload {
     count: u16,
 }
 
+/// The reply to `get_diagnostics`: heap health, radio counters, and the live size of every
+/// table and queue the stack maintains. Always available (the heap/radio fields are valid
+/// even before `configure`; the stack fields are zero until a stack exists).
+#[abstract_bits]
+#[derive(Debug, Clone)]
+struct DiagnosticsPayload {
+    // Whether a stack is configured and started (so zeros below can be read correctly).
+    configured: bool,
+    started: bool,
+    reserved: u6,
+    // Heap (bytes / cumulative counts since boot).
+    heap_size: u32,
+    heap_used: u32,
+    heap_free: u32,
+    heap_peak_used: u32,
+    heap_alloc_ok: u32,
+    heap_alloc_failures: u32,
+    heap_dealloc: u32,
+    heap_largest_request: u32,
+    // Radio counters since boot.
+    rx_total: u32,
+    rx_dropped: u32,
+    // Outbound protocol-frame queue occupancy.
+    outbound_queued: u16,
+    // Stack tables and queues (live entry counts).
+    tx_total: u16,
+    neighbors_total: u16,
+    neighbors_children: u16,
+    route_table: u16,
+    route_discovery: u16,
+    route_records: u16,
+    address_map: u16,
+    aps_device_keys: u16,
+    indirect_transactions: u16,
+    pending_aps_acks: u16,
+    pending_routes: u16,
+    pending_broadcasts: u16,
+    pending_unicast_retries: u16,
+    address_conflicts: u16,
+    aps_duplicates: u16,
+    notifications_queued: u16,
+    scan_beacons_queued: u16,
+    scan_beacon_frames: u32,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone)]
 struct RouteEntry {
@@ -541,6 +587,7 @@ enum Request {
     GetFirmwareInfo,
     GetHwAddress,
     Shutdown,
+    GetDiagnostics,
     Configure(ConfigurePayload),
     LoadKeyTable(LoadKeyTablePayload),
     LoadChildren(LoadChildrenPayload),
@@ -570,6 +617,7 @@ impl Request {
             CommandId::GetFirmwareInfo => Self::GetFirmwareInfo,
             CommandId::GetHwAddress => Self::GetHwAddress,
             CommandId::Shutdown => Self::Shutdown,
+            CommandId::GetDiagnostics => Self::GetDiagnostics,
             CommandId::Configure => Self::Configure(require(payload, "configure")?),
             CommandId::LoadKeyTable => Self::LoadKeyTable(require(payload, "key entries")?),
             CommandId::LoadChildren => Self::LoadChildren(require(payload, "child entries")?),
@@ -616,6 +664,7 @@ enum Response {
     HwAddress(HwAddressPayload),
     NetworkInfo(NetworkInfoPayload),
     ScanCount(ScanCountPayload),
+    Diagnostics(DiagnosticsPayload),
 }
 
 impl Response {
@@ -628,6 +677,7 @@ impl Response {
             Self::HwAddress(payload) => append(&mut bytes, payload),
             Self::NetworkInfo(payload) => append(&mut bytes, payload),
             Self::ScanCount(payload) => append(&mut bytes, payload),
+            Self::Diagnostics(payload) => append(&mut bytes, payload),
         };
         if !fits {
             return Error::new(Status::InvalidRequest, "reply too large").frame(command, request_id);
@@ -868,6 +918,7 @@ async fn dispatch<P: RadioPhy>(
             ieee: app.platform.hw_eui64(),
         })),
         Request::Shutdown => handle_shutdown(app).await,
+        Request::GetDiagnostics => handle_get_diagnostics(app),
         Request::Configure(payload) => handle_configure(app, payload).await,
         Request::LoadKeyTable(payload) => handle_load_key_table(app, payload),
         Request::LoadChildren(payload) => handle_load_children(app, payload),
@@ -1144,6 +1195,53 @@ async fn handle_start_network<P: RadioPhy>(app: &mut App<P>) -> Result<Response,
     spawn_stack_pumps(&stack);
     app.started = true;
     Ok(Response::Empty)
+}
+
+/// Report heap health, radio counters, and every stack table/queue size. Deliberately
+/// unguarded: it works before `configure` and after an OOM reboot (stack fields are zero),
+/// which is exactly when you want to inspect it.
+fn handle_get_diagnostics<P: RadioPhy>(app: &App<P>) -> Result<Response, Error> {
+    let heap = app.platform.heap_stats();
+    let (rx_total, rx_dropped) = app.platform.rx_counters();
+    let stack = app
+        .stack
+        .as_ref()
+        .map(|stack| stack.diagnostics())
+        .unwrap_or_default();
+
+    Ok(Response::Diagnostics(DiagnosticsPayload {
+        configured: app.stack.is_some(),
+        started: app.started,
+        heap_size: heap.size as u32,
+        heap_used: heap.used as u32,
+        heap_free: heap.free as u32,
+        heap_peak_used: heap.peak_used as u32,
+        heap_alloc_ok: heap.alloc_ok as u32,
+        heap_alloc_failures: heap.alloc_failures as u32,
+        heap_dealloc: heap.dealloc as u32,
+        heap_largest_request: heap.largest_request as u32,
+        rx_total: rx_total as u32,
+        rx_dropped: rx_dropped as u32,
+        outbound_queued: crate::OUTBOUND.len() as u16,
+        tx_total: stack.tx_total,
+        neighbors_total: stack.neighbors_total,
+        neighbors_children: stack.neighbors_children,
+        route_table: stack.route_table,
+        route_discovery: stack.route_discovery,
+        route_records: stack.route_records,
+        address_map: stack.address_map,
+        aps_device_keys: stack.aps_device_keys,
+        indirect_transactions: stack.indirect_transactions,
+        pending_aps_acks: stack.pending_aps_acks,
+        pending_routes: stack.pending_routes,
+        pending_broadcasts: stack.pending_broadcasts,
+        pending_unicast_retries: stack.pending_unicast_retries,
+        address_conflicts: stack.address_conflicts,
+        aps_duplicates: stack.aps_duplicates,
+        notifications_queued: stack.notifications_queued,
+        scan_beacons_queued: stack.scan_beacons_queued,
+        scan_beacon_frames: stack.scan_beacon_frames,
+    }))
 }
 
 fn handle_get_network_info<P: RadioPhy>(app: &App<P>) -> Result<Response, Error> {

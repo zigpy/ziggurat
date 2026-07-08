@@ -53,16 +53,80 @@ static HOST_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[cfg(target_os = "none")]
 mod heap {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
     use embedded_alloc::LlffHeap;
+    use ziggurat_ncp_api::HeapStats;
+
+    /// The first-fit heap, wrapped to record cumulative alloc/dealloc counts, peak live
+    /// bytes, and the largest single request. These are what separate a leak (live/peak
+    /// climb) from fragmentation (`alloc_failures` rise while `free` stays well above the
+    /// `largest_request` that failed) in a `get_diagnostics` taken after a crash.
+    struct TrackingHeap {
+        inner: LlffHeap,
+        alloc_ok: AtomicUsize,
+        alloc_fail: AtomicUsize,
+        dealloc: AtomicUsize,
+        live: AtomicUsize,
+        peak: AtomicUsize,
+        largest_request: AtomicUsize,
+    }
 
     #[global_allocator]
-    static HEAP: LlffHeap = LlffHeap::empty();
+    static HEAP: TrackingHeap = TrackingHeap {
+        inner: LlffHeap::empty(),
+        alloc_ok: AtomicUsize::new(0),
+        alloc_fail: AtomicUsize::new(0),
+        dealloc: AtomicUsize::new(0),
+        live: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        largest_request: AtomicUsize::new(0),
+    };
+
+    unsafe impl GlobalAlloc for TrackingHeap {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            self.largest_request
+                .fetch_max(layout.size(), Ordering::Relaxed);
+            let ptr = unsafe { self.inner.alloc(layout) };
+            if ptr.is_null() {
+                self.alloc_fail.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.alloc_ok.fetch_add(1, Ordering::Relaxed);
+                let live = self.live.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+                self.peak.fetch_max(live, Ordering::Relaxed);
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { self.inner.dealloc(ptr, layout) };
+            self.dealloc.fetch_add(1, Ordering::Relaxed);
+            self.live.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+    }
 
     const HEAP_BYTES: usize = 64 * 1024;
     static mut ARENA: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
     pub fn init() {
-        unsafe { HEAP.init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES) }
+        unsafe {
+            HEAP.inner
+                .init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES)
+        }
+    }
+
+    pub fn stats() -> HeapStats {
+        HeapStats {
+            size: HEAP_BYTES,
+            used: HEAP.inner.used(),
+            free: HEAP.inner.free(),
+            peak_used: HEAP.peak.load(Ordering::Relaxed),
+            alloc_ok: HEAP.alloc_ok.load(Ordering::Relaxed),
+            alloc_failures: HEAP.alloc_fail.load(Ordering::Relaxed),
+            dealloc: HEAP.dealloc.load(Ordering::Relaxed),
+            largest_request: HEAP.largest_request.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -145,6 +209,11 @@ impl Platform for OtPlatform {
             ziggurat_phy_otlink::rx_total(),
             ziggurat_phy_otlink::rx_dropped(),
         )
+    }
+
+    #[cfg(target_os = "none")]
+    fn heap_stats(&self) -> api::HeapStats {
+        heap::stats()
     }
 }
 

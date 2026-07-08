@@ -112,6 +112,11 @@ impl<F, C> IndirectQueue<F, C> {
         self.queue.contains_key(&destination)
     }
 
+    /// Diagnostic: total transactions queued across all destinations.
+    pub fn transaction_count(&self) -> usize {
+        self.queue.values().map(VecDeque::len).sum()
+    }
+
     /// Match a poll against the queue: pop the oldest live transaction queued under
     /// either of the polling device's addresses, also popping any expired
     /// transactions found ahead of it.
