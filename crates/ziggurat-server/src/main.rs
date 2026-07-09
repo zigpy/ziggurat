@@ -15,6 +15,9 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 use ziggurat_driver::runtime::TokioSpawner;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
@@ -1263,6 +1266,14 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    // Dropped when `main` returns, which writes the profile; the SIGINT/SIGTERM branch
+    // below exists so that return actually happens instead of the process being killed
+    // outright. Written to the addon's persistent `/data` volume so it survives the
+    // container being recreated on stop (the ephemeral rootfs layer does not).
+    let _dhat = dhat::Profiler::builder()
+        .file_name("/data/dhat-heap.json")
+        .build();
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let filter = EnvFilter::try_from_default_env()
@@ -1289,9 +1300,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             flow_control: args.flow_control,
         }));
 
-        match args.api {
-            ApiMode::Ws => server.run(&args.listen).await?,
-            ApiMode::Stdio => server.run_stdio().await?,
+        // Race the server against SIGINT/SIGTERM so a profiling run can be stopped
+        // cleanly (Ctrl-C locally, `docker stop`/addon-stop in a container), letting the
+        // dhat profiler flush its report as `main` unwinds.
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = async {
+                match args.api {
+                    ApiMode::Ws => server.run(&args.listen).await,
+                    ApiMode::Stdio => server.run_stdio().await,
+                }
+            } => result?,
+            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT: flushing dhat heap profile"),
+            _ = sigterm.recv() => tracing::info!("SIGTERM: flushing dhat heap profile"),
         }
 
         Ok(())
