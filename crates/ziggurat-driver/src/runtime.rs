@@ -230,9 +230,8 @@ mod embassy_impl {
         }
     }
 
-    /// Each detached task runs in one slot of this fixed pool — embassy has no dynamic
-    /// spawn, so the size bounds the stack's concurrent background tasks (long-lived
-    /// reactors plus the transient ZDP/indirect/route-request ones).
+    /// Each detached task runs in one slot of this fixed pool. Embassy has no dynamic
+    /// spawn so the size bounds the stack's concurrent background tasks.
     #[embassy_executor::task(pool_size = 32)]
     async fn task_runner(task: SpawnedTask) {
         task.await;
@@ -251,13 +250,9 @@ mod embassy_impl {
 
     impl Spawn for EmbassySpawner {
         fn spawn(&self, task: SpawnedTask) {
-            // In embassy-executor 0.10 the pool slot is claimed when the token is built,
-            // so exhaustion surfaces here rather than at `spawn`.
             match task_runner(task) {
                 Ok(token) => self.0.spawn(token),
-                Err(_) => {
-                    tracing::error!("embassy task pool exhausted; background task dropped");
-                }
+                Err(_) => panic!("embassy task pool exhausted"),
             }
         }
 

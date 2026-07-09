@@ -1,5 +1,6 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
+use crate::frame_token::{self, FrameToken};
 use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
 use crate::signal::Signal;
 use abstract_bits::AbstractBits;
@@ -41,7 +42,7 @@ pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use ziggurat_zigbee::constants::{
     MAX_DEPTH, PROTOCOL_VERSION, STACK_PROFILE, Tunables, WELL_KNOWN_LINK_KEY,
 };
-pub use ziggurat_zigbee::indirect::{IndirectQueue, SrcMatchTable};
+pub use ziggurat_zigbee::indirect::{IndirectQueue, SrcMatchTable, Transaction};
 pub use ziggurat_zigbee::nwk::NwkDeviceType;
 pub use ziggurat_zigbee::nwk::addresses::AddressMap;
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
@@ -86,8 +87,8 @@ pub enum ZigbeeStackError {
     ApsAckTimeout,
     #[error("payload does not fit in a single frame")]
     PayloadTooLong,
-    #[error("send queue full")]
-    SendQueueFull,
+    #[error("frame memory budget exhausted")]
+    FrameBudgetExhausted,
     #[error("aps security material unavailable or unusable")]
     ApsSecurityFailed,
     #[error("indirect transaction expired before {destination:?} polled")]
@@ -230,6 +231,10 @@ pub struct NetworkConfig {
 pub struct AddressConflict {
     pub handled_at: CoreInstant,
     pub heard_from_network: bool,
+    /// When our own jittered Network Status broadcast is due, acted on by the
+    /// address-conflict report reactor. `None` once sent, or when no report is owed
+    /// (the conflict was learned from the network).
+    pub report_at: Option<CoreInstant>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -275,6 +280,19 @@ pub enum TxOutcome {
         request_id: RequestId,
         aps_ack: Option<ApsAckData>,
     },
+    /// An extracted indirect transaction in flight to the radio. Success resolves the
+    /// transaction's own completion; a failed transmit puts it back at the head of its
+    /// queue for the device's next poll (802.15.4 spec 6.7.3), unless it has expired.
+    IndirectDelivery {
+        destination: Ieee802154Address,
+        /// Boxed: the transaction embeds a whole [`IndirectFrame`] and its own
+        /// [`TxOutcome`].
+        transaction: Box<Transaction<IndirectFrame, Self>>,
+    },
+    /// A successful association response was extracted by the joiner, confirming its
+    /// short address: deliver the network key (spec 4.6.3.2). Expiry is only logged;
+    /// the joiner retries the association.
+    DeliverNetworkKey { nwk: Nwk, eui64: Eui64 },
 }
 
 /// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
@@ -295,6 +313,7 @@ pub struct SendRequest {
     // Boxed so the `BinaryHeap<SendRequest>` backing array stays small
     pub(crate) kind: Box<SendKind>,
     pub(crate) outcome: TxOutcome,
+    pub(crate) token: FrameToken,
 }
 
 #[derive(Debug)]
@@ -328,6 +347,7 @@ pub struct PendingFrame {
     pub(crate) security: NwkSecurityMode,
     pub(crate) priority: TxPriority,
     pub(crate) outcome: TxOutcome,
+    pub(crate) token: FrameToken,
 }
 
 /// All frames waiting on one destination's route discovery.
@@ -369,6 +389,8 @@ pub struct PendingBroadcast {
     /// An application send awaiting confirmation: `SendConfirm { via: Quorum }` when the
     /// passive-ack quorum is heard, or `Failed` when attempts run out.
     pub(crate) request_id: Option<RequestId>,
+    /// Held for the broadcast's whole retransmit schedule, only to be dropped with it.
+    pub(crate) _token: FrameToken,
 }
 
 /// A unicast awaiting re-transmission after a failed attempt, held by the unicast-retry
@@ -392,6 +414,7 @@ pub struct PendingUnicastRetry {
     /// When the re-enqueue is due.
     pub(crate) next_attempt: CoreInstant,
     pub(crate) outcome: TxOutcome,
+    pub(crate) token: FrameToken,
 }
 
 impl PartialEq for SendRequest {
@@ -469,6 +492,7 @@ pub struct Aib {
 pub struct IndirectFrame {
     pub poll_address: Ieee802154Address,
     pub payload: IndirectPayload,
+    pub token: FrameToken,
 }
 
 /// The payload of an [`IndirectFrame`].
@@ -858,6 +882,7 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Wakes the broadcast-retransmit reactor: signaled on every recorded passive ack
     /// and whenever a broadcast is queued for retransmission.
     pub(crate) broadcast_retransmit_wake: Notify,
+    pub(crate) address_conflict_wake: Notify,
     /// Wakes the unicast-retry reactor whenever a failed unicast is parked for a later
     /// re-enqueue.
     pub(crate) unicast_retry_wake: Notify,
@@ -1007,6 +1032,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tunables: Tunables,
         spawner: R::Spawner,
     ) -> Arc<Self> {
+        Self::configure_frame_budget(&tunables);
+
         let raw_frame_rx = radio.subscribe_rx();
         let reset_rx = radio.subscribe_reset();
 
@@ -1031,6 +1058,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             mtorr_kick: Notify::new(),
             link_status_received: Notify::new(),
             broadcast_retransmit_wake: Notify::new(),
+            address_conflict_wake: Notify::new(),
             unicast_retry_wake: Notify::new(),
             aps_ack_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),
@@ -1044,6 +1072,52 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             next_task_id: AtomicU32::new(0),
             tasks_drained: Notify::new(),
         })
+    }
+
+    /// Size the frame-token budget from the platform's heap arena and the tunables.
+    ///
+    /// A token is priced at a parked frame's worst case: the queue entry plus its boxed
+    /// [`SendKind`] (the fattest owner of a frame; the other parking structs are
+    /// smaller). The budget is what remains of the arena after a worst-case ceiling for
+    /// every other heap user, itemized below for the current 128KB MG24 platform;
+    /// hardware `peak_used` measurements should refine it.
+    fn configure_frame_budget(tunables: &Tunables) {
+        const TOKEN_BYTES: usize =
+            core::mem::size_of::<SendRequest>() + core::mem::size_of::<SendKind>();
+
+        // Worst-case heap held by everything that is not a parked frame:
+        //   NCP host transport queues: (64 + 16) frames × ~536B      ≈ 42 KiB
+        //   notification queue: 64 × (enum + ASDU copy ≤ 127B)       ≈ 15 KiB
+        //   long-lived tables (neighbors, routing, security,
+        //   addresses) at ~100 devices                               ≈ 13 KiB
+        //   transient RX/TX processing, allocator overhead, margin   ≈ 10 KiB
+        const NON_FRAME_HEAP_CEILING: usize = 80 * 1024;
+
+        let arena = frame_token::heap_arena();
+        if arena == 0 {
+            // An unbounded host allocator; the budget only counts, never refuses.
+            frame_token::set_budget(0, 0, 0);
+            return;
+        }
+
+        let budget_bytes = match tunables.frame_budget_bytes {
+            0 => arena.saturating_sub(NON_FRAME_HEAP_CEILING),
+            bytes => bytes,
+        };
+        let total = budget_bytes / TOKEN_BYTES;
+
+        // A budget too small to hold the reserves means the platform's queue caps and
+        // this ceiling need rethinking, not silent operation with a starved stack.
+        assert!(
+            total > tunables.critical_reserve_frames + tunables.forwarding_reserve_frames,
+            "frame budget of {total} tokens cannot hold the configured reserves"
+        );
+
+        frame_token::set_budget(
+            total,
+            tunables.critical_reserve_frames,
+            tunables.forwarding_reserve_frames,
+        );
     }
 
     /// Queue a network event and wake the notification drainer. Bounded: when the queue is
@@ -1364,6 +1438,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.spawn_tracked(async move {
             arc_self.parent_annce_task().await;
+        });
+
+        // Broadcast jittered address-conflict reports (spec 3.6.1.10.5)
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.spawn_tracked(async move {
+            arc_self.address_conflict_task().await;
         });
 
         Ok(())

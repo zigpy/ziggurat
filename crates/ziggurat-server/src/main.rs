@@ -1068,7 +1068,9 @@ impl ZigguratServer {
             request.aps_seq,
             asdu,
             aps_security,
-            TxPriority(request.priority),
+            // Clamped below stack-critical: the host cannot claim the frame budget's
+            // critical reserve or preempt the stack's own machinery.
+            TxPriority(request.priority).min(TxPriority::USER_CRITICAL),
             id as RequestId,
         ) {
             Ok(()) => response(id, json!({"status": "accepted"})),

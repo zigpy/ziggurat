@@ -96,7 +96,7 @@ mod heap {
                 self.alloc_fail.fetch_add(1, Ordering::Relaxed);
             } else {
                 self.alloc_ok.fetch_add(1, Ordering::Relaxed);
-                ziggurat_driver::mem::record_alloc(layout.size());
+                ziggurat_driver::frame_token::record_alloc(layout.size());
             }
             ptr
         }
@@ -104,7 +104,7 @@ mod heap {
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
             unsafe { self.inner.dealloc(ptr, layout) };
             self.dealloc.fetch_add(1, Ordering::Relaxed);
-            ziggurat_driver::mem::record_dealloc(layout.size());
+            ziggurat_driver::frame_token::record_dealloc(layout.size());
         }
     }
 
@@ -117,18 +117,18 @@ mod heap {
                 .init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES)
         }
         // Tell the stack how much heap it has, so it can size its heap-bounded queues.
-        ziggurat_driver::mem::set_heap_arena(HEAP_BYTES);
+        ziggurat_driver::frame_token::set_heap_arena(HEAP_BYTES);
     }
 
     pub fn stats() -> HeapStats {
         // TLSF exposes no used/free accounting, so report the tracked live total (the sum
         // of live request sizes; excludes per-block overhead) and the arena's remainder.
-        let used = ziggurat_driver::mem::live();
+        let used = ziggurat_driver::frame_token::live();
         HeapStats {
             size: HEAP_BYTES,
             used,
             free: HEAP_BYTES.saturating_sub(used),
-            peak_used: ziggurat_driver::mem::peak(),
+            peak_used: ziggurat_driver::frame_token::peak(),
             alloc_ok: HEAP.alloc_ok.load(Ordering::Relaxed),
             alloc_failures: HEAP.alloc_fail.load(Ordering::Relaxed),
             dealloc: HEAP.dealloc.load(Ordering::Relaxed),

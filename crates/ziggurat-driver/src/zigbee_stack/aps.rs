@@ -376,6 +376,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let request_id = match outcome {
                 TxOutcome::Confirm { request_id, .. } => Some(request_id),
                 TxOutcome::Discard | TxOutcome::Signal(_) => None,
+                // Indirect-queue continuations never ride an APS frame
+                TxOutcome::IndirectDelivery { .. } | TxOutcome::DeliverNetworkKey { .. } => {
+                    unreachable!()
+                }
             };
             self.send_broadcast_nwk_frame(
                 nwk_frame,

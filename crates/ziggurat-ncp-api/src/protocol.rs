@@ -334,6 +334,9 @@ struct DiagnosticsPayload {
     // Radio counters since boot.
     rx_total: u32,
     rx_dropped: u32,
+    // Frame-token budget occupancy (0 total means unbounded).
+    frame_tokens_used: u16,
+    frame_tokens_total: u16,
     // Outbound protocol-frame queue occupancy.
     outbound_queued: u16,
     // Stack tables and queues (live entry counts).
@@ -1224,6 +1227,8 @@ fn handle_get_diagnostics<P: RadioPhy>(app: &App<P>) -> Result<Response, Error> 
         heap_largest_request_align: heap.largest_request_align as u16,
         rx_total: rx_total as u32,
         rx_dropped: rx_dropped as u32,
+        frame_tokens_used: ziggurat_driver::frame_token::used() as u16,
+        frame_tokens_total: ziggurat_driver::frame_token::total() as u16,
         outbound_queued: crate::OUTBOUND.len() as u16,
         tx_total: stack.tx_total,
         neighbors_total: stack.neighbors_total,
@@ -1335,7 +1340,9 @@ fn handle_send_aps<P: RadioPhy>(
         request.aps_seq,
         request.asdu,
         aps_security,
-        TxPriority(request.priority as i8),
+        // Clamped below stack-critical: the host cannot claim the frame budget's
+        // critical reserve or preempt the stack's own machinery.
+        TxPriority(request.priority as i8).min(TxPriority::USER_CRITICAL),
         StackRequestId::from(request_id),
     );
 

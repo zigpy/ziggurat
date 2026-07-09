@@ -118,6 +118,17 @@ pub struct Tunables {
     /// `macMaxFrameRetries`: how many times the radio retransmits a unicast that goes
     /// unacknowledged before declaring it failed.
     pub mac_max_frame_retries: u8,
+
+    /// Bytes of heap the driver may hold in parked frames. 0 derives it from the
+    /// platform's heap arena minus a worst-case ceiling for everything else.
+    pub frame_budget_bytes: usize,
+
+    /// Frame tokens only stack-critical traffic may use.
+    pub critical_reserve_frames: usize,
+
+    /// Frame tokens reserved for transit traffic, so a host flood cannot stop the
+    /// device from routing.
+    pub forwarding_reserve_frames: usize,
 }
 
 impl Default for Tunables {
@@ -163,6 +174,9 @@ impl Tunables {
             aps_ack_timeout_indirect: Duration::from_millis(10000),
             mac_max_csma_backoffs: 2,
             mac_max_frame_retries: 5,
+            frame_budget_bytes: 0,
+            critical_reserve_frames: 32,
+            forwarding_reserve_frames: 16,
         }
     }
 }

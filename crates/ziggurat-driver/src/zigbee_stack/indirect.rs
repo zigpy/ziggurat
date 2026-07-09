@@ -1,6 +1,7 @@
+use crate::frame_token::{self, TrafficClass};
 use crate::runtime::Runtime;
-use crate::signal;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -27,22 +28,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();
-    }
-
-    /// Queue a frame and await its delivery: resolves once the device extracts it, or
-    /// with an error on expiry or eviction. A dropped sender (stack shutdown) reads as
-    /// expiry.
-    pub(super) async fn queue_indirect_frame(
-        &self,
-        frame: IndirectFrame,
-    ) -> Result<(), ZigbeeStackError> {
-        let destination = frame.poll_address;
-        let (completion, waiter) = signal::channel();
-        self.enqueue_indirect_frame(frame, TxOutcome::Signal(completion));
-        waiter
-            .wait()
-            .await
-            .unwrap_or(Err(ZigbeeStackError::IndirectExpired { destination }))
     }
 
     /// 802.15.4 spec 6.7.3: a MAC Data Request extracts the oldest transaction queued
@@ -120,29 +105,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return false;
         };
 
-        tracing::debug!(
-            "Delivering queued indirect frame to {:?}",
-            delivery.destination
-        );
-
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
-            arc_self.transmit_indirect_transaction(delivery).await;
-        });
-
-        true
-    }
-
-    async fn transmit_indirect_transaction(&self, delivery: Delivery<IndirectFrame, TxOutcome>) {
         let Delivery {
             destination,
             transaction,
             more_pending,
         } = delivery;
+
+        tracing::debug!("Delivering queued indirect frame to {destination:?}");
 
         // Finish a deferred NWK frame now, at delivery time: this is where its frame
         // counter is assigned (via `encrypt_nwk_frame`), just before the frame hits the
@@ -167,38 +136,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         }
 
-        // Indirect delivery answers a sleepy child's poll within `macResponseWaitTime`
+        // Indirect delivery answers a sleepy child's poll within `macResponseWaitTime`.
+        // The transaction rides along in the outcome: the sender resolves its
+        // completion after the transmit, or requeues it for the next poll on failure.
         let raw_frame = Ieee802154Frame::from_bytes_without_fcs(&frame.to_bytes_without_fcs())
             .expect("a built indirect frame round-trips through bytes");
 
-        match self
-            .send(
-                SendKind::Raw { frame: raw_frame },
-                TxPriority::STACK_CRITICAL,
-            )
-            .await
-        {
-            Ok(()) => {
-                self.resolve_outcome(transaction.completion, None, Ok(()));
-                self.remove_indirect_queue_if_empty(destination);
-            }
-            // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
-            // so a failed transmit goes back to the head of the queue for the next poll
-            Err(err) if self.core_now() < transaction.expires_at => {
-                tracing::warn!("Indirect transmit to {destination:?} failed ({err}), requeueing");
-                self.core()
-                    .mac
-                    .indirect_queue
-                    .requeue(destination, transaction);
-            }
-            Err(err) => {
-                self.resolve_outcome(transaction.completion, None, Err(err));
-                self.remove_indirect_queue_if_empty(destination);
-            }
-        }
+        self.enqueue_send(
+            SendKind::Raw { frame: raw_frame },
+            TxPriority::STACK_CRITICAL,
+            TxOutcome::IndirectDelivery {
+                destination,
+                transaction: Box::new(transaction),
+            },
+        );
+
+        true
     }
 
-    fn remove_indirect_queue_if_empty(&self, destination: Ieee802154Address) {
+    pub(super) fn remove_indirect_queue_if_empty(&self, destination: Ieee802154Address) {
         self.core().mac.indirect_queue.remove_if_empty(destination);
 
         self.src_match_sync.notify_one();
@@ -236,6 +192,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         tracing::info!("Poll from unknown device {nwk:?}, queueing a leave request");
 
+        let Some(token) = frame_token::take(TrafficClass::Critical) else {
+            tracing::warn!("Frame budget exhausted; not queueing a leave for {nwk:?}");
+            return;
+        };
+
         // Spec 3.6.10.4.1: no destination IEEE address is included
         let mut nwk_frame = self
             .nwk_command_frame(
@@ -249,25 +210,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_radius(1);
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
-            let frame = IndirectFrame {
+        // Fire-and-forget: an expiry (the stale child never polled again) is only
+        // worth a log line, which the discarded outcome provides.
+        self.enqueue_indirect_frame(
+            IndirectFrame {
                 poll_address: destination,
                 payload: IndirectPayload::Deferred {
                     nwk_frame,
                     next_hop: nwk,
                     security: NwkSecurityMode::NetworkKey,
                 },
-            };
-
-            if let Err(err) = arc_self.queue_indirect_frame(frame).await {
-                tracing::debug!("Queued leave to {nwk:?} was not extracted: {err}");
-            }
-        });
+                token,
+            },
+            TxOutcome::Discard,
+        );
     }
 
     /// Mirrors the indirect queue keys into the RCP source address match table:
