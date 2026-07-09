@@ -99,15 +99,28 @@ pub enum ZigbeeStackError {
 
 /// Transmit scheduling priority. Higher transmits first when the radio is contended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TxPriority(pub i8);
+pub enum TxPriority {
+    Background,
+    UserLow,
+    UserNormal,
+    UserHigh,
+    UserCritical,
+    StackCritical,
+}
 
 impl TxPriority {
-    pub const BACKGROUND: Self = Self(-2);
-    pub const USER_LOW: Self = Self(-1);
-    pub const USER_NORMAL: Self = Self(0);
-    pub const USER_HIGH: Self = Self(1);
-    pub const USER_CRITICAL: Self = Self(2);
-    pub const STACK_CRITICAL: Self = Self(3);
+    /// Map a host-supplied wire priority (an `i8`, 0 = normal) to a level, clamped
+    /// below [`Self::StackCritical`]: the host cannot preempt the stack's own
+    /// machinery.
+    pub const fn from_host(value: i8) -> Self {
+        match value {
+            i8::MIN..=-2 => Self::Background,
+            -1 => Self::UserLow,
+            0 => Self::UserNormal,
+            1 => Self::UserHigh,
+            _ => Self::UserCritical,
+        }
+    }
 }
 
 /// How a transmit is treated under contention.

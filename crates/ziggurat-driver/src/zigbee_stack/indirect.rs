@@ -145,7 +145,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.enqueue_send(
             SendKind::Raw { frame: raw_frame },
             TxPolicy {
-                priority: TxPriority::STACK_CRITICAL,
+                priority: TxPriority::StackCritical,
                 class: TrafficClass::Critical,
             },
             TxOutcome::IndirectDelivery {

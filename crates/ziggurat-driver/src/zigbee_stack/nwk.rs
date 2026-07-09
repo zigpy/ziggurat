@@ -297,7 +297,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame,
             NwkSecurityMode::NetworkKey,
             TxPolicy {
-                priority: TxPriority::USER_NORMAL,
+                priority: TxPriority::UserNormal,
                 class: TrafficClass::Critical,
             },
             BroadcastSchedule::FixedInterval {
@@ -537,7 +537,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security,
             mode,
             TxPolicy {
-                priority: TxPriority::STACK_CRITICAL,
+                priority: TxPriority::StackCritical,
                 class: TrafficClass::Critical,
             },
             TxOutcome::Discard,
@@ -1752,7 +1752,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame,
             next_hop_address,
             NwkSecurityMode::NetworkKey,
-            TxPriority::USER_NORMAL,
+            TxPriority::UserNormal,
             TxOutcome::Discard,
             token,
         );
@@ -1842,7 +1842,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             relayed_frame,
             NwkSecurityMode::NetworkKey,
             TxPolicy {
-                priority: TxPriority::USER_NORMAL,
+                priority: TxPriority::UserNormal,
                 class: TrafficClass::Forwarding,
             },
             BroadcastSchedule::PassiveAck,

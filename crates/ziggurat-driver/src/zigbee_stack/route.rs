@@ -283,7 +283,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 many_to_one_request_frame,
                 NwkSecurityMode::NetworkKey,
                 TxPolicy {
-                    priority: TxPriority::BACKGROUND,
+                    priority: TxPriority::Background,
                     class: TrafficClass::Critical,
                 },
             )

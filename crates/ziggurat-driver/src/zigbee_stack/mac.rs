@@ -137,14 +137,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let policy = if permitting_joins {
             TxPolicy {
                 // We should try to win any beacon races during joins
-                priority: TxPriority::STACK_CRITICAL,
+                priority: TxPriority::StackCritical,
                 class: TrafficClass::Critical,
             }
         } else {
             TxPolicy {
                 // Otherwise, unexpected beacon requests should never compete with
                 // normal traffic
-                priority: TxPriority::BACKGROUND,
+                priority: TxPriority::Background,
                 class: TrafficClass::Critical,
             }
         };

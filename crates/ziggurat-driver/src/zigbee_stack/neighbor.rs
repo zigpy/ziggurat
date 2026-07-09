@@ -147,7 +147,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     // Housekeeping the mesh depends on: last to transmit, but never
                     // memory-starved by a host flood
                     TxPolicy {
-                        priority: TxPriority::BACKGROUND,
+                        priority: TxPriority::Background,
                         class: TrafficClass::Critical,
                     },
                 )

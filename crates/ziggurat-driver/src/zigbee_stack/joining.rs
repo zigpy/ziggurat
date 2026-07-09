@@ -323,7 +323,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 conflict_frame,
                 NwkSecurityMode::NetworkKey,
                 TxPolicy {
-                    priority: TxPriority::USER_NORMAL,
+                    priority: TxPriority::UserNormal,
                     class: TrafficClass::Critical,
                 },
                 None,

@@ -287,7 +287,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.enqueue_aps_frame(
             nwk_frame,
             TxPolicy {
-                priority: TxPriority::USER_NORMAL,
+                priority: TxPriority::UserNormal,
                 class: TrafficClass::Host,
             },
             TxOutcome::Discard,

@@ -503,9 +503,7 @@ async fn dispatch_send_aps(app: &App, id: u64, params: Value) {
         request.aps_seq,
         asdu,
         aps_security,
-        // Clamped below stack-critical: the host cannot claim the frame budget's
-        // critical reserve or preempt the stack's own machinery.
-        TxPriority(request.priority).min(TxPriority::USER_CRITICAL),
+        TxPriority::from_host(request.priority),
         id as RequestId,
     );
 
