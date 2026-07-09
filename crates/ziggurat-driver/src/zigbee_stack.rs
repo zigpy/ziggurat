@@ -86,6 +86,8 @@ pub enum ZigbeeStackError {
     ApsAckTimeout,
     #[error("payload does not fit in a single frame")]
     PayloadTooLong,
+    #[error("send queue full")]
+    SendQueueFull,
     #[error("aps security material unavailable or unusable")]
     ApsSecurityFailed,
     #[error("indirect transaction expired before {destination:?} polled")]

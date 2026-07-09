@@ -106,7 +106,7 @@ mod heap {
         }
     }
 
-    const HEAP_BYTES: usize = 64 * 1024;
+    const HEAP_BYTES: usize = 128 * 1024;
     static mut ARENA: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
     pub fn init() {
@@ -114,6 +114,8 @@ mod heap {
             HEAP.inner
                 .init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES)
         }
+        // Tell the stack how much heap it has, so it can size its heap-bounded queues.
+        ziggurat_driver::mem::set_heap_arena(HEAP_BYTES);
     }
 
     pub fn stats() -> HeapStats {

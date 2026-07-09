@@ -774,13 +774,34 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Enqueue a send into the priority queue and wake the sender task.
     pub(super) fn enqueue_send(&self, kind: SendKind, priority: TxPriority, outcome: TxOutcome) {
         let seq = self.send_seq.fetch_add(1, AtomicOrdering::Relaxed);
-        self.send_queue.lock().push(SendRequest {
-            seq,
-            priority,
-            kind: Box::new(kind),
-            outcome,
-        });
-        self.send_wake.notify_one();
+
+        const SEND_QUEUE_HEAP_FRACTION: usize = 8;
+        const SEND_REQUEST_BYTES: usize =
+            core::mem::size_of::<SendRequest>() + core::mem::size_of::<SendKind>();
+
+        let capacity = match crate::mem::heap_arena() {
+            0 => usize::MAX,
+            arena => arena / SEND_QUEUE_HEAP_FRACTION / SEND_REQUEST_BYTES,
+        };
+
+        // Bound the queue and error early instead of crashing
+        {
+            let mut queue = self.send_queue.lock();
+            if queue.len() < capacity {
+                queue.push(SendRequest {
+                    seq,
+                    priority,
+                    kind: Box::new(kind),
+                    outcome,
+                });
+                drop(queue);
+                self.send_wake.notify_one();
+                return;
+            }
+        }
+
+        tracing::warn!("Send queue full ({capacity} frames); rejecting frame");
+        self.resolve_outcome(outcome, None, Err(ZigbeeStackError::SendQueueFull));
     }
 
     /// Enqueue a unicast whose next hop is already resolved. A sleepy child goes to the
