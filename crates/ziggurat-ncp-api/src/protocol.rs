@@ -330,6 +330,7 @@ struct DiagnosticsPayload {
     heap_alloc_failures: u32,
     heap_dealloc: u32,
     heap_largest_request: u32,
+    heap_largest_request_align: u16,
     // Radio counters since boot.
     rx_total: u32,
     rx_dropped: u32,
@@ -1220,6 +1221,7 @@ fn handle_get_diagnostics<P: RadioPhy>(app: &App<P>) -> Result<Response, Error> 
         heap_alloc_failures: heap.alloc_failures as u32,
         heap_dealloc: heap.dealloc as u32,
         heap_largest_request: heap.largest_request as u32,
+        heap_largest_request_align: heap.largest_request_align as u16,
         rx_total: rx_total as u32,
         rx_dropped: rx_dropped as u32,
         outbound_queued: crate::OUTBOUND.len() as u16,

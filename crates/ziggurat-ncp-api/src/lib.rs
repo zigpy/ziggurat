@@ -46,6 +46,7 @@ pub struct HeapStats {
     pub alloc_failures: usize,
     pub dealloc: usize,
     pub largest_request: usize,
+    pub largest_request_align: usize,
 }
 
 /// Board specifics the protocol surface needs but the transport-agnostic core can't know.
