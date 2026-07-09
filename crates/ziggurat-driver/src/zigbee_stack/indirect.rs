@@ -13,7 +13,7 @@ use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
     DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind, TxOutcome,
-    TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -144,7 +144,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.enqueue_send(
             SendKind::Raw { frame: raw_frame },
-            TxPriority::STACK_CRITICAL,
+            TxPolicy {
+                priority: TxPriority::STACK_CRITICAL,
+                class: TrafficClass::Critical,
+            },
             TxOutcome::IndirectDelivery {
                 destination,
                 transaction: Box::new(transaction),

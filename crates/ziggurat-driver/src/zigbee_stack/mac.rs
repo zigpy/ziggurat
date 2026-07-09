@@ -16,9 +16,11 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
+use crate::frame_token::TrafficClass;
+
 use super::{
-    NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPriority, ZigbeeStack,
-    ZigbeeStackError,
+    NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPolicy, TxPriority,
+    ZigbeeStack, ZigbeeStackError,
 };
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
@@ -132,19 +134,26 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             fcs: 0x0000,
         });
 
-        let tx_priority = if permitting_joins {
-            // We should try to win any beacon races during joins
-            TxPriority::STACK_CRITICAL
+        let policy = if permitting_joins {
+            TxPolicy {
+                // We should try to win any beacon races during joins
+                priority: TxPriority::STACK_CRITICAL,
+                class: TrafficClass::Critical,
+            }
         } else {
-            // Otherwise, unexpected beacon requests should never compete with normal traffic
-            TxPriority::BACKGROUND
+            TxPolicy {
+                // Otherwise, unexpected beacon requests should never compete with
+                // normal traffic
+                priority: TxPriority::BACKGROUND,
+                class: TrafficClass::Critical,
+            }
         };
 
         self.enqueue_send(
             SendKind::Raw {
                 frame: beacon_frame,
             },
-            tx_priority,
+            policy,
             TxOutcome::Discard,
         );
     }

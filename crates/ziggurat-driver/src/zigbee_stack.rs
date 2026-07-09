@@ -1,6 +1,6 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
 
-use crate::frame_token::{self, FrameToken};
+use crate::frame_token::{self, FrameToken, TrafficClass};
 use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
 use crate::signal::Signal;
 use abstract_bits::AbstractBits;
@@ -108,6 +108,18 @@ impl TxPriority {
     pub const USER_HIGH: Self = Self(1);
     pub const USER_CRITICAL: Self = Self(2);
     pub const STACK_CRITICAL: Self = Self(3);
+}
+
+/// How a transmit is treated under contention.
+///
+/// The axes are independent: `priority` orders the send queue (who transmits first),
+/// `class` picks the frame-budget tier (who may hold memory under pressure). A link
+/// status frame is background priority but critical class; a host send may be high
+/// priority but is always host class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxPolicy {
+    pub priority: TxPriority,
+    pub class: TrafficClass,
 }
 
 /// How an outgoing NWK frame is secured. Frames carrying the network key to a joining
@@ -380,7 +392,7 @@ pub(crate) enum BroadcastSchedule {
 pub struct PendingBroadcast {
     pub(crate) nwk_frame: NwkFrame,
     pub(crate) security: NwkSecurityMode,
-    pub(crate) priority: TxPriority,
+    pub(crate) policy: TxPolicy,
     pub(crate) schedule: BroadcastSchedule,
     /// Retransmissions left before the broadcast is given up on.
     pub(crate) attempts_remaining: u8,

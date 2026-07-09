@@ -30,7 +30,7 @@ use super::{
     AddrConflictSource, BroadcastSchedule, IndirectFrame, IndirectPayload, JoinKind, MAX_DEPTH,
     NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute,
     PendingUnicastRetry, RequestId, SendKind, SendMode, SendRequest, SendResult, TxOutcome,
-    TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -170,7 +170,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             #[allow(clippy::large_enum_variant)]
             enum Next {
                 Idle,
-                Retransmit(NwkFrame, NwkSecurityMode, TxPriority),
+                Retransmit(NwkFrame, NwkSecurityMode, TxPolicy),
                 Exhausted(Option<RequestId>),
             }
 
@@ -193,21 +193,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     Next::Retransmit(
                         broadcast.nwk_frame.clone(),
                         broadcast.security,
-                        broadcast.priority,
+                        broadcast.policy,
                     )
                 }
             };
 
             match action {
                 Next::Idle => {}
-                Next::Retransmit(nwk_frame, security, priority) => {
+                Next::Retransmit(nwk_frame, security, policy) => {
                     tracing::debug!("Retransmitting broadcast {key:?}");
                     self.enqueue_send(
                         SendKind::Broadcast {
                             nwk_frame,
                             security,
                         },
-                        priority,
+                        policy,
                         TxOutcome::Discard,
                     );
                 }
@@ -233,7 +233,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         key: (Nwk, u8),
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        priority: TxPriority,
+        policy: TxPolicy,
         schedule: BroadcastSchedule,
         first_delay: Duration,
         attempts: u8,
@@ -246,13 +246,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         // The retained copy holds a budget token for its whole retransmit schedule;
-        // each transmitted copy is charged separately at enqueue.
-        let class = self.frame_class(&nwk_frame, priority);
-        let Some(token) = frame_token::take(class) else {
+        // each transmitted copy takes its own at enqueue.
+        let Some(token) = frame_token::take(policy.class) else {
             tracing::warn!(
-                "Frame budget exhausted ({}/{} tokens); dropping {class:?} broadcast retransmissions",
+                "Frame budget exhausted ({}/{} tokens); dropping {:?} broadcast retransmissions",
                 frame_token::used(),
-                frame_token::total()
+                frame_token::total(),
+                policy.class,
             );
             if let Some(request_id) = request_id {
                 self.push_notification(ZigbeeNotification::SendConfirm {
@@ -270,7 +270,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             PendingBroadcast {
                 nwk_frame,
                 security,
-                priority,
+                policy,
                 schedule,
                 attempts_remaining: attempts,
                 next_attempt: self.core_now() + first_delay,
@@ -296,7 +296,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             key,
             nwk_frame,
             NwkSecurityMode::NetworkKey,
-            TxPriority::USER_NORMAL,
+            TxPolicy {
+                priority: TxPriority::USER_NORMAL,
+                class: TrafficClass::Critical,
+            },
             BroadcastSchedule::FixedInterval {
                 interval: self.tunables.rreq_retry_interval,
             },
@@ -533,7 +536,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame,
             security,
             mode,
-            TxPriority::STACK_CRITICAL,
+            TxPolicy {
+                priority: TxPriority::STACK_CRITICAL,
+                class: TrafficClass::Critical,
+            },
             TxOutcome::Discard,
         );
     }
@@ -546,18 +552,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         mode: SendMode,
-        priority: TxPriority,
+        policy: TxPolicy,
         outcome: TxOutcome,
     ) {
-        // Charged here, at the frame's entry into the stack's ownership, so that
-        // route-discovery parking is covered by the budget too. The token travels
-        // with the frame through every queue until its terminal outcome.
-        let class = self.frame_class(&nwk_frame, priority);
-        let Some(token) = frame_token::take(class) else {
+        // The token is taken here, at the frame's entry into the stack's ownership, so
+        // that route-discovery parking is covered by the budget too. It travels with
+        // the frame through every queue until its terminal outcome.
+        let Some(token) = frame_token::take(policy.class) else {
             tracing::warn!(
-                "Frame budget exhausted ({}/{} tokens); rejecting {class:?} unicast",
+                "Frame budget exhausted ({}/{} tokens); rejecting {:?} unicast",
                 frame_token::used(),
-                frame_token::total()
+                frame_token::total(),
+                policy.class,
             );
             self.resolve_outcome(outcome, None, Err(ZigbeeStackError::FrameBudgetExhausted));
             return;
@@ -568,10 +574,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         match self.resolve_next_hop(&mut nwk_frame, mode) {
             NextHop::Resolved(next_hop) => {
-                self.enqueue_unicast(nwk_frame, next_hop, security, priority, outcome, token);
+                self.enqueue_unicast(
+                    nwk_frame,
+                    next_hop,
+                    security,
+                    policy.priority,
+                    outcome,
+                    token,
+                );
             }
             NextHop::NeedDiscovery => {
-                self.enqueue_awaiting_route(nwk_frame, security, priority, outcome, token)
+                self.enqueue_awaiting_route(nwk_frame, security, policy.priority, outcome, token)
             }
             NextHop::Discard => {
                 tracing::debug!(
@@ -642,15 +655,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         mode: SendMode,
-        priority: TxPriority,
+        policy: TxPolicy,
     ) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             // Broadcasts are fire-and-forget: the retransmit reactor owns delivery, and
             // there is no end-to-end result to await.
-            self.send_broadcast_nwk_frame(nwk_frame, security, priority, None);
+            self.send_broadcast_nwk_frame(nwk_frame, security, policy, None);
             Ok(())
         } else {
-            self.send_unicast_nwk_frame(nwk_frame, security, mode, priority)
+            self.send_unicast_nwk_frame(nwk_frame, security, mode, policy)
                 .await
         }
     }
@@ -739,14 +752,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         mode: SendMode,
-        priority: TxPriority,
+        policy: TxPolicy,
     ) -> Result<(), ZigbeeStackError> {
         let (completion_tx, completion_rx) = signal::channel();
         self.originate_unicast(
             nwk_frame,
             security,
             mode,
-            priority,
+            policy,
             TxOutcome::Signal(completion_tx),
         );
         completion_rx
@@ -806,48 +819,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame)
     }
 
-    /// Which slice of the frame budget admits this frame (see [`crate::mem`]):
-    /// transit frames we relay are [`TrafficClass::Forwarding`]; NWK commands and
-    /// anything sent at stack-critical priority are [`TrafficClass::Critical`];
-    /// everything else is best-effort [`TrafficClass::Host`] traffic.
-    pub(super) fn frame_class(&self, nwk_frame: &NwkFrame, priority: TxPriority) -> TrafficClass {
-        if nwk_frame.nwk_header.source != self.state.network_address {
-            TrafficClass::Forwarding
-        } else if priority >= TxPriority::STACK_CRITICAL
-            || matches!(nwk_frame.payload, NwkPayload::Command(_))
-        {
-            TrafficClass::Critical
-        } else {
-            TrafficClass::Host
-        }
-    }
-
-    fn send_class(&self, kind: &SendKind, priority: TxPriority) -> TrafficClass {
-        match kind {
-            SendKind::Unicast { nwk_frame, .. } | SendKind::Broadcast { nwk_frame, .. } => {
-                self.frame_class(nwk_frame, priority)
-            }
-            // Beacon responses, association responses, indirect deliveries: all
-            // stack machinery.
-            SendKind::Raw { .. } => TrafficClass::Critical,
-        }
-    }
-
-    /// Enqueue a send into the priority queue and wake the sender task, charging the
-    /// frame budget. A refused charge resolves the outcome with an error instead.
-    pub(super) fn enqueue_send(&self, kind: SendKind, priority: TxPriority, outcome: TxOutcome) {
-        let class = self.send_class(&kind, priority);
-        let Some(token) = frame_token::take(class) else {
+    /// Enqueue a send into the priority queue and wake the sender task, taking a frame
+    /// token from the policy's budget tier. A refused token resolves the outcome with
+    /// an error instead.
+    pub(super) fn enqueue_send(&self, kind: SendKind, policy: TxPolicy, outcome: TxOutcome) {
+        let Some(token) = frame_token::take(policy.class) else {
             tracing::warn!(
-                "Frame budget exhausted ({}/{} tokens); rejecting {class:?} frame",
+                "Frame budget exhausted ({}/{} tokens); rejecting {:?} frame",
                 frame_token::used(),
-                frame_token::total()
+                frame_token::total(),
+                policy.class,
             );
             self.resolve_outcome(outcome, None, Err(ZigbeeStackError::FrameBudgetExhausted));
             return;
         };
 
-        self.enqueue_send_with_token(kind, priority, outcome, token);
+        self.enqueue_send_with_token(kind, policy.priority, outcome, token);
     }
 
     /// Enqueue a send whose frame already holds a budget token (a retry, or a frame
@@ -922,10 +909,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn send(
         &self,
         kind: SendKind,
-        priority: TxPriority,
+        policy: TxPolicy,
     ) -> Result<(), ZigbeeStackError> {
         let (completion_tx, completion_rx) = signal::channel();
-        self.enqueue_send(kind, priority, TxOutcome::Signal(completion_tx));
+        self.enqueue_send(kind, policy, TxOutcome::Signal(completion_tx));
         completion_rx
             .wait()
             .await
@@ -1467,7 +1454,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         nwk_frame: &NwkFrame,
         security: NwkSecurityMode,
-        priority: TxPriority,
+        class: TrafficClass,
     ) {
         if nwk_frame.nwk_header.destination != BROADCAST_ALL_DEVICES {
             return;
@@ -1482,7 +1469,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .filter(|(_, child_nwk)| *child_nwk != nwk_frame.nwk_header.source)
             .collect();
 
-        let class = self.frame_class(nwk_frame, priority);
         for (child_eui64, child_nwk) in sleepy_children {
             // Each per-child copy is its own charge: under pressure copies are skipped
             // (the child misses one broadcast) instead of exhausting the heap.
@@ -1518,7 +1504,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        priority: TxPriority,
+        policy: TxPolicy,
         // An application send awaiting confirmation on passive-ack quorum; internal
         // broadcasts pass `None`.
         request_id: Option<RequestId>,
@@ -1527,7 +1513,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
         // for each (spec 3.6.6).
-        self.fan_out_broadcast_to_sleepy_children(&nwk_frame, security, priority);
+        self.fan_out_broadcast_to_sleepy_children(&nwk_frame, security, policy.class);
 
         let key = (
             nwk_frame.nwk_header.source,
@@ -1552,14 +1538,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 nwk_frame: nwk_frame.clone(),
                 security,
             },
-            priority,
+            policy,
             TxOutcome::Discard,
         );
         self.schedule_broadcast(
             key,
             nwk_frame,
             security,
-            priority,
+            policy,
             BroadcastSchedule::PassiveAck,
             self.tunables.passive_ack_timeout + self.broadcast_jitter(),
             self.tunables.max_broadcast_retries,
@@ -1574,14 +1560,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        priority: TxPriority,
+        policy: TxPolicy,
     ) -> Result<(), ZigbeeStackError> {
         self.send(
             SendKind::Broadcast {
                 nwk_frame,
                 security,
             },
-            priority,
+            policy,
         )
         .await
     }
@@ -1831,7 +1817,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.fan_out_broadcast_to_sleepy_children(
             nwk_frame,
             NwkSecurityMode::NetworkKey,
-            TxPriority::USER_NORMAL,
+            TrafficClass::Forwarding,
         );
 
         let mut relayed_frame = nwk_frame.clone();
@@ -1855,7 +1841,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             key,
             relayed_frame,
             NwkSecurityMode::NetworkKey,
-            TxPriority::USER_NORMAL,
+            TxPolicy {
+                priority: TxPriority::USER_NORMAL,
+                class: TrafficClass::Forwarding,
+            },
             BroadcastSchedule::PassiveAck,
             self.broadcast_jitter(),
             self.tunables.max_broadcast_retries + 1,

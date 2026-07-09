@@ -36,8 +36,8 @@ use ziggurat_zigbee::nwk::commands::{
 
 use super::{
     AddrConflictSource, DeviceLeaveReason, IndirectFrame, IndirectPayload, JoinKind, NwkDeviceType,
-    NwkSecurityMode, RadioPhy, SendMode, TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack,
-    neighbors,
+    NwkSecurityMode, RadioPhy, SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification,
+    ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -322,7 +322,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.send_broadcast_nwk_frame(
                 conflict_frame,
                 NwkSecurityMode::NetworkKey,
-                TxPriority::USER_NORMAL,
+                TxPolicy {
+                    priority: TxPriority::USER_NORMAL,
+                    class: TrafficClass::Critical,
+                },
                 None,
             );
         }

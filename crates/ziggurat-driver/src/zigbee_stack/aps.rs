@@ -19,8 +19,9 @@ use ziggurat_zigbee::Instant as CoreInstant;
 
 use super::{
     ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, SendMode,
-    TxOutcome, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
+use crate::frame_token::TrafficClass;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// The EUI64 an inbound secured APS frame was encrypted by: the auxiliary header's
@@ -351,9 +352,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.aps_ack_wake.notify_one();
         }
 
+        // The class is fixed here, not host-chosen: a host send can never draw from
+        // the forwarding or critical budget tiers, whatever its priority.
         self.enqueue_aps_frame(
             nwk_frame,
-            priority,
+            TxPolicy {
+                priority,
+                class: TrafficClass::Host,
+            },
             TxOutcome::Confirm {
                 request_id,
                 aps_ack: ack_data,
@@ -369,7 +375,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn enqueue_aps_frame(
         &self,
         nwk_frame: NwkFrame,
-        priority: TxPriority,
+        policy: TxPolicy,
         outcome: TxOutcome,
     ) {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
@@ -384,7 +390,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.send_broadcast_nwk_frame(
                 nwk_frame,
                 NwkSecurityMode::NetworkKey,
-                priority,
+                policy,
                 request_id,
             );
         } else {
@@ -392,7 +398,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 nwk_frame,
                 NwkSecurityMode::NetworkKey,
                 SendMode::Route,
-                priority,
+                policy,
                 outcome,
             );
         }

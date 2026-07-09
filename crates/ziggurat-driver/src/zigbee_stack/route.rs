@@ -12,7 +12,9 @@ use ziggurat_zigbee::nwk::commands::{
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use super::routing::RouteReplyDisposition;
-use super::{AddrConflictSource, NwkSecurityMode, SendMode, TxPriority, ZigbeeStack};
+use crate::frame_token::TrafficClass;
+
+use super::{AddrConflictSource, NwkSecurityMode, SendMode, TxPolicy, TxPriority, ZigbeeStack};
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
@@ -280,7 +282,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .transmit_broadcast_nwk_frame(
                 many_to_one_request_frame,
                 NwkSecurityMode::NetworkKey,
-                TxPriority::BACKGROUND,
+                TxPolicy {
+                    priority: TxPriority::BACKGROUND,
+                    class: TrafficClass::Critical,
+                },
             )
             .await
         {
