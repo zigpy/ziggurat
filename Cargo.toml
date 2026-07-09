@@ -30,6 +30,7 @@ ziggurat-phy-spinel = { path = "crates/ziggurat-phy-spinel", version = "0.1.0" }
 ziggurat-spinel = { path = "crates/ziggurat-spinel", version = "0.1.0" }
 ziggurat-zigbee = { path = "crates/ziggurat-zigbee", version = "0.1.0" }
 ziggurat-driver = { path = "crates/ziggurat-driver", version = "0.1.0" }
+ziggurat-protocol = { path = "crates/ziggurat-protocol", version = "0.1.0" }
 
 [profile.release-with-debug]
 inherits = "release"

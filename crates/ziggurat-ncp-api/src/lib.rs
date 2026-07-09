@@ -82,15 +82,26 @@ pub(crate) async fn send_outbound(frame: Vec<u8>) {
 
 /// The unsolicited hello, sent once at startup.
 pub async fn emit_hello(configured: bool) {
-    if let Some(frame) = protocol::hello_frame(configured) {
+    let frame = protocol::Notification::Hello(protocol::HelloPayload {
+        protocol_version: protocol::PROTOCOL_VERSION,
+        configured,
+    })
+    .frame();
+    if let Some(frame) = frame {
         push_outbound(frame);
     }
 }
 
 /// The unsolicited last-reset diagnostic, sent once after `hello` when the
-/// previous reset was abnormal (a fault or a panic).
+/// previous reset was abnormal (a fault or a panic). The message is truncated so
+/// the frame always fits.
 pub async fn emit_last_reset(message: &str) {
-    if let Some(frame) = protocol::last_reset_frame(message) {
+    let message = &message.as_bytes()[..message.len().min(255)];
+    let frame = protocol::Notification::LastReset(protocol::LastResetPayload {
+        message: message.to_vec(),
+    })
+    .frame();
+    if let Some(frame) = frame {
         push_outbound(frame);
     }
 }

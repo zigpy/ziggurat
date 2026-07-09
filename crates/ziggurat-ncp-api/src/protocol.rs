@@ -1,714 +1,27 @@
-//! The binary command set: request/response keyed by request id, streamed events,
-//! unsolicited notifications, fixed-layout payloads, and index-free scan/load state
-//! transfer.
+//! Embedded dispatch for the binary control protocol: it routes parsed requests to
+//! the live `ZigbeeStack` and streams the replies onto [`crate::OUTBOUND`].
 
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use abstract_bits::{AbstractBits, BitReader, abstract_bits};
-use num_enum::TryFromPrimitive;
-
 use ziggurat_driver::runtime::Spawn;
-use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
-use ziggurat_driver::zigbee_stack::{
-    ApsAck, ApsAckResult, DeviceLeaveReason, NetworkConfig, NwkDeviceType,
-    RequestId as StackRequestId, SendResult, TclkSeed, Tunables, TxPriority, ZigbeeNotification,
-    ZigbeeStack,
-};
-use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
+use ziggurat_driver::zigbee_stack::{Tunables, ZigbeeStack};
 use ziggurat_phy::{RadioPhy, Receiver};
-use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
-use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
-use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
-use ziggurat_zigbee::nwk::routing;
+use ziggurat_protocol::{
+    self as proto, CapturedPacketPayload, ChannelPayload, CommandId, ConfigurePayload,
+    EnergyResultPayload, Error, Event, FirmwareInfoPayload, HwAddressPayload, NwkUpdateIdPayload,
+    PermitJoinsPayload, ProvisionalKeyPayload, Request, RequestHeader, RequestId, ResetPayload,
+    Response, ScanCountPayload, ScanRequestPayload, Status,
+};
 
 use crate::{App, CaptureStop, capture_config, push_outbound, send_outbound, spawn_stack_pumps};
 
-pub const PROTOCOL_VERSION: u8 = 1;
-pub type RequestId = u16;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum CommandId {
-    // Notifications (device -> host, unsolicited).
-    Hello = 0x00,
-    // Requests (host -> device).
-    Ping = 0x01,
-    Reset = 0x02,
-    GetFirmwareInfo = 0x03,
-    GetHwAddress = 0x04,
-    Shutdown = 0x05,
-    Configure = 0x10,
-    LoadKeyTable = 0x11,
-    LoadChildren = 0x12,
-    LoadAddressCache = 0x13,
-    StartNetwork = 0x14,
-    GetNetworkInfo = 0x18,
-    ScanKeyTable = 0x19,
-    ScanChildren = 0x1A,
-    ScanAddressCache = 0x1B,
-    ScanRouteTable = 0x1C,
-    SendAps = 0x20,
-    PermitJoins = 0x21,
-    SetChannel = 0x22,
-    SetNwkUpdateId = 0x23,
-    SetProvisionalKey = 0x24,
-    EnergyScan = 0x25,
-    NetworkScan = 0x26,
-    PacketCapture = 0x27,
-    PacketCaptureChannel = 0x28,
-    // More notifications.
-    ReceivedAps = 0x30,
-    SendConfirm = 0x31,
-    ApsAckConfirm = 0x32,
-    DeviceJoined = 0x33,
-    DeviceLeft = 0x34,
-    FrameCounter = 0x35,
-    LinkKey = 0x36,
-    ApsDecryptFailure = 0x37,
-    LastReset = 0x38,
-}
-
-impl From<CommandId> for u8 {
-    fn from(id: CommandId) -> Self {
-        id as Self
-    }
-}
-
-/// Child entries restored from a backup re-negotiate their real timeout at the
-/// first keepalive; until then they age out after a conservative day.
-const RESTORED_CHILD_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// How the host must route a device -> host frame. Inbound frames are always
-/// requests, so they carry no frame type. `Error` folds into `Response`: a
-/// response carries a [`Status`], so `Status::Ok` + payload is success and any
-/// other status + message is failure — one terminal path for the client.
-#[abstract_bits(bits = 8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum FrameType {
-    Response = 1,
-    Event = 2,
-    Notification = 3,
-}
-
-/// Response status. `Ok` carries the response payload; any other value carries a
-/// diagnostic message string instead (see [`Error`]).
-#[abstract_bits(bits = 8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum Status {
-    Ok = 0,
-    Parse = 1,
-    UnknownCommand = 2,
-    InvalidState = 3,
-    NotConfigured = 4,
-    RadioError = 5,
-    NetworkStartFailed = 6,
-    TransmitFailed = 7,
-    ScanFailed = 8,
-    InvalidRequest = 9,
-}
-
-/// Role a `configure` sets the coordinator up as.
-#[abstract_bits(bits = 8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum NodeRole {
-    Coordinator = 0,
-    Router = 1,
-}
-
-/// The trust-center-link-key derivation scheme carried over from a prior stack.
-#[abstract_bits(bits = 8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum TclkFlavorId {
-    ZStack = 0,
-    Ezsp = 1,
-}
-
-/// A restored child's type. `Unknown` (a backup that didn't record it) is restored
-/// as a sleepy end device - the safe default for frame-pending.
-#[abstract_bits(bits = 2)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum ChildDeviceType {
-    Unknown = 0,
-    Router = 1,
-    EndDevice = 2,
-}
-
-/// Which key an undecryptable APS frame was secured with (the NWK aux header's
-/// key-id field). A byte-wide wire mirror of the driver's `NwkSecurityHeaderKeyId`.
-#[abstract_bits(bits = 8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum KeyId {
-    Data = 0,
-    Network = 1,
-    KeyTransport = 2,
-    KeyLoad = 3,
-}
-
-/// How the stack learned a device left (mirrors the driver's `DeviceLeaveReason`).
-/// The `rejoin` / `router` / `router_ieee` fields of the notification are only
-/// meaningful for `Announced` / `RouterReported` respectively.
-#[abstract_bits(bits = 8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
-pub enum LeaveReason {
-    Announced = 0,
-    RouterReported = 1,
-    KeepaliveTimeout = 2,
-}
-
-/// The 3-byte header of every host -> device frame (always a request).
-#[abstract_bits]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestHeader {
-    pub command: u8,
-    pub request_id: RequestId,
-}
-
-/// The 4-byte header of every device -> host frame.
-#[abstract_bits]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplyHeader {
-    pub frame_type: FrameType,
-    pub command: u8,
-    pub request_id: RequestId,
-}
-
-// -- payload structs -------------------------------------------------------------
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ResetPayload {
-    hard: bool,
-    reserved: u7,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct FirmwareInfoPayload {
-    protocol_version: u8,
-    version_len: u16,
-    // A human-readable firmware version ("ziggurat/0.1.0"); inherently a string.
-    #[abstract_bits(length_from = version_len)]
-    version: Vec<u8>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct HwAddressPayload {
-    ieee: Eui64,
-}
-
-/// The persistent network state shared by `configure` and `get_network_info`
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct NetworkState {
-    channel: u8,
-    nwk_update_id: u8,
-    pan_id: PanId,
-    extended_pan_id: Eui64,
-    nwk_address: Nwk,
-    ieee_address: Eui64,
-    network_key: Key,
-    network_key_seq: u8,
-    network_key_tx_counter: u32,
-    tc_link_key: Key,
-    has_tclk_seed: bool,
-    reserved: u7,
-    tclk_seed: Key,
-    tclk_flavor: TclkFlavorId,
-    tx_power: u8, // i8 two's complement (abstract-bits has no signed types)
-    aps_frame_counter: u32,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ConfigurePayload {
-    role: NodeRole,
-    source_routing: bool,
-    reserved: u7,
-    state: NetworkState,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct KeyEntry {
-    key: Key,
-    tx_counter: u32,
-    rx_counter: u32,
-    seq: u8,
-    partner_ieee: Eui64,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct LoadKeyTablePayload {
-    count: u16,
-    #[abstract_bits(length_from = count)]
-    entries: Vec<KeyEntry>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ChildFlags {
-    rx_on_when_idle: bool,
-    device_type: ChildDeviceType,
-    reserved: u5,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ChildEntry {
-    ieee: Eui64,
-    nwk: Nwk,
-    flags: ChildFlags,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct LoadChildrenPayload {
-    count: u16,
-    #[abstract_bits(length_from = count)]
-    entries: Vec<ChildEntry>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct AddressEntry {
-    ieee: Eui64,
-    nwk: Nwk,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct LoadAddressCachePayload {
-    count: u16,
-    #[abstract_bits(length_from = count)]
-    entries: Vec<AddressEntry>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct NetworkInfoPayload {
-    state: NetworkState,
-    key_count: u16,
-    started: bool,
-    reserved: u7,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ScanCountPayload {
-    count: u16,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct RouteEntry {
-    destination: Nwk,
-    next_hop: Nwk,
-    path_cost: u8,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct SendApsFlags {
-    has_eui64: bool,
-    aps_ack: bool,
-    aps_encryption: bool,
-    delivery_mode: ApsDeliveryMode,
-    reserved: u3,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct SendApsPayload {
-    flags: SendApsFlags,
-    destination: Nwk,
-    destination_eui64: Eui64,
-    profile_id: u16,
-    cluster_id: u16,
-    src_ep: u8,
-    dst_ep: u8,
-    aps_seq: u8,
-    radius: u8,
-    priority: u8, // i8 two's complement
-    asdu_len: u16,
-    #[abstract_bits(length_from = asdu_len)]
-    asdu: Vec<u8>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct PermitJoinsPayload {
-    duration: u16,
-    accept_direct_joins: bool,
-    reserved: u7,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ChannelPayload {
-    channel: u8,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct NwkUpdateIdPayload {
-    nwk_update_id: u8,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ProvisionalKeyPayload {
-    ieee: Eui64,
-    key: Key,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ScanRequestPayload {
-    count: u16,
-    #[abstract_bits(length_from = count)]
-    channels: Vec<u8>,
-    duration_per_channel_ms: u16,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct EnergyResultPayload {
-    channel: u8,
-    rssi: u8, // i8 two's complement
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct BeaconPayload {
-    channel: u8,
-    source: Nwk, // 0xFFFF when the beacon had no short source
-    pan_id: PanId,
-    extended_pan_id: Eui64,
-    permit_joining: bool,
-    router_capacity: bool,
-    end_device_capacity: bool,
-    reserved: u5,
-    stack_profile: u8,
-    protocol_version: u8,
-    device_depth: u8,
-    update_id: u8,
-    lqi: u8,
-    rssi: u8, // i8 two's complement
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct CapturedPacketPayload {
-    channel: u8,
-    rssi: u8, // i8 two's complement
-    lqi: u8,
-    psdu_len: u16,
-    #[abstract_bits(length_from = psdu_len)]
-    psdu: Vec<u8>,
-}
-
-/// The body of a failed response: a `Status` other than `Ok` followed by a
-/// diagnostic, human-readable message.
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ErrorPayload {
-    status: Status,
-    message_len: u16,
-    #[abstract_bits(length_from = message_len)]
-    message: Vec<u8>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct HelloPayload {
-    protocol_version: u8,
-    configured: bool,
-    reserved: u7,
-}
-
-/// Why the MCU last rebooted, when the reboot was abnormal (a fault dump or the
-/// stored Rust panic message). Sent once, right after `hello`.
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct LastResetPayload {
-    message_len: u16,
-    #[abstract_bits(length_from = message_len)]
-    message: Vec<u8>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ReceivedApsPayload {
-    source: Nwk,
-    destination: Nwk,
-    has_group: bool,
-    reserved: u7,
-    group: u16,
-    profile_id: u16,
-    cluster_id: u16,
-    src_ep: u8,
-    dst_ep: u8,
-    lqi: u8,
-    rssi: u8, // i8 two's complement
-    data_len: u16,
-    #[abstract_bits(length_from = data_len)]
-    data: Vec<u8>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct SendConfirmPayload {
-    confirmed: bool,
-    reserved: u7,
-    next_hop: Nwk, // 0xFFFF when unknown
-    reason_len: u16,
-    #[abstract_bits(length_from = reason_len)]
-    reason: Vec<u8>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ApsAckConfirmPayload {
-    acked: bool,
-    reserved: u7,
-    reason_len: u16,
-    #[abstract_bits(length_from = reason_len)]
-    reason: Vec<u8>,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct DeviceJoinedPayload {
-    nwk: Nwk,
-    ieee: Eui64,
-    parent: Nwk,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct DeviceLeftPayload {
-    nwk: Nwk,
-    has_ieee: bool,
-    rejoin: bool,
-    has_router_ieee: bool,
-    reserved: u5,
-    ieee: Eui64,
-    reason: LeaveReason,
-    router: Nwk, // 0xFFFF when not router_reported
-    router_ieee: Eui64,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct FrameCounterPayload {
-    frame_counter: u32,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct LinkKeyPayload {
-    ieee: Eui64,
-    key: Key,
-}
-
-#[abstract_bits]
-#[derive(Debug, Clone)]
-struct ApsDecryptFailPayload {
-    source: Nwk,
-    source_ieee: Eui64,
-    frame_counter: u32,
-    key_id: KeyId,
-}
-
-// -- typed frames ------------------------------------------------------------------
-
-/// A parsed host -> device request.
-enum Request {
-    Ping,
-    Reset(ResetPayload),
-    GetFirmwareInfo,
-    GetHwAddress,
-    Shutdown,
-    Configure(ConfigurePayload),
-    LoadKeyTable(LoadKeyTablePayload),
-    LoadChildren(LoadChildrenPayload),
-    LoadAddressCache(LoadAddressCachePayload),
-    StartNetwork,
-    GetNetworkInfo,
-    ScanKeyTable,
-    ScanChildren,
-    ScanAddressCache,
-    ScanRouteTable,
-    SendAps(SendApsPayload),
-    PermitJoins(PermitJoinsPayload),
-    SetChannel(ChannelPayload),
-    SetNwkUpdateId(NwkUpdateIdPayload),
-    SetProvisionalKey(ProvisionalKeyPayload),
-    EnergyScan(ScanRequestPayload),
-    NetworkScan(ScanRequestPayload),
-    PacketCapture(ChannelPayload),
-    PacketCaptureChannel(ChannelPayload),
-}
-
-impl Request {
-    fn parse(command: CommandId, payload: &[u8]) -> Result<Self, Error> {
-        Ok(match command {
-            CommandId::Ping => Self::Ping,
-            CommandId::Reset => Self::Reset(require(payload, "reset")?),
-            CommandId::GetFirmwareInfo => Self::GetFirmwareInfo,
-            CommandId::GetHwAddress => Self::GetHwAddress,
-            CommandId::Shutdown => Self::Shutdown,
-            CommandId::Configure => Self::Configure(require(payload, "configure")?),
-            CommandId::LoadKeyTable => Self::LoadKeyTable(require(payload, "key entries")?),
-            CommandId::LoadChildren => Self::LoadChildren(require(payload, "child entries")?),
-            CommandId::LoadAddressCache => {
-                Self::LoadAddressCache(require(payload, "addr entries")?)
-            }
-            CommandId::StartNetwork => Self::StartNetwork,
-            CommandId::GetNetworkInfo => Self::GetNetworkInfo,
-            CommandId::ScanKeyTable => Self::ScanKeyTable,
-            CommandId::ScanChildren => Self::ScanChildren,
-            CommandId::ScanAddressCache => Self::ScanAddressCache,
-            CommandId::ScanRouteTable => Self::ScanRouteTable,
-            CommandId::SendAps => Self::SendAps(require(payload, "send_aps")?),
-            CommandId::PermitJoins => Self::PermitJoins(require(payload, "permit_joins")?),
-            CommandId::SetChannel => Self::SetChannel(require(payload, "channel")?),
-            CommandId::SetNwkUpdateId => Self::SetNwkUpdateId(require(payload, "update id")?),
-            CommandId::SetProvisionalKey => Self::SetProvisionalKey(require(payload, "key")?),
-            CommandId::EnergyScan => Self::EnergyScan(require(payload, "energy_scan")?),
-            CommandId::NetworkScan => Self::NetworkScan(require(payload, "network_scan")?),
-            CommandId::PacketCapture => Self::PacketCapture(require(payload, "channel")?),
-            CommandId::PacketCaptureChannel => {
-                Self::PacketCaptureChannel(require(payload, "channel")?)
-            }
-            CommandId::Hello
-            | CommandId::ReceivedAps
-            | CommandId::SendConfirm
-            | CommandId::ApsAckConfirm
-            | CommandId::DeviceJoined
-            | CommandId::DeviceLeft
-            | CommandId::FrameCounter
-            | CommandId::LinkKey
-            | CommandId::ApsDecryptFailure
-            | CommandId::LastReset => {
-                return Err(Error::new(Status::UnknownCommand, "not a request"));
-            }
-        })
-    }
-}
-
-/// The typed body of a successful response.
-enum Response {
-    Empty,
-    FirmwareInfo(FirmwareInfoPayload),
-    HwAddress(HwAddressPayload),
-    NetworkInfo(NetworkInfoPayload),
-    ScanCount(ScanCountPayload),
-}
-
-impl Response {
-    fn frame(&self, command: u8, request_id: RequestId) -> Vec<u8> {
-        let mut bytes = envelope(FrameType::Response, command, request_id);
-        append(&mut bytes, &Status::Ok);
-        let fits = match self {
-            Self::Empty => true,
-            Self::FirmwareInfo(payload) => append(&mut bytes, payload),
-            Self::HwAddress(payload) => append(&mut bytes, payload),
-            Self::NetworkInfo(payload) => append(&mut bytes, payload),
-            Self::ScanCount(payload) => append(&mut bytes, payload),
-        };
-        if !fits {
-            return Error::new(Status::InvalidRequest, "reply too large").frame(command, request_id);
-        }
-        bytes
-    }
-}
-
-/// A failed reply: any non-`Ok` [`Status`] plus a diagnostic message. The client
-/// branches on the status; the text is for humans.
-struct Error {
-    status: Status,
-    message: String,
-}
-
-impl Error {
-    fn new(status: Status, message: &str) -> Self {
-        Self {
-            status,
-            message: message.to_string(),
-        }
-    }
-
-    fn parse(what: &str) -> Self {
-        Self::new(Status::Parse, what)
-    }
-
-    fn not_configured() -> Self {
-        Self::new(Status::NotConfigured, "")
-    }
-
-    fn frame(&self, command: u8, request_id: RequestId) -> Vec<u8> {
-        let message = &self.message.as_bytes()[..self.message.len().min(255)];
-        let mut bytes = envelope(FrameType::Response, command, request_id);
-        append(
-            &mut bytes,
-            &ErrorPayload {
-                status: self.status,
-                message: message.to_vec(),
-            },
-        );
-        bytes
-    }
-}
-
-/// A streamed item, sent before its request's terminal response, carrying the
-/// request's id.
-enum Event {
-    KeyEntry(KeyEntry),
-    Child(ChildEntry),
-    Address(AddressEntry),
-    Route(RouteEntry),
-    EnergyResult(EnergyResultPayload),
-    Beacon(BeaconPayload),
-    CapturedPacket(CapturedPacketPayload),
-}
-
-impl Event {
-    fn frame(&self, request_id: RequestId) -> Option<Vec<u8>> {
-        let command = match self {
-            Self::KeyEntry(_) => CommandId::ScanKeyTable,
-            Self::Child(_) => CommandId::ScanChildren,
-            Self::Address(_) => CommandId::ScanAddressCache,
-            Self::Route(_) => CommandId::ScanRouteTable,
-            Self::EnergyResult(_) => CommandId::EnergyScan,
-            Self::Beacon(_) => CommandId::NetworkScan,
-            Self::CapturedPacket(_) => CommandId::PacketCapture,
-        };
-        let mut bytes = envelope(FrameType::Event, command.into(), request_id);
-        let fits = match self {
-            Self::KeyEntry(payload) => append(&mut bytes, payload),
-            Self::Child(payload) => append(&mut bytes, payload),
-            Self::Address(payload) => append(&mut bytes, payload),
-            Self::Route(payload) => append(&mut bytes, payload),
-            Self::EnergyResult(payload) => append(&mut bytes, payload),
-            Self::Beacon(payload) => append(&mut bytes, payload),
-            Self::CapturedPacket(payload) => append(&mut bytes, payload),
-        };
-        fits.then_some(bytes)
-    }
-}
+// Re-exported for the transport shell (`crate::lib`) and downstream firmware.
+pub use ziggurat_protocol::{
+    HelloPayload, LastResetPayload, Notification, PROTOCOL_VERSION, notification_frame,
+};
 
 async fn send_event(request_id: RequestId, event: Event) {
     if let Some(frame) = event.frame(request_id) {
@@ -716,121 +29,16 @@ async fn send_event(request_id: RequestId, event: Event) {
     }
 }
 
-/// An unsolicited device -> host frame. Confirms carry their originating send's
-/// request id; everything else uses 0.
-enum Notification {
-    Hello(HelloPayload),
-    LastReset(LastResetPayload),
-    ReceivedAps(ReceivedApsPayload),
-    SendConfirm(RequestId, SendConfirmPayload),
-    ApsAckConfirm(RequestId, ApsAckConfirmPayload),
-    DeviceJoined(DeviceJoinedPayload),
-    DeviceLeft(DeviceLeftPayload),
-    FrameCounter(FrameCounterPayload),
-    LinkKey(LinkKeyPayload),
-    ApsDecryptFailure(ApsDecryptFailPayload),
-}
-
-impl Notification {
-    fn frame(&self) -> Option<Vec<u8>> {
-        let (command, request_id) = match self {
-            Self::Hello(_) => (CommandId::Hello, 0),
-            Self::LastReset(_) => (CommandId::LastReset, 0),
-            Self::ReceivedAps(_) => (CommandId::ReceivedAps, 0),
-            Self::SendConfirm(request_id, _) => (CommandId::SendConfirm, *request_id),
-            Self::ApsAckConfirm(request_id, _) => (CommandId::ApsAckConfirm, *request_id),
-            Self::DeviceJoined(_) => (CommandId::DeviceJoined, 0),
-            Self::DeviceLeft(_) => (CommandId::DeviceLeft, 0),
-            Self::FrameCounter(_) => (CommandId::FrameCounter, 0),
-            Self::LinkKey(_) => (CommandId::LinkKey, 0),
-            Self::ApsDecryptFailure(_) => (CommandId::ApsDecryptFailure, 0),
-        };
-        let mut bytes = envelope(FrameType::Notification, command.into(), request_id);
-        let fits = match self {
-            Self::Hello(payload) => append(&mut bytes, payload),
-            Self::LastReset(payload) => append(&mut bytes, payload),
-            Self::ReceivedAps(payload) => append(&mut bytes, payload),
-            Self::SendConfirm(_, payload) => append(&mut bytes, payload),
-            Self::ApsAckConfirm(_, payload) => append(&mut bytes, payload),
-            Self::DeviceJoined(payload) => append(&mut bytes, payload),
-            Self::DeviceLeft(payload) => append(&mut bytes, payload),
-            Self::FrameCounter(payload) => append(&mut bytes, payload),
-            Self::LinkKey(payload) => append(&mut bytes, payload),
-            Self::ApsDecryptFailure(payload) => append(&mut bytes, payload),
-        };
-        fits.then_some(bytes)
-    }
-}
-
-// -- frame assembly ----------------------------------------------------------------
-
-/// Bounds one encoded frame: the envelope plus the largest payload (a captured
-/// packet or an error string).
-const MAX_FRAME: usize = 512;
-
-/// Append `value`'s serialization; false (nothing appended) if it exceeds
-/// [`MAX_FRAME`].
-fn append<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) -> bool {
-    let mut buffer = [0u8; MAX_FRAME];
-    let mut writer = abstract_bits::BitWriter::from(&mut buffer[..]);
-    if value.write_abstract_bits(&mut writer).is_err() {
-        return false;
-    }
-    let written = writer.bytes_written();
-    bytes.extend_from_slice(&buffer[..written]);
-    true
-}
-
-fn envelope(frame_type: FrameType, command: u8, request_id: RequestId) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(32);
-    append(
-        &mut bytes,
-        &ReplyHeader {
-            frame_type,
-            command,
-            request_id,
-        },
-    );
-    bytes
-}
-
-/// Parse one payload, ignoring trailing bytes (append-only forward compatibility).
-fn parse<T: AbstractBits>(payload: &[u8]) -> Option<T> {
-    let mut reader = BitReader::from(payload);
-    T::read_abstract_bits(&mut reader).ok()
-}
-
-fn require<T: AbstractBits>(payload: &[u8], what: &str) -> Result<T, Error> {
-    parse(payload).ok_or_else(|| Error::parse(what))
-}
-
-pub fn hello_frame(configured: bool) -> Option<Vec<u8>> {
-    Notification::Hello(HelloPayload {
-        protocol_version: PROTOCOL_VERSION,
-        configured,
-    })
-    .frame()
-}
-
-pub fn last_reset_frame(message: &str) -> Option<Vec<u8>> {
-    let message = &message.as_bytes()[..message.len().min(255)];
-    Notification::LastReset(LastResetPayload {
-        message: message.to_vec(),
-    })
-    .frame()
-}
-
 // -- dispatch ------------------------------------------------------------------------
 
 /// Dispatch one inbound frame; every path emits exactly one response or error,
 /// preceded by any streamed events.
 pub async fn handle_frame<P: RadioPhy>(app: &mut App<P>, bytes: &[u8]) {
-    let mut reader = BitReader::from(bytes);
-    let Ok(header) = RequestHeader::read_abstract_bits(&mut reader) else {
+    let Some((header, consumed)) = RequestHeader::parse(bytes) else {
         send_outbound(Error::parse("truncated header").frame(0, 0)).await;
         return;
     };
-    let payload = &bytes[reader.bytes_read()..];
+    let payload = &bytes[consumed..];
     let request_id = header.request_id;
 
     let request = CommandId::try_from(header.command)
@@ -869,84 +77,63 @@ async fn dispatch<P: RadioPhy>(
         })),
         Request::Shutdown => handle_shutdown(app).await,
         Request::Configure(payload) => handle_configure(app, payload).await,
-        Request::LoadKeyTable(payload) => handle_load_key_table(app, payload),
-        Request::LoadChildren(payload) => handle_load_children(app, payload),
-        Request::LoadAddressCache(payload) => handle_load_address_cache(app, payload),
+        Request::LoadKeyTable(payload) => {
+            proto::apply_key_table(&**loadable(app)?, payload);
+            Ok(Response::Empty)
+        }
+        Request::LoadChildren(payload) => {
+            proto::apply_children(&**loadable(app)?, payload);
+            Ok(Response::Empty)
+        }
+        Request::LoadAddressCache(payload) => {
+            proto::apply_address_cache(&**loadable(app)?, payload);
+            Ok(Response::Empty)
+        }
         Request::StartNetwork => handle_start_network(app).await,
-        Request::GetNetworkInfo => handle_get_network_info(app),
+        Request::GetNetworkInfo => Ok(Response::NetworkInfo(proto::network_info_payload(
+            &**configured(app)?,
+            app.started,
+        ))),
         Request::ScanKeyTable => {
             scan_table(app, request_id, |stack| {
-                let core = stack.state.core.lock();
-                let aps = &core.aib.aps_security;
-                let outgoing = aps.outgoing_frame_counter();
-                aps.device_keys()
-                    .map(|(partner, entry)| {
-                        Event::KeyEntry(KeyEntry {
-                            key: entry.key.clone(),
-                            tx_counter: outgoing,
-                            rx_counter: aps.incoming_frame_counter(partner).unwrap_or(0),
-                            seq: 0,
-                            partner_ieee: partner,
-                        })
-                    })
+                proto::key_entries(stack)
+                    .into_iter()
+                    .map(Event::KeyEntry)
                     .collect()
             })
             .await
         }
         Request::ScanChildren => {
             scan_table(app, request_id, |stack| {
-                let core = stack.state.core.lock();
-                core.nib
-                    .neighbors
-                    .entries()
-                    .filter(|entry| entry.is_child())
-                    .map(|entry| {
-                        Event::Child(ChildEntry {
-                            ieee: entry.extended_address,
-                            nwk: entry.network_address,
-                            flags: ChildFlags {
-                                rx_on_when_idle: entry.rx_on_when_idle,
-                                device_type: match entry.device_type {
-                                    NwkDeviceType::Router => ChildDeviceType::Router,
-                                    _ => ChildDeviceType::EndDevice,
-                                },
-                            },
-                        })
-                    })
+                proto::child_entries(stack)
+                    .into_iter()
+                    .map(Event::Child)
                     .collect()
             })
             .await
         }
         Request::ScanAddressCache => {
             scan_table(app, request_id, |stack| {
-                let core = stack.state.core.lock();
-                core.nib
-                    .address_map
-                    .entries()
-                    .map(|(ieee, nwk)| Event::Address(AddressEntry { ieee, nwk }))
+                proto::address_entries(stack)
+                    .into_iter()
+                    .map(Event::Address)
                     .collect()
             })
             .await
         }
         Request::ScanRouteTable => {
             scan_table(app, request_id, |stack| {
-                let core = stack.state.core.lock();
-                core.nib
-                    .routing
-                    .entries()
-                    .filter(|entry| matches!(entry.status, routing::Status::Active))
-                    .map(|entry| {
-                        Event::Route(RouteEntry {
-                            destination: entry.destination,
-                            next_hop: entry.next_hop_address,
-                            path_cost: entry.path_cost,
-                        })
-                    })
+                proto::route_entries(stack)
+                    .into_iter()
+                    .map(Event::Route)
                     .collect()
             })
             .await
         }
-        Request::SendAps(payload) => handle_send_aps(app, request_id, payload),
+        Request::SendAps(payload) => {
+            proto::send_aps(&**running(app)?, payload, request_id)?;
+            Ok(Response::Empty)
+        }
         Request::PermitJoins(payload) => handle_permit_joins(app, payload),
         Request::SetChannel(payload) => handle_set_channel(app, payload).await,
         Request::SetNwkUpdateId(payload) => handle_set_nwk_update_id(app, payload),
@@ -1022,33 +209,7 @@ async fn handle_configure<P: RadioPhy>(
     app: &mut App<P>,
     request: ConfigurePayload,
 ) -> Result<Response, Error> {
-    let state = request.state;
-
-    let config = NetworkConfig {
-        role: match request.role {
-            NodeRole::Router => NwkDeviceType::Router,
-            NodeRole::Coordinator => NwkDeviceType::Coordinator,
-        },
-        channel: state.channel,
-        update_id: state.nwk_update_id,
-        pan_id: state.pan_id,
-        extended_pan_id: state.extended_pan_id,
-        network_address: state.nwk_address,
-        ieee_address: state.ieee_address,
-        network_key: state.network_key,
-        network_key_seq_number: state.network_key_seq,
-        network_key_tx_counter: state.network_key_tx_counter,
-        tc_link_key: state.tc_link_key,
-        tclk_seed: state.has_tclk_seed.then_some(TclkSeed {
-            seed: state.tclk_seed,
-            flavor: match state.tclk_flavor {
-                TclkFlavorId::Ezsp => TclkFlavor::Ezsp,
-                TclkFlavorId::ZStack => TclkFlavor::ZStack,
-            },
-        }),
-        tx_power: state.tx_power as i8,
-        source_routing: request.source_routing,
-    };
+    let config = proto::network_config(&request);
 
     if let Some(old_stack) = app.stack.take() {
         old_stack.shutdown().await;
@@ -1062,74 +223,8 @@ async fn handle_configure<P: RadioPhy>(
         .lock()
         .aib
         .aps_security
-        .restore_outgoing_frame_counter(state.aps_frame_counter);
+        .restore_outgoing_frame_counter(request.state.aps_frame_counter);
     app.stack = Some(stack);
-
-    Ok(Response::Empty)
-}
-
-fn handle_load_key_table<P: RadioPhy>(
-    app: &mut App<P>,
-    request: LoadKeyTablePayload,
-) -> Result<Response, Error> {
-    let stack = loadable(app)?;
-
-    let mut core = stack.state.core.lock();
-    for entry in request.entries {
-        core.aib
-            .aps_security
-            .restore_device_key(entry.partner_ieee, entry.key);
-        if entry.rx_counter != 0 {
-            core.aib
-                .aps_security
-                .restore_incoming_frame_counter(entry.partner_ieee, entry.rx_counter);
-        }
-    }
-
-    Ok(Response::Empty)
-}
-
-fn handle_load_children<P: RadioPhy>(
-    app: &mut App<P>,
-    request: LoadChildrenPayload,
-) -> Result<Response, Error> {
-    let stack = loadable(app)?;
-
-    let now = stack.core_now();
-    let mut core = stack.state.core.lock();
-    for entry in request.entries {
-        let device_type = match entry.flags.device_type {
-            ChildDeviceType::Router => NwkDeviceType::Router,
-            // Unknown restores as an end device (the safe frame-pending default).
-            ChildDeviceType::Unknown | ChildDeviceType::EndDevice => NwkDeviceType::EndDevice,
-        };
-        core.nib.neighbors.upsert_child(
-            ChildDescriptor {
-                eui64: entry.ieee,
-                network_address: entry.nwk,
-                device_type,
-                rx_on_when_idle: entry.flags.rx_on_when_idle,
-                device_timeout: RESTORED_CHILD_TIMEOUT,
-                relationship: Relationship::Child,
-            },
-            now,
-        );
-        core.nib.address_map.update_mapping(entry.ieee, entry.nwk);
-    }
-
-    Ok(Response::Empty)
-}
-
-fn handle_load_address_cache<P: RadioPhy>(
-    app: &mut App<P>,
-    request: LoadAddressCachePayload,
-) -> Result<Response, Error> {
-    let stack = loadable(app)?;
-
-    let mut core = stack.state.core.lock();
-    for entry in request.entries {
-        core.nib.address_map.update_mapping(entry.ieee, entry.nwk);
-    }
 
     Ok(Response::Empty)
 }
@@ -1144,49 +239,6 @@ async fn handle_start_network<P: RadioPhy>(app: &mut App<P>) -> Result<Response,
     spawn_stack_pumps(&stack);
     app.started = true;
     Ok(Response::Empty)
-}
-
-fn handle_get_network_info<P: RadioPhy>(app: &App<P>) -> Result<Response, Error> {
-    let stack = configured(app)?;
-
-    let stack_state = &stack.state;
-    let core = stack_state.core.lock();
-    let nwk_security = &core.nib.nwk_security;
-    let aps_security = &core.aib.aps_security;
-
-    let (has_tclk_seed, tclk_seed, tclk_flavor) = match &stack.config.tclk_seed {
-        Some(tclk) => (
-            true,
-            tclk.seed.clone(),
-            match tclk.flavor {
-                TclkFlavor::ZStack => TclkFlavorId::ZStack,
-                TclkFlavor::Ezsp => TclkFlavorId::Ezsp,
-            },
-        ),
-        None => (false, Key([0; 16]), TclkFlavorId::ZStack),
-    };
-
-    Ok(Response::NetworkInfo(NetworkInfoPayload {
-        state: NetworkState {
-            channel: core.mac.channel,
-            nwk_update_id: core.nib.update_id,
-            pan_id: core.mac.pan_id,
-            extended_pan_id: stack_state.extended_pan_id,
-            nwk_address: stack_state.network_address,
-            ieee_address: stack_state.ieee_address,
-            network_key: nwk_security.network_key(),
-            network_key_seq: nwk_security.key_seq_number(),
-            network_key_tx_counter: nwk_security.outgoing_frame_counter(),
-            tc_link_key: stack.config.tc_link_key.clone(),
-            has_tclk_seed,
-            tclk_seed,
-            tclk_flavor,
-            tx_power: stack.config.tx_power as u8,
-            aps_frame_counter: aps_security.outgoing_frame_counter(),
-        },
-        key_count: aps_security.device_key_count() as u16,
-        started: app.started,
-    }))
 }
 
 /// Stream one table scan: snapshot under the core lock, then stream outside it
@@ -1205,44 +257,6 @@ async fn scan_table<P: RadioPhy>(
     }
 
     Ok(Response::ScanCount(ScanCountPayload { count }))
-}
-
-fn handle_send_aps<P: RadioPhy>(
-    app: &App<P>,
-    request_id: RequestId,
-    request: SendApsPayload,
-) -> Result<Response, Error> {
-    let stack = running(app)?;
-
-    let aps_security = (request.flags.aps_encryption && request.flags.has_eui64)
-        .then_some(request.destination_eui64);
-
-    let aps_ack = if request.flags.aps_ack {
-        ApsAck::Request
-    } else {
-        ApsAck::None
-    };
-
-    let outcome = stack.send_aps(
-        request.flags.delivery_mode,
-        request.destination,
-        request.profile_id,
-        request.cluster_id,
-        request.src_ep,
-        request.dst_ep,
-        aps_ack,
-        request.radius,
-        request.aps_seq,
-        request.asdu,
-        aps_security,
-        TxPriority::from_host(request.priority as i8),
-        StackRequestId::from(request_id),
-    );
-
-    match outcome {
-        Ok(()) => Ok(Response::Empty),
-        Err(e) => Err(Error::new(Status::TransmitFailed, &e.to_string())),
-    }
 }
 
 fn handle_permit_joins<P: RadioPhy>(
@@ -1329,25 +343,7 @@ async fn handle_network_scan<P: RadioPhy>(
             break;
         }
         for beacon in batch {
-            send_event(
-                request_id,
-                Event::Beacon(BeaconPayload {
-                    channel: beacon.channel,
-                    source: beacon.source.unwrap_or(Nwk(0xFFFF)),
-                    pan_id: beacon.pan_id,
-                    extended_pan_id: beacon.extended_pan_id,
-                    permit_joining: beacon.permit_joining,
-                    router_capacity: beacon.router_capacity,
-                    end_device_capacity: beacon.end_device_capacity,
-                    stack_profile: beacon.stack_profile,
-                    protocol_version: beacon.protocol_version,
-                    device_depth: beacon.device_depth,
-                    update_id: beacon.update_id,
-                    lqi: beacon.lqi,
-                    rssi: beacon.rssi as u8,
-                }),
-            )
-            .await;
+            send_event(request_id, Event::Beacon((&beacon).into())).await;
         }
     }
 
@@ -1405,127 +401,4 @@ async fn handle_packet_capture_channel<P: RadioPhy>(
         Ok(()) => Ok(Response::Empty),
         Err(e) => Err(Error::new(Status::RadioError, &e.to_string())),
     }
-}
-
-// -- notifications ---------------------------------------------------------------------
-
-/// Encode one unsolicited notification. `send_confirm`/`aps_ack_confirm` carry
-/// their originating request id in the envelope.
-pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
-    let notification = match update {
-        ZigbeeNotification::ReceivedApsCommand {
-            source,
-            destination,
-            group,
-            profile_id,
-            cluster_id,
-            src_ep,
-            dst_ep,
-            lqi,
-            rssi,
-            data,
-        } => Notification::ReceivedAps(ReceivedApsPayload {
-            source: *source,
-            destination: *destination,
-            has_group: group.is_some(),
-            group: group.unwrap_or(0),
-            profile_id: *profile_id,
-            cluster_id: *cluster_id,
-            src_ep: *src_ep,
-            dst_ep: *dst_ep,
-            lqi: *lqi,
-            rssi: *rssi as u8,
-            data: data.clone(),
-        }),
-        ZigbeeNotification::SendConfirm { request_id, result } => {
-            let (confirmed, next_hop, reason) = match result {
-                SendResult::Confirmed { next_hop } => {
-                    (true, next_hop.unwrap_or(Nwk(0xFFFF)), Vec::new())
-                }
-                SendResult::Failed { reason } => {
-                    (false, Nwk(0xFFFF), reason.to_string().into_bytes())
-                }
-            };
-            Notification::SendConfirm(
-                *request_id as u16,
-                SendConfirmPayload {
-                    confirmed,
-                    next_hop,
-                    reason,
-                },
-            )
-        }
-        ZigbeeNotification::ApsAckConfirm { request_id, result } => {
-            let (acked, reason) = match result {
-                ApsAckResult::Acked => (true, Vec::new()),
-                ApsAckResult::Failed { reason } => (false, reason.to_string().into_bytes()),
-            };
-            Notification::ApsAckConfirm(*request_id as u16, ApsAckConfirmPayload { acked, reason })
-        }
-        ZigbeeNotification::DeviceJoined { nwk, ieee, parent } => {
-            Notification::DeviceJoined(DeviceJoinedPayload {
-                nwk: *nwk,
-                ieee: *ieee,
-                parent: *parent,
-            })
-        }
-        ZigbeeNotification::DeviceLeft { nwk, ieee, reason } => {
-            let (reason_code, rejoin, router, router_ieee) = match reason {
-                DeviceLeaveReason::Announced { rejoin } => {
-                    (LeaveReason::Announced, *rejoin, None, None)
-                }
-                DeviceLeaveReason::RouterReported {
-                    router,
-                    router_ieee,
-                } => (
-                    LeaveReason::RouterReported,
-                    false,
-                    Some(*router),
-                    *router_ieee,
-                ),
-                DeviceLeaveReason::KeepaliveTimeout => {
-                    (LeaveReason::KeepaliveTimeout, false, None, None)
-                }
-            };
-            Notification::DeviceLeft(DeviceLeftPayload {
-                nwk: *nwk,
-                has_ieee: ieee.is_some(),
-                rejoin,
-                has_router_ieee: router_ieee.is_some(),
-                ieee: ieee.unwrap_or(Eui64([0; 8])),
-                reason: reason_code,
-                router: router.unwrap_or(Nwk(0xFFFF)),
-                router_ieee: router_ieee.unwrap_or(Eui64([0; 8])),
-            })
-        }
-        ZigbeeNotification::FrameCounterUpdate { frame_counter } => {
-            Notification::FrameCounter(FrameCounterPayload {
-                frame_counter: *frame_counter,
-            })
-        }
-        ZigbeeNotification::LinkKeyUpdate { ieee, key } => Notification::LinkKey(LinkKeyPayload {
-            ieee: *ieee,
-            key: key.clone(),
-        }),
-        ZigbeeNotification::ApsDecryptionFailure {
-            source,
-            source_ieee,
-            frame_counter,
-            key_id,
-        } => {
-            let key_id = match key_id {
-                NwkSecurityHeaderKeyId::DataKey => KeyId::Data,
-                NwkSecurityHeaderKeyId::NetworkKey => KeyId::Network,
-                NwkSecurityHeaderKeyId::KeyTransportKey => KeyId::KeyTransport,
-                NwkSecurityHeaderKeyId::KeyLoadKey => KeyId::KeyLoad,
-            };
-            Notification::ApsDecryptFailure(ApsDecryptFailPayload {
-                source: *source,
-                source_ieee: *source_ieee,
-                frame_counter: *frame_counter,
-                key_id,
-            })
-        }
-    };
-    notification.frame()
 }

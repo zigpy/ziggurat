@@ -273,6 +273,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cobs"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67ba02a97a2bd10f4b59b25c7973101c79642302776489e030cd13cdab09ed15"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,14 +2034,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ziggurat-protocol"
+version = "0.1.0"
+dependencies = [
+ "abstract-bits",
+ "arbitrary-int 2.1.1",
+ "num_enum",
+ "ziggurat-driver",
+ "ziggurat-ieee-802154",
+ "ziggurat-phy",
+ "ziggurat-zigbee",
+]
+
+[[package]]
 name = "ziggurat-server"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "cobs",
  "futures-util",
- "hex",
- "serde",
- "serde_json",
  "tokio",
  "tokio-serial",
  "tokio-tungstenite",
@@ -2044,6 +2061,7 @@ dependencies = [
  "ziggurat-driver",
  "ziggurat-phy",
  "ziggurat-phy-spinel",
+ "ziggurat-protocol",
  "ziggurat-spinel",
  "ziggurat-zigbee",
 ]
