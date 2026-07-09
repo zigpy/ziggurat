@@ -8,6 +8,7 @@ pub mod constants;
 pub mod crypto;
 pub mod indirect;
 pub mod nwk;
+pub mod ring_buffer;
 pub mod time;
 pub mod zdp;
 
