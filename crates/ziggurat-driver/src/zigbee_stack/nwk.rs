@@ -778,16 +778,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         const SEND_QUEUE_HEAP_FRACTION: usize = 8;
         const SEND_REQUEST_BYTES: usize =
             core::mem::size_of::<SendRequest>() + core::mem::size_of::<SendKind>();
+        // Slots kept free for stack-critical frames (acks, indirect delivery, joins) so a
+        // flood of best-effort host traffic can never starve them of a queue slot.
+        const CRITICAL_RESERVE: usize = 8;
 
         let capacity = match crate::mem::heap_arena() {
             0 => usize::MAX,
             arena => arena / SEND_QUEUE_HEAP_FRACTION / SEND_REQUEST_BYTES,
         };
+        let admit = if priority >= TxPriority::STACK_CRITICAL {
+            capacity
+        } else {
+            capacity.saturating_sub(CRITICAL_RESERVE)
+        };
 
         // Bound the queue and error early instead of crashing
         {
             let mut queue = self.send_queue.lock();
-            if queue.len() < capacity {
+            if queue.len() < admit {
                 queue.push(SendRequest {
                     seq,
                     priority,
