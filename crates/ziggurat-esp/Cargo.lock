@@ -2328,7 +2328,6 @@ dependencies = [
  "heapless 0.9.3",
  "hex",
  "num_enum",
- "serde",
  "thiserror",
 ]
 
@@ -2365,7 +2364,6 @@ dependencies = [
  "hex",
  "num_enum",
  "once_cell",
- "serde",
  "subtle",
  "thiserror",
  "tracing",
