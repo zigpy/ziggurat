@@ -1,7 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::vec;
 
-use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use ziggurat_ieee_802154::types::{Eui64, Key};
 
@@ -13,8 +12,7 @@ use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash,
 use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
 /// Which stack's seed-to-key transformation a TCLK seed uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TclkFlavor {
     ZStack,
     Ezsp,

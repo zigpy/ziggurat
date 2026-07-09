@@ -21,8 +21,7 @@ pub enum ApsFrameType {
 }
 
 #[abstract_bits(bits = 2)]
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum ApsDeliveryMode {
     Unicast = 0b00,
