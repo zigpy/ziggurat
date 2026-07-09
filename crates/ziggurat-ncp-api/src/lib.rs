@@ -32,23 +32,6 @@ pub static OUTBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, OUTBOUND_DEPTH> =
 /// Cancels an in-progress packet capture (see the `reset` command).
 pub type CaptureStop = embassy_sync::signal::Signal<CriticalSectionRawMutex, ()>;
 
-/// Global-allocator diagnostics for the `get_diagnostics` command. `used`/`free`/`size`
-/// describe the heap right now; the counters are cumulative since boot. A leak shows
-/// `used` (and `peak_used`) climbing; fragmentation shows `free` staying high while
-/// `alloc_failures` rises for a `largest_request` far below `free`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct HeapStats {
-    pub size: usize,
-    pub used: usize,
-    pub free: usize,
-    pub peak_used: usize,
-    pub alloc_ok: usize,
-    pub alloc_failures: usize,
-    pub dealloc: usize,
-    pub largest_request: usize,
-    pub largest_request_align: usize,
-}
-
 /// Board specifics the protocol surface needs but the transport-agnostic core can't know.
 pub trait Platform: Send + Sync {
     /// The factory-programmed EUI-64, used as the coordinator IEEE address.
@@ -61,12 +44,6 @@ pub trait Platform: Send + Sync {
     /// RX diagnostics: (total frames, frames dropped on a full queue) since boot.
     fn rx_counters(&self) -> (usize, usize) {
         (0, 0)
-    }
-
-    /// Heap diagnostics. Defaults to zeros for platforms with no instrumented allocator
-    /// (e.g. the std-hosted server).
-    fn heap_stats(&self) -> HeapStats {
-        HeapStats::default()
     }
 }
 

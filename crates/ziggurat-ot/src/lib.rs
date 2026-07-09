@@ -53,88 +53,16 @@ static HOST_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[cfg(target_os = "none")]
 mod heap {
-    use core::alloc::{GlobalAlloc, Layout};
-    use core::sync::atomic::{AtomicUsize, Ordering};
-
-    use embedded_alloc::TlsfHeap;
-    use ziggurat_ncp_api::HeapStats;
-
-    /// The two-level segregated-fit heap, wrapped to record cumulative alloc/dealloc
-    /// counts, peak live bytes, and the largest single request. TLSF is used over the
-    /// first-fit heap because the Zigbee stack's alloc/free churn fragments a first-fit
-    /// arena until a multi-KB request cannot be placed despite ample free bytes.
-    struct TrackingHeap {
-        inner: TlsfHeap,
-        alloc_ok: AtomicUsize,
-        alloc_fail: AtomicUsize,
-        dealloc: AtomicUsize,
-        largest_request: AtomicUsize,
-        // Alignment of the largest request, captured with it: `1` is a `Vec<u8>` byte
-        // buffer, `4` a collection of word/pointer-bearing structs, etc. — pins the shape
-        // of the biggest allocation the stack makes.
-        largest_request_align: AtomicUsize,
-    }
+    use embedded_alloc::LlffHeap;
 
     #[global_allocator]
-    static HEAP: TrackingHeap = TrackingHeap {
-        inner: TlsfHeap::empty(),
-        alloc_ok: AtomicUsize::new(0),
-        alloc_fail: AtomicUsize::new(0),
-        dealloc: AtomicUsize::new(0),
-        largest_request: AtomicUsize::new(0),
-        largest_request_align: AtomicUsize::new(0),
-    };
-
-    unsafe impl GlobalAlloc for TrackingHeap {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if layout.size() > self.largest_request.fetch_max(layout.size(), Ordering::Relaxed) {
-                self.largest_request_align
-                    .store(layout.align(), Ordering::Relaxed);
-            }
-            let ptr = unsafe { self.inner.alloc(layout) };
-            if ptr.is_null() {
-                self.alloc_fail.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.alloc_ok.fetch_add(1, Ordering::Relaxed);
-                ziggurat_driver::frame_token::record_alloc(layout.size());
-            }
-            ptr
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { self.inner.dealloc(ptr, layout) };
-            self.dealloc.fetch_add(1, Ordering::Relaxed);
-            ziggurat_driver::frame_token::record_dealloc(layout.size());
-        }
-    }
+    static HEAP: LlffHeap = LlffHeap::empty();
 
     const HEAP_BYTES: usize = 128 * 1024;
     static mut ARENA: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
     pub fn init() {
-        unsafe {
-            HEAP.inner
-                .init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES)
-        }
-        // Tell the stack how much heap it has, so it can size its heap-bounded queues.
-        ziggurat_driver::frame_token::set_heap_arena(HEAP_BYTES);
-    }
-
-    pub fn stats() -> HeapStats {
-        // TLSF exposes no used/free accounting, so report the tracked live total (the sum
-        // of live request sizes; excludes per-block overhead) and the arena's remainder.
-        let used = ziggurat_driver::frame_token::live();
-        HeapStats {
-            size: HEAP_BYTES,
-            used,
-            free: HEAP_BYTES.saturating_sub(used),
-            peak_used: ziggurat_driver::frame_token::peak(),
-            alloc_ok: HEAP.alloc_ok.load(Ordering::Relaxed),
-            alloc_failures: HEAP.alloc_fail.load(Ordering::Relaxed),
-            dealloc: HEAP.dealloc.load(Ordering::Relaxed),
-            largest_request: HEAP.largest_request.load(Ordering::Relaxed),
-            largest_request_align: HEAP.largest_request_align.load(Ordering::Relaxed),
-        }
+        unsafe { HEAP.init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES) }
     }
 }
 
@@ -217,11 +145,6 @@ impl Platform for OtPlatform {
             ziggurat_phy_otlink::rx_total(),
             ziggurat_phy_otlink::rx_dropped(),
         )
-    }
-
-    #[cfg(target_os = "none")]
-    fn heap_stats(&self) -> api::HeapStats {
-        heap::stats()
     }
 }
 

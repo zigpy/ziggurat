@@ -9,6 +9,9 @@ static CRITICAL_RESERVE: AtomicUsize = AtomicUsize::new(0);
 static FORWARDING_RESERVE: AtomicUsize = AtomicUsize::new(0);
 static USED_TOKENS: AtomicUsize = AtomicUsize::new(0);
 
+/// Allocator debug instrumentation
+static HEAP_ARENA_BYTES: AtomicUsize = AtomicUsize::new(0);
+
 /// Which tier of the frame budget admits a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrafficClass {
@@ -78,14 +81,6 @@ pub fn total() -> usize {
     TOTAL_TOKENS.load(Ordering::Relaxed)
 }
 
-// Allocator debug instrumentation below: the platform's heap arena size and the
-// tracking allocator's live/peak byte counters, surfaced through `get_diagnostics`.
-// Kept only while the memory work is being debugged; it will be removed.
-
-static HEAP_ARENA_BYTES: AtomicUsize = AtomicUsize::new(0);
-static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
-static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
-
 /// Called once by the platform at startup, before the stack runs.
 pub fn set_heap_arena(bytes: usize) {
     HEAP_ARENA_BYTES.store(bytes, Ordering::Relaxed);
@@ -94,21 +89,4 @@ pub fn set_heap_arena(bytes: usize) {
 /// The heap arena size, or 0 if unknown (an unbounded host allocator).
 pub fn heap_arena() -> usize {
     HEAP_ARENA_BYTES.load(Ordering::Relaxed)
-}
-
-pub fn record_alloc(bytes: usize) {
-    let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
-}
-
-pub fn record_dealloc(bytes: usize) {
-    LIVE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
-}
-
-pub fn live() -> usize {
-    LIVE_BYTES.load(Ordering::Relaxed)
-}
-
-pub fn peak() -> usize {
-    PEAK_BYTES.load(Ordering::Relaxed)
 }
