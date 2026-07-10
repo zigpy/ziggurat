@@ -267,9 +267,13 @@ impl Neighbors {
         self.table.contains_key(&eui64)
     }
 
-    /// The number of children, for join admission and beacon capacity decisions.
-    pub fn child_count(&self) -> usize {
-        self.table.values().filter(|entry| entry.is_child()).count()
+    /// The number of end device children, for join admission and beacon capacity
+    /// decisions.
+    pub fn end_device_child_count(&self) -> usize {
+        self.table
+            .values()
+            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
+            .count()
     }
 
     /// Spec 3.6.10.4: a MAC data poll from a known device refreshes its keepalive

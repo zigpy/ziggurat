@@ -60,20 +60,27 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let permitting_joins = self.permitting_joins();
 
-        // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
-        // admitted only while capacity remains
+        let device_type = match request.device_type {
+            AssociationRequestDeviceType::FullFunctionDevice => NwkDeviceType::Router,
+            AssociationRequestDeviceType::ReducedFunctionDevice => NwkDeviceType::EndDevice,
+        };
+
+        // Spec 3.6.1.6.1.3: known devices may always re-attach; new end device
+        // children are admitted only while parent capacity remains. Routers are never
+        // capped: they use us as the network entry point, not as a parent.
         let (already_known, at_capacity) = {
             let core = self.core();
 
             (
                 core.nib.neighbors.contains(source_eui64),
-                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children()),
+                core.nib.neighbors.end_device_child_count()
+                    >= usize::from(self.tunables.max_children()),
             )
         };
 
         let denial_status = if !permitting_joins {
             Some(Ieee802154AssociationStatus::PanAccessDenied)
-        } else if !already_known && at_capacity {
+        } else if device_type == NwkDeviceType::EndDevice && !already_known && at_capacity {
             Some(Ieee802154AssociationStatus::PanAtCapacity)
         } else {
             None
@@ -93,11 +100,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Joiners retry association requests if they miss our response, so the address
         // and table entries must be stable across retries
         self.update_nwk_eui64_mapping(short_address, source_eui64);
-
-        let device_type = match request.device_type {
-            AssociationRequestDeviceType::FullFunctionDevice => NwkDeviceType::Router,
-            AssociationRequestDeviceType::ReducedFunctionDevice => NwkDeviceType::EndDevice,
-        };
 
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
@@ -1038,18 +1040,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let requested_nwk = nwk_frame.nwk_header.source;
         let capability = &rejoin_request.capability_information;
 
-        // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
-        // admitted only while capacity remains
+        let device_type = match capability.device_type {
+            NwkRejoinCapabilityInformationDeviceType::Router => NwkDeviceType::Router,
+            NwkRejoinCapabilityInformationDeviceType::EndDevice => NwkDeviceType::EndDevice,
+        };
+
+        // Spec 3.6.1.6.1.3: known devices may always re-attach; new end device
+        // children are admitted only while parent capacity remains. Routers are never
+        // capped: they use us as the network entry point, not as a parent.
         let (already_known, at_capacity) = {
             let core = self.core();
 
             (
                 core.nib.neighbors.contains(source_ieee),
-                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children()),
+                core.nib.neighbors.end_device_child_count()
+                    >= usize::from(self.tunables.max_children()),
             )
         };
 
-        if !already_known && at_capacity {
+        if device_type == NwkDeviceType::EndDevice && !already_known && at_capacity {
             tracing::info!("Denying rejoin request from {source_ieee:?}, no child capacity left");
             self.send_rejoin_response(
                 requested_nwk,
@@ -1077,11 +1086,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::info!("Device {source_ieee:?} is rejoining as {assigned_nwk:?}");
 
         self.update_nwk_eui64_mapping(assigned_nwk, source_ieee);
-
-        let device_type = match capability.device_type {
-            NwkRejoinCapabilityInformationDeviceType::Router => NwkDeviceType::Router,
-            NwkRejoinCapabilityInformationDeviceType::EndDevice => NwkDeviceType::EndDevice,
-        };
 
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
