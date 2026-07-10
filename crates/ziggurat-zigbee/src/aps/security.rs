@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use crate::flat_map::FlatMap;
 use alloc::vec;
 
 use subtle::ConstantTimeEq;
@@ -101,7 +101,7 @@ pub struct ApsSecurity {
     global_link_key: Key,
     local_eui64: Eui64,
     /// Per-device link keys and replay counters, keyed by peer EUI64
-    devices: BTreeMap<Eui64, DeviceState>,
+    devices: FlatMap<Eui64, DeviceState>,
     /// When set, unique link keys are derived from this seed instead of generated
     /// randomly, mirroring the stack the network was taken over from
     tclk_seed: Option<TclkSeed>,
@@ -119,7 +119,7 @@ impl ApsSecurity {
         Self {
             global_link_key,
             local_eui64,
-            devices: BTreeMap::new(),
+            devices: FlatMap::new(),
             tclk_seed,
             outgoing_frame_counter: 0,
         }

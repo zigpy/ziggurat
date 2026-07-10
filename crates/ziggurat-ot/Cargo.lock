@@ -1449,7 +1449,6 @@ dependencies = [
  "heapless",
  "hex",
  "num_enum",
- "serde",
  "thiserror",
 ]
 
@@ -1458,13 +1457,13 @@ name = "ziggurat-ncp-api"
 version = "0.1.0"
 dependencies = [
  "abstract-bits",
- "arbitrary-int 2.1.1",
  "embassy-futures",
  "embassy-sync",
  "num_enum",
  "ziggurat-driver",
  "ziggurat-ieee-802154",
  "ziggurat-phy",
+ "ziggurat-protocol",
  "ziggurat-zigbee",
 ]
 
@@ -1508,6 +1507,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ziggurat-protocol"
+version = "0.1.0"
+dependencies = [
+ "abstract-bits",
+ "arbitrary-int 2.1.1",
+ "num_enum",
+ "ziggurat-driver",
+ "ziggurat-ieee-802154",
+ "ziggurat-phy",
+ "ziggurat-zigbee",
+]
+
+[[package]]
 name = "ziggurat-zigbee"
 version = "0.1.0"
 dependencies = [
@@ -1519,7 +1531,6 @@ dependencies = [
  "hex",
  "num_enum",
  "once_cell",
- "serde",
  "subtle",
  "thiserror",
  "tracing",

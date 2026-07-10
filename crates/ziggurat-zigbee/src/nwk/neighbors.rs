@@ -1,4 +1,4 @@
-use alloc::collections::{BTreeMap, BTreeSet};
+use crate::flat_map::{FlatMap, FlatSet};
 use alloc::vec::Vec;
 use core::cmp;
 
@@ -173,10 +173,10 @@ pub struct Neighbors {
     network_address: Nwk,
     /// Neighbors silent for this long get their link costs reset
     max_age: Duration,
-    table: BTreeMap<Eui64, TableEntry>,
+    table: FlatMap<Eui64, TableEntry>,
     /// LQI samples for senders that have no neighbor entry yet, capped at
     /// [`PENDING_LQA_CAP`] entries.
-    pending_lqas: BTreeMap<Nwk, LqaSamples>,
+    pending_lqas: FlatMap<Nwk, LqaSamples>,
 }
 
 impl Neighbors {
@@ -184,8 +184,8 @@ impl Neighbors {
         Self {
             network_address,
             max_age,
-            table: BTreeMap::new(),
-            pending_lqas: BTreeMap::new(),
+            table: FlatMap::new(),
+            pending_lqas: FlatMap::new(),
         }
     }
 
@@ -637,7 +637,7 @@ impl Neighbors {
                     None
                 }
             })
-            .collect::<BTreeSet<Nwk>>();
+            .collect::<FlatSet<Nwk>>();
 
         // Fold any LQI samples buffered for this address before its entry existed.
         let buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();

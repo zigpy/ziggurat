@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::sync::{AsyncMutex, Mutex, MutexGuard, Notify};
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
+use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -26,6 +26,7 @@ use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
+use ziggurat_zigbee::flat_map::FlatMap;
 use ziggurat_zigbee::nwk::frame::{EncryptedNwkFrame, NwkFrame, NwkSecurityHeaderKeyId};
 
 mod aps;
@@ -601,20 +602,20 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub pending_aps_acks: Mutex<BTreeMap<ApsAckData, PendingApsAck>>,
-    pub pending_routes: Mutex<BTreeMap<Nwk, PendingRoute>>,
+    pub pending_aps_acks: Mutex<FlatMap<ApsAckData, PendingApsAck>>,
+    pub pending_routes: Mutex<FlatMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
-    pub pending_broadcasts: Mutex<BTreeMap<(Nwk, u8), PendingBroadcast>>,
+    pub pending_broadcasts: Mutex<FlatMap<(Nwk, u8), PendingBroadcast>>,
     /// Unicasts awaiting re-transmission after a failed attempt. Unordered: each entry
     /// is an independent in-flight frame (no dedup key like broadcasts have), drained
     /// by the unicast-retry reactor when due.
     pub pending_unicast_retries: Mutex<Vec<PendingUnicastRetry>>,
-    pub address_conflicts: Mutex<BTreeMap<Nwk, AddressConflict>>,
+    pub address_conflicts: Mutex<FlatMap<Nwk, AddressConflict>>,
 
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
     /// the receipt time; an inbound data frame matching a live entry is a retransmission
     /// to be acknowledged but not delivered to the application a second time.
-    pub aps_duplicates: Mutex<BTreeMap<(Nwk, u8), CoreInstant>>,
+    pub aps_duplicates: Mutex<FlatMap<(Nwk, u8), CoreInstant>>,
 
     // We intentionally violate the spec with these options
     //
@@ -714,12 +715,12 @@ impl State {
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
             }),
-            pending_aps_acks: Mutex::new(BTreeMap::new()),
-            pending_routes: Mutex::new(BTreeMap::new()),
-            pending_broadcasts: Mutex::new(BTreeMap::new()),
+            pending_aps_acks: Mutex::new(FlatMap::new()),
+            pending_routes: Mutex::new(FlatMap::new()),
+            pending_broadcasts: Mutex::new(FlatMap::new()),
             pending_unicast_retries: Mutex::new(Vec::new()),
-            address_conflicts: Mutex::new(BTreeMap::new()),
-            aps_duplicates: Mutex::new(BTreeMap::new()),
+            address_conflicts: Mutex::new(FlatMap::new()),
+            aps_duplicates: Mutex::new(FlatMap::new()),
 
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
@@ -937,7 +938,7 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     spawner: R::Spawner,
 
     /// Per-task cancel signals, keyed by task id.
-    cancels: Mutex<BTreeMap<u32, Arc<Notify>>>,
+    cancels: Mutex<FlatMap<u32, Arc<Notify>>>,
     /// Hands each spawned task a unique id for the `cancels` map.
     next_task_id: AtomicU32,
     /// Woken whenever a task removes itself from `cancels`, so `shutdown` can await the
@@ -1026,7 +1027,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             pending_route_wake: Notify::new(),
             send_seq: AtomicU32::new(0),
             spawner,
-            cancels: Mutex::new(BTreeMap::new()),
+            cancels: Mutex::new(FlatMap::new()),
             next_task_id: AtomicU32::new(0),
             tasks_drained: Notify::new(),
         })

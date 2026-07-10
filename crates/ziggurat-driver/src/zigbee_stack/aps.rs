@@ -9,13 +9,13 @@ use ziggurat_zigbee::nwk::frame::{
     BROADCAST_LOW_POWER_ROUTERS, BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery,
 };
 
-use alloc::collections::btree_map::Entry;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cmp;
 use core::time::Duration;
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
+use ziggurat_zigbee::flat_map::Entry;
 
 use super::{
     ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, SendMode,
