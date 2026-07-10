@@ -3,7 +3,16 @@ resolver = "2"
 members = ["crates/*"]
 # ziggurat-phy-esp and ziggurat-esp only build for an ESP32-C6 (riscv32imac) with esp-hal;
 # excluded so host `cargo build` over the workspace doesn't try (and fail) to compile them.
-exclude = ["fuzz", "crates/ziggurat-phy-esp", "crates/ziggurat-esp"]
+# ziggurat-ot (and its ziggurat-ncp-api / ziggurat-phy-otlink deps) likewise only build
+# for thumbv8m.main-none-eabihf, as the staticlib embedded in the OpenThread RCP firmware.
+exclude = [
+    "fuzz",
+    "crates/ziggurat-phy-esp",
+    "crates/ziggurat-esp",
+    "crates/ziggurat-ncp-api",
+    "crates/ziggurat-ot",
+    "crates/ziggurat-phy-otlink",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +30,7 @@ ziggurat-phy-spinel = { path = "crates/ziggurat-phy-spinel", version = "0.1.0" }
 ziggurat-spinel = { path = "crates/ziggurat-spinel", version = "0.1.0" }
 ziggurat-zigbee = { path = "crates/ziggurat-zigbee", version = "0.1.0" }
 ziggurat-driver = { path = "crates/ziggurat-driver", version = "0.1.0" }
+ziggurat-protocol = { path = "crates/ziggurat-protocol", version = "0.1.0" }
 
 [profile.release-with-debug]
 inherits = "release"

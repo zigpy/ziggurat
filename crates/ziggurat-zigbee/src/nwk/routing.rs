@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use crate::flat_map::FlatMap;
 use alloc::vec::Vec;
 
 use crate::Instant;
@@ -164,9 +164,9 @@ pub struct Routing {
     mtorr_route_error_threshold: u8,
     mtorr_delivery_failure_threshold: u8,
 
-    route_table: BTreeMap<Nwk, TableEntry>,
-    discovery_table: BTreeMap<(Nwk, RouteRequestId), DiscoveryEntry>,
-    route_record_table: BTreeMap<Nwk, Vec<Nwk>>,
+    route_table: FlatMap<Nwk, TableEntry>,
+    discovery_table: FlatMap<(Nwk, RouteRequestId), DiscoveryEntry>,
+    route_record_table: FlatMap<Nwk, Vec<Nwk>>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
@@ -189,9 +189,9 @@ impl Routing {
             mtorr_delivery_failures: 0,
             mtorr_route_error_threshold,
             mtorr_delivery_failure_threshold,
-            route_table: BTreeMap::new(),
-            discovery_table: BTreeMap::new(),
-            route_record_table: BTreeMap::new(),
+            route_table: FlatMap::new(),
+            discovery_table: FlatMap::new(),
+            route_record_table: FlatMap::new(),
             request_sequence_number: 0,
         }
     }

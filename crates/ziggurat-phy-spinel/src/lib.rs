@@ -8,6 +8,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_ieee_802154::{FrameBytes, Ieee802154Frame};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
@@ -251,8 +252,13 @@ async fn apply_config(client: &SpinelClient, config: &RadioConfig) -> Result<(),
 }
 
 fn tx_frame_to_spinel(frame: TxFrame, channel: u8) -> SpinelTxFrame {
+    // The RCP's frame length must include the FCS.
+    let mut psdu = frame.psdu;
+    let fcs = Ieee802154Frame::<FrameBytes>::compute_fcs(&psdu).to_le_bytes();
+    psdu.extend_from_slice(&fcs);
+
     SpinelTxFrame {
-        psdu: frame.psdu,
+        psdu,
         channel: Some(frame.channel.unwrap_or(channel)),
         max_csma_backoffs: Some(frame.max_csma_backoffs),
         max_frame_retries: Some(frame.max_frame_retries),

@@ -13,7 +13,6 @@ abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", versio
 num_enum = { version = "0.7.3", default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 thiserror = { version = "2.0.12", default-features = false }
-serde = { version = "1.0.219", default-features = false, features = ["alloc"] }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 heapless = "0.9.3"
 

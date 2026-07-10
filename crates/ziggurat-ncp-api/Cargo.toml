@@ -1,0 +1,22 @@
+[package]
+name = "ziggurat-ncp-api"
+version = "0.1.0"
+edition = "2021"
+description = "Binary NCP control protocol shared by the embedded Ziggurat firmwares"
+license = "Apache-2.0"
+
+[dependencies]
+ziggurat-phy = { path = "../ziggurat-phy" }
+ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+ziggurat-driver = { path = "../ziggurat-driver", default-features = false, features = ["embassy"] }
+ziggurat-zigbee = { path = "../ziggurat-zigbee" }
+ziggurat-protocol = { path = "../ziggurat-protocol" }
+abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
+num_enum = { version = "0.7.3", default-features = false }
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+
+# Standalone workspace: consumed only by the MCU firmware crates (ziggurat-ot,
+# ziggurat-esp), which pin ziggurat-driver to the embassy runtime; excluded from the host
+# workspace so its feature selection doesn't unify with the tokio build.
+[workspace]

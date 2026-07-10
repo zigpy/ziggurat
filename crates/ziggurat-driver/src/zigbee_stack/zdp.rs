@@ -12,9 +12,10 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, MAX_DEPTH, NwkDeviceType, TxOutcome, TxPriority, ZigbeeStack, ZigbeeStackError,
-    neighbors, routing,
+    ApsAck, MAX_DEPTH, NwkDeviceType, TxOutcome, TxPolicy, TxPriority, ZigbeeStack,
+    ZigbeeStackError, neighbors, routing,
 };
+use crate::frame_token::TrafficClass;
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
@@ -282,7 +283,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             None,
         )?;
 
-        self.enqueue_aps_frame(nwk_frame, TxPriority::USER_NORMAL, TxOutcome::Discard);
+        // ZDP responses are answerable to the remote requester's retries: best-effort
+        self.enqueue_aps_frame(
+            nwk_frame,
+            TxPolicy {
+                priority: TxPriority::UserNormal,
+                class: TrafficClass::Host,
+            },
+            TxOutcome::Discard,
+        );
         Ok(())
     }
 

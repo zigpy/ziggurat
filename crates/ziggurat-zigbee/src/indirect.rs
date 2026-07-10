@@ -1,8 +1,8 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use crate::flat_map::{FlatMap, FlatSet};
 use alloc::collections::VecDeque;
-use alloc::collections::{BTreeMap, BTreeSet};
 
 use crate::Instant;
 
@@ -54,8 +54,8 @@ pub struct PollOutcome<F, C> {
 /// tell whether the auto-ACK of a given poll advertised frame-pending=1.
 #[derive(Debug, Default)]
 pub struct SrcMatchTable {
-    pub short_addresses: BTreeSet<Nwk>,
-    pub extended_addresses: BTreeSet<Eui64>,
+    pub short_addresses: FlatSet<Nwk>,
+    pub extended_addresses: FlatSet<Eui64>,
 }
 
 impl SrcMatchTable {
@@ -76,14 +76,14 @@ impl SrcMatchTable {
 pub struct IndirectQueue<F, C> {
     /// How long a transaction awaits a poll before expiring
     persistence_time: Duration,
-    queue: BTreeMap<Ieee802154Address, VecDeque<Transaction<F, C>>>,
+    queue: FlatMap<Ieee802154Address, VecDeque<Transaction<F, C>>>,
 }
 
 impl<F, C> IndirectQueue<F, C> {
     pub const fn new(persistence_time: Duration) -> Self {
         Self {
             persistence_time,
-            queue: BTreeMap::new(),
+            queue: FlatMap::new(),
         }
     }
 
@@ -235,7 +235,7 @@ impl<F, C> IndirectQueue<F, C> {
 
     /// The source address match table the RCP should hold: every device with queued
     /// transactions, under both its address forms (the device may poll with either).
-    pub fn queued_addresses(&self, address_map: &BTreeMap<Eui64, Nwk>) -> SrcMatchTable {
+    pub fn queued_addresses(&self, address_map: &FlatMap<Eui64, Nwk>) -> SrcMatchTable {
         let mut table = SrcMatchTable::default();
 
         for key in self.queue.keys() {

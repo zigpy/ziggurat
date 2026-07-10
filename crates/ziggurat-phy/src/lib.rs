@@ -17,8 +17,8 @@ pub trait Receiver<T>: Send {
     fn recv(&mut self) -> impl Future<Output = Option<T>> + Send;
 }
 
-/// A frame to transmit. `psdu` is the serialized 802.15.4 frame; the backend supplies
-/// or recomputes the FCS. `channel` overrides the current channel for this frame only.
+/// A frame to transmit. `psdu` is the 802.15.4 frame without the FCS; `channel`
+/// overrides the current channel for this frame only.
 #[derive(Debug, Clone)]
 pub struct TxFrame {
     pub psdu: Vec<u8>,
@@ -138,4 +138,14 @@ pub trait ExclusiveRadio: Send {
 
     fn transmit(&self, frame: TxFrame)
     -> impl Future<Output = Result<TxResult, RadioError>> + Send;
+
+    fn set_promiscuous(
+        &self,
+        promiscuous: bool,
+    ) -> impl Future<Output = Result<(), RadioError>> + Send {
+        async move {
+            let _ = promiscuous;
+            Ok(())
+        }
+    }
 }

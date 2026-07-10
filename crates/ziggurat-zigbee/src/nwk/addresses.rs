@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use crate::flat_map::FlatMap;
 
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 
@@ -9,7 +9,7 @@ use crate::nwk::neighbors::Neighbors;
 #[derive(Debug)]
 pub struct AddressMap {
     own_address: Nwk,
-    map: BTreeMap<Eui64, Nwk>,
+    map: FlatMap<Eui64, Nwk>,
 }
 
 impl AddressMap {
@@ -18,7 +18,7 @@ impl AddressMap {
     pub fn new(own_address: Nwk, own_eui64: Eui64) -> Self {
         Self {
             own_address,
-            map: BTreeMap::from([(own_eui64, own_address)]),
+            map: FlatMap::from([(own_eui64, own_address)]),
         }
     }
 
@@ -30,6 +30,14 @@ impl AddressMap {
         self.map
             .iter()
             .find_map(|(&eui64, &mapped)| (mapped == nwk).then_some(eui64))
+    }
+
+    /// Every known mapping except our own, for the client to persist.
+    pub fn entries(&self) -> impl Iterator<Item = (Eui64, Nwk)> + '_ {
+        self.map
+            .iter()
+            .map(|(&eui64, &nwk)| (eui64, nwk))
+            .filter(|&(_, nwk)| nwk != self.own_address)
     }
 
     /// Record a mapping learned from a frame. Returns true when the network address
@@ -125,7 +133,7 @@ impl AddressMap {
 
     /// The raw mapping, e.g. for completing indirect queue keys with the device's
     /// other address form.
-    pub const fn map(&self) -> &BTreeMap<Eui64, Nwk> {
+    pub const fn map(&self) -> &FlatMap<Eui64, Nwk> {
         &self.map
     }
 }

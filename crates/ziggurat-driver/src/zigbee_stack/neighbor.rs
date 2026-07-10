@@ -6,7 +6,9 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
-use super::{NwkSecurityMode, TxPriority, ZigbeeStack};
+use crate::frame_token::TrafficClass;
+
+use super::{NwkSecurityMode, TxPolicy, TxPriority, ZigbeeStack};
 
 /// Maximum number of link status entries that can be carried in a single frame.
 const MAX_LINK_STATUSES: usize = 7;
@@ -142,7 +144,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .transmit_broadcast_nwk_frame(
                     link_status_frame,
                     NwkSecurityMode::NetworkKey,
-                    TxPriority::BACKGROUND,
+                    // Housekeeping the mesh depends on: last to transmit, but never
+                    // memory-starved by a host flood
+                    TxPolicy {
+                        priority: TxPriority::Background,
+                        class: TrafficClass::Critical,
+                    },
                 )
                 .await
             {

@@ -21,8 +21,7 @@ pub enum ApsFrameType {
 }
 
 #[abstract_bits(bits = 2)]
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum ApsDeliveryMode {
     Unicast = 0b00,
@@ -162,6 +161,19 @@ impl ApsAckFrame {
     }
 }
 
+/// The cleartext header fields of an APS data frame, without the ASDU. Kept separate
+/// so [`EncryptedApsDataFrame`] doesn't carry a dead inline ASDU buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApsDataHeader {
+    pub frame_control: ApsFrameControl,
+    pub group_id: Option<u16>,
+    pub destination_endpoint: Option<u8>,
+    pub cluster_id: u16,
+    pub profile_id: u16,
+    pub source_endpoint: u8,
+    pub counter: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApsDataFrame {
     pub frame_control: ApsFrameControl,
@@ -174,9 +186,11 @@ pub struct ApsDataFrame {
     pub asdu: FrameBytes,
 }
 
-impl ApsDataFrame {
+impl ApsDataHeader {
+    /// Parse the header, returning it and the remaining bytes (the ASDU, or the
+    /// auxiliary header and ciphertext for a secured frame).
     #[allow(clippy::useless_let_if_seq)]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, &[u8]), ParseError> {
         if bytes.len() < 8 {
             return Err(ParseError::UnexpectedEnd { ty: "ApsDataFrame" });
         }
@@ -239,25 +253,22 @@ impl ApsDataFrame {
             return Err(ParseError::Unsupported("APS fragmentation"));
         }
 
-        let asdu =
-            FrameBytes::from_slice(remaining).map_err(|_| ParseError::TooLong { ty: "ASDU" })?;
-
-        Ok(Self {
-            frame_control,
-            group_id,
-            destination_endpoint,
-            cluster_id,
-            profile_id,
-            source_endpoint,
-            counter,
-            asdu,
-        })
+        Ok((
+            Self {
+                frame_control,
+                group_id,
+                destination_endpoint,
+                cluster_id,
+                profile_id,
+                source_endpoint,
+                counter,
+            },
+            remaining,
+        ))
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        extend_abstract_bits(&mut bytes, &self.frame_control);
+    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
+        extend_abstract_bits(bytes, &self.frame_control);
 
         if let Some(group_id) = self.group_id {
             bytes.extend(group_id.to_le_bytes());
@@ -271,6 +282,52 @@ impl ApsDataFrame {
         bytes.extend(self.profile_id.to_le_bytes());
         bytes.extend(self.source_endpoint.to_le_bytes());
         bytes.extend(self.counter.to_le_bytes());
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.serialize_into(&mut bytes);
+        bytes
+    }
+
+    pub const fn into_frame(self, asdu: FrameBytes) -> ApsDataFrame {
+        ApsDataFrame {
+            frame_control: self.frame_control,
+            group_id: self.group_id,
+            destination_endpoint: self.destination_endpoint,
+            cluster_id: self.cluster_id,
+            profile_id: self.profile_id,
+            source_endpoint: self.source_endpoint,
+            counter: self.counter,
+            asdu,
+        }
+    }
+}
+
+impl ApsDataFrame {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+        let (header, remaining) = ApsDataHeader::deserialize(bytes)?;
+        let asdu =
+            FrameBytes::from_slice(remaining).map_err(|_| ParseError::TooLong { ty: "ASDU" })?;
+
+        Ok(header.into_frame(asdu))
+    }
+
+    pub fn header(&self) -> ApsDataHeader {
+        ApsDataHeader {
+            frame_control: self.frame_control.clone(),
+            group_id: self.group_id,
+            destination_endpoint: self.destination_endpoint,
+            cluster_id: self.cluster_id,
+            profile_id: self.profile_id,
+            source_endpoint: self.source_endpoint,
+            counter: self.counter,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.header().serialize_into(&mut bytes);
         bytes.extend_from_slice(&self.asdu);
 
         bytes
@@ -893,8 +950,7 @@ impl EncryptedApsCommandFrame {
 #[derive(Educe, Clone, PartialEq, Eq)]
 #[educe(Debug)]
 pub struct EncryptedApsDataFrame {
-    /// The cleartext APS header fields; its `asdu` is empty
-    pub header: ApsDataFrame,
+    pub header: ApsDataHeader,
     pub aux_header: ApsAuxHeader,
     #[educe(Debug(method(format_hex)))]
     pub ciphertext: FrameBytes,
@@ -902,10 +958,7 @@ pub struct EncryptedApsDataFrame {
 
 impl ApsDataFrame {
     pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsDataFrame {
-        let header = Self {
-            asdu: FrameBytes::new(),
-            ..self.clone()
-        };
+        let header = self.header();
         let ciphertext = encrypt_aps_payload(key, aux_header, &header.to_bytes(), &self.asdu);
 
         EncryptedApsDataFrame {
@@ -918,11 +971,10 @@ impl ApsDataFrame {
 
 impl EncryptedApsDataFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
-        let mut header = ApsDataFrame::from_bytes(bytes)?;
-        let (aux_header, remaining) = ApsAuxHeader::deserialize(&header.asdu)?;
+        let (header, remaining) = ApsDataHeader::deserialize(bytes)?;
+        let (aux_header, remaining) = ApsAuxHeader::deserialize(remaining)?;
         let ciphertext = FrameBytes::from_slice(remaining)
             .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?;
-        header.asdu = FrameBytes::new();
 
         Ok(Self {
             header,
@@ -950,10 +1002,7 @@ impl EncryptedApsDataFrame {
             &self.ciphertext,
         )?;
 
-        Ok(ApsDataFrame {
-            asdu,
-            ..self.header.clone()
-        })
+        Ok(self.header.clone().into_frame(asdu))
     }
 }
 

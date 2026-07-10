@@ -1,10 +1,10 @@
-use alloc::collections::VecDeque;
-use alloc::collections::{BTreeMap, BTreeSet};
+use crate::flat_map::{FlatMap, FlatSet};
 use alloc::vec::Vec;
 use core::cmp;
 
 use crate::Instant;
 use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
+use crate::ring_buffer::RingBuffer;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 
@@ -14,6 +14,15 @@ use super::NwkDeviceType;
 // eliminates single outliers maintains a fast response to real changes in link quality,
 // and keeps memory requirements to a minimum.
 const LINK_QUALITY_SAMPLES: usize = 3;
+
+/// Cap on the buffer of LQI samples for senders without a neighbor entry: any device we
+/// merely overhear (or a spoofed source address) creates an entry, so the map must not
+/// grow with them. Sized above the ~30 routers a dense radio neighborhood can hold.
+const PENDING_LQA_CAP: usize = 64;
+
+/// The last [`LINK_QUALITY_SAMPLES`] LQI samples from one transmitter, stored inline:
+/// a heap buffer per neighbor would fragment a small arena.
+pub type LqaSamples = RingBuffer<u8, LINK_QUALITY_SAMPLES>;
 
 /// Compute the link cost (1-7) based on the LQI (0-255).
 const fn lqi_to_link_cost(lqi: u8) -> u8 {
@@ -50,8 +59,7 @@ pub struct TableEntry {
     /// A value indicating if previous transmissions to the device were successful or
     /// not. Higher values indicate more failures.
     pub transmit_failure: u8,
-    /// TODO: replace with a fixed-size ring buffer
-    pub lqas: VecDeque<u8>,
+    pub lqas: LqaSamples,
 
     /// The outgoing cost field contains the cost of the link as measured by the
     /// neighbor. The value is obtained from the most recent link status command frame
@@ -92,21 +100,21 @@ pub struct TableEntry {
 
 impl TableEntry {
     pub fn lqa(&self) -> Option<u8> {
-        let num_samples = self.lqas.len();
-        if num_samples < LINK_QUALITY_SAMPLES {
+        if !self.lqas.is_full() {
             return None;
         }
 
-        let mut sorted_lqas = Vec::from(self.lqas.clone());
-        sorted_lqas.sort_unstable();
+        let mut sorted = [0; LINK_QUALITY_SAMPLES];
+        sorted.copy_from_slice(self.lqas.values());
+        sorted.sort_unstable();
 
-        // Calculate median
-        if num_samples % 2 == 1 {
-            Some(sorted_lqas[num_samples / 2])
+        // The median of the sample window
+        if LINK_QUALITY_SAMPLES % 2 == 1 {
+            Some(sorted[LINK_QUALITY_SAMPLES / 2])
         } else {
-            // Average of the two middle elements for even number of samples
-            let mid1 = sorted_lqas[num_samples / 2 - 1];
-            let mid2 = sorted_lqas[num_samples / 2];
+            // Average of the two middle elements for an even sample count
+            let mid1 = sorted[LINK_QUALITY_SAMPLES / 2 - 1];
+            let mid2 = sorted[LINK_QUALITY_SAMPLES / 2];
             Some(((mid1 as u16 + mid2 as u16) / 2) as u8)
         }
     }
@@ -165,9 +173,10 @@ pub struct Neighbors {
     network_address: Nwk,
     /// Neighbors silent for this long get their link costs reset
     max_age: Duration,
-    table: BTreeMap<Eui64, TableEntry>,
-    /// LQI samples for senders that have no neighbor entry yet.
-    pending_lqas: BTreeMap<Nwk, VecDeque<u8>>,
+    table: FlatMap<Eui64, TableEntry>,
+    /// LQI samples for senders that have no neighbor entry yet, capped at
+    /// [`PENDING_LQA_CAP`] entries.
+    pending_lqas: FlatMap<Nwk, LqaSamples>,
 }
 
 impl Neighbors {
@@ -175,8 +184,8 @@ impl Neighbors {
         Self {
             network_address,
             max_age,
-            table: BTreeMap::new(),
-            pending_lqas: BTreeMap::new(),
+            table: FlatMap::new(),
+            pending_lqas: FlatMap::new(),
         }
     }
 
@@ -189,21 +198,18 @@ impl Neighbors {
             .values_mut()
             .find(|entry| entry.network_address == sender_nwk)
         {
-            entry.lqas.push_back(lqi);
-
-            if entry.lqas.len() > LINK_QUALITY_SAMPLES {
-                entry.lqas.pop_front();
-            }
+            entry.lqas.push(lqi);
         } else {
             // No neighbor entry yet (e.g. a sibling router that has not sent a link
             // status command). Buffer the sample so the entry starts with usable link
-            // quality the moment it is created, rather than discarding it.
-            let buffer = self.pending_lqas.entry(sender_nwk).or_default();
-            buffer.push_back(lqi);
-
-            if buffer.len() > LINK_QUALITY_SAMPLES {
-                buffer.pop_front();
+            // quality the moment it is created.
+            if self.pending_lqas.len() >= PENDING_LQA_CAP
+                && !self.pending_lqas.contains_key(&sender_nwk)
+            {
+                self.pending_lqas.pop_first();
             }
+
+            self.pending_lqas.entry(sender_nwk).or_default().push(lqi);
         }
     }
 
@@ -467,7 +473,7 @@ impl Neighbors {
             device_timeout: child.device_timeout,
             relationship: Relationship::Child,
             transmit_failure: 0,
-            lqas: VecDeque::new(),
+            lqas: LqaSamples::default(),
             outgoing_cost: 0,
             last_link_status_timestamp: now,
             incoming_beacon_timestamp: 0,
@@ -534,7 +540,7 @@ impl Neighbors {
             if neighbor.outgoing_cost > 0
                 && neighbor.last_link_status_timestamp + self.max_age <= now
             {
-                neighbor.lqas.truncate(0);
+                neighbor.lqas.clear();
                 neighbor.outgoing_cost = 0;
                 stale_neighbors.push(neighbor.network_address);
 
@@ -631,7 +637,7 @@ impl Neighbors {
                     None
                 }
             })
-            .collect::<BTreeSet<Nwk>>();
+            .collect::<FlatSet<Nwk>>();
 
         // Fold any LQI samples buffered for this address before its entry existed.
         let buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();
@@ -649,7 +655,7 @@ impl Neighbors {
                 device_timeout: Duration::from_secs(0xFFFFFFFF),
                 relationship: Relationship::Sibling,
                 transmit_failure: 0,
-                lqas: VecDeque::new(),
+                lqas: LqaSamples::default(),
                 outgoing_cost: 0,
                 last_link_status_timestamp: now,
                 incoming_beacon_timestamp: 0,
@@ -665,13 +671,10 @@ impl Neighbors {
                 security_timer: 0,
             };
 
-            // Seed the LQI deque with samples buffered before the entry existed plus the
-            // current one (the receive path could not record them without an entry).
-            entry.lqas.extend(buffered_lqas);
-            entry.lqas.push_back(lqi);
-            while entry.lqas.len() > LINK_QUALITY_SAMPLES {
-                entry.lqas.pop_front();
-            }
+            // Seed with the samples buffered before the entry existed plus the current
+            // one (the receive path could not record them without an entry).
+            entry.lqas = buffered_lqas;
+            entry.lqas.push(lqi);
 
             entry
         });

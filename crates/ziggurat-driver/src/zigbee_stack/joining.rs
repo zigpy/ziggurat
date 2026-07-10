@@ -1,3 +1,4 @@
+use crate::frame_token::{self, TrafficClass};
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::commands::{
     AssociationRequestDeviceType, Ieee802154AssociationRequestCommand,
@@ -23,9 +24,9 @@ use ziggurat_zigbee::nwk::frame::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
 };
 
-use alloc::format;
 use alloc::vec::Vec;
 use core::time::Duration;
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
     Nwk802154AssociationStatus, NwkCommand, NwkEndDeviceTimeoutRequestCommand,
     NwkEndDeviceTimeoutResponseCommand, NwkEndDeviceTimeoutResponseStatus, NwkLeaveCommand,
@@ -35,7 +36,8 @@ use ziggurat_zigbee::nwk::commands::{
 
 use super::{
     AddrConflictSource, DeviceLeaveReason, IndirectFrame, IndirectPayload, JoinKind, NwkDeviceType,
-    NwkSecurityMode, RadioPhy, SendMode, TxPriority, ZigbeeNotification, ZigbeeStack, neighbors,
+    NwkSecurityMode, RadioPhy, SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification,
+    ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -129,7 +131,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// 802.15.4 spec 6.4.1: association responses are sent indirectly. The joiner
     /// extracts the queued response by polling with a MAC Data Request; once the
-    /// response is extracted and acknowledged, the network key follows.
+    /// response is extracted and acknowledged, the network key follows (delivered by
+    /// the resolution of the queued [`TxOutcome::DeliverNetworkKey`]).
     fn queue_association_response(
         &self,
         eui64: Eui64,
@@ -140,31 +143,32 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // still queued from the previous attempt is stale
         self.drop_indirect_transactions(Some(eui64), short_address);
 
+        let Some(token) = frame_token::take(TrafficClass::Critical) else {
+            tracing::warn!("Frame budget exhausted; dropping association response to {eui64:?}");
+            return;
+        };
+
         let response_frame = self.build_802154_association_response(eui64, short_address, status);
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
+        // A denial has no follow-up; a successful join hands the joiner its network
+        // key once the response is extracted (spec 4.6.3.2).
+        let outcome = if matches!(status, Ieee802154AssociationStatus::AssociationSuccessful) {
+            TxOutcome::DeliverNetworkKey {
+                nwk: short_address,
+                eui64,
+            }
+        } else {
+            TxOutcome::Discard
+        };
 
-        self.spawn_tracked(async move {
-            let frame = IndirectFrame {
+        self.enqueue_indirect_frame(
+            IndirectFrame {
                 poll_address: Ieee802154Address::Eui64(eui64),
                 payload: IndirectPayload::Final(response_frame),
-            };
-            match arc_self.queue_indirect_frame(frame).await {
-                Ok(()) => {
-                    // Zigbee spec 4.6.3.2: the network key is delivered once the
-                    // device has confirmed receipt of its short address
-                    if matches!(status, Ieee802154AssociationStatus::AssociationSuccessful) {
-                        arc_self.send_network_key(short_address, eui64, JoinKind::New);
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("Association response to {eui64:?} was not extracted: {err}");
-                }
-            }
-        });
+                token,
+            },
+            outcome,
+        );
     }
 
     /// Pick an unused random network address for a joining device, reusing the previous
@@ -213,6 +217,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 super::AddressConflict {
                     handled_at: now,
                     heard_from_network: source == AddrConflictSource::Network,
+                    // Spec 3.6.1.10.5: a locally detected conflict is reported to the
+                    // network with a jittered Network Status broadcast, cancelled when
+                    // another device reports it first
+                    report_at: (source == AddrConflictSource::Local)
+                        .then(|| now + self.broadcast_jitter()),
                 },
             );
         }
@@ -220,7 +229,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::warn!("Address conflict detected on {address:?}");
 
         if source == AddrConflictSource::Local {
-            self.broadcast_address_conflict(address);
+            self.address_conflict_wake.notify_one();
         }
 
         if address == self.state.network_address {
@@ -242,38 +251,65 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core.nib.routing.remove_route(address);
     }
 
-    /// Spec 3.6.1.10.5: notify the network of an address conflict with a jittered
-    /// Network Status broadcast, cancelled when another device reports it first.
-    fn broadcast_address_conflict(&self, address: Nwk) {
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
-            R::sleep(
-                arc_self
-                    .tunables
-                    .max_broadcast_jitter
-                    .mul_f32(crate::rng::random_f32()),
-            )
-            .await;
-
-            let heard_from_network = arc_self
-                .state
-                .address_conflicts
-                .lock()
-                .get(&address)
-                .is_some_and(|conflict| conflict.heard_from_network);
-
-            if heard_from_network {
-                tracing::debug!(
-                    "Address conflict on {address:?} was already reported, not rebroadcasting"
-                );
-                return;
+    /// The address-conflict report reactor: a single long-lived task owning the
+    /// jittered Network Status broadcasts (spec 3.6.1.10.5). Sleeps to the earliest
+    /// owed report, then sends every due report another device hasn't already made.
+    pub(super) async fn address_conflict_task(&self) {
+        loop {
+            match self.earliest_conflict_report() {
+                Some(deadline) => {
+                    let _ = self
+                        .timeout_at_core(deadline, self.address_conflict_wake.notified())
+                        .await;
+                }
+                None => self.address_conflict_wake.notified().await,
             }
 
-            let conflict_frame = arc_self.nwk_command_frame(
+            self.drive_conflict_reports();
+        }
+    }
+
+    /// The soonest owed conflict report across all tracked conflicts, or `None` when
+    /// none is owed (the reactor then sleeps on its wake signal).
+    fn earliest_conflict_report(&self) -> Option<CoreInstant> {
+        self.state
+            .address_conflicts
+            .lock()
+            .values()
+            .filter_map(|conflict| conflict.report_at)
+            .min()
+    }
+
+    /// One reactor pass: broadcast every due report, unless another device's report
+    /// arrived during the jitter window.
+    fn drive_conflict_reports(&self) {
+        let now = self.core_now();
+
+        let due: Vec<Nwk> = {
+            let mut conflicts = self.state.address_conflicts.lock();
+            let mut due = Vec::new();
+
+            for (address, conflict) in conflicts.iter_mut() {
+                if conflict.report_at.is_none_or(|report_at| report_at > now) {
+                    continue;
+                }
+                conflict.report_at = None;
+
+                if conflict.heard_from_network {
+                    tracing::debug!(
+                        "Address conflict on {address:?} was already reported, not rebroadcasting"
+                    );
+                } else {
+                    due.push(*address);
+                }
+            }
+            drop(conflicts);
+
+            due
+        };
+
+        for address in due {
+            let conflict_frame = self.nwk_command_frame(
                 BROADCAST_RX_ON_WHEN_IDLE,
                 NwkCommand::NetworkStatus(NwkNetworkStatusCommand {
                     status_code: NwkNetworkStatus::AddressConflict,
@@ -281,15 +317,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }),
             );
 
-            // The retransmit reactor owns the rebroadcasts; this task only applies the
-            // jittered delay and the cancel-if-already-reported check above.
-            arc_self.send_broadcast_nwk_frame(
+            // The retransmit reactor owns the rebroadcasts; the jitter was applied by
+            // the report deadline, and the cancel-if-already-reported check above.
+            self.send_broadcast_nwk_frame(
                 conflict_frame,
                 NwkSecurityMode::NetworkKey,
-                TxPriority::USER_NORMAL,
+                TxPolicy {
+                    priority: TxPriority::UserNormal,
+                    class: TrafficClass::Critical,
+                },
                 None,
             );
-        });
+        }
     }
 
     /// Spec 3.6.1.10.5: pick a new address for an end device child caught in an
@@ -438,7 +477,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Zigbee spec 4.6.3.2: deliver the network key to a joining device. The NWK frame
     /// is unsecured; the APS command is encrypted with the key-transport key derived
     /// from the joiner's link key.
-    fn send_network_key(&self, destination: Nwk, destination_eui64: Eui64, join_kind: JoinKind) {
+    pub(super) fn send_network_key(
+        &self,
+        destination: Nwk,
+        destination_eui64: Eui64,
+        join_kind: JoinKind,
+    ) {
         let encrypted_command =
             self.build_encrypted_network_key_transport(destination_eui64, join_kind);
 
@@ -495,10 +539,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     source: nwk_frame.nwk_header.source,
                     source_ieee: extended_source,
                     frame_counter: encrypted_command_frame.aux_header.frame_counter,
-                    key_id: format!(
-                        "{:?}",
-                        encrypted_command_frame.aux_header.security_control.key_id
-                    ),
+                    key_id: encrypted_command_frame.aux_header.security_control.key_id,
                 });
             }
         }

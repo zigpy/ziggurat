@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use crate::flat_map::{FlatMap, FlatSet};
 
 use crate::Instant;
 
@@ -18,7 +18,7 @@ struct Transaction {
     expected_relayers: Vec<Nwk>,
     /// Neighbors heard relaying this broadcast: their passive acknowledgments
     /// (spec 3.6.6)
-    heard_from: BTreeSet<Nwk>,
+    heard_from: FlatSet<Nwk>,
 }
 
 /// The NWK broadcast transaction table: deduplication of received broadcasts and
@@ -30,7 +30,7 @@ pub struct Broadcasts {
     /// A broadcast with at least this many expected relayers is considered passively
     /// acknowledged once this many of them have been heard, instead of all of them
     quorum: usize,
-    table: BTreeMap<(Nwk, u8), Transaction>,
+    table: FlatMap<(Nwk, u8), Transaction>,
 }
 
 impl Broadcasts {
@@ -38,7 +38,7 @@ impl Broadcasts {
         Self {
             delivery_time,
             quorum,
-            table: BTreeMap::new(),
+            table: FlatMap::new(),
         }
     }
 
@@ -69,7 +69,7 @@ impl Broadcasts {
                 expiration_time: now + self.delivery_time,
                 expected_relayers: audience,
                 // Whoever delivered the frame to us has already broadcast it
-                heard_from: BTreeSet::from([sender]),
+                heard_from: FlatSet::from([sender]),
             },
         );
 
@@ -90,7 +90,7 @@ impl Broadcasts {
             Transaction {
                 expiration_time: now + self.delivery_time,
                 expected_relayers: audience,
-                heard_from: BTreeSet::new(),
+                heard_from: FlatSet::new(),
             },
         );
     }

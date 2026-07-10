@@ -1,7 +1,6 @@
-use alloc::collections::BTreeMap;
+use crate::flat_map::FlatMap;
 use alloc::vec;
 
-use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use ziggurat_ieee_802154::types::{Eui64, Key};
 
@@ -13,8 +12,7 @@ use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash,
 use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
 /// Which stack's seed-to-key transformation a TCLK seed uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TclkFlavor {
     ZStack,
     Ezsp,
@@ -103,7 +101,7 @@ pub struct ApsSecurity {
     global_link_key: Key,
     local_eui64: Eui64,
     /// Per-device link keys and replay counters, keyed by peer EUI64
-    devices: BTreeMap<Eui64, DeviceState>,
+    devices: FlatMap<Eui64, DeviceState>,
     /// When set, unique link keys are derived from this seed instead of generated
     /// randomly, mirroring the stack the network was taken over from
     tclk_seed: Option<TclkSeed>,
@@ -121,7 +119,7 @@ impl ApsSecurity {
         Self {
             global_link_key,
             local_eui64,
-            devices: BTreeMap::new(),
+            devices: FlatMap::new(),
             tclk_seed,
             outgoing_frame_counter: 0,
         }
@@ -157,6 +155,31 @@ impl ApsSecurity {
             key,
             attributes: KeyAttributes::Verified,
         });
+    }
+
+    /// Restore a device's incoming (replay) frame counter persisted by the client.
+    pub fn restore_incoming_frame_counter(&mut self, eui64: Eui64, counter: u32) {
+        self.devices
+            .entry(eui64)
+            .or_default()
+            .incoming_frame_counter = Some(counter);
+    }
+
+    /// A device's incoming (replay) frame counter, for the client to persist.
+    pub fn incoming_frame_counter(&self, eui64: Eui64) -> Option<u32> {
+        self.devices.get(&eui64)?.incoming_frame_counter
+    }
+
+    /// The outgoing frame counter shared by all link-key-encrypted frames, for the
+    /// client to persist.
+    pub const fn outgoing_frame_counter(&self) -> u32 {
+        self.outgoing_frame_counter
+    }
+
+    /// Restore the shared outgoing frame counter persisted by the client. Never
+    /// moves it backwards.
+    pub fn restore_outgoing_frame_counter(&mut self, counter: u32) {
+        self.outgoing_frame_counter = self.outgoing_frame_counter.max(counter);
     }
 
     /// Register a link key provisioned out of band (derived from an install code)

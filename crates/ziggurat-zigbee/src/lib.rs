@@ -6,8 +6,10 @@ pub mod aps;
 pub mod beacon;
 pub mod constants;
 pub mod crypto;
+pub mod flat_map;
 pub mod indirect;
 pub mod nwk;
+pub mod ring_buffer;
 pub mod time;
 pub mod zdp;
 

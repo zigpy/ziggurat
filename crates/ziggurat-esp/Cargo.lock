@@ -1864,19 +1864,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_json"
-version = "1.0.150"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
-dependencies = [
- "itoa",
- "memchr",
- "serde",
- "serde_core",
- "zmij",
-]
-
-[[package]]
 name = "serde_yaml"
 version = "0.9.34+deprecated"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2314,10 +2301,7 @@ name = "ziggurat-esp"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
- "embassy-futures",
  "embassy-sync 0.8.0",
- "embassy-time",
- "embedded-io-async 0.7.0",
  "esp-alloc 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
@@ -2326,9 +2310,6 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "heapless 0.9.3",
- "hex",
- "serde",
- "serde_json",
  "subtle",
  "tracing",
  "ziggurat-driver",
@@ -2347,7 +2328,6 @@ dependencies = [
  "heapless 0.9.3",
  "hex",
  "num_enum",
- "serde",
  "thiserror",
 ]
 
@@ -2384,15 +2364,8 @@ dependencies = [
  "hex",
  "num_enum",
  "once_cell",
- "serde",
  "subtle",
  "thiserror",
  "tracing",
  "ziggurat-ieee-802154",
 ]
-
-[[package]]
-name = "zmij"
-version = "1.0.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"

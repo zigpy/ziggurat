@@ -1,0 +1,28 @@
+id: ziggurat_stack
+label: Ziggurat Zigbee stack
+package: ziggurat
+category: Ziggurat
+quality: experimental
+description: >
+  Embeds the Ziggurat Zigbee stack into an OpenThread RCP. Takes over
+  the NCP vendor hook: owns otAppNcpInit and the vendor Spinel property range,
+  tunneling Ziggurat's binary control protocol over PROP_ZIGGURAT.
+provides:
+  - name: ziggurat_stack
+requires:
+  - name: ot_ncp
+conflicts:
+  - name: ot_ncp_vendor_extension
+define:
+  - name: OPENTHREAD_ENABLE_NCP_VENDOR_HOOK
+    value: 1
+include:
+  - path: inc
+    file_list:
+      - path: ziggurat.h
+      - path: ziggurat_glue.h
+source:
+  - path: src/ziggurat_ncp.cpp
+  - path: src/ziggurat_glue.cpp
+library:
+  - path: lib/libziggurat_ot.a

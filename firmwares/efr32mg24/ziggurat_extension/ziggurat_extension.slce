@@ -1,0 +1,7 @@
+id: ziggurat
+label: Ziggurat
+description: Ziggurat Zigbee stack embedded in an OpenThread RCP
+vendor: nabucasa
+version: "1.0.0"
+component_path:
+  - path: "./"

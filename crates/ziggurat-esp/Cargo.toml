@@ -3,7 +3,7 @@ name = "ziggurat-esp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
-description = "ESP32-C6 firmware running the Ziggurat stack with a line-delimited JSON API"
+description = "ESP32-C6 firmware hardware bring-up for the Ziggurat stack (no control API yet)"
 license = "Apache-2.0"
 
 [[bin]]
@@ -37,16 +37,10 @@ esp-println = { version = "0.17.0", default-features = false, features = [
 ] }
 
 embassy-executor = "0.10"
-embassy-time = "0.5"
 embassy-sync = "0.8"
-embassy-futures = "0.1"
-embedded-io-async = "0.7"
 
 heapless = { version = "0.9", default-features = false }
 tracing = { version = "0.1", default-features = false }
-serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
-hex = { version = "0.4", default-features = false, features = ["alloc"] }
 subtle = { version = "2", default-features = false }
 
 [profile.release]

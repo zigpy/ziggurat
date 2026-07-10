@@ -1,6 +1,5 @@
 use core::fmt;
 
-use alloc::string::String;
 use hex;
 
 use crate::ParseError;
@@ -35,24 +34,6 @@ fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N], FromHexError> {
 
     Ok(bytes)
 }
-
-/// Hex-string forms (as used in the client wire protocol) deserialize through
-/// `try_from_hex` so malformed client input is an error, never a panic.
-macro_rules! deserialize_via_try_from_hex {
-    ($ty:ty) => {
-        impl<'de> serde::Deserialize<'de> for $ty {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let text = String::deserialize(deserializer)?;
-                Self::try_from_hex(&text).map_err(serde::de::Error::custom)
-            }
-        }
-    };
-}
-
-deserialize_via_try_from_hex!(Nwk);
-deserialize_via_try_from_hex!(Eui64);
-deserialize_via_try_from_hex!(PanId);
-deserialize_via_try_from_hex!(Key);
 
 #[abstract_bits::abstract_bits]
 #[derive(Eq, Hash, Copy, Clone, PartialEq, PartialOrd, Ord)]

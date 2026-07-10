@@ -1,0 +1,6 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+# The firmware builder's DWARF-reproducibility check rejects absolute host paths.
+[target.thumbv8m.main-none-eabihf]
+rustflags = ["--remap-path-prefix", "/Users/nikita/Projects/ziggurat=/src/ziggurat"]
