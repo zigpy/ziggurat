@@ -21,10 +21,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// `poll_address`. Its `outcome` is resolved when the device extracts the frame, or
     /// with an error on expiry or eviction.
     pub(super) fn enqueue_indirect_frame(&self, frame: IndirectFrame, outcome: TxOutcome) {
-        self.core()
-            .mac
-            .indirect_queue
-            .push(frame.poll_address, frame, outcome, self.core_now());
+        self.core().mac.indirect_queue.push(
+            frame.poll_address,
+            frame,
+            outcome,
+            self.core_now(),
+            self.tunables.transaction_persistence_time(),
+        );
 
         self.src_match_sync.notify_one();
         self.maintenance_wake.notify_one();

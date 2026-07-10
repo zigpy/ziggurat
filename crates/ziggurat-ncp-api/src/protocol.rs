@@ -216,7 +216,7 @@ async fn handle_configure<P: RadioPhy>(
     }
     app.started = false;
 
-    let stack = ZigbeeStack::new(app.phy.clone(), config, Tunables::new(), app.spawner);
+    let stack = ZigbeeStack::new(app.phy.clone(), config, Tunables::default(), app.spawner);
     stack
         .state
         .core

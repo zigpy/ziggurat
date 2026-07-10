@@ -583,7 +583,7 @@ impl ZigguratServer {
         let stack = ZigbeeStack::new(
             phy,
             proto::network_config(&payload),
-            Tunables::new(),
+            Tunables::default(),
             TokioSpawner::default(),
         );
         stack

@@ -74,7 +74,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::trace!("Sending 802.15.4 beacon frame (permitting joins: {permitting_joins})");
 
         let end_device_capacity =
-            { self.core().nib.neighbors.child_count() } < usize::from(self.tunables.max_children);
+            { self.core().nib.neighbors.child_count() } < usize::from(self.tunables.max_children());
 
         let (ieee802154_sequence_number, pan_id, update_id) = {
             let core = self.core();
@@ -420,8 +420,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 psdu: final_frame.to_bytes_without_fcs(),
                 channel: Some(channel),
                 csma_ca: true,
-                max_frame_retries: self.tunables.mac_max_frame_retries,
-                max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
+                max_frame_retries: self.tunables.mac_max_frame_retries(),
+                max_csma_backoffs: self.tunables.mac_max_csma_backoffs(),
                 security_processed: true,
             })
             .await?;

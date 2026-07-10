@@ -23,25 +23,12 @@ struct Transaction {
 
 /// The NWK broadcast transaction table: deduplication of received broadcasts and
 /// passive acknowledgment accounting (spec 3.6.6).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Broadcasts {
-    /// How long a transaction stays in the table (`nwkNetworkBroadcastDeliveryTime`)
-    delivery_time: Duration,
-    /// A broadcast with at least this many expected relayers is considered passively
-    /// acknowledged once this many of them have been heard, instead of all of them
-    quorum: usize,
     table: FlatMap<(Nwk, u8), Transaction>,
 }
 
 impl Broadcasts {
-    pub const fn new(delivery_time: Duration, quorum: usize) -> Self {
-        Self {
-            delivery_time,
-            quorum,
-            table: FlatMap::new(),
-        }
-    }
-
     /// Digest a received broadcast. Returns true for a known transaction, which also
     /// records the sender's passive acknowledgment: the frame is a duplicate and must
     /// be filtered. An unknown broadcast creates a transaction expecting passive acks
@@ -53,6 +40,7 @@ impl Broadcasts {
         sender: Nwk,
         audience: Vec<Nwk>,
         now: Instant,
+        delivery_time: Duration,
     ) -> bool {
         self.table.retain(|_, entry| entry.expiration_time > now);
 
@@ -66,7 +54,7 @@ impl Broadcasts {
         self.table.insert(
             (source, sequence_number),
             Transaction {
-                expiration_time: now + self.delivery_time,
+                expiration_time: now + delivery_time,
                 expected_relayers: audience,
                 // Whoever delivered the frame to us has already broadcast it
                 heard_from: FlatSet::from([sender]),
@@ -84,11 +72,12 @@ impl Broadcasts {
         sequence_number: u8,
         audience: Vec<Nwk>,
         now: Instant,
+        delivery_time: Duration,
     ) {
         self.table.insert(
             (source, sequence_number),
             Transaction {
-                expiration_time: now + self.delivery_time,
+                expiration_time: now + delivery_time,
                 expected_relayers: audience,
                 heard_from: FlatSet::new(),
             },
@@ -101,7 +90,13 @@ impl Broadcasts {
     /// unreasonable to wait for all ~40 nearby routers, so _enough_ of them suffice.
     /// An absent (expired) transaction means the delivery window has already closed,
     /// which counts as acknowledged.
-    pub fn passively_acked(&self, source: Nwk, sequence_number: u8, live_relayers: &[Nwk]) -> bool {
+    pub fn passively_acked(
+        &self,
+        source: Nwk,
+        sequence_number: u8,
+        live_relayers: &[Nwk],
+        quorum: usize,
+    ) -> bool {
         self.table
             .get(&(source, sequence_number))
             .is_none_or(|transaction| {
@@ -117,7 +112,7 @@ impl Broadcasts {
                     .filter(|nwk| transaction.heard_from.contains(nwk))
                     .count();
 
-                heard >= audience.len().min(self.quorum)
+                heard >= audience.len().min(quorum)
             })
     }
 }

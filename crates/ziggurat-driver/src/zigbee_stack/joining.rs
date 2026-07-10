@@ -67,7 +67,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             (
                 core.nib.neighbors.contains(source_eui64),
-                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children),
+                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children()),
             )
         };
 
@@ -102,7 +102,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
         let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default.duration()
+            self.tunables.end_device_timeout_default().duration()
         } else {
             Duration::from_secs(0xFFFFFFFF)
         };
@@ -200,7 +200,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let mut conflicts = self.state.address_conflicts.lock();
 
             let now = self.core_now();
-            let window = self.tunables.broadcast_delivery_time;
+            let window = self.tunables.broadcast_delivery_time();
 
             // Detection re-triggers on every frame from the conflicted devices, so a
             // conflict is handled once per delivery window
@@ -859,7 +859,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec Table 4-7: Update-Device must be APS-encrypted when we share a unique link
         // key with the relaying router. Drop an unencrypted one from such a router unless
         // policy explicitly allows it.
-        if !aps_encrypted && !self.tunables.allow_unencrypted_router_device_update {
+        if !aps_encrypted && !self.tunables.allow_unencrypted_router_device_update() {
             let router_ieee = nwk_frame
                 .nwk_header
                 .source_ieee
@@ -1018,7 +1018,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// exposed under the well-known key); the `allow_unsecured_rejoins` policy overrides
     /// this for migration scenarios.
     fn may_rejoin_unsecured(&self, eui64: Eui64) -> bool {
-        self.tunables.allow_unsecured_rejoins
+        self.tunables.allow_unsecured_rejoins()
             || self.core().aib.aps_security.has_unique_link_key(eui64)
     }
 
@@ -1045,7 +1045,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             (
                 core.nib.neighbors.contains(source_ieee),
-                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children),
+                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children()),
             )
         };
 
@@ -1086,7 +1086,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
         let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default.duration()
+            self.tunables.end_device_timeout_default().duration()
         } else {
             Duration::from_secs(0xFFFFFFFF)
         };

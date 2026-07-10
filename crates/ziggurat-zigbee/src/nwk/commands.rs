@@ -264,7 +264,9 @@ pub struct NwkLeaveCommand {
 }
 
 #[abstract_bits(bits = 8)]
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[derive(
+    Debug, Eq, PartialEq, Clone, Copy, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
 #[repr(u8)]
 pub enum EndDeviceTimeout {
     Seconds10 = 0,

@@ -151,18 +151,13 @@ pub enum RouteReplyDisposition {
 
 /// The NWK routing layer: route table, route discovery table, and route record table,
 /// with the decision logic for route request/reply processing.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Routing {
-    network_address: Nwk,
-    route_discovery_time: Duration,
-
     /// Route-repair signals counted since the last many-to-one route request
     /// (route-failure network statuses and locally failed unicast deliveries);
     /// crossing a threshold warrants advertising the concentrator early
     mtorr_route_errors: u8,
     mtorr_delivery_failures: u8,
-    mtorr_route_error_threshold: u8,
-    mtorr_delivery_failure_threshold: u8,
 
     route_table: FlatMap<Nwk, TableEntry>,
     discovery_table: FlatMap<(Nwk, RouteRequestId), DiscoveryEntry>,
@@ -176,38 +171,18 @@ pub struct Routing {
 }
 
 impl Routing {
-    pub const fn new(
-        network_address: Nwk,
-        route_discovery_time: Duration,
-        mtorr_route_error_threshold: u8,
-        mtorr_delivery_failure_threshold: u8,
-    ) -> Self {
-        Self {
-            network_address,
-            route_discovery_time,
-            mtorr_route_errors: 0,
-            mtorr_delivery_failures: 0,
-            mtorr_route_error_threshold,
-            mtorr_delivery_failure_threshold,
-            route_table: FlatMap::new(),
-            discovery_table: FlatMap::new(),
-            route_record_table: FlatMap::new(),
-            request_sequence_number: 0,
-        }
-    }
-
     /// Count a received route-failure network status toward an early many-to-one
-    /// route request. Returns whether the accumulated signals warrant one.
-    pub const fn note_route_error(&mut self) -> bool {
+    /// route request. Returns whether the accumulated signals reach `threshold`.
+    pub const fn note_route_error(&mut self, threshold: u8) -> bool {
         self.mtorr_route_errors = self.mtorr_route_errors.saturating_add(1);
-        self.mtorr_route_errors >= self.mtorr_route_error_threshold
+        self.mtorr_route_errors >= threshold
     }
 
     /// Count a locally failed unicast delivery toward an early many-to-one route
-    /// request. Returns whether the accumulated signals warrant one.
-    pub const fn note_delivery_failure(&mut self) -> bool {
+    /// request. Returns whether the accumulated signals reach `threshold`.
+    pub const fn note_delivery_failure(&mut self, threshold: u8) -> bool {
         self.mtorr_delivery_failures = self.mtorr_delivery_failures.saturating_add(1);
-        self.mtorr_delivery_failures >= self.mtorr_delivery_failure_threshold
+        self.mtorr_delivery_failures >= threshold
     }
 
     /// A many-to-one route request went out: the accumulated route-repair signals
@@ -334,7 +309,13 @@ impl Routing {
     /// Prepare table state for a route discovery we originate: the routing entry enters
     /// `DiscoveryUnderway` and a discovery entry keyed by our own address is created.
     /// Returns the request identifier to put in the route request command.
-    pub fn begin_discovery(&mut self, destination: Nwk, now: Instant) -> RouteRequestId {
+    pub fn begin_discovery(
+        &mut self,
+        own_address: Nwk,
+        destination: Nwk,
+        now: Instant,
+        route_discovery_time: Duration,
+    ) -> RouteRequestId {
         // Expire stale discoveries before establishing the new one. A just-expired
         // discovery toward this same destination would otherwise tear down the
         // `DiscoveryUnderway` route entry created below.
@@ -349,17 +330,17 @@ impl Routing {
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
         let request_id = self.request_sequence_number;
 
-        let key = (self.network_address, request_id);
+        let key = (own_address, request_id);
         let discovery_entry = self
             .discovery_table
             .entry(key)
             .or_insert_with(|| DiscoveryEntry {
                 route_request_id: request_id,
-                source_address: self.network_address,
+                source_address: own_address,
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
                 residual_cost: u8::MAX,
-                expiration_time: now + self.route_discovery_time,
+                expiration_time: now + route_discovery_time,
                 destination_address: destination,
             });
 
@@ -370,7 +351,12 @@ impl Routing {
 
     /// Register the discovery entry backing a many-to-one route advertisement, which
     /// is addressed to a broadcast address and never answered with a reply.
-    pub fn begin_many_to_one_advertisement(&mut self, now: Instant) -> RouteRequestId {
+    pub fn begin_many_to_one_advertisement(
+        &mut self,
+        own_address: Nwk,
+        now: Instant,
+        route_discovery_time: Duration,
+    ) -> RouteRequestId {
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
         let request_id = self.request_sequence_number;
 
@@ -379,14 +365,14 @@ impl Routing {
         // The discovery entry exists purely for loop detection: relayed copies of our
         // own request will compare against the zero forward cost and be dropped
         self.discovery_table.insert(
-            (self.network_address, request_id),
+            (own_address, request_id),
             DiscoveryEntry {
                 route_request_id: request_id,
-                source_address: self.network_address,
+                source_address: own_address,
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
                 residual_cost: u8::MAX,
-                expiration_time: now + self.route_discovery_time,
+                expiration_time: now + route_discovery_time,
                 destination_address: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
             },
         );
@@ -421,6 +407,7 @@ impl Routing {
         updated_path_cost: u8,
         many_to_one: NwkRouteRequestManyToOne,
         now: Instant,
+        route_discovery_time: Duration,
     ) -> bool {
         self.expire_discoveries(now);
 
@@ -443,7 +430,7 @@ impl Routing {
                         sender_address: sender,
                         forward_cost: updated_path_cost,
                         residual_cost: u8::MAX,
-                        expiration_time: now + self.route_discovery_time,
+                        expiration_time: now + route_discovery_time,
                         destination_address: destination,
                     },
                 );
@@ -490,6 +477,7 @@ impl Routing {
     /// `updated_path_cost` is the advertised cost plus the sender's outgoing link cost.
     pub fn accept_route_reply(
         &mut self,
+        own_address: Nwk,
         originator: Nwk,
         request_id: RouteRequestId,
         responder: Nwk,
@@ -507,7 +495,7 @@ impl Routing {
         };
 
         // If we are the originator, handling is simplified
-        if originator == self.network_address {
+        if originator == own_address {
             if routing_entry.status == Status::Active
                 && updated_path_cost >= discovery_entry.residual_cost
             {
