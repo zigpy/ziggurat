@@ -322,7 +322,10 @@ pub struct SendApsFlags {
     pub aps_ack: bool,
     pub aps_encryption: bool,
     pub delivery_mode: ApsDeliveryMode,
-    pub reserved: u3,
+    /// The destination is a sleepy device. It only sees frames by polling its parent,
+    /// so the APS ack wait must cover a poll cycle.
+    pub sleepy_destination: bool,
+    pub reserved: u2,
 }
 
 #[abstract_bits]
