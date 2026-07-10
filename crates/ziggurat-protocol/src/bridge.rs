@@ -272,6 +272,20 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
         .map_err(|e| Error::new(Status::TransmitFailed, &e.to_string()))
 }
 
+/// Apply a `set_tunable` to the stack: the name is matched against the Rust field
+/// names of `Tunables`, the raw value decoded per the field's type.
+pub fn set_tunable<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: &SetTunablePayload,
+) -> Result<(), Error> {
+    let name = core::str::from_utf8(&payload.name)
+        .map_err(|_| Error::new(Status::InvalidRequest, "tunable name is not UTF-8"))?;
+
+    stack
+        .set_tunable(name, payload.value)
+        .map_err(|e| Error::new(Status::InvalidRequest, &alloc::format!("{name}: {e}")))
+}
+
 /// Encode one unsolicited notification. `send_confirm`/`aps_ack_confirm` carry
 /// their originating request id in the envelope.
 pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {

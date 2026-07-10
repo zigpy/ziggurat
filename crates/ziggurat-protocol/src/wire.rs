@@ -49,6 +49,7 @@ pub enum CommandId {
     NetworkScan = 0x26,
     PacketCapture = 0x27,
     PacketCaptureChannel = 0x28,
+    SetTunable = 0x29,
     // More notifications.
     ReceivedAps = 0x30,
     SendConfirm = 0x31,
@@ -369,6 +370,19 @@ pub struct ProvisionalKeyPayload {
     pub key: Key,
 }
 
+/// Sets one driver tunable by its Rust field name (see the `tunables!` block in
+/// `ziggurat-zigbee`). The value is type-punned into a `u64`: integers as-is,
+/// bools as 0/1, durations in microseconds, enums as their discriminant; the
+/// stack rejects out-of-range values and unknown names.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SetTunablePayload {
+    pub name_len: u8,
+    #[abstract_bits(length_from = name_len)]
+    pub name: Vec<u8>,
+    pub value: u64,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct ScanRequestPayload {
@@ -556,6 +570,7 @@ pub enum Request {
     NetworkScan(ScanRequestPayload),
     PacketCapture(ChannelPayload),
     PacketCaptureChannel(ChannelPayload),
+    SetTunable(SetTunablePayload),
 }
 
 impl Request {
@@ -589,6 +604,7 @@ impl Request {
             CommandId::PacketCaptureChannel => {
                 Self::PacketCaptureChannel(require(payload, "channel")?)
             }
+            CommandId::SetTunable => Self::SetTunable(require(payload, "set_tunable")?),
             // Everything else (the device -> host notification opcodes) is not a request.
             _ => return Err(Error::new(Status::UnknownCommand, "not a request")),
         })

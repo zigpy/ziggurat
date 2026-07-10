@@ -523,6 +523,10 @@ impl ZigguratServer {
                     .await
             }
             R::PacketCaptureChannel(payload) => self.handle_packet_capture_channel(payload).await,
+            R::SetTunable(payload) => {
+                proto::set_tunable(&*self.configured()?, &payload)?;
+                Ok(proto::Response::Empty)
+            }
         }
     }
 

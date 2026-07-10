@@ -144,6 +144,10 @@ async fn dispatch<P: RadioPhy>(
         Request::PacketCaptureChannel(payload) => {
             handle_packet_capture_channel(app, payload).await
         }
+        Request::SetTunable(payload) => {
+            proto::set_tunable(&**configured(app)?, &payload)?;
+            Ok(Response::Empty)
+        }
     }
 }
 
