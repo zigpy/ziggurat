@@ -373,4 +373,30 @@ tunables! {
     /// Frame tokens reserved for transit traffic, so a host flood cannot stop the
     /// device from routing.
     forwarding_reserve_frames: usize = 16,
+
+    /// Broadcast admission budget (issue #43): a token bucket shared across traffic
+    /// classes, mirroring the frame budget above but bounding broadcast *rate*. As a
+    /// coordinator we intentionally break the spec's no-rate-limit rule so a host
+    /// broadcast flood cannot out-pace what surrounding routers can relay.
+    ///
+    /// This is the burst capacity: a discrete host action (a button press, a scene)
+    /// draws from it and goes out immediately, however low the sustained rate is, so
+    /// responsiveness comes from the burst — not from the rate below.
+    broadcast_budget_tokens: u8 = 15,
+
+    /// Time to regenerate one broadcast token; the reciprocal is the sustained
+    /// admission rate (~0.55/s here). Held just under a stock SiLabs router's ~0.6/s
+    /// relay budget so the surrounding mesh always keeps headroom to carry our
+    /// broadcasts. A sustained stream (a slider drag) is throttled to this rate;
+    /// deciding *which* frames survive the throttle (latest-wins coalescing) needs ZCL
+    /// semantics and belongs in the host, not here.
+    broadcast_token_refill: Duration = Duration::from_millis(1800),
+
+    /// Broadcast tokens only stack-critical broadcasts (route discovery, key updates,
+    /// leaves, ZDO management) may draw; a host flood can never consume them.
+    broadcast_critical_reserve: u8 = 3,
+
+    /// Broadcast tokens reserved for relayed (transit) broadcasts above the host floor,
+    /// so a host flood cannot stop us relaying the mesh's own broadcasts.
+    broadcast_forwarding_reserve: u8 = 2,
 }

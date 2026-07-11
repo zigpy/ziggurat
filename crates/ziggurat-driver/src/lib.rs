@@ -6,6 +6,7 @@ extern crate alloc;
 #[cfg(feature = "embassy-host")]
 extern crate std;
 
+pub mod broadcast_budget;
 pub mod frame_token;
 pub mod rng;
 pub mod runtime;

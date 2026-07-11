@@ -960,6 +960,10 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// could move the earliest expiry deadline closer
     pub(crate) maintenance_wake: Notify,
 
+    /// Admission budget for outgoing broadcasts: a token bucket with per-class reserves
+    /// so a host broadcast flood cannot starve stack-critical broadcasts.
+    pub(crate) broadcast_budget: Mutex<crate::broadcast_budget::BroadcastBudget>,
+
     /// Outgoing frames awaiting the single sender task, ordered by priority then FIFO.
     /// The sender encrypts at dequeue, so frame-counter order matches on-air order.
     pub send_queue: Mutex<BinaryHeap<SendRequest>>,
@@ -1038,6 +1042,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let raw_frame_rx = radio.subscribe_rx();
         let reset_rx = radio.subscribe_reset();
 
+        let initial_broadcast_tokens = tunables.broadcast_budget_tokens();
+
         Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
             start_time: R::now(),
@@ -1064,6 +1070,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             aps_ack_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
+            broadcast_budget: Mutex::new(crate::broadcast_budget::BroadcastBudget::new(
+                initial_broadcast_tokens,
+            )),
             send_queue: Mutex::new(BinaryHeap::new()),
             send_wake: Notify::new(),
             pending_route_wake: Notify::new(),

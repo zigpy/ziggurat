@@ -1,3 +1,4 @@
+use crate::broadcast_budget::BroadcastAdmission;
 use crate::frame_token::{self, FrameToken, TrafficClass};
 use crate::runtime::{Elapsed, Runtime};
 use crate::signal;
@@ -1669,6 +1670,36 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // broadcasts pass `None`.
         request_id: Option<RequestId>,
     ) {
+        // Stack-critical broadcasts always pass; host- and forwarding-class broadcasts
+        // yield to the reserves when the bucket is drained.
+        let admission = self.broadcast_budget.lock().take(
+            policy.class,
+            self.core_now(),
+            self.tunables.broadcast_budget_tokens(),
+            self.tunables.broadcast_token_refill(),
+            self.tunables.broadcast_critical_reserve(),
+            self.tunables.broadcast_forwarding_reserve(),
+        );
+
+        match admission {
+            BroadcastAdmission::Admit => {}
+            BroadcastAdmission::Defer { retry_in } => {
+                // TODO(#43): park until `retry_in` and coalesce superseded copies
+                // (latest-wins per group + command) instead of dropping outright.
+                let _ = retry_in;
+                tracing::debug!(?policy, "broadcast budget exhausted; dropping");
+                if let Some(request_id) = request_id {
+                    self.push_notification(ZigbeeNotification::SendConfirm {
+                        request_id,
+                        result: SendResult::Failed {
+                            reason: "broadcast rate limit exceeded".to_string(),
+                        },
+                    });
+                }
+                return;
+            }
+        }
+
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
