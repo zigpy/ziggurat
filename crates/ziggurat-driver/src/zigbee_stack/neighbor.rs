@@ -46,8 +46,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     pub(super) fn maybe_age_neighbors(&self) {
+        // Link costs reset after `router_age_limit` missed link status periods
+        let max_age =
+            u32::from(self.tunables.router_age_limit()) * self.tunables.link_status_period();
+
         // TODO: this function should be replaced by real timers
-        let stale_neighbors = self.core().nib.neighbors.age(self.core_now());
+        let stale_neighbors = self.core().nib.neighbors.age(self.core_now(), max_age);
 
         for neighbor_nwk in stale_neighbors {
             self.invalidate_routes_via(neighbor_nwk);
@@ -70,6 +74,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         let lost_link = self.core().nib.neighbors.on_link_status(
+            self.state.network_address,
             source_ieee,
             nwk_frame.nwk_header.source,
             lqi,
@@ -167,7 +172,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     pub async fn periodic_link_status_broadcast_task(&self) {
         loop {
-            R::sleep(self.tunables.link_status_period).await;
+            R::sleep(self.tunables.link_status_period()).await;
 
             self.send_link_status_broadcast(false).await;
         }

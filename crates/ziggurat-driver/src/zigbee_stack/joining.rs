@@ -60,20 +60,27 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let permitting_joins = self.permitting_joins();
 
-        // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
-        // admitted only while capacity remains
+        let device_type = match request.device_type {
+            AssociationRequestDeviceType::FullFunctionDevice => NwkDeviceType::Router,
+            AssociationRequestDeviceType::ReducedFunctionDevice => NwkDeviceType::EndDevice,
+        };
+
+        // Spec 3.6.1.6.1.3: known devices may always re-attach; new end device
+        // children are admitted only while parent capacity remains. Routers are never
+        // capped: they use us as the network entry point, not as a parent.
         let (already_known, at_capacity) = {
             let core = self.core();
 
             (
                 core.nib.neighbors.contains(source_eui64),
-                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children),
+                core.nib.neighbors.end_device_child_count()
+                    >= usize::from(self.tunables.max_children()),
             )
         };
 
         let denial_status = if !permitting_joins {
             Some(Ieee802154AssociationStatus::PanAccessDenied)
-        } else if !already_known && at_capacity {
+        } else if device_type == NwkDeviceType::EndDevice && !already_known && at_capacity {
             Some(Ieee802154AssociationStatus::PanAtCapacity)
         } else {
             None
@@ -94,15 +101,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // and table entries must be stable across retries
         self.update_nwk_eui64_mapping(short_address, source_eui64);
 
-        let device_type = match request.device_type {
-            AssociationRequestDeviceType::FullFunctionDevice => NwkDeviceType::Router,
-            AssociationRequestDeviceType::ReducedFunctionDevice => NwkDeviceType::EndDevice,
-        };
-
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
         let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default.duration()
+            self.tunables.end_device_timeout_default().duration()
         } else {
             Duration::from_secs(0xFFFFFFFF)
         };
@@ -200,7 +202,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let mut conflicts = self.state.address_conflicts.lock();
 
             let now = self.core_now();
-            let window = self.tunables.broadcast_delivery_time;
+            let window = self.tunables.broadcast_delivery_time();
 
             // Detection re-triggers on every frame from the conflicted devices, so a
             // conflict is handled once per delivery window
@@ -859,7 +861,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec Table 4-7: Update-Device must be APS-encrypted when we share a unique link
         // key with the relaying router. Drop an unencrypted one from such a router unless
         // policy explicitly allows it.
-        if !aps_encrypted && !self.tunables.allow_unencrypted_router_device_update {
+        if !aps_encrypted && !self.tunables.allow_unencrypted_router_device_update() {
             let router_ieee = nwk_frame
                 .nwk_header
                 .source_ieee
@@ -1018,7 +1020,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// exposed under the well-known key); the `allow_unsecured_rejoins` policy overrides
     /// this for migration scenarios.
     fn may_rejoin_unsecured(&self, eui64: Eui64) -> bool {
-        self.tunables.allow_unsecured_rejoins
+        self.tunables.allow_unsecured_rejoins()
             || self.core().aib.aps_security.has_unique_link_key(eui64)
     }
 
@@ -1038,18 +1040,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let requested_nwk = nwk_frame.nwk_header.source;
         let capability = &rejoin_request.capability_information;
 
-        // Spec 3.6.1.6.1.3: known devices may always re-attach; new children are
-        // admitted only while capacity remains
+        let device_type = match capability.device_type {
+            NwkRejoinCapabilityInformationDeviceType::Router => NwkDeviceType::Router,
+            NwkRejoinCapabilityInformationDeviceType::EndDevice => NwkDeviceType::EndDevice,
+        };
+
+        // Spec 3.6.1.6.1.3: known devices may always re-attach; new end device
+        // children are admitted only while parent capacity remains. Routers are never
+        // capped: they use us as the network entry point, not as a parent.
         let (already_known, at_capacity) = {
             let core = self.core();
 
             (
                 core.nib.neighbors.contains(source_ieee),
-                core.nib.neighbors.child_count() >= usize::from(self.tunables.max_children),
+                core.nib.neighbors.end_device_child_count()
+                    >= usize::from(self.tunables.max_children()),
             )
         };
 
-        if !already_known && at_capacity {
+        if device_type == NwkDeviceType::EndDevice && !already_known && at_capacity {
             tracing::info!("Denying rejoin request from {source_ieee:?}, no child capacity left");
             self.send_rejoin_response(
                 requested_nwk,
@@ -1078,15 +1087,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.update_nwk_eui64_mapping(assigned_nwk, source_ieee);
 
-        let device_type = match capability.device_type {
-            NwkRejoinCapabilityInformationDeviceType::Router => NwkDeviceType::Router,
-            NwkRejoinCapabilityInformationDeviceType::EndDevice => NwkDeviceType::EndDevice,
-        };
-
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
         let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default.duration()
+            self.tunables.end_device_timeout_default().duration()
         } else {
             Duration::from_secs(0xFFFFFFFF)
         };

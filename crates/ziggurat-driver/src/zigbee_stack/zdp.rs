@@ -328,10 +328,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         loop {
             let jitter = self
                 .tunables
-                .parent_annce_jitter_max
+                .parent_annce_jitter_max()
                 .mul_f32(crate::rng::random_f32());
             let slept_at = self.core_now();
-            R::sleep(self.tunables.parent_annce_base_timer + jitter).await;
+            R::sleep(self.tunables.parent_annce_base_timer() + jitter).await;
 
             // Spec 2.4.3.1.12.2: an announcement from another router restarts the
             // countdown

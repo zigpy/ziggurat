@@ -74,26 +74,35 @@ impl SrcMatchTable {
 /// address.
 #[derive(Debug)]
 pub struct IndirectQueue<F, C> {
-    /// How long a transaction awaits a poll before expiring
-    persistence_time: Duration,
     queue: FlatMap<Ieee802154Address, VecDeque<Transaction<F, C>>>,
 }
 
-impl<F, C> IndirectQueue<F, C> {
-    pub const fn new(persistence_time: Duration) -> Self {
+// Not derived: a derive would demand `F: Default, C: Default` for a field that
+// needs neither.
+impl<F, C> Default for IndirectQueue<F, C> {
+    fn default() -> Self {
         Self {
-            persistence_time,
             queue: FlatMap::new(),
         }
     }
+}
 
-    pub fn push(&mut self, destination: Ieee802154Address, frame: F, completion: C, now: Instant) {
+impl<F, C> IndirectQueue<F, C> {
+    /// Queue a frame to await a poll; it expires after `persistence_time` without one.
+    pub fn push(
+        &mut self,
+        destination: Ieee802154Address,
+        frame: F,
+        completion: C,
+        now: Instant,
+        persistence_time: Duration,
+    ) {
         self.queue
             .entry(destination)
             .or_default()
             .push_back(Transaction {
                 frame,
-                expires_at: now + self.persistence_time,
+                expires_at: now + persistence_time,
                 completion,
             });
     }

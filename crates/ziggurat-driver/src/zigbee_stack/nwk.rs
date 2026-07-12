@@ -71,7 +71,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // We cannot handle broadcasts until the network has been running for at least
         // the time it takes to deliver one broadcast (core time starts at zero).
         if !self.state.hack_ignore_broadcast_startup_wait_period
-            && (CoreInstant::from_micros(0) + self.tunables.broadcast_delivery_time > now)
+            && (CoreInstant::from_micros(0) + self.tunables.broadcast_delivery_time() > now)
         {
             tracing::debug!("Filtering broadcast, network started too recently.");
             return true;
@@ -88,6 +88,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             sender_nwk,
             audience,
             now,
+            self.tunables.broadcast_delivery_time(),
         );
         drop(core);
 
@@ -160,7 +161,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             let next_attempt = match schedule {
                 BroadcastSchedule::PassiveAck => {
-                    now + self.tunables.passive_ack_timeout + self.broadcast_jitter()
+                    now + self.tunables.passive_ack_timeout() + self.broadcast_jitter()
                 }
                 BroadcastSchedule::FixedInterval { interval } => now + interval,
             };
@@ -301,7 +302,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 class: TrafficClass::Critical,
             },
             BroadcastSchedule::FixedInterval {
-                interval: self.tunables.rreq_retry_interval,
+                interval: self.tunables.rreq_retry_interval(),
             },
             initial_delay,
             attempts,
@@ -312,7 +313,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
     pub(super) fn broadcast_jitter(&self) -> Duration {
         self.tunables
-            .max_broadcast_jitter
+            .max_broadcast_jitter()
             .mul_f32(crate::rng::random_f32())
     }
 
@@ -322,9 +323,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let core = self.core();
         let live_relayers = core.nib.neighbors.expected_broadcast_relayers();
 
-        core.nib
-            .broadcasts
-            .passively_acked(key.0, key.1, &live_relayers)
+        core.nib.broadcasts.passively_acked(
+            key.0,
+            key.1,
+            &live_relayers,
+            self.tunables.broadcast_passive_ack_quorum(),
+        )
     }
 
     pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, lqi: u8, rssi: i8) {
@@ -385,7 +389,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // reach this point: the send path pre-fills the transaction table. The
             // frame is discarded instead of relayed (3.6.1.10).
             if nwk_frame.nwk_header.source == self.state.network_address {
-                if CoreInstant::from_micros(0) + self.tunables.broadcast_delivery_time
+                if CoreInstant::from_micros(0) + self.tunables.broadcast_delivery_time()
                     < self.core_now()
                 {
                     self.handle_address_conflict(
@@ -740,7 +744,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.core()
             .nib
             .routing
-            .route_to(destination, self.tunables.max_source_route)
+            .route_to(destination, self.tunables.max_source_route())
     }
 
     /// Originate a unicast and await its delivery result. The completion resolves once
@@ -897,7 +901,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 nwk_frame,
                 next_hop,
                 security,
-                attempts_remaining: self.tunables.unicast_retries,
+                attempts_remaining: self.tunables.unicast_retries(),
             },
             priority,
             outcome,
@@ -937,7 +941,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .entry(destination)
                 .or_insert_with(|| PendingRoute {
                     frames: Vec::new(),
-                    attempts_remaining: self.tunables.pending_route_discovery_attempts,
+                    attempts_remaining: self.tunables.pending_route_discovery_attempts(),
                 })
                 .frames
                 .push(PendingFrame {
@@ -1332,7 +1336,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         outcome: TxOutcome,
         token: FrameToken,
     ) {
-        let delay = self.tunables.unicast_retry_delay;
+        let delay = self.tunables.unicast_retry_delay();
 
         // The frame has a random jitter of up to one retry delay period
         let jitter = delay.mul_f32(crate::rng::random_f32());
@@ -1526,9 +1530,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let mut core = self.core();
             let audience = core.nib.neighbors.expected_broadcast_relayers();
 
-            core.nib
-                .broadcasts
-                .record_transmission(key.0, key.1, audience, self.core_now());
+            core.nib.broadcasts.record_transmission(
+                key.0,
+                key.1,
+                audience,
+                self.core_now(),
+                self.tunables.broadcast_delivery_time(),
+            );
         }
 
         // Transmit the first copy immediately; the reactor makes any retransmissions,
@@ -1547,8 +1555,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security,
             policy,
             BroadcastSchedule::PassiveAck,
-            self.tunables.passive_ack_timeout + self.broadcast_jitter(),
-            self.tunables.max_broadcast_retries,
+            self.tunables.passive_ack_timeout() + self.broadcast_jitter(),
+            self.tunables.max_broadcast_retries(),
             request_id,
         );
     }
@@ -1666,7 +1674,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NwkCommand::RouteRecord(route_record) => {
                     // Spec 3.6.4.5.5: with no room left for our address the route record
                     // is discarded rather than overflowing the frame.
-                    if route_record.relays.len() >= usize::from(self.tunables.max_source_route) {
+                    if route_record.relays.len() >= usize::from(self.tunables.max_source_route()) {
                         tracing::warn!("Dropping transiting route record: relay list is full");
                         return;
                     }
@@ -1847,7 +1855,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             BroadcastSchedule::PassiveAck,
             self.broadcast_jitter(),
-            self.tunables.max_broadcast_retries + 1,
+            self.tunables.max_broadcast_retries() + 1,
             None,
         );
     }

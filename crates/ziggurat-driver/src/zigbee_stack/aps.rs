@@ -101,7 +101,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// are swept on each call.
     pub(super) fn is_duplicate_aps_frame(&self, source: Nwk, counter: u8) -> bool {
         let now = self.core_now();
-        let timeout = self.tunables.aps_duplicate_rejection_timeout;
+        let timeout = self.tunables.aps_duplicate_rejection_timeout();
 
         let mut table = self.state.aps_duplicates.lock();
         table.retain(|_, seen| now.saturating_duration_since(*seen) < timeout);
@@ -297,9 +297,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// sees (and acks) the frame after polling.
     fn aps_ack_timeout(&self, destination: Nwk) -> Duration {
         if self.sleepy_child_eui64(destination).is_some() {
-            self.tunables.aps_ack_timeout_indirect
+            self.tunables.aps_ack_timeout_indirect()
         } else {
-            self.tunables.aps_ack_timeout
+            self.tunables.aps_ack_timeout()
         }
     }
 

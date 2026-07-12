@@ -45,6 +45,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let updated_path_cost = route_reply_cmd.path_cost;
 
         let disposition = self.core().nib.routing.accept_route_reply(
+            self.state.network_address,
             route_reply_cmd.originator_nwk,
             route_reply_cmd.route_request_identifier,
             route_reply_cmd.responder_nwk,
@@ -150,6 +151,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             updated_path_cost,
             route_request_cmd.many_to_one,
             self.core_now(),
+            self.tunables.route_discovery_time(),
         );
 
         if !accepted {
@@ -236,15 +238,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_radius(rebroadcast_radius)
             .with_sequence_number(nwk_frame.nwk_header.sequence_number);
 
-        // Spec 3.6.4.5.1.4: relayed route requests are jittered and retried
-        let jitter = (self.tunables.min_rreq_jitter
-            + (self.tunables.max_rreq_jitter - self.tunables.min_rreq_jitter)
+        // Spec 3.6.4.5.1.4: relayed route requests are jittered and retried. The jitter
+        // bounds are loaded once and subtracted saturating: a runtime tunable change can
+        // transiently leave min above max.
+        let min_jitter = self.tunables.min_rreq_jitter();
+        let max_jitter = self.tunables.max_rreq_jitter();
+        let jitter = (min_jitter
+            + max_jitter
+                .saturating_sub(min_jitter)
                 .mul_f32(crate::rng::random_f32()))
             * 2;
 
         self.broadcast_route_request(
             relayed_route_request_cmd,
-            self.tunables.rreq_retries + 1,
+            self.tunables.rreq_retries() + 1,
             jitter,
         );
     }
@@ -254,11 +261,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// per-device route discoveries, and respond with route record commands that we
     /// store for future source routing.
     pub async fn send_many_to_one_route_request(&self) {
-        let route_request_identifier = self
-            .core()
-            .nib
-            .routing
-            .begin_many_to_one_advertisement(self.core_now());
+        let route_request_identifier = self.core().nib.routing.begin_many_to_one_advertisement(
+            self.state.network_address,
+            self.core_now(),
+            self.tunables.route_discovery_time(),
+        );
 
         tracing::debug!("Sending many-to-one route request {route_request_identifier}");
 
@@ -273,7 +280,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     destination_eui64: None,
                 }),
             )
-            .with_radius(self.tunables.concentrator_radius)
+            .with_radius(self.tunables.concentrator_radius())
             // Sent via `transmit_*`, which does not assign sequence numbers
             .with_sequence_number(self.next_nwk_sequence_number());
 
@@ -297,7 +304,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Receivers drop route requests from senders with a zero outgoing cost, so
         // the first advertisement waits until link status exchanges establish a
         // neighbor link, bounded by a fixed ceiling in case the network is silent
-        let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period;
+        let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period();
 
         loop {
             if self.core().nib.neighbors.any_live_router_link() {
@@ -318,8 +325,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             self.core().nib.routing.reset_mtorr_triggers();
 
-            let min_deadline = self.core_now() + self.tunables.mtorr_min_interval;
-            let max_deadline = self.core_now() + self.tunables.mtorr_max_interval;
+            let min_deadline = self.core_now() + self.tunables.mtorr_min_interval();
+            let max_deadline = self.core_now() + self.tunables.mtorr_max_interval();
 
             // Advertise every max interval, sooner when accumulated route errors or
             // delivery failures signal that routes toward us have gone bad, but never
@@ -342,7 +349,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        let kick = self.core().nib.routing.note_route_error();
+        let kick = self
+            .core()
+            .nib
+            .routing
+            .note_route_error(self.tunables.mtorr_route_error_threshold());
 
         if kick {
             self.mtorr_kick.notify_one();
@@ -356,7 +367,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        let kick = self.core().nib.routing.note_delivery_failure();
+        let kick = self
+            .core()
+            .nib
+            .routing
+            .note_delivery_failure(self.tunables.mtorr_delivery_failure_threshold());
 
         if kick {
             self.mtorr_kick.notify_one();
@@ -442,11 +457,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn send_route_discovery(&self, destination: Nwk) {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
 
-        let route_request_identifier = self
-            .core()
-            .nib
-            .routing
-            .begin_discovery(destination, self.core_now());
+        let route_request_identifier = self.core().nib.routing.begin_discovery(
+            self.state.network_address,
+            destination,
+            self.core_now(),
+            self.tunables.route_discovery_time(),
+        );
 
         // If we know the EUI64 corresponding to the NWK, use it
         let destination_eui64 = self.core().nib.address_map.eui64_for(destination);
@@ -470,7 +486,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // times, separated by the retry interval
         self.broadcast_route_request(
             route_request_frame,
-            self.tunables.initial_rreq_retries + 1,
+            self.tunables.initial_rreq_retries() + 1,
             Duration::ZERO,
         );
     }

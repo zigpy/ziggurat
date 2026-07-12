@@ -168,11 +168,8 @@ pub struct NeighborLink {
 }
 
 /// The neighbor table: link quality accounting, link status digestion, and aging.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Neighbors {
-    network_address: Nwk,
-    /// Neighbors silent for this long get their link costs reset
-    max_age: Duration,
     table: FlatMap<Eui64, TableEntry>,
     /// LQI samples for senders that have no neighbor entry yet, capped at
     /// [`PENDING_LQA_CAP`] entries.
@@ -180,15 +177,6 @@ pub struct Neighbors {
 }
 
 impl Neighbors {
-    pub const fn new(network_address: Nwk, max_age: Duration) -> Self {
-        Self {
-            network_address,
-            max_age,
-            table: FlatMap::new(),
-            pending_lqas: FlatMap::new(),
-        }
-    }
-
     /// Record an LQI sample for the device that transmitted a frame to us. LQA is a
     /// property of the radio link to the MAC transmitter; the frame's NWK originator
     /// may be several hops away.
@@ -279,9 +267,13 @@ impl Neighbors {
         self.table.contains_key(&eui64)
     }
 
-    /// The number of children, for join admission and beacon capacity decisions.
-    pub fn child_count(&self) -> usize {
-        self.table.values().filter(|entry| entry.is_child()).count()
+    /// The number of end device children, for join admission and beacon capacity
+    /// decisions.
+    pub fn end_device_child_count(&self) -> usize {
+        self.table
+            .values()
+            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
+            .count()
     }
 
     /// Spec 3.6.10.4: a MAC data poll from a known device refreshes its keepalive
@@ -529,17 +521,16 @@ impl Neighbors {
             .collect()
     }
 
-    /// Reset link costs of neighbors that have stopped sending link status frames,
-    /// returning their addresses so routes through them can be invalidated.
+    /// Reset link costs of neighbors that have been silent for `max_age` (stopped
+    /// sending link status frames), returning their addresses so routes through them
+    /// can be invalidated.
     #[must_use = "routes through the returned aged-out neighbors must be invalidated; \
         dropping them leaves stale routes"]
-    pub fn age(&mut self, now: Instant) -> Vec<Nwk> {
+    pub fn age(&mut self, now: Instant, max_age: Duration) -> Vec<Nwk> {
         let mut stale_neighbors = Vec::new();
 
         for neighbor in self.table.values_mut() {
-            if neighbor.outgoing_cost > 0
-                && neighbor.last_link_status_timestamp + self.max_age <= now
-            {
+            if neighbor.outgoing_cost > 0 && neighbor.last_link_status_timestamp + max_age <= now {
                 neighbor.lqas.clear();
                 neighbor.outgoing_cost = 0;
                 stale_neighbors.push(neighbor.network_address);
@@ -619,6 +610,7 @@ impl Neighbors {
     /// routes through it must be invalidated (spec 3.6.4.4.2).
     pub fn on_link_status(
         &mut self,
+        own_address: Nwk,
         source_ieee: Eui64,
         source_nwk: Nwk,
         lqi: u8,
@@ -705,7 +697,7 @@ impl Neighbors {
                 }
             }
 
-            if link_status.address == self.network_address {
+            if link_status.address == own_address {
                 neighbor_entry.outgoing_cost = link_status.incoming_cost;
             }
         }

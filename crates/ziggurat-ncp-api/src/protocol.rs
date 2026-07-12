@@ -144,6 +144,10 @@ async fn dispatch<P: RadioPhy>(
         Request::PacketCaptureChannel(payload) => {
             handle_packet_capture_channel(app, payload).await
         }
+        Request::SetTunable(payload) => {
+            proto::set_tunable(&**configured(app)?, &payload)?;
+            Ok(Response::Empty)
+        }
     }
 }
 
@@ -216,7 +220,7 @@ async fn handle_configure<P: RadioPhy>(
     }
     app.started = false;
 
-    let stack = ZigbeeStack::new(app.phy.clone(), config, Tunables::new(), app.spawner);
+    let stack = ZigbeeStack::new(app.phy.clone(), config, Tunables::default(), app.spawner);
     stack
         .state
         .core

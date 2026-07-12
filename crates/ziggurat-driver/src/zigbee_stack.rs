@@ -41,7 +41,7 @@ mod zdp;
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use ziggurat_zigbee::constants::{
-    MAX_DEPTH, PROTOCOL_VERSION, STACK_PROFILE, Tunables, WELL_KNOWN_LINK_KEY,
+    MAX_DEPTH, PROTOCOL_VERSION, STACK_PROFILE, TunableError, Tunables, WELL_KNOWN_LINK_KEY,
 };
 pub use ziggurat_zigbee::indirect::{IndirectQueue, SrcMatchTable, Transaction};
 pub use ziggurat_zigbee::nwk::NwkDeviceType;
@@ -668,27 +668,16 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(config: &NetworkConfig, tunables: &Tunables) -> Self {
+    pub fn new(config: &NetworkConfig) -> Self {
         Self {
             core: Mutex::new(ZigbeeCore {
                 nib: Nib {
                     sequence_number: 0,
                     update_id: config.update_id,
                     tx_total: 0,
-                    neighbors: Neighbors::new(
-                        config.network_address,
-                        u32::from(tunables.router_age_limit) * tunables.link_status_period,
-                    ),
-                    routing: Routing::new(
-                        config.network_address,
-                        tunables.route_discovery_time,
-                        tunables.mtorr_route_error_threshold,
-                        tunables.mtorr_delivery_failure_threshold,
-                    ),
-                    broadcasts: Broadcasts::new(
-                        tunables.broadcast_delivery_time,
-                        tunables.broadcast_passive_ack_quorum,
-                    ),
+                    neighbors: Neighbors::default(),
+                    routing: Routing::default(),
+                    broadcasts: Broadcasts::default(),
                     nwk_security: NwkSecurity::new(
                         config.network_key.clone(),
                         config.network_key_seq_number,
@@ -709,7 +698,7 @@ impl State {
                     channel: config.channel,
                     ieee802154_sequence_number: 0,
                     pan_id: config.pan_id,
-                    indirect_queue: IndirectQueue::new(tunables.transaction_persistence_time),
+                    indirect_queue: IndirectQueue::default(),
                 },
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
@@ -999,7 +988,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
             start_time: R::now(),
-            state: State::new(&config, &tunables),
+            state: State::new(&config),
             config,
             tunables,
             radio,
@@ -1033,6 +1022,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
+    /// Set a tunable by its Rust field name from a raw wire value. Takes effect on
+    /// the next read: in-flight waits (a sleeping retry, a stamped deadline) finish
+    /// under the value they started with.
+    pub fn set_tunable(&self, name: &str, raw: u64) -> Result<(), TunableError> {
+        // These size the global frame-token pool once, in `configure_frame_budget`.
+        if matches!(
+            name,
+            "frame_budget_bytes" | "critical_reserve_frames" | "forwarding_reserve_frames"
+        ) {
+            return Err(TunableError::StartupOnly);
+        }
+        self.tunables.set(name, raw)
+    }
+
     /// Size the frame-token budget from the platform's heap arena and the tunables.
     ///
     /// A token is priced at a parked frame's worst case: the queue entry plus its boxed
@@ -1054,7 +1057,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        let budget_bytes = match tunables.frame_budget_bytes {
+        let budget_bytes = match tunables.frame_budget_bytes() {
             0 => arena.saturating_sub(NON_FRAME_HEAP_CEILING),
             bytes => bytes,
         };
@@ -1063,14 +1066,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // A budget too small to hold the reserves means the platform's queue caps and
         // this ceiling need rethinking, not silent operation with a starved stack.
         assert!(
-            total > tunables.critical_reserve_frames + tunables.forwarding_reserve_frames,
+            total > tunables.critical_reserve_frames() + tunables.forwarding_reserve_frames(),
             "frame budget of {total} tokens cannot hold the configured reserves"
         );
 
         frame_token::set_budget(
             total,
-            tunables.critical_reserve_frames,
-            tunables.forwarding_reserve_frames,
+            tunables.critical_reserve_frames(),
+            tunables.forwarding_reserve_frames(),
         );
     }
 
@@ -1574,7 +1577,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         channel: None,
                         csma_ca: true,
                         max_frame_retries: 0,
-                        max_csma_backoffs: self.tunables.mac_max_csma_backoffs,
+                        max_csma_backoffs: self.tunables.mac_max_csma_backoffs(),
                         security_processed: true,
                     })
                     .await;
