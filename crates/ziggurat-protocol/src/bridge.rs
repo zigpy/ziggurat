@@ -266,6 +266,7 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
             payload.aps_seq,
             payload.asdu,
             aps_security,
+            payload.flags.sleepy_destination,
             TxPriority::from_host(payload.priority as i8),
             StackRequestId::from(request_id),
         )

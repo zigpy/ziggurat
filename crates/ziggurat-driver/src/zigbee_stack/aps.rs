@@ -293,10 +293,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok((nwk_frame, ack_data))
     }
 
-    /// How long to wait for a device's APS ack: longer for a sleepy child, which only
-    /// sees (and acks) the frame after polling.
-    fn aps_ack_timeout(&self, destination: Nwk) -> Duration {
-        if self.sleepy_child_eui64(destination).is_some() {
+    /// How long to wait for a device's APS ack: longer for a sleepy destination, which
+    /// only sees (and acks) the frame after polling.
+    fn aps_ack_timeout(&self, destination: Nwk, sleepy_destination: bool) -> Duration {
+        if sleepy_destination || self.sleepy_child_eui64(destination).is_some() {
             self.tunables.aps_ack_timeout_indirect()
         } else {
             self.tunables.aps_ack_timeout()
@@ -321,6 +321,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         aps_seq: u8,
         data: Vec<u8>,
         aps_security: Option<Eui64>,
+        sleepy_destination: bool,
         priority: TxPriority,
         request_id: RequestId,
     ) -> Result<(), ZigbeeStackError> {
@@ -341,7 +342,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // An APS-ack send is confirmed by the end-to-end ack: register it (with the
         // deadline the timeout reactor uses) before enqueueing so a fast reply is caught.
         if let Some(ack_data) = &ack_data {
-            let deadline = self.core_now() + self.aps_ack_timeout(destination);
+            let deadline = self.core_now() + self.aps_ack_timeout(destination, sleepy_destination);
             self.state.pending_aps_acks.lock().insert(
                 ack_data.clone(),
                 PendingApsAck {
