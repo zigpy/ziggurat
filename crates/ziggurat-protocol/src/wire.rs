@@ -50,6 +50,7 @@ pub enum CommandId {
     PacketCapture = 0x27,
     PacketCaptureChannel = 0x28,
     SetTunable = 0x29,
+    CancelRequest = 0x2A,
     // More notifications.
     ReceivedAps = 0x30,
     SendConfirm = 0x31,
@@ -343,6 +344,22 @@ pub struct SendApsPayload {
     pub asdu: Vec<u8>,
 }
 
+/// Cancels an in-flight send by the `request_id` it was issued under. Best-effort:
+/// the send is torn down only if it is still in a pre-delivery state (queued, awaiting
+/// route discovery, or between retries). The reply reports whether anything was caught.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct CancelRequestPayload {
+    pub request_id: RequestId,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct CancelResultPayload {
+    pub cancelled: bool,
+    pub reserved: u7,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct PermitJoinsPayload {
@@ -571,6 +588,7 @@ pub enum Request {
     PacketCapture(ChannelPayload),
     PacketCaptureChannel(ChannelPayload),
     SetTunable(SetTunablePayload),
+    CancelRequest(CancelRequestPayload),
 }
 
 impl Request {
@@ -605,6 +623,7 @@ impl Request {
                 Self::PacketCaptureChannel(require(payload, "channel")?)
             }
             CommandId::SetTunable => Self::SetTunable(require(payload, "set_tunable")?),
+            CommandId::CancelRequest => Self::CancelRequest(require(payload, "cancel_request")?),
             // Everything else (the device -> host notification opcodes) is not a request.
             _ => return Err(Error::new(Status::UnknownCommand, "not a request")),
         })
@@ -618,6 +637,7 @@ pub enum Response {
     HwAddress(HwAddressPayload),
     NetworkInfo(NetworkInfoPayload),
     ScanCount(ScanCountPayload),
+    CancelResult(CancelResultPayload),
 }
 
 impl Response {
@@ -630,6 +650,7 @@ impl Response {
             Self::HwAddress(payload) => append(&mut bytes, payload),
             Self::NetworkInfo(payload) => append(&mut bytes, payload),
             Self::ScanCount(payload) => append(&mut bytes, payload),
+            Self::CancelResult(payload) => append(&mut bytes, payload),
         };
         if !fits {
             return Error::new(Status::InvalidRequest, "reply too large")

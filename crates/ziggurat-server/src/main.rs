@@ -527,6 +527,10 @@ impl ZigguratServer {
                 proto::set_tunable(&*self.configured()?, &payload)?;
                 Ok(proto::Response::Empty)
             }
+            R::CancelRequest(payload) => Ok(proto::Response::CancelResult(proto::cancel_request(
+                &*self.running()?,
+                &payload,
+            ))),
         }
     }
 
