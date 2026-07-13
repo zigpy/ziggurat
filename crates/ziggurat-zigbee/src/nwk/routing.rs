@@ -268,6 +268,14 @@ impl Routing {
         removed
     }
 
+    /// Seed an active routing entry restored by the client on startup. Unlike a route
+    /// learned at runtime, this does not record a change (the client already has it).
+    pub fn restore_route(&mut self, destination: Nwk, next_hop: Nwk, path_cost: u8) {
+        let mut entry = TableEntry::new(destination, Status::Active, next_hop);
+        entry.path_cost = path_cost;
+        self.route_table.insert(destination, entry);
+    }
+
     /// Take the accumulated next-hop changes for the client to persist. Each entry is a
     /// destination and its new active next hop, or `None` if the route was removed.
     pub fn drain_route_changes(&mut self) -> Vec<(Nwk, Option<Nwk>)> {

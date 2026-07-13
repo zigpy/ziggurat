@@ -35,6 +35,8 @@ pub enum CommandId {
     LoadChildren = 0x12,
     LoadAddressCache = 0x13,
     StartNetwork = 0x14,
+    LoadRouteTable = 0x15,
+    LoadSourceRoutes = 0x16,
     GetNetworkInfo = 0x18,
     ScanKeyTable = 0x19,
     ScanChildren = 0x1A,
@@ -294,6 +296,31 @@ pub struct LoadAddressCachePayload {
     pub count: u16,
     #[abstract_bits(length_from = count)]
     pub entries: Vec<AddressEntry>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct LoadRouteTablePayload {
+    pub count: u16,
+    #[abstract_bits(length_from = count)]
+    pub entries: Vec<RouteEntry>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SourceRouteEntry {
+    pub destination: Nwk,
+    pub relay_count: u8,
+    #[abstract_bits(length_from = relay_count)]
+    pub relays: Vec<Nwk>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct LoadSourceRoutesPayload {
+    pub count: u16,
+    #[abstract_bits(length_from = count)]
+    pub entries: Vec<SourceRouteEntry>,
 }
 
 #[abstract_bits]
@@ -603,6 +630,8 @@ pub enum Request {
     LoadKeyTable(LoadKeyTablePayload),
     LoadChildren(LoadChildrenPayload),
     LoadAddressCache(LoadAddressCachePayload),
+    LoadRouteTable(LoadRouteTablePayload),
+    LoadSourceRoutes(LoadSourceRoutesPayload),
     StartNetwork,
     GetNetworkInfo,
     ScanKeyTable,
@@ -635,6 +664,10 @@ impl Request {
             CommandId::LoadChildren => Self::LoadChildren(require(payload, "child entries")?),
             CommandId::LoadAddressCache => {
                 Self::LoadAddressCache(require(payload, "addr entries")?)
+            }
+            CommandId::LoadRouteTable => Self::LoadRouteTable(require(payload, "route entries")?),
+            CommandId::LoadSourceRoutes => {
+                Self::LoadSourceRoutes(require(payload, "source route entries")?)
             }
             CommandId::StartNetwork => Self::StartNetwork,
             CommandId::GetNetworkInfo => Self::GetNetworkInfo,

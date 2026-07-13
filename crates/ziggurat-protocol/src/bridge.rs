@@ -216,6 +216,30 @@ pub fn apply_address_cache<P: RadioPhy, R: Runtime>(
     }
 }
 
+pub fn apply_route_table<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: LoadRouteTablePayload,
+) {
+    let mut core = stack.state.core.lock();
+    for entry in payload.entries {
+        core.nib
+            .routing
+            .restore_route(entry.destination, entry.next_hop, entry.path_cost);
+    }
+}
+
+pub fn apply_source_routes<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: LoadSourceRoutesPayload,
+) {
+    let mut core = stack.state.core.lock();
+    for entry in payload.entries {
+        core.nib
+            .routing
+            .store_route_record(entry.destination, entry.relays);
+    }
+}
+
 impl From<&NetworkBeacon> for BeaconPayload {
     fn from(beacon: &NetworkBeacon) -> Self {
         Self {

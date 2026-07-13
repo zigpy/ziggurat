@@ -455,6 +455,14 @@ impl ZigguratServer {
                 proto::apply_address_cache(&*self.loadable()?, payload);
                 Ok(proto::Response::Empty)
             }
+            R::LoadRouteTable(payload) => {
+                proto::apply_route_table(&*self.loadable()?, payload);
+                Ok(proto::Response::Empty)
+            }
+            R::LoadSourceRoutes(payload) => {
+                proto::apply_source_routes(&*self.loadable()?, payload);
+                Ok(proto::Response::Empty)
+            }
             R::StartNetwork => self.handle_start_network().await,
             R::GetNetworkInfo => Ok(proto::Response::NetworkInfo(proto::network_info_payload(
                 &*self.configured()?,
