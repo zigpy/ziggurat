@@ -86,14 +86,20 @@ impl TableEntry {
     /// Update this entry to route through `next_hop` at advertised `cost`, honoring the
     /// spec 3.6.4.5.3 suitability rule: an ACTIVE entry is only replaced by a strictly
     /// cheaper route, so a worse advertisement never clobbers a good route or forms a
-    /// loop.
-    fn consider_route(&mut self, next_hop: Nwk, cost: u8) {
+    /// loop. Returns the new next hop when the active route actually changed (a fresh
+    /// establishment or a different hop), for change tracking.
+    fn consider_route(&mut self, next_hop: Nwk, cost: u8) -> Option<Nwk> {
         if self.status == Status::Active && cost >= self.path_cost {
-            return;
+            return None;
         }
+
+        let previous_next_hop = (self.status == Status::Active).then_some(self.next_hop_address);
+
         self.status = Status::Active;
         self.next_hop_address = next_hop;
         self.path_cost = cost;
+
+        (previous_next_hop != Some(next_hop)).then_some(next_hop)
     }
 }
 
@@ -162,6 +168,11 @@ pub struct Routing {
     route_table: FlatMap<Nwk, TableEntry>,
     discovery_table: FlatMap<(Nwk, RouteRequestId), DiscoveryEntry>,
     route_record_table: FlatMap<Nwk, Vec<Nwk>>,
+
+    /// Persist-worthy next-hop changes since the last drain: destination -> its new
+    /// active next hop, or `None` if the route was removed. Keyed by destination so
+    /// repeated changes to the same route within a batch collapse to the latest.
+    route_changes: FlatMap<Nwk, Option<Nwk>>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
@@ -250,10 +261,25 @@ impl Routing {
     }
 
     pub fn remove_route(&mut self, destination: Nwk) -> bool {
-        self.route_table.remove(&destination).is_some()
+        let removed = self.route_table.remove(&destination).is_some();
+        if removed {
+            self.route_changes.insert(destination, None);
+        }
+        removed
     }
 
-    pub fn store_route_record(&mut self, source: Nwk, relays: Vec<Nwk>) {
+    /// Take the accumulated next-hop changes for the client to persist. Each entry is a
+    /// destination and its new active next hop, or `None` if the route was removed.
+    pub fn drain_route_changes(&mut self) -> Vec<(Nwk, Option<Nwk>)> {
+        core::mem::take(&mut self.route_changes)
+            .iter()
+            .map(|(&destination, &next_hop)| (destination, next_hop))
+            .collect()
+    }
+
+    /// Returns whether the stored relay list for `source` changed, so the client only
+    /// persists a genuinely new source route (most route records are redundant).
+    pub fn store_route_record(&mut self, source: Nwk, relays: Vec<Nwk>) -> bool {
         // Spec 3.6.4.5.5: the new route also replaces any existing source routes to
         // the intermediary relays. The relays between relay `i` and us form its own
         // route; the last relay delivered the record to us directly.
@@ -265,7 +291,10 @@ impl Routing {
             self.route_record_table.insert(last, Vec::new());
         }
 
+        let changed = self.route_record_table.get(&source) != Some(&relays);
         self.route_record_table.insert(source, relays);
+
+        changed
     }
 
     pub fn remove_route_record(&mut self, destination: Nwk) -> bool {
@@ -443,7 +472,8 @@ impl Routing {
             .route_table
             .entry(originator)
             .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
-        originator_entry.consider_route(sender, updated_path_cost);
+
+        let route_change = originator_entry.consider_route(sender, updated_path_cost);
 
         // Spec 3.6.4.5.1.2: a many-to-one request marks its originator as a
         // concentrator; spec 3.6.4.5.1.8: a later plain request never clears it
@@ -452,6 +482,10 @@ impl Routing {
             originator_entry.route_record_required = true;
             originator_entry.no_route_cache = many_to_one
                 == NwkRouteRequestManyToOne::ManyToOneSenderDoesntSupportRouteRecordTable;
+        }
+
+        if let Some(next_hop) = route_change {
+            self.route_changes.insert(originator, Some(next_hop));
         }
 
         true
@@ -512,10 +546,16 @@ impl Routing {
                 routing_entry.status,
             );
 
+            let previous_next_hop =
+                (routing_entry.status == Status::Active).then_some(routing_entry.next_hop_address);
             routing_entry.status = Status::Active;
             routing_entry.next_hop_address = sender;
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = updated_path_cost;
+
+            if previous_next_hop != Some(sender) {
+                self.route_changes.insert(responder, Some(sender));
+            }
 
             return RouteReplyDisposition::Established;
         }
@@ -547,7 +587,10 @@ impl Routing {
             .route_table
             .entry(originator)
             .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
-        reverse_entry.consider_route(next_hop, forward_cost);
+
+        if let Some(new_next_hop) = reverse_entry.consider_route(next_hop, forward_cost) {
+            self.route_changes.insert(originator, Some(new_next_hop));
+        }
 
         RouteReplyDisposition::Relay {
             next_hop,

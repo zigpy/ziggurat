@@ -350,11 +350,28 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             };
             Notification::ApsAckConfirm(*request_id as u16, ApsAckConfirmPayload { acked, reason })
         }
-        ZigbeeNotification::DeviceJoined { nwk, ieee, parent } => {
+        ZigbeeNotification::DeviceJoined {
+            nwk,
+            ieee,
+            parent,
+            device_type,
+            rx_on_when_idle,
+        } => {
+            let device_type = match device_type {
+                Some(NwkDeviceType::Router) => ChildDeviceType::Router,
+                Some(NwkDeviceType::EndDevice) => ChildDeviceType::EndDevice,
+                // `None` (learned via a router's Update-Device) or the nonsensical
+                // Coordinator both map to Unknown
+                _ => ChildDeviceType::Unknown,
+            };
             Notification::DeviceJoined(DeviceJoinedPayload {
                 nwk: *nwk,
                 ieee: *ieee,
                 parent: *parent,
+                flags: ChildFlags {
+                    rx_on_when_idle: *rx_on_when_idle,
+                    device_type,
+                },
             })
         }
         ZigbeeNotification::DeviceLeft { nwk, ieee, reason } => {
@@ -395,6 +412,27 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             ieee: *ieee,
             key: key.clone(),
         }),
+        ZigbeeNotification::RouteChanged {
+            destination,
+            next_hop,
+            removed,
+        } => Notification::RouteChanged(RouteChangedPayload {
+            destination: *destination,
+            next_hop: *next_hop,
+            removed: *removed,
+        }),
+        ZigbeeNotification::RouteRecord {
+            destination,
+            relays,
+        } => Notification::RouteRecord(RouteRecordPayload {
+            destination: *destination,
+            relays: relays.clone(),
+        }),
+        ZigbeeNotification::ApsFrameCounterUpdate { frame_counter } => {
+            Notification::ApsFrameCounter(ApsFrameCounterPayload {
+                frame_counter: *frame_counter,
+            })
+        }
         ZigbeeNotification::ApsDecryptionFailure {
             source,
             source_ieee,

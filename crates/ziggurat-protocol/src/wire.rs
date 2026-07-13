@@ -61,6 +61,9 @@ pub enum CommandId {
     LinkKey = 0x36,
     ApsDecryptFailure = 0x37,
     LastReset = 0x38,
+    RouteChanged = 0x39,
+    RouteRecord = 0x3A,
+    ApsFrameCounter = 0x3B,
 }
 
 impl From<CommandId> for u8 {
@@ -524,6 +527,7 @@ pub struct DeviceJoinedPayload {
     pub nwk: Nwk,
     pub ieee: Eui64,
     pub parent: Nwk,
+    pub flags: ChildFlags,
 }
 
 #[abstract_bits]
@@ -551,6 +555,30 @@ pub struct FrameCounterPayload {
 pub struct LinkKeyPayload {
     pub ieee: Eui64,
     pub key: Key,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct RouteChangedPayload {
+    pub destination: Nwk,
+    pub next_hop: Nwk,
+    pub removed: bool,
+    pub reserved: u7,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct RouteRecordPayload {
+    pub destination: Nwk,
+    pub relay_count: u8,
+    #[abstract_bits(length_from = relay_count)]
+    pub relays: Vec<Nwk>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct ApsFrameCounterPayload {
+    pub frame_counter: u32,
 }
 
 #[abstract_bits]
@@ -750,6 +778,9 @@ pub enum Notification {
     FrameCounter(FrameCounterPayload),
     LinkKey(LinkKeyPayload),
     ApsDecryptFailure(ApsDecryptFailPayload),
+    RouteChanged(RouteChangedPayload),
+    RouteRecord(RouteRecordPayload),
+    ApsFrameCounter(ApsFrameCounterPayload),
 }
 
 impl Notification {
@@ -765,6 +796,9 @@ impl Notification {
             Self::FrameCounter(_) => (CommandId::FrameCounter, 0),
             Self::LinkKey(_) => (CommandId::LinkKey, 0),
             Self::ApsDecryptFailure(_) => (CommandId::ApsDecryptFailure, 0),
+            Self::RouteChanged(_) => (CommandId::RouteChanged, 0),
+            Self::RouteRecord(_) => (CommandId::RouteRecord, 0),
+            Self::ApsFrameCounter(_) => (CommandId::ApsFrameCounter, 0),
         };
         let mut bytes = envelope(FrameType::Notification, command.into(), request_id);
         let fits = match self {
@@ -778,6 +812,9 @@ impl Notification {
             Self::FrameCounter(payload) => append(&mut bytes, payload),
             Self::LinkKey(payload) => append(&mut bytes, payload),
             Self::ApsDecryptFailure(payload) => append(&mut bytes, payload),
+            Self::RouteChanged(payload) => append(&mut bytes, payload),
+            Self::RouteRecord(payload) => append(&mut bytes, payload),
+            Self::ApsFrameCounter(payload) => append(&mut bytes, payload),
         };
         fits.then_some(bytes)
     }

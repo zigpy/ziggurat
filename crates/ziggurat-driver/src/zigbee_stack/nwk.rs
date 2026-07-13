@@ -412,10 +412,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NwkCommand::RouteReply(cmd) => self.handle_route_reply(nwk_frame, cmd.clone()),
                 NwkCommand::RouteRecord(cmd) => {
                     tracing::trace!("Route record command frame received: {cmd:?}");
-                    self.core()
+                    let source = nwk_frame.nwk_header.source;
+                    let changed = self
+                        .core()
                         .nib
                         .routing
-                        .store_route_record(nwk_frame.nwk_header.source, cmd.relays.clone());
+                        .store_route_record(source, cmd.relays.clone());
+
+                    if changed {
+                        self.push_notification(ZigbeeNotification::RouteRecord {
+                            destination: source,
+                            relays: cmd.relays.clone(),
+                        });
+                    }
                 }
                 NwkCommand::RouteRequest(cmd) => {
                     self.handle_route_request(nwk_frame, cmd.clone(), sender_nwk);
@@ -448,6 +457,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     tracing::warn!("Unhandled NWK command: {:?}", other.command_id());
                 }
             }
+        }
+
+        // Stream any next-hop cache changes this frame produced so the client can
+        // persist them for a warm restart.
+        let route_changes = self.core().nib.routing.drain_route_changes();
+        for (destination, next_hop) in route_changes {
+            self.push_notification(ZigbeeNotification::RouteChanged {
+                destination,
+                next_hop: next_hop.unwrap_or(Nwk(0xFFFF)),
+                removed: next_hop.is_none(),
+            });
         }
     }
 

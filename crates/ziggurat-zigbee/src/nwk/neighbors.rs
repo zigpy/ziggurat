@@ -267,6 +267,13 @@ impl Neighbors {
         self.table.contains_key(&eui64)
     }
 
+    /// The device type and rx-on-when-idle of a table entry, for join notifications.
+    pub fn device_capability(&self, eui64: Eui64) -> Option<(NwkDeviceType, bool)> {
+        self.table
+            .get(&eui64)
+            .map(|entry| (entry.device_type, entry.rx_on_when_idle))
+    }
+
     /// The number of end device children, for join admission and beacon capacity
     /// decisions.
     pub fn end_device_child_count(&self) -> usize {
