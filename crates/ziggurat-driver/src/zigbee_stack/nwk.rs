@@ -26,7 +26,7 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityLevel, NwkSourceRoute,
 };
 
-use super::routing::{Route, Status as RouteStatus};
+use super::routing::{Route, RouteUpdate, Status as RouteStatus};
 use super::{
     AddrConflictSource, BroadcastSchedule, IndirectFrame, IndirectPayload, JoinKind, MAX_DEPTH,
     NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute,
@@ -458,15 +458,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
         }
+    }
 
-        // Stream any next-hop cache changes this frame produced so the client can
-        // persist them for a warm restart.
-        let route_changes = self.core().nib.routing.drain_route_changes();
-        for (destination, next_hop) in route_changes {
+    /// Notify the client of an established or re-pointed route so it can update its
+    /// warm-start next-hop cache in real time.
+    pub(crate) fn notify_route_update(&self, update: Option<RouteUpdate>) {
+        if let Some(RouteUpdate {
+            destination,
+            next_hop,
+            path_cost,
+        }) = update
+        {
             self.push_notification(ZigbeeNotification::RouteChanged {
                 destination,
-                next_hop: next_hop.unwrap_or(Nwk(0xFFFF)),
-                removed: next_hop.is_none(),
+                next_hop,
+                path_cost,
             });
         }
     }

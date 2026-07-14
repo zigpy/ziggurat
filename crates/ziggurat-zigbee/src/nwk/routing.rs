@@ -86,11 +86,11 @@ impl TableEntry {
     /// Update this entry to route through `next_hop` at advertised `cost`, honoring the
     /// spec 3.6.4.5.3 suitability rule: an ACTIVE entry is only replaced by a strictly
     /// cheaper route, so a worse advertisement never clobbers a good route or forms a
-    /// loop. Returns the new next hop when the active route actually changed (a fresh
-    /// establishment or a different hop), for change tracking.
-    fn consider_route(&mut self, next_hop: Nwk, cost: u8) -> Option<Nwk> {
+    /// loop. Returns whether the active route actually changed (a fresh establishment or
+    /// a different hop), for change tracking.
+    fn consider_route(&mut self, next_hop: Nwk, cost: u8) -> bool {
         if self.status == Status::Active && cost >= self.path_cost {
-            return None;
+            return false;
         }
 
         let previous_next_hop = (self.status == Status::Active).then_some(self.next_hop_address);
@@ -99,7 +99,7 @@ impl TableEntry {
         self.next_hop_address = next_hop;
         self.path_cost = cost;
 
-        (previous_next_hop != Some(next_hop)).then_some(next_hop)
+        previous_next_hop != Some(next_hop)
     }
 }
 
@@ -155,6 +155,31 @@ pub enum RouteReplyDisposition {
     Relay { next_hop: Nwk, path_cost: u8 },
 }
 
+/// A route established or re-pointed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteUpdate {
+    pub destination: Nwk,
+    pub next_hop: Nwk,
+    pub path_cost: u8,
+}
+
+/// The result of processing a received route request: whether it was accepted (only
+/// accepted requests are replied to / relayed) and any route it established.
+#[derive(Debug)]
+pub struct RouteRequestOutcome {
+    pub accepted: bool,
+    pub update: Option<RouteUpdate>,
+}
+
+/// The result of processing a received route reply: what to do with it and any route
+/// it established.
+#[derive(Debug)]
+#[must_use = "the driver must act on the disposition and forward the route update"]
+pub struct RouteReplyOutcome {
+    pub disposition: RouteReplyDisposition,
+    pub update: Option<RouteUpdate>,
+}
+
 /// The NWK routing layer: route table, route discovery table, and route record table,
 /// with the decision logic for route request/reply processing.
 #[derive(Debug, Default)]
@@ -168,11 +193,6 @@ pub struct Routing {
     route_table: FlatMap<Nwk, TableEntry>,
     discovery_table: FlatMap<(Nwk, RouteRequestId), DiscoveryEntry>,
     route_record_table: FlatMap<Nwk, Vec<Nwk>>,
-
-    /// Persist-worthy next-hop changes since the last drain: destination -> its new
-    /// active next hop, or `None` if the route was removed. Keyed by destination so
-    /// repeated changes to the same route within a batch collapse to the latest.
-    route_changes: FlatMap<Nwk, Option<Nwk>>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
@@ -260,12 +280,9 @@ impl Routing {
         }
     }
 
+    /// Remove the route to a destination, returning whether an entry was removed.
     pub fn remove_route(&mut self, destination: Nwk) -> bool {
-        let removed = self.route_table.remove(&destination).is_some();
-        if removed {
-            self.route_changes.insert(destination, None);
-        }
-        removed
+        self.route_table.remove(&destination).is_some()
     }
 
     /// Seed an active routing entry restored by the client on startup. Unlike a route
@@ -274,15 +291,6 @@ impl Routing {
         let mut entry = TableEntry::new(destination, Status::Active, next_hop);
         entry.path_cost = path_cost;
         self.route_table.insert(destination, entry);
-    }
-
-    /// Take the accumulated next-hop changes for the client to persist. Each entry is a
-    /// destination and its new active next hop, or `None` if the route was removed.
-    pub fn drain_route_changes(&mut self) -> Vec<(Nwk, Option<Nwk>)> {
-        core::mem::take(&mut self.route_changes)
-            .iter()
-            .map(|(&destination, &next_hop)| (destination, next_hop))
-            .collect()
     }
 
     /// Returns whether the stored relay list for `source` changed, so the client only
@@ -445,14 +453,17 @@ impl Routing {
         many_to_one: NwkRouteRequestManyToOne,
         now: Instant,
         route_discovery_time: Duration,
-    ) -> bool {
+    ) -> RouteRequestOutcome {
         self.expire_discoveries(now);
 
         match self.discovery_table.get_mut(&(originator, request_id)) {
             Some(discovery_entry) => {
                 if updated_path_cost > discovery_entry.forward_cost {
                     tracing::debug!("Ignoring route request with a worse cost");
-                    return false;
+                    return RouteRequestOutcome {
+                        accepted: false,
+                        update: None,
+                    };
                 }
 
                 discovery_entry.forward_cost = updated_path_cost;
@@ -481,7 +492,7 @@ impl Routing {
             .entry(originator)
             .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
 
-        let route_change = originator_entry.consider_route(sender, updated_path_cost);
+        let route_changed = originator_entry.consider_route(sender, updated_path_cost);
 
         // Spec 3.6.4.5.1.2: a many-to-one request marks its originator as a
         // concentrator; spec 3.6.4.5.1.8: a later plain request never clears it
@@ -492,11 +503,16 @@ impl Routing {
                 == NwkRouteRequestManyToOne::ManyToOneSenderDoesntSupportRouteRecordTable;
         }
 
-        if let Some(next_hop) = route_change {
-            self.route_changes.insert(originator, Some(next_hop));
-        }
+        let update = route_changed.then_some(RouteUpdate {
+            destination: originator,
+            next_hop: sender,
+            path_cost: updated_path_cost,
+        });
 
-        true
+        RouteRequestOutcome {
+            accepted: true,
+            update,
+        }
     }
 
     /// Before relaying a route request: track that discovery toward the destination is
@@ -525,15 +541,21 @@ impl Routing {
         responder: Nwk,
         sender: Nwk,
         updated_path_cost: u8,
-    ) -> RouteReplyDisposition {
+    ) -> RouteReplyOutcome {
         let Some(discovery_entry) = self.discovery_table.get_mut(&(originator, request_id)) else {
             tracing::debug!("Route reply for unknown route discovery, ignoring");
-            return RouteReplyDisposition::Drop;
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Drop,
+                update: None,
+            };
         };
 
         let Some(routing_entry) = self.route_table.get_mut(&responder) else {
             tracing::debug!("Route reply with unknown responder, ignoring");
-            return RouteReplyDisposition::Drop;
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Drop,
+                update: None,
+            };
         };
 
         // If we are the originator, handling is simplified
@@ -546,7 +568,10 @@ impl Routing {
                     updated_path_cost,
                     discovery_entry.residual_cost
                 );
-                return RouteReplyDisposition::Drop;
+                return RouteReplyOutcome {
+                    disposition: RouteReplyDisposition::Drop,
+                    update: None,
+                };
             }
 
             tracing::debug!(
@@ -561,11 +586,16 @@ impl Routing {
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = updated_path_cost;
 
-            if previous_next_hop != Some(sender) {
-                self.route_changes.insert(responder, Some(sender));
-            }
+            let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
+                destination: responder,
+                next_hop: sender,
+                path_cost: updated_path_cost,
+            });
 
-            return RouteReplyDisposition::Established;
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Established,
+                update,
+            };
         }
 
         // Otherwise, we need to decide if we need to update our own routes and possibly
@@ -576,7 +606,10 @@ impl Routing {
                 updated_path_cost,
                 discovery_entry.residual_cost
             );
-            return RouteReplyDisposition::Drop;
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Drop,
+                update: None,
+            };
         }
 
         routing_entry.status = Status::Active;
@@ -596,13 +629,20 @@ impl Routing {
             .entry(originator)
             .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
 
-        if let Some(new_next_hop) = reverse_entry.consider_route(next_hop, forward_cost) {
-            self.route_changes.insert(originator, Some(new_next_hop));
-        }
+        let update = reverse_entry
+            .consider_route(next_hop, forward_cost)
+            .then_some(RouteUpdate {
+                destination: originator,
+                next_hop,
+                path_cost: forward_cost,
+            });
 
-        RouteReplyDisposition::Relay {
-            next_hop,
-            path_cost: updated_path_cost,
+        RouteReplyOutcome {
+            disposition: RouteReplyDisposition::Relay {
+                next_hop,
+                path_cost: updated_path_cost,
+            },
+            update,
         }
     }
 

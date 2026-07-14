@@ -14,7 +14,10 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
-use super::{AddrConflictSource, NwkSecurityMode, SendMode, TxPolicy, TxPriority, ZigbeeStack};
+use super::{
+    AddrConflictSource, NwkSecurityMode, SendMode, TxPolicy, TxPriority, ZigbeeNotification,
+    ZigbeeStack,
+};
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
@@ -44,7 +47,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // responder seeds the first hop and each relay adds the link it forwards across.
         let updated_path_cost = route_reply_cmd.path_cost;
 
-        let disposition = self.core().nib.routing.accept_route_reply(
+        let outcome = self.core().nib.routing.accept_route_reply(
             self.state.network_address,
             route_reply_cmd.originator_nwk,
             route_reply_cmd.route_request_identifier,
@@ -53,7 +56,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             updated_path_cost,
         );
 
-        let (next_hop_nwk, path_cost) = match disposition {
+        self.notify_route_update(outcome.update);
+
+        let (next_hop_nwk, path_cost) = match outcome.disposition {
             RouteReplyDisposition::Drop => return,
             RouteReplyDisposition::Established => {
                 self.pending_route_wake.notify_one();
@@ -143,7 +148,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Deduplicate route requests and track the best path back to the originator.
         // Only requests advertising a strictly better forward cost are processed
         // further; this also stops our own requests from echoing back at us.
-        let accepted = self.core().nib.routing.accept_route_request(
+        let outcome = self.core().nib.routing.accept_route_request(
             nwk_frame.nwk_header.source,
             route_request_cmd.route_request_identifier,
             route_request_cmd.destination_address,
@@ -154,7 +159,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.tunables.route_discovery_time(),
         );
 
-        if !accepted {
+        self.notify_route_update(outcome.update);
+
+        if !outcome.accepted {
             return;
         }
 
@@ -422,6 +429,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         "Removed failed route to {:?}",
                         network_status_cmd.network_address
                     );
+                    self.push_notification(ZigbeeNotification::RouteRemoved {
+                        destination: network_status_cmd.network_address,
+                    });
                 }
                 if removed_record {
                     tracing::info!(

@@ -66,6 +66,7 @@ pub enum CommandId {
     RouteChanged = 0x39,
     RouteRecord = 0x3A,
     ApsFrameCounter = 0x3B,
+    RouteRemoved = 0x3C,
 }
 
 impl From<CommandId> for u8 {
@@ -589,8 +590,13 @@ pub struct LinkKeyPayload {
 pub struct RouteChangedPayload {
     pub destination: Nwk,
     pub next_hop: Nwk,
-    pub removed: bool,
-    pub reserved: u7,
+    pub path_cost: u8,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct RouteRemovedPayload {
+    pub destination: Nwk,
 }
 
 #[abstract_bits]
@@ -812,6 +818,7 @@ pub enum Notification {
     LinkKey(LinkKeyPayload),
     ApsDecryptFailure(ApsDecryptFailPayload),
     RouteChanged(RouteChangedPayload),
+    RouteRemoved(RouteRemovedPayload),
     RouteRecord(RouteRecordPayload),
     ApsFrameCounter(ApsFrameCounterPayload),
 }
@@ -830,6 +837,7 @@ impl Notification {
             Self::LinkKey(_) => (CommandId::LinkKey, 0),
             Self::ApsDecryptFailure(_) => (CommandId::ApsDecryptFailure, 0),
             Self::RouteChanged(_) => (CommandId::RouteChanged, 0),
+            Self::RouteRemoved(_) => (CommandId::RouteRemoved, 0),
             Self::RouteRecord(_) => (CommandId::RouteRecord, 0),
             Self::ApsFrameCounter(_) => (CommandId::ApsFrameCounter, 0),
         };
@@ -846,6 +854,7 @@ impl Notification {
             Self::LinkKey(payload) => append(&mut bytes, payload),
             Self::ApsDecryptFailure(payload) => append(&mut bytes, payload),
             Self::RouteChanged(payload) => append(&mut bytes, payload),
+            Self::RouteRemoved(payload) => append(&mut bytes, payload),
             Self::RouteRecord(payload) => append(&mut bytes, payload),
             Self::ApsFrameCounter(payload) => append(&mut bytes, payload),
         };

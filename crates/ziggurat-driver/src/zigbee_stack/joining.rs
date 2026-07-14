@@ -248,9 +248,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Routers resolve their own conflicts after hearing the notification; our
         // mapping for the address is ambiguous until the keeper re-announces
-        let mut core = self.core();
-        core.nib.address_map.forget_address(address);
-        core.nib.routing.remove_route(address);
+        let removed = {
+            let mut core = self.core();
+            core.nib.address_map.forget_address(address);
+            core.nib.routing.remove_route(address)
+        };
+        if removed {
+            self.push_notification(ZigbeeNotification::RouteRemoved {
+                destination: address,
+            });
+        }
     }
 
     /// The address-conflict report reactor: a single long-lived task owning the
@@ -1223,7 +1230,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The address map entry and any negotiated link key are kept around so that the
         // device can rejoin later
         self.drop_indirect_transactions(source_ieee, source);
-        self.core().nib.routing.remove_route(source);
+        if self.core().nib.routing.remove_route(source) {
+            self.push_notification(ZigbeeNotification::RouteRemoved {
+                destination: source,
+            });
+        }
 
         self.push_notification(ZigbeeNotification::DeviceLeft {
             nwk: source,
