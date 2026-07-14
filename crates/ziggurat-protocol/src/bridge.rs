@@ -273,6 +273,16 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
         .map_err(|e| Error::new(Status::TransmitFailed, &e.to_string()))
 }
 
+/// Cancel an in-flight send by the `request_id` it was issued under. Best-effort: the
+/// reply reports whether a still-cancellable (pre-delivery) send was found and removed.
+pub fn cancel_request<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: &CancelRequestPayload,
+) -> CancelResultPayload {
+    let cancelled = stack.cancel_send(StackRequestId::from(payload.request_id));
+    CancelResultPayload { cancelled }
+}
+
 /// Apply a `set_tunable` to the stack: the name is matched against the Rust field
 /// names of `Tunables`, the raw value decoded per the field's type.
 pub fn set_tunable<P: RadioPhy, R: Runtime>(

@@ -6,6 +6,7 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
 };
 use alloc::boxed::Box;
+use alloc::collections::BinaryHeap;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering as AtomicOrdering;
@@ -1423,6 +1424,108 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 retry.token,
             );
         }
+    }
+
+    /// Best-effort cancellation of an application send by the `request_id` it was
+    /// issued under. Tears the send out of whichever pre-delivery queue still holds
+    /// it.
+    pub fn cancel_send(&self, request_id: RequestId) -> bool {
+        self.cancel_queued_send(request_id)
+            || self.cancel_pending_route(request_id)
+            || self.cancel_pending_unicast_retry(request_id)
+            || self.cancel_pending_broadcast(request_id)
+    }
+
+    /// Whether a transmit outcome is the confirmation of `request_id`.
+    const fn confirms_request(outcome: &TxOutcome, request_id: RequestId) -> bool {
+        matches!(outcome, TxOutcome::Confirm { request_id: rid, .. } if *rid == request_id)
+    }
+
+    /// Remove a send still waiting in the sender priority queue (not yet transmitted).
+    fn cancel_queued_send(&self, request_id: RequestId) -> bool {
+        let mut queue = self.send_queue.lock();
+        if !queue
+            .iter()
+            .any(|send| Self::confirms_request(&send.outcome, request_id))
+        {
+            return false;
+        }
+
+        // The heap has no keyed removal, so drain, drop the one match (freeing its
+        // token), and rebuild from the rest. Cancellation is rare, so the rebuild is
+        // fine.
+        let mut removed = false;
+        let kept: Vec<SendRequest> = queue
+            .drain()
+            .filter(|send| {
+                let drop_it = !removed && Self::confirms_request(&send.outcome, request_id);
+                removed |= drop_it;
+                !drop_it
+            })
+            .collect();
+        *queue = BinaryHeap::from(kept);
+        true
+    }
+
+    /// Remove a frame parked awaiting route discovery. When it was the last frame
+    /// waiting on that destination, drop the empty bucket so the reactor stops
+    /// inspecting it; the shared route request (critical-class, a fixed short burst)
+    /// and the routing table's `DiscoveryUnderway` entry are left to run out / expire
+    /// on their own.
+    fn cancel_pending_route(&self, request_id: RequestId) -> bool {
+        let mut pending = self.state.pending_routes.lock();
+
+        let mut emptied = None;
+        let mut found = false;
+
+        for (destination, bucket) in pending.iter_mut() {
+            let before = bucket.frames.len();
+            bucket
+                .frames
+                .retain(|frame| !Self::confirms_request(&frame.outcome, request_id));
+
+            if bucket.frames.len() != before {
+                found = true;
+
+                if bucket.frames.is_empty() {
+                    emptied = Some(*destination);
+                }
+
+                break;
+            }
+        }
+
+        if let Some(destination) = emptied {
+            pending.remove(&destination);
+        }
+        found
+    }
+
+    /// Remove a unicast parked in the retry backoff before its next attempt is due.
+    fn cancel_pending_unicast_retry(&self, request_id: RequestId) -> bool {
+        let mut pending = self.state.pending_unicast_retries.lock();
+
+        pending
+            .iter()
+            .position(|retry| Self::confirms_request(&retry.outcome, request_id))
+            .is_some_and(|index| {
+                pending.swap_remove(index);
+                true
+            })
+    }
+
+    /// Remove a data/group broadcast still being retransmitted, stopping its remaining
+    /// transmissions. Route-request broadcasts carry no `request_id` and are never matched.
+    fn cancel_pending_broadcast(&self, request_id: RequestId) -> bool {
+        let mut pending = self.state.pending_broadcasts.lock();
+
+        pending
+            .iter()
+            .find_map(|(key, broadcast)| (broadcast.request_id == Some(request_id)).then_some(*key))
+            .is_some_and(|key| {
+                pending.remove(&key);
+                true
+            })
     }
 
     /// A unicast exhausted its retries at the sender. The next hop is dead: invalidate

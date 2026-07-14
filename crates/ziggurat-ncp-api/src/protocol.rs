@@ -148,6 +148,10 @@ async fn dispatch<P: RadioPhy>(
             proto::set_tunable(&**configured(app)?, &payload)?;
             Ok(Response::Empty)
         }
+        Request::CancelRequest(payload) => Ok(Response::CancelResult(proto::cancel_request(
+            &**running(app)?,
+            &payload,
+        ))),
     }
 }
 
