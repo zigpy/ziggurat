@@ -8,7 +8,7 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 
 use crate::frame_token::TrafficClass;
 
-use super::{NwkSecurityMode, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack};
+use super::{NwkSecurityMode, TxPolicy, TxPriority, ZigbeeStack};
 
 /// Maximum number of link status entries that can be carried in a single frame.
 const MAX_LINK_STATUSES: usize = 7;
@@ -33,9 +33,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::info!("Child {eui64:?} ({nwk:?}) is now parented by {new_parent:?}");
 
         self.drop_indirect_transactions(Some(eui64), nwk);
-        if self.core().nib.routing.remove_route(nwk) {
-            self.push_notification(ZigbeeNotification::RouteRemoved { destination: nwk });
-        }
+        self.core().nib.routing.remove_route(nwk);
     }
 
     /// Drop our child entry for a device known to have attached to another parent.

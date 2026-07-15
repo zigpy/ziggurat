@@ -827,14 +827,6 @@ pub enum ZigbeeNotification {
         device_type: Option<NwkDeviceType>,
         rx_on_when_idle: bool,
     },
-    /// A routing table entry's active route changed.
-    RouteChanged {
-        destination: Nwk,
-        next_hop: Nwk,
-        path_cost: u8,
-    },
-    /// A routing table entry was removed; the client drops it from its persisted cache
-    RouteRemoved { destination: Nwk },
     /// A source route (relay list) to a destination was learned or cleared
     RouteRecord { destination: Nwk, relays: Vec<Nwk> },
     /// The outgoing APS security frame counter has advanced; the client persists it to

@@ -337,9 +337,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // The address map entry and any negotiated link key are kept so that the
             // device can rejoin later (mirrors `handle_leave`)
             self.drop_indirect_transactions(Some(eui64), nwk);
-            if self.core().nib.routing.remove_route(nwk) {
-                self.push_notification(ZigbeeNotification::RouteRemoved { destination: nwk });
-            }
+            self.core().nib.routing.remove_route(nwk);
 
             self.push_notification(ZigbeeNotification::DeviceLeft {
                 nwk,

@@ -14,10 +14,7 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
-use super::{
-    AddrConflictSource, NwkSecurityMode, SendMode, TxPolicy, TxPriority, ZigbeeNotification,
-    ZigbeeStack,
-};
+use super::{AddrConflictSource, NwkSecurityMode, SendMode, TxPolicy, TxPriority, ZigbeeStack};
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
@@ -55,8 +52,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source,
             updated_path_cost,
         );
-
-        self.notify_route_update(outcome.update);
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
             RouteReplyDisposition::Drop => return,
@@ -158,8 +153,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.core_now(),
             self.tunables.route_discovery_time(),
         );
-
-        self.notify_route_update(outcome.update);
 
         if !outcome.accepted {
             return;
@@ -408,8 +401,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             | NwkNetworkStatus::SourceRouteFailure => {
                 let mut core = self.core();
 
-                let removed_route = core
-                    .nib
+                core.nib
                     .routing
                     .remove_route(network_status_cmd.network_address);
 
@@ -424,15 +416,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                 drop(core);
 
-                if removed_route {
-                    tracing::info!(
-                        "Removed failed route to {:?}",
-                        network_status_cmd.network_address
-                    );
-                    self.push_notification(ZigbeeNotification::RouteRemoved {
-                        destination: network_status_cmd.network_address,
-                    });
-                }
                 if removed_record {
                     tracing::info!(
                         "Removed failed source route to {:?}",

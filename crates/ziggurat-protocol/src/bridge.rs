@@ -468,20 +468,6 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             ieee: *ieee,
             key: key.clone(),
         }),
-        ZigbeeNotification::RouteChanged {
-            destination,
-            next_hop,
-            path_cost,
-        } => Notification::RouteChanged(RouteChangedPayload {
-            destination: *destination,
-            next_hop: *next_hop,
-            path_cost: *path_cost,
-        }),
-        ZigbeeNotification::RouteRemoved { destination } => {
-            Notification::RouteRemoved(RouteRemovedPayload {
-                destination: *destination,
-            })
-        }
         ZigbeeNotification::RouteRecord {
             destination,
             relays,
