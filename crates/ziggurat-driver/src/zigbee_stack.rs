@@ -145,15 +145,44 @@ pub enum NwkSecurityMode {
 }
 
 /// How the MAC next hop for an outgoing unicast is chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendMode {
     /// The destination is its own next hop: transmit straight to it with no routing
     /// lookup (and route discovery suppressed). Used for frames to a one-hop neighbor,
     /// e.g. delivering the network key to a joining device.
     Direct,
-    /// Resolve the next hop through the routing layer: the route table or an applicable
-    /// source route, discovering a route first if none is known.
-    Route,
+    /// Resolve the next hop through the routing layer, subject to a host [`RouteDirective`]:
+    /// the route table or an applicable source route, discovering a route first if none is
+    /// known.
+    Route(RouteDirective),
+}
+
+/// How the host wants an originated unicast routed.
+///
+/// Hints and forces are per-frame: they steer a single send and are never written into
+/// the routing tables (so they never echo back through the route-change notification
+/// stream).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteDirective {
+    /// The stack resolves the route entirely on its own (source route, route table, or
+    /// discovery). What all stack-originated traffic passes.
+    StackDecides,
+    /// Use the supplied route only when the stack has no route of its own; it stands in
+    /// for route discovery rather than triggering it. A known route still wins.
+    Hint(HostRoute),
+    /// Use the supplied route unconditionally, overriding even a known route and
+    /// suppressing discovery.
+    Force(HostRoute),
+}
+
+/// A route the host supplies alongside a send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRoute {
+    /// Hand the frame to this next hop and let it route onward.
+    NextHop(Nwk),
+    /// The ordered relay path to embed as a source route; the MAC destination is the
+    /// last relay. An empty list means direct delivery to the destination.
+    SourceRoute(Vec<Nwk>),
 }
 
 /// Whether a unicast APS data frame requests an end-to-end acknowledgement. When it

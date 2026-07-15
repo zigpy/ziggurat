@@ -360,6 +360,32 @@ pub struct SendApsFlags {
     pub reserved: u2,
 }
 
+/// How the host wants a unicast routed.
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
+#[repr(u8)]
+pub enum RouteControl {
+    /// Leave routing entirely to the stack. No route data follows.
+    StackDecides = 0,
+    /// Use `next_hop` only if the stack has no route of its own (stands in for discovery).
+    HintNextHop = 1,
+    /// Use `next_hop` unconditionally, overriding a known route and suppressing discovery.
+    ForceNextHop = 2,
+    /// Use `relays` as a source route only if the stack has no route of its own.
+    HintSourceRoute = 3,
+    /// Use `relays` as a source route unconditionally, overriding a known route.
+    ForceSourceRoute = 4,
+}
+
+/// The ordered relay path of a host-supplied source route (excluding the destination).
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SourceRouteRelays {
+    pub relay_count: u8,
+    #[abstract_bits(length_from = relay_count)]
+    pub relays: Vec<Nwk>,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct SendApsPayload {
@@ -373,6 +399,15 @@ pub struct SendApsPayload {
     pub aps_seq: u8,
     pub radius: u8,
     pub priority: u8, // i8 two's complement
+    pub route: RouteControl,
+    #[abstract_bits(
+        presence_from = matches!(route, RouteControl::HintNextHop | RouteControl::ForceNextHop)
+    )]
+    pub next_hop: Option<Nwk>,
+    #[abstract_bits(
+        presence_from = matches!(route, RouteControl::HintSourceRoute | RouteControl::ForceSourceRoute)
+    )]
+    pub relays: Option<SourceRouteRelays>,
     pub asdu_len: u16,
     #[abstract_bits(length_from = asdu_len)]
     pub asdu: Vec<u8>,
