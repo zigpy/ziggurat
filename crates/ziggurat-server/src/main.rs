@@ -5,8 +5,8 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{broadcast, mpsc};
+use tokio::net::{TcpListener, TcpStream, UnixListener};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_serial::{FlowControl, SerialPortBuilderExt};
 use tokio_tungstenite::tungstenite::Message;
@@ -22,7 +22,7 @@ use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_protocol::{self as proto};
-use ziggurat_spinel::client::SpinelClient;
+use ziggurat_spinel::client::{RcpTransport, SpinelClient};
 
 /// Outbound frames a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -62,7 +62,7 @@ pub struct ZigguratServer {
     /// The radio transport owns the serial port for the lifetime of the process: it is
     /// opened lazily by the first command that needs it and never reopened, so stack
     /// replacement cannot race a straggling port handle (`EBUSY`)
-    phy: Mutex<Option<Arc<SpinelPhy>>>,
+    phy: AsyncMutex<Option<Arc<SpinelPhy>>>,
     stack: Mutex<Option<Arc<ZigbeeStack<SpinelPhy>>>>,
     started: AtomicBool,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
@@ -77,7 +77,7 @@ impl ZigguratServer {
 
         Self {
             serial,
-            phy: Mutex::new(None),
+            phy: AsyncMutex::new(None),
             stack: Mutex::new(None),
             started: AtomicBool::new(false),
             notification_tx,
@@ -141,20 +141,15 @@ impl ZigguratServer {
     }
 
     /// The process-lifetime radio transport, opening the serial port on first use.
-    fn phy(&self) -> Result<Arc<SpinelPhy>, tokio_serial::Error> {
-        let mut phy = self.phy.lock().unwrap();
+    async fn phy(&self) -> std::io::Result<Arc<SpinelPhy>> {
+        let mut phy = self.phy.lock().await;
 
         if let Some(phy) = &*phy {
             return Ok(phy.clone());
         }
 
-        // Without flow control the RCP's UART drops bytes under load, corrupting
-        // host->RCP frames ("Framing error" + command timeout)
-        let port = tokio_serial::new(&self.serial.device, self.serial.baudrate)
-            .flow_control(self.serial.flow_control.into())
-            .open_native_async()?;
-
-        let new_phy = Arc::new(SpinelPhy::new(Arc::new(SpinelClient::new(port))));
+        let transport = open_transport(&self.serial).await?;
+        let new_phy = Arc::new(SpinelPhy::new(Arc::new(SpinelClient::new(transport))));
         *phy = Some(new_phy.clone());
         drop(phy);
 
@@ -552,7 +547,7 @@ impl ZigguratServer {
         payload: proto::ResetPayload,
     ) -> Result<proto::Response, proto::Error> {
         if payload.hard {
-            let phy = self.phy().map_err(radio_error)?;
+            let phy = self.phy().await.map_err(radio_error)?;
             phy.reset()
                 .await
                 .map_err(|e| proto::Error::new(proto::Status::RadioError, &e.to_string()))?;
@@ -562,7 +557,7 @@ impl ZigguratServer {
     }
 
     async fn handle_get_hw_address(&self) -> Result<proto::Response, proto::Error> {
-        let phy = self.phy().map_err(radio_error)?;
+        let phy = self.phy().await.map_err(radio_error)?;
         let ieee = phy
             .hw_address()
             .await
@@ -574,7 +569,7 @@ impl ZigguratServer {
     async fn handle_shutdown(&self) -> Result<proto::Response, proto::Error> {
         self.teardown_stack().await;
 
-        let phy = self.phy().map_err(radio_error)?;
+        let phy = self.phy().await.map_err(radio_error)?;
         phy.set_frame_pending_table(&[], &[])
             .await
             .map_err(|e| proto::Error::new(proto::Status::RadioError, &e.to_string()))?;
@@ -594,7 +589,7 @@ impl ZigguratServer {
         self.teardown_stack().await;
 
         tracing::info!("Initializing Zigbee stack with new settings...");
-        let phy = self.phy().map_err(radio_error)?;
+        let phy = self.phy().await.map_err(radio_error)?;
 
         let aps_frame_counter = payload.state.aps_frame_counter;
         let stack = ZigbeeStack::new(
@@ -701,7 +696,7 @@ impl ZigguratServer {
     ) -> Result<proto::Response, proto::Error> {
         // An energy detect is a radio operation, not a network one: it drives the
         // radio directly and needs no configured stack.
-        let phy = self.phy().map_err(radio_error)?;
+        let phy = self.phy().await.map_err(radio_error)?;
 
         let duration = Duration::from_millis(u64::from(payload.duration_per_channel_ms));
         for channel in payload.channels {
@@ -774,7 +769,7 @@ impl ZigguratServer {
         payload: proto::ChannelPayload,
         outbound: &mpsc::Sender<Vec<u8>>,
     ) -> Result<proto::Response, proto::Error> {
-        let phy = self.phy().map_err(radio_error)?;
+        let phy = self.phy().await.map_err(radio_error)?;
 
         phy.reconfigure(&capture_config(payload.channel))
             .await
@@ -808,7 +803,7 @@ impl ZigguratServer {
         &self,
         payload: proto::ChannelPayload,
     ) -> Result<proto::Response, proto::Error> {
-        let phy = self.phy().map_err(radio_error)?;
+        let phy = self.phy().await.map_err(radio_error)?;
 
         phy.reconfigure(&capture_config(payload.channel))
             .await
@@ -842,6 +837,27 @@ pub struct SerialConfig {
     flow_control: FlowControlMode,
 }
 
+/// Connects to the RCP per `serial.device`: a `tcp://host:port` address for a raw TCP
+/// socket (e.g. a network-attached RCP or a `ser2net`-style serial-to-TCP bridge), or a
+/// path for a local serial device.
+async fn open_transport(serial: &SerialConfig) -> std::io::Result<Box<dyn RcpTransport>> {
+    if let Some(addr) = serial.device.strip_prefix("tcp://") {
+        let stream = TcpStream::connect(addr).await?;
+        // The Spinel control plane is latency-sensitive request/response traffic in
+        // small frames; Nagle's algorithm would needlessly delay them.
+        stream.set_nodelay(true)?;
+        return Ok(Box::new(stream));
+    }
+
+    // Without flow control the RCP's UART drops bytes under load, corrupting
+    // host->RCP frames ("Framing error" + command timeout)
+    let port = tokio_serial::new(&serial.device, serial.baudrate)
+        .flow_control(serial.flow_control.into())
+        .open_native_async()
+        .map_err(std::io::Error::other)?;
+    Ok(Box::new(port))
+}
+
 /// How the Zigbee API is exposed to clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ApiMode {
@@ -861,15 +877,16 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ApiMode::Ws)]
     api: ApiMode,
 
-    /// Serial device of the 802.15.4 RCP
+    /// RCP transport: a serial device path, or `tcp://host:port` for a raw TCP socket
     #[arg(long)]
     device: String,
 
-    /// Serial baudrate
+    /// Serial baudrate; ignored for a `tcp://` device
     #[arg(long, default_value_t = 460_800)]
     baudrate: u32,
 
-    /// Serial flow control; the RCP UART drops bytes under load without it
+    /// Serial flow control; the RCP UART drops bytes under load without it. Ignored
+    /// for a `tcp://` device
     #[arg(long, value_enum, default_value_t = FlowControlMode::Hardware)]
     flow_control: FlowControlMode,
 
@@ -922,4 +939,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlowControlMode, SerialConfig, open_transport};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn open_transport_connects_to_a_tcp_device() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let serial = SerialConfig {
+            device: format!("tcp://{addr}"),
+            baudrate: 115_200,
+            flow_control: FlowControlMode::None,
+        };
+
+        open_transport(&serial)
+            .await
+            .expect("tcp:// device should connect over TCP");
+    }
+
+    #[tokio::test]
+    async fn open_transport_rejects_an_unreachable_tcp_device() {
+        // Port 0 is never a valid connect target, so this fails fast without relying on
+        // a real port being closed.
+        let serial = SerialConfig {
+            device: "tcp://127.0.0.1:0".to_string(),
+            baudrate: 115_200,
+            flow_control: FlowControlMode::None,
+        };
+
+        assert!(
+            open_transport(&serial).await.is_err(),
+            "connecting to port 0 should fail"
+        );
+    }
 }
