@@ -788,8 +788,29 @@ pub enum ZigbeeNotification {
     /// A unique trust center link key was negotiated with a device; the client should
     /// persist it so the device survives a stack restart
     LinkKeyUpdate { ieee: Eui64, key: Key },
-    /// A device joined or rejoined the network, directly or through a router
-    DeviceJoined { nwk: Nwk, ieee: Eui64, parent: Nwk },
+    /// A device joined or rejoined the network, directly or through a router. The
+    /// capability is known for direct association/rejoin (our children) and `None` for
+    /// joins learned second-hand via an APS Update-Device from a router.
+    DeviceJoined {
+        nwk: Nwk,
+        ieee: Eui64,
+        parent: Nwk,
+        device_type: Option<NwkDeviceType>,
+        rx_on_when_idle: bool,
+    },
+    /// A routing table entry's active route changed.
+    RouteChanged {
+        destination: Nwk,
+        next_hop: Nwk,
+        path_cost: u8,
+    },
+    /// A routing table entry was removed; the client drops it from its persisted cache
+    RouteRemoved { destination: Nwk },
+    /// A source route (relay list) to a destination was learned or cleared
+    RouteRecord { destination: Nwk, relays: Vec<Nwk> },
+    /// The outgoing APS security frame counter has advanced; the client persists it to
+    /// prevent a rollback on restart
+    ApsFrameCounterUpdate { frame_counter: u32 },
     /// A device left the network. The EUI64 is unknown when the leaving device never
     /// made it into the address map. `reason` records how we learned of the departure.
     DeviceLeft {
@@ -920,6 +941,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     pub(crate) pending_route_wake: Notify,
     /// Monotonic tiebreaker giving equal-priority sends FIFO order in `send_queue`.
     pub(crate) send_seq: AtomicU32,
+    /// The outgoing APS frame counter last streamed to the client, so a persist
+    /// notification only fires every `FRAME_COUNTER_NOTIFY_INTERVAL` frames.
+    last_persisted_aps_counter: AtomicU32,
 
     /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
     /// stopped: a leaked background task would keep the replaced stack processing frames
@@ -1015,6 +1039,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             send_wake: Notify::new(),
             pending_route_wake: Notify::new(),
             send_seq: AtomicU32::new(0),
+            last_persisted_aps_counter: AtomicU32::new(0),
             spawner,
             cancels: Mutex::new(FlatMap::new()),
             next_task_id: AtomicU32::new(0),
@@ -1089,6 +1114,34 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         drop(notifications);
 
         self.notification_wake.notify_one();
+    }
+
+    /// The `(device_type, rx_on_when_idle)` for a `DeviceJoined` notification, read back
+    /// from the neighbor entry. Known for a direct association/rejoin (the device is our
+    /// child); `(None, true)` for a join learned second-hand via a router's Update-Device.
+    fn device_join_capability(&self, ieee: Eui64) -> (Option<NwkDeviceType>, bool) {
+        let device_capability = self.core().nib.neighbors.device_capability(ieee);
+        match device_capability {
+            Some((device_type, rx_on_when_idle)) => (Some(device_type), rx_on_when_idle),
+            None => (None, true),
+        }
+    }
+
+    /// Stream the outgoing APS frame counter every `FRAME_COUNTER_NOTIFY_INTERVAL`
+    /// frames so a restart can't roll it back. Called after each APS encryption.
+    fn maybe_notify_aps_frame_counter(&self) {
+        let counter = self.core().aib.aps_security.outgoing_frame_counter();
+        let last = self
+            .last_persisted_aps_counter
+            .load(AtomicOrdering::Relaxed);
+
+        if counter.wrapping_sub(last) >= FRAME_COUNTER_NOTIFY_INTERVAL {
+            self.last_persisted_aps_counter
+                .store(counter, AtomicOrdering::Relaxed);
+            self.push_notification(ZigbeeNotification::ApsFrameCounterUpdate {
+                frame_counter: counter,
+            });
+        }
     }
 
     /// Wait for and take all queued network events.

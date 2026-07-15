@@ -86,14 +86,20 @@ impl TableEntry {
     /// Update this entry to route through `next_hop` at advertised `cost`, honoring the
     /// spec 3.6.4.5.3 suitability rule: an ACTIVE entry is only replaced by a strictly
     /// cheaper route, so a worse advertisement never clobbers a good route or forms a
-    /// loop.
-    fn consider_route(&mut self, next_hop: Nwk, cost: u8) {
+    /// loop. Returns whether the active route actually changed (a fresh establishment or
+    /// a different hop), for change tracking.
+    fn consider_route(&mut self, next_hop: Nwk, cost: u8) -> bool {
         if self.status == Status::Active && cost >= self.path_cost {
-            return;
+            return false;
         }
+
+        let previous_next_hop = (self.status == Status::Active).then_some(self.next_hop_address);
+
         self.status = Status::Active;
         self.next_hop_address = next_hop;
         self.path_cost = cost;
+
+        previous_next_hop != Some(next_hop)
     }
 }
 
@@ -147,6 +153,31 @@ pub enum RouteReplyDisposition {
     /// Relay the reply toward the request originator via `next_hop`, advertising
     /// `path_cost` (the next hop's own link cost still needs to be added)
     Relay { next_hop: Nwk, path_cost: u8 },
+}
+
+/// A route established or re-pointed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteUpdate {
+    pub destination: Nwk,
+    pub next_hop: Nwk,
+    pub path_cost: u8,
+}
+
+/// The result of processing a received route request: whether it was accepted (only
+/// accepted requests are replied to / relayed) and any route it established.
+#[derive(Debug)]
+pub struct RouteRequestOutcome {
+    pub accepted: bool,
+    pub update: Option<RouteUpdate>,
+}
+
+/// The result of processing a received route reply: what to do with it and any route
+/// it established.
+#[derive(Debug)]
+#[must_use = "the driver must act on the disposition and forward the route update"]
+pub struct RouteReplyOutcome {
+    pub disposition: RouteReplyDisposition,
+    pub update: Option<RouteUpdate>,
 }
 
 /// The NWK routing layer: route table, route discovery table, and route record table,
@@ -249,11 +280,22 @@ impl Routing {
         }
     }
 
+    /// Remove the route to a destination, returning whether an entry was removed.
     pub fn remove_route(&mut self, destination: Nwk) -> bool {
         self.route_table.remove(&destination).is_some()
     }
 
-    pub fn store_route_record(&mut self, source: Nwk, relays: Vec<Nwk>) {
+    /// Seed an active routing entry restored by the client on startup. Unlike a route
+    /// learned at runtime, this does not record a change (the client already has it).
+    pub fn restore_route(&mut self, destination: Nwk, next_hop: Nwk, path_cost: u8) {
+        let mut entry = TableEntry::new(destination, Status::Active, next_hop);
+        entry.path_cost = path_cost;
+        self.route_table.insert(destination, entry);
+    }
+
+    /// Returns whether the stored relay list for `source` changed, so the client only
+    /// persists a genuinely new source route (most route records are redundant).
+    pub fn store_route_record(&mut self, source: Nwk, relays: Vec<Nwk>) -> bool {
         // Spec 3.6.4.5.5: the new route also replaces any existing source routes to
         // the intermediary relays. The relays between relay `i` and us form its own
         // route; the last relay delivered the record to us directly.
@@ -265,7 +307,10 @@ impl Routing {
             self.route_record_table.insert(last, Vec::new());
         }
 
+        let changed = self.route_record_table.get(&source) != Some(&relays);
         self.route_record_table.insert(source, relays);
+
+        changed
     }
 
     pub fn remove_route_record(&mut self, destination: Nwk) -> bool {
@@ -408,14 +453,17 @@ impl Routing {
         many_to_one: NwkRouteRequestManyToOne,
         now: Instant,
         route_discovery_time: Duration,
-    ) -> bool {
+    ) -> RouteRequestOutcome {
         self.expire_discoveries(now);
 
         match self.discovery_table.get_mut(&(originator, request_id)) {
             Some(discovery_entry) => {
                 if updated_path_cost > discovery_entry.forward_cost {
                     tracing::debug!("Ignoring route request with a worse cost");
-                    return false;
+                    return RouteRequestOutcome {
+                        accepted: false,
+                        update: None,
+                    };
                 }
 
                 discovery_entry.forward_cost = updated_path_cost;
@@ -443,7 +491,8 @@ impl Routing {
             .route_table
             .entry(originator)
             .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
-        originator_entry.consider_route(sender, updated_path_cost);
+
+        let route_changed = originator_entry.consider_route(sender, updated_path_cost);
 
         // Spec 3.6.4.5.1.2: a many-to-one request marks its originator as a
         // concentrator; spec 3.6.4.5.1.8: a later plain request never clears it
@@ -454,7 +503,16 @@ impl Routing {
                 == NwkRouteRequestManyToOne::ManyToOneSenderDoesntSupportRouteRecordTable;
         }
 
-        true
+        let update = route_changed.then_some(RouteUpdate {
+            destination: originator,
+            next_hop: sender,
+            path_cost: updated_path_cost,
+        });
+
+        RouteRequestOutcome {
+            accepted: true,
+            update,
+        }
     }
 
     /// Before relaying a route request: track that discovery toward the destination is
@@ -483,15 +541,21 @@ impl Routing {
         responder: Nwk,
         sender: Nwk,
         updated_path_cost: u8,
-    ) -> RouteReplyDisposition {
+    ) -> RouteReplyOutcome {
         let Some(discovery_entry) = self.discovery_table.get_mut(&(originator, request_id)) else {
             tracing::debug!("Route reply for unknown route discovery, ignoring");
-            return RouteReplyDisposition::Drop;
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Drop,
+                update: None,
+            };
         };
 
         let Some(routing_entry) = self.route_table.get_mut(&responder) else {
             tracing::debug!("Route reply with unknown responder, ignoring");
-            return RouteReplyDisposition::Drop;
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Drop,
+                update: None,
+            };
         };
 
         // If we are the originator, handling is simplified
@@ -504,7 +568,10 @@ impl Routing {
                     updated_path_cost,
                     discovery_entry.residual_cost
                 );
-                return RouteReplyDisposition::Drop;
+                return RouteReplyOutcome {
+                    disposition: RouteReplyDisposition::Drop,
+                    update: None,
+                };
             }
 
             tracing::debug!(
@@ -512,12 +579,23 @@ impl Routing {
                 routing_entry.status,
             );
 
+            let previous_next_hop =
+                (routing_entry.status == Status::Active).then_some(routing_entry.next_hop_address);
             routing_entry.status = Status::Active;
             routing_entry.next_hop_address = sender;
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = updated_path_cost;
 
-            return RouteReplyDisposition::Established;
+            let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
+                destination: responder,
+                next_hop: sender,
+                path_cost: updated_path_cost,
+            });
+
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Established,
+                update,
+            };
         }
 
         // Otherwise, we need to decide if we need to update our own routes and possibly
@@ -528,7 +606,10 @@ impl Routing {
                 updated_path_cost,
                 discovery_entry.residual_cost
             );
-            return RouteReplyDisposition::Drop;
+            return RouteReplyOutcome {
+                disposition: RouteReplyDisposition::Drop,
+                update: None,
+            };
         }
 
         routing_entry.status = Status::Active;
@@ -547,11 +628,21 @@ impl Routing {
             .route_table
             .entry(originator)
             .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
-        reverse_entry.consider_route(next_hop, forward_cost);
 
-        RouteReplyDisposition::Relay {
-            next_hop,
-            path_cost: updated_path_cost,
+        let update = reverse_entry
+            .consider_route(next_hop, forward_cost)
+            .then_some(RouteUpdate {
+                destination: originator,
+                next_hop,
+                path_cost: forward_cost,
+            });
+
+        RouteReplyOutcome {
+            disposition: RouteReplyDisposition::Relay {
+                next_hop,
+                path_cost: updated_path_cost,
+            },
+            update,
         }
     }
 

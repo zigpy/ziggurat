@@ -248,9 +248,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Routers resolve their own conflicts after hearing the notification; our
         // mapping for the address is ambiguous until the keeper re-announces
-        let mut core = self.core();
-        core.nib.address_map.forget_address(address);
-        core.nib.routing.remove_route(address);
+        let removed = {
+            let mut core = self.core();
+            core.nib.address_map.forget_address(address);
+            core.nib.routing.remove_route(address)
+        };
+        if removed {
+            self.push_notification(ZigbeeNotification::RouteRemoved {
+                destination: address,
+            });
+        }
     }
 
     /// The address-conflict report reactor: a single long-lived task owning the
@@ -494,10 +501,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.background_send_nwk_frame(nwk_frame, NwkSecurityMode::Unsecured, SendMode::Direct);
 
+        let (device_type, rx_on_when_idle) = self.device_join_capability(destination_eui64);
         self.push_notification(ZigbeeNotification::DeviceJoined {
             nwk: destination,
             ieee: destination_eui64,
             parent: self.state.network_address,
+            device_type,
+            rx_on_when_idle,
         });
     }
 
@@ -917,6 +927,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     nwk: update.device_short_address,
                     ieee: update.device_address,
                     parent: router_nwk,
+                    // Learned via the router's Update-Device, which carries no capability
+                    device_type: None,
+                    rx_on_when_idle: true,
                 });
             }
             ApsUpdateDeviceStatus::StandardDeviceTrustCenterRejoin => {
@@ -938,6 +951,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     nwk: update.device_short_address,
                     ieee: update.device_address,
                     parent: router_nwk,
+                    // Learned via the router's Update-Device, which carries no capability
+                    device_type: None,
+                    rx_on_when_idle: true,
                 });
             }
             ApsUpdateDeviceStatus::StandardDeviceSecuredRejoin => {
@@ -947,6 +963,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     nwk: update.device_short_address,
                     ieee: update.device_address,
                     parent: router_nwk,
+                    // Learned via the router's Update-Device, which carries no capability
+                    device_type: None,
+                    rx_on_when_idle: true,
                 });
             }
             ApsUpdateDeviceStatus::DeviceLeft => {
@@ -1139,10 +1158,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // `send_network_key` also emits the join notification
             self.send_network_key(assigned_nwk, source_ieee, JoinKind::Rejoin);
         } else {
+            let (device_type, rx_on_when_idle) = self.device_join_capability(source_ieee);
+
             self.push_notification(ZigbeeNotification::DeviceJoined {
                 nwk: assigned_nwk,
                 ieee: source_ieee,
                 parent: self.state.network_address,
+                device_type,
+                rx_on_when_idle,
             });
         }
     }
@@ -1207,7 +1230,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The address map entry and any negotiated link key are kept around so that the
         // device can rejoin later
         self.drop_indirect_transactions(source_ieee, source);
-        self.core().nib.routing.remove_route(source);
+        if self.core().nib.routing.remove_route(source) {
+            self.push_notification(ZigbeeNotification::RouteRemoved {
+                destination: source,
+            });
+        }
 
         self.push_notification(ZigbeeNotification::DeviceLeft {
             nwk: source,

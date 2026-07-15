@@ -35,6 +35,8 @@ pub enum CommandId {
     LoadChildren = 0x12,
     LoadAddressCache = 0x13,
     StartNetwork = 0x14,
+    LoadRouteTable = 0x15,
+    LoadSourceRoutes = 0x16,
     GetNetworkInfo = 0x18,
     ScanKeyTable = 0x19,
     ScanChildren = 0x1A,
@@ -61,6 +63,10 @@ pub enum CommandId {
     LinkKey = 0x36,
     ApsDecryptFailure = 0x37,
     LastReset = 0x38,
+    RouteChanged = 0x39,
+    RouteRecord = 0x3A,
+    ApsFrameCounter = 0x3B,
+    RouteRemoved = 0x3C,
 }
 
 impl From<CommandId> for u8 {
@@ -295,6 +301,31 @@ pub struct LoadAddressCachePayload {
 
 #[abstract_bits]
 #[derive(Debug, Clone)]
+pub struct LoadRouteTablePayload {
+    pub count: u16,
+    #[abstract_bits(length_from = count)]
+    pub entries: Vec<RouteEntry>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SourceRouteEntry {
+    pub destination: Nwk,
+    pub relay_count: u8,
+    #[abstract_bits(length_from = relay_count)]
+    pub relays: Vec<Nwk>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct LoadSourceRoutesPayload {
+    pub count: u16,
+    #[abstract_bits(length_from = count)]
+    pub entries: Vec<SourceRouteEntry>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
 pub struct NetworkInfoPayload {
     pub state: NetworkState,
     pub key_count: u16,
@@ -524,6 +555,7 @@ pub struct DeviceJoinedPayload {
     pub nwk: Nwk,
     pub ieee: Eui64,
     pub parent: Nwk,
+    pub flags: ChildFlags,
 }
 
 #[abstract_bits]
@@ -555,6 +587,35 @@ pub struct LinkKeyPayload {
 
 #[abstract_bits]
 #[derive(Debug, Clone)]
+pub struct RouteChangedPayload {
+    pub destination: Nwk,
+    pub next_hop: Nwk,
+    pub path_cost: u8,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct RouteRemovedPayload {
+    pub destination: Nwk,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct RouteRecordPayload {
+    pub destination: Nwk,
+    pub relay_count: u8,
+    #[abstract_bits(length_from = relay_count)]
+    pub relays: Vec<Nwk>,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct ApsFrameCounterPayload {
+    pub frame_counter: u32,
+}
+
+#[abstract_bits]
+#[derive(Debug, Clone)]
 pub struct ApsDecryptFailPayload {
     pub source: Nwk,
     pub source_ieee: Eui64,
@@ -575,6 +636,8 @@ pub enum Request {
     LoadKeyTable(LoadKeyTablePayload),
     LoadChildren(LoadChildrenPayload),
     LoadAddressCache(LoadAddressCachePayload),
+    LoadRouteTable(LoadRouteTablePayload),
+    LoadSourceRoutes(LoadSourceRoutesPayload),
     StartNetwork,
     GetNetworkInfo,
     ScanKeyTable,
@@ -607,6 +670,10 @@ impl Request {
             CommandId::LoadChildren => Self::LoadChildren(require(payload, "child entries")?),
             CommandId::LoadAddressCache => {
                 Self::LoadAddressCache(require(payload, "addr entries")?)
+            }
+            CommandId::LoadRouteTable => Self::LoadRouteTable(require(payload, "route entries")?),
+            CommandId::LoadSourceRoutes => {
+                Self::LoadSourceRoutes(require(payload, "source route entries")?)
             }
             CommandId::StartNetwork => Self::StartNetwork,
             CommandId::GetNetworkInfo => Self::GetNetworkInfo,
@@ -750,6 +817,10 @@ pub enum Notification {
     FrameCounter(FrameCounterPayload),
     LinkKey(LinkKeyPayload),
     ApsDecryptFailure(ApsDecryptFailPayload),
+    RouteChanged(RouteChangedPayload),
+    RouteRemoved(RouteRemovedPayload),
+    RouteRecord(RouteRecordPayload),
+    ApsFrameCounter(ApsFrameCounterPayload),
 }
 
 impl Notification {
@@ -765,6 +836,10 @@ impl Notification {
             Self::FrameCounter(_) => (CommandId::FrameCounter, 0),
             Self::LinkKey(_) => (CommandId::LinkKey, 0),
             Self::ApsDecryptFailure(_) => (CommandId::ApsDecryptFailure, 0),
+            Self::RouteChanged(_) => (CommandId::RouteChanged, 0),
+            Self::RouteRemoved(_) => (CommandId::RouteRemoved, 0),
+            Self::RouteRecord(_) => (CommandId::RouteRecord, 0),
+            Self::ApsFrameCounter(_) => (CommandId::ApsFrameCounter, 0),
         };
         let mut bytes = envelope(FrameType::Notification, command.into(), request_id);
         let fits = match self {
@@ -778,6 +853,10 @@ impl Notification {
             Self::FrameCounter(payload) => append(&mut bytes, payload),
             Self::LinkKey(payload) => append(&mut bytes, payload),
             Self::ApsDecryptFailure(payload) => append(&mut bytes, payload),
+            Self::RouteChanged(payload) => append(&mut bytes, payload),
+            Self::RouteRemoved(payload) => append(&mut bytes, payload),
+            Self::RouteRecord(payload) => append(&mut bytes, payload),
+            Self::ApsFrameCounter(payload) => append(&mut bytes, payload),
         };
         fits.then_some(bytes)
     }
