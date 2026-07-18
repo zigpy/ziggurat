@@ -46,10 +46,9 @@ pub enum Ieee802154FrameType {
     Ack = 0b010,
 }
 
-/// Frame Version field (IEEE Std 802.15.4-2020, Table 7-4). All four values are
-/// representable in the 2-bit field, so decoding never fails.
+/// Frame Version field (IEEE Std 802.15.4-2020, Table 7-4).
 #[abstract_bits(bits = 2)]
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 #[repr(u8)]
 pub enum Ieee802154FrameVersion {
     /// IEEE Std 802.15.4-2003
