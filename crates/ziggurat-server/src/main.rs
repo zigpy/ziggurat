@@ -12,6 +12,7 @@ use tokio_serial::{FlowControl, SerialPortBuilderExt};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::Instrument;
 use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -890,18 +891,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(args.log_level.to_string()));
 
+        let timer = ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.6f%:z".to_string());
+
         // In stdio mode stdout carries the binary API, so logs must not touch it
         if args.api == ApiMode::Stdio {
             tracing_subscriber::registry()
                 .with(
                     fmt::layer()
+                        .with_timer(timer)
                         .with_writer(std::io::stderr)
                         .with_filter(filter),
                 )
                 .init();
         } else {
             tracing_subscriber::registry()
-                .with(fmt::layer().with_filter(filter))
+                .with(fmt::layer().with_timer(timer).with_filter(filter))
                 .init();
         }
 

@@ -20,7 +20,7 @@ clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 cobs = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "io-std"] }
 tokio-serial = "5.4"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
