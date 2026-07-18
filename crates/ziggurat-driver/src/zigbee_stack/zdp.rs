@@ -12,8 +12,8 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, MAX_DEPTH, NwkDeviceType, TxOutcome, TxPolicy, TxPriority, ZigbeeStack,
-    ZigbeeStackError, neighbors, routing,
+    ApsAck, MAX_DEPTH, NwkDeviceType, RouteDirective, SendMode, TxOutcome, TxPolicy, TxPriority,
+    ZigbeeStack, ZigbeeStackError, neighbors, routing,
 };
 use crate::frame_token::TrafficClass;
 
@@ -291,6 +291,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 class: TrafficClass::Host,
             },
             TxOutcome::Discard,
+            SendMode::Route(RouteDirective::StackDecides),
         );
         Ok(())
     }

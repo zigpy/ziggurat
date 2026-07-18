@@ -18,8 +18,8 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::flat_map::Entry;
 
 use super::{
-    ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, SendMode,
-    TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, RouteDirective,
+    SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 use crate::frame_token::TrafficClass;
 
@@ -173,7 +173,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.background_send_nwk_frame(aps_ack_frame, NwkSecurityMode::NetworkKey, SendMode::Route);
+        self.background_send_nwk_frame(
+            aps_ack_frame,
+            NwkSecurityMode::NetworkKey,
+            SendMode::Route(RouteDirective::StackDecides),
+        );
     }
 
     /// Build the NWK frame carrying an APS data frame, plus the ack-correlation data when
@@ -327,6 +331,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         aps_security: Option<Eui64>,
         sleepy_destination: bool,
         priority: TxPriority,
+        route: RouteDirective,
         request_id: RequestId,
     ) -> Result<(), ZigbeeStackError> {
         let (nwk_frame, ack_data) = self.prepare_aps_send(
@@ -369,6 +374,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 request_id,
                 aps_ack: ack_data,
             },
+            SendMode::Route(route),
         );
         Ok(())
     }
@@ -382,6 +388,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         policy: TxPolicy,
         outcome: TxOutcome,
+        mode: SendMode,
     ) {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             let request_id = match outcome {
@@ -402,7 +409,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.originate_unicast(
                 nwk_frame,
                 NwkSecurityMode::NetworkKey,
-                SendMode::Route,
+                mode,
                 policy,
                 outcome,
             );

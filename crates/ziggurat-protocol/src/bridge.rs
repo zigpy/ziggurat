@@ -11,8 +11,9 @@ use core::time::Duration;
 use ziggurat_driver::runtime::Runtime;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ApsAckResult, DeviceLeaveReason, NetworkBeacon, NetworkConfig, NwkDeviceType,
-    RequestId as StackRequestId, SendResult, TclkSeed, TxPriority, ZigbeeNotification, ZigbeeStack,
+    ApsAck, ApsAckResult, DeviceLeaveReason, HostRoute, NetworkBeacon, NetworkConfig,
+    NwkDeviceType, RequestId as StackRequestId, RouteDirective, SendResult, TclkSeed, TxPriority,
+    ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -277,6 +278,8 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
         ApsAck::None
     };
 
+    let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
+
     stack
         .send_aps(
             payload.flags.delivery_mode,
@@ -292,9 +295,38 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
             aps_security,
             payload.flags.sleepy_destination,
             TxPriority::from_host(payload.priority as i8),
+            route,
             StackRequestId::from(request_id),
         )
         .map_err(|e| Error::new(Status::TransmitFailed, &e.to_string()))
+}
+
+/// Build the driver's [`RouteDirective`] from the wire route control.
+fn route_directive(
+    control: RouteControl,
+    next_hop: Option<Nwk>,
+    relays: Option<SourceRouteRelays>,
+) -> Result<RouteDirective, Error> {
+    let host_source_route = |relays: SourceRouteRelays| -> Result<HostRoute, Error> {
+        if relays.relays.is_empty() {
+            Err(Error::new(
+                Status::InvalidRequest,
+                "a source route must contain at least one relay",
+            ))
+        } else {
+            Ok(HostRoute::SourceRoute(relays.relays))
+        }
+    };
+
+    Ok(match control {
+        RouteControl::StackDecides => RouteDirective::StackDecides,
+        RouteControl::HintNextHop => RouteDirective::Hint(HostRoute::NextHop(next_hop.unwrap())),
+        RouteControl::ForceNextHop => RouteDirective::Force(HostRoute::NextHop(next_hop.unwrap())),
+        RouteControl::HintSourceRoute => RouteDirective::Hint(host_source_route(relays.unwrap())?),
+        RouteControl::ForceSourceRoute => {
+            RouteDirective::Force(host_source_route(relays.unwrap())?)
+        }
+    })
 }
 
 /// Cancel an in-flight send by the `request_id` it was issued under. Best-effort: the

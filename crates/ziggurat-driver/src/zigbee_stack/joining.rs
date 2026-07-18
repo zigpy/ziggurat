@@ -36,8 +36,8 @@ use ziggurat_zigbee::nwk::commands::{
 
 use super::{
     AddrConflictSource, DeviceLeaveReason, IndirectFrame, IndirectPayload, JoinKind, NwkDeviceType,
-    NwkSecurityMode, RadioPhy, SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification,
-    ZigbeeStack, neighbors,
+    NwkSecurityMode, RadioPhy, RouteDirective, SendMode, TxOutcome, TxPolicy, TxPriority,
+    ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -628,7 +628,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             if self.is_neighbor(destination) {
                 SendMode::Direct
             } else {
-                SendMode::Route
+                SendMode::Route(RouteDirective::StackDecides)
             },
         );
     }

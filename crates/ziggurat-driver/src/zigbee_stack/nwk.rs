@@ -28,10 +28,10 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, RouteUpdate, Status as RouteStatus};
 use super::{
-    AddrConflictSource, BroadcastSchedule, IndirectFrame, IndirectPayload, JoinKind, MAX_DEPTH,
-    NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute,
-    PendingUnicastRetry, RequestId, SendKind, SendMode, SendRequest, SendResult, TxOutcome,
-    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    AddrConflictSource, BroadcastSchedule, HostRoute, IndirectFrame, IndirectPayload, JoinKind,
+    MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute,
+    PendingUnicastRetry, RequestId, RouteDirective, SendKind, SendMode, SendRequest, SendResult,
+    TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -603,7 +603,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let destination = nwk_frame.nwk_header.destination;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        match self.resolve_next_hop(&mut nwk_frame, mode) {
+        match self.resolve_next_hop(&mut nwk_frame, &mode) {
             NextHop::Resolved(next_hop) => {
                 self.enqueue_unicast(
                     nwk_frame,
@@ -633,11 +633,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Resolve the MAC next hop for a unicast without ever blocking. A source-routed
     /// result rewrites `nwk_frame`'s header in place (spec 3.6.4.3.1). When no route is
     /// known the frame's `discover_route` flag decides between discovery and discard.
-    fn resolve_next_hop(&self, nwk_frame: &mut NwkFrame, mode: SendMode) -> NextHop {
+    fn resolve_next_hop(&self, nwk_frame: &mut NwkFrame, mode: &SendMode) -> NextHop {
         let destination = nwk_frame.nwk_header.destination;
 
-        if mode == SendMode::Direct {
-            return NextHop::Resolved(destination);
+        let directive = match mode {
+            SendMode::Direct => return NextHop::Resolved(destination),
+            SendMode::Route(directive) => directive,
+        };
+
+        // A forced host route overrides everything, including a known route.
+        if let RouteDirective::Force(route) = directive {
+            return self.apply_host_route(nwk_frame, route);
         }
 
         // End device children never route-discover; their parent delivers directly.
@@ -649,16 +655,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         match self.outbound_route(destination) {
             Some(Route::NextHop(next_hop)) => return NextHop::Resolved(next_hop),
             Some(Route::SourceRouted(relays)) => {
-                // Spec 3.6.4.3.1: the MAC destination is the relay closest to us, listed
-                // last; the relay index starts one below the relay count.
-                let next_hop = *relays.last().unwrap();
-                nwk_frame.nwk_header.frame_control.source_route = true;
-                nwk_frame.nwk_header.frame_control.discover_route = NwkRouteDiscovery::Suppress;
-                nwk_frame.nwk_header.source_route = Some(NwkSourceRoute {
-                    relay_index: relays.len() as u8 - 1,
-                    relays,
-                });
-                return NextHop::Resolved(next_hop);
+                return self.apply_source_route(nwk_frame, relays);
             }
             None => {}
         }
@@ -673,12 +670,39 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         }
 
-        // No usable route. Spec 3.6.3.3: only initiate discovery if the frame allows it.
+        // No usable route. A host hint stands in for discovery rather than triggering it.
+        if let RouteDirective::Hint(route) = directive {
+            return self.apply_host_route(nwk_frame, route);
+        }
+
+        // Spec 3.6.3.3: only initiate discovery if the frame allows it.
         if nwk_frame.nwk_header.frame_control.discover_route == NwkRouteDiscovery::Suppress {
             NextHop::Discard
         } else {
             NextHop::NeedDiscovery
         }
+    }
+
+    /// Apply a host-supplied route to a frame we originate, resolving its MAC next hop.
+    fn apply_host_route(&self, nwk_frame: &mut NwkFrame, route: &HostRoute) -> NextHop {
+        match route {
+            // The next hop routes onward itself, so `discover_route` is left as built:
+            // an intermediate hop still needs it to reach the final destination.
+            HostRoute::NextHop(next_hop) => NextHop::Resolved(*next_hop),
+            HostRoute::SourceRoute(relays) => self.apply_source_route(nwk_frame, relays.clone()),
+        }
+    }
+
+    /// Rewrite `nwk_frame` to carry a source route.
+    fn apply_source_route(&self, nwk_frame: &mut NwkFrame, relays: Vec<Nwk>) -> NextHop {
+        let next_hop = *relays.last().unwrap();
+        nwk_frame.nwk_header.frame_control.source_route = true;
+        nwk_frame.nwk_header.frame_control.discover_route = NwkRouteDiscovery::Suppress;
+        nwk_frame.nwk_header.source_route = Some(NwkSourceRoute {
+            relay_index: relays.len() as u8 - 1,
+            relays,
+        });
+        NextHop::Resolved(next_hop)
     }
 
     pub async fn send_nwk_frame(
@@ -1085,7 +1109,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 token,
             } = queued;
 
-            match self.resolve_next_hop(&mut nwk_frame, SendMode::Route) {
+            match self.resolve_next_hop(
+                &mut nwk_frame,
+                &SendMode::Route(RouteDirective::StackDecides),
+            ) {
                 NextHop::Resolved(next_hop) => {
                     self.enqueue_unicast(nwk_frame, next_hop, security, priority, outcome, token);
                 }
@@ -1928,7 +1955,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.background_send_nwk_frame(
             network_status_frame,
             NwkSecurityMode::NetworkKey,
-            SendMode::Route,
+            SendMode::Route(RouteDirective::StackDecides),
         );
     }
 
