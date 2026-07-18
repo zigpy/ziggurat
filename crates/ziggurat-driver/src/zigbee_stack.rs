@@ -1,4 +1,4 @@
-use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame};
+use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame, ParseError};
 
 use crate::frame_token::{self, FrameToken, TrafficClass};
 use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
@@ -1330,6 +1330,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 Ok(frame) => {
                     tracing::trace!("Received 802.15.4 frame: {frame:?}");
                     return (packet, frame);
+                }
+                Err(e @ ParseError::Unsupported(_)) => {
+                    tracing::debug!("Ignoring unsupported IEEE 802.15.4 frame: {e:?}");
+                    continue;
                 }
                 Err(e) => {
                     tracing::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");

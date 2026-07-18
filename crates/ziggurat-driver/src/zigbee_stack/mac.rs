@@ -4,6 +4,7 @@ use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154CommandFrame, Ieee802154DataFrame,
     Ieee802154Frame, Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
+    Ieee802154FrameVersion,
 };
 use abstract_bits::AbstractBits;
 use alloc::vec::Vec;
@@ -99,7 +100,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::None,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
                 sequence_number: Some(ieee802154_sequence_number),
@@ -201,7 +202,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::Short,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::None,
                 },
                 sequence_number: Some(sequence_number),
