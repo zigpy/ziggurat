@@ -7,7 +7,7 @@ use crate::ziggurat_ieee_802154::commands::{
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154AssociationStatus,
     Ieee802154CommandFrame, Ieee802154CommandPayload, Ieee802154Frame, Ieee802154FrameControl,
-    Ieee802154FrameHeader, Ieee802154FrameType,
+    Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
@@ -384,7 +384,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::Long,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::Long,
                 },
                 sequence_number: Some(sequence_number),

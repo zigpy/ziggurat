@@ -46,6 +46,20 @@ pub enum Ieee802154FrameType {
     Ack = 0b010,
 }
 
+/// Frame Version field (IEEE Std 802.15.4-2020, Table 7-4).
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum Ieee802154FrameVersion {
+    /// IEEE Std 802.15.4-2003
+    Ieee2003 = 0b00,
+    /// IEEE Std 802.15.4-2006
+    Ieee2006 = 0b01,
+    /// IEEE Std 802.15.4-2015 and later; enables IEs, enhanced beacons/acks
+    Ieee2015 = 0b10,
+    Reserved = 0b11,
+}
+
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[abstract_bits(bits = 8)]
 #[repr(u8)]
@@ -82,7 +96,7 @@ pub struct Ieee802154FrameControl {
     pub sequence_number_suppression: bool,
     pub information_elements_present: bool,
     pub dest_addr_mode: Ieee802154AddressingMode,
-    pub frame_version: u2,
+    pub frame_version: Ieee802154FrameVersion,
     pub src_addr_mode: Ieee802154AddressingMode,
 }
 
@@ -430,6 +444,13 @@ impl Ieee802154Frame<FrameBytes> {
         // Branch based on frame type
         match header.frame_control.frame_type {
             Ieee802154FrameType::Beacon => {
+                if !matches!(
+                    header.frame_control.frame_version,
+                    Ieee802154FrameVersion::Ieee2003 | Ieee802154FrameVersion::Ieee2006
+                ) {
+                    return Err(ParseError::Unsupported("Enhanced Beacon frame"));
+                }
+
                 if remaining.len() < 4 {
                     return Err(ParseError::UnexpectedEnd {
                         ty: "Ieee802154BeaconFrame",
@@ -611,7 +632,10 @@ mod test {
             frame_control.dest_addr_mode,
             Ieee802154AddressingMode::Short
         );
-        assert_eq!(frame_control.frame_version, 0);
+        assert_eq!(
+            frame_control.frame_version,
+            Ieee802154FrameVersion::Ieee2003
+        );
         assert_eq!(frame_control.src_addr_mode, Ieee802154AddressingMode::Short);
 
         assert_eq!(remaining, [0xFF]);
@@ -645,7 +669,10 @@ mod test {
                 data_frame.header.frame_control.dest_addr_mode,
                 Ieee802154AddressingMode::Short
             );
-            assert_eq!(data_frame.header.frame_control.frame_version, 0);
+            assert_eq!(
+                data_frame.header.frame_control.frame_version,
+                Ieee802154FrameVersion::Ieee2003
+            );
             assert_eq!(
                 data_frame.header.frame_control.src_addr_mode,
                 Ieee802154AddressingMode::Short
@@ -696,7 +723,10 @@ mod test {
         let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
 
         if let Ieee802154Frame::Ack(ack_frame) = frame {
-            assert_eq!(ack_frame.header.frame_control.frame_version, 0);
+            assert_eq!(
+                ack_frame.header.frame_control.frame_version,
+                Ieee802154FrameVersion::Ieee2003
+            );
             assert_eq!(
                 ack_frame.header.frame_control.src_addr_mode,
                 Ieee802154AddressingMode::None
@@ -736,7 +766,7 @@ mod test {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::Short,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
                 sequence_number: Some(52),
@@ -771,7 +801,7 @@ mod test {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::Short,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
                 sequence_number: Some(3),
@@ -810,7 +840,7 @@ mod test {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::Short,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::Short,
                 },
                 sequence_number: Some(3),
@@ -847,7 +877,7 @@ mod test {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::Short,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::None,
                 },
                 sequence_number: Some(109),
@@ -883,7 +913,7 @@ mod test {
                     sequence_number_suppression: false,
                     information_elements_present: false,
                     dest_addr_mode: Ieee802154AddressingMode::Short,
-                    frame_version: 0,
+                    frame_version: Ieee802154FrameVersion::Ieee2003,
                     src_addr_mode: Ieee802154AddressingMode::Long,
                 },
                 sequence_number: Some(19),
