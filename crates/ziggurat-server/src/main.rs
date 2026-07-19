@@ -306,7 +306,9 @@ impl ZigguratServer {
                             break 'read;
                         }
                     }
-                    Err(()) => {
+                    Err(cobs::DecodeError::EmptyFrame)
+                    | Err(cobs::DecodeError::InvalidFrame { decoded_bytes: _ })
+                    | Err(cobs::DecodeError::TargetBufTooSmall) => {
                         let _ = outbound_tx
                             .send(proto::Error::parse("cobs").frame(0, 0))
                             .await;

@@ -13,5 +13,5 @@ ziggurat-ieee-802154.workspace = true
 ziggurat-phy.workspace = true
 ziggurat-spinel.workspace = true
 
-parking_lot = "0.12.4"
-tokio = { version = "1.43.0", features = ["rt", "time", "sync"] }
+parking_lot = "0.12.5"
+tokio = { version = "1.53.0", features = ["rt", "time", "sync"] }
