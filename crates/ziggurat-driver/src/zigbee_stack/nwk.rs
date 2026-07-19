@@ -152,11 +152,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             {
                 tracing::debug!("Broadcast {key:?} passively acknowledged");
                 let removed = self.state.pending_broadcasts.lock().remove(&key);
-                if let Some(request_id) = removed.and_then(|broadcast| broadcast.request_id) {
-                    self.push_notification(ZigbeeNotification::SendConfirm {
-                        request_id,
-                        result: SendResult::Confirmed { next_hop: None },
-                    });
+                if let Some(broadcast) = removed {
+                    self.resolve_outcome(broadcast.outcome, None, Ok(()));
                 }
                 continue;
             }
@@ -174,7 +171,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             enum Next {
                 Idle,
                 Retransmit(NwkFrame, NwkSecurityMode, TxPolicy),
-                Exhausted(Option<RequestId>),
+                Exhausted(TxOutcome),
             }
 
             // Decide under the lock; if a copy is due, extract it to transmit after release.
@@ -187,9 +184,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 if broadcast.next_attempt > now {
                     Next::Idle
                 } else if broadcast.attempts_remaining == 0 {
-                    let request_id = broadcast.request_id;
-                    pending.remove(&key);
-                    Next::Exhausted(request_id)
+                    let broadcast = pending.remove(&key).unwrap();
+                    Next::Exhausted(broadcast.outcome)
                 } else {
                     broadcast.attempts_remaining -= 1;
                     broadcast.next_attempt = next_attempt;
@@ -214,16 +210,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         TxOutcome::Discard,
                     );
                 }
-                Next::Exhausted(request_id) => {
+                Next::Exhausted(outcome) => {
                     tracing::debug!("Broadcast {key:?} out of retransmit attempts");
-                    if let Some(request_id) = request_id {
-                        self.push_notification(ZigbeeNotification::SendConfirm {
-                            request_id,
-                            result: SendResult::Failed {
-                                reason: "passive-ack quorum not reached".to_string(),
-                            },
-                        });
-                    }
+                    let result = match schedule {
+                        BroadcastSchedule::PassiveAck => {
+                            Err(ZigbeeStackError::BroadcastQuorumNotReached)
+                        }
+                        // A fixed-interval broadcast completes by running out of attempts
+                        BroadcastSchedule::FixedInterval { .. } => Ok(()),
+                    };
+                    self.resolve_outcome(outcome, None, result);
                 }
             }
         }
@@ -240,11 +236,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         schedule: BroadcastSchedule,
         first_delay: Duration,
         attempts: u8,
-        request_id: Option<RequestId>,
+        outcome: TxOutcome,
     ) {
-        // With a request_id we still track the broadcast even at zero retransmits, so the
-        // reactor can confirm its quorum (or fail it); untracked broadcasts just return.
-        if attempts == 0 && request_id.is_none() {
+        // With an awaited outcome we still track the broadcast even at zero retransmits,
+        // so the reactor can confirm its quorum (or fail it); untracked broadcasts just
+        // return.
+        if attempts == 0 && matches!(outcome, TxOutcome::Discard) {
             return;
         }
 
@@ -257,14 +254,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 frame_token::total(),
                 policy.class,
             );
-            if let Some(request_id) = request_id {
-                self.push_notification(ZigbeeNotification::SendConfirm {
-                    request_id,
-                    result: SendResult::Failed {
-                        reason: ZigbeeStackError::FrameBudgetExhausted.to_string(),
-                    },
-                });
-            }
+            self.resolve_outcome(outcome, None, Err(ZigbeeStackError::FrameBudgetExhausted));
             return;
         };
 
@@ -277,7 +267,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 schedule,
                 attempts_remaining: attempts,
                 next_attempt: self.core_now() + first_delay,
-                request_id,
+                outcome,
                 _token: token,
             },
         );
@@ -308,7 +298,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             initial_delay,
             attempts,
-            None,
+            TxOutcome::Discard,
         );
     }
 
@@ -532,7 +522,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Fire-and-forget originate of a unicast NWK frame at normal priority. Nothing is
     /// awaited, so a failed transmit is handled by the sender, not reported back here.
-    /// Unicast only; broadcasts go through [`Self::send_broadcast_nwk_frame`].
+    /// Unicast only; broadcasts go through [`Self::originate_broadcast`].
     pub fn background_send_nwk_frame(
         &self,
         nwk_frame: NwkFrame,
@@ -689,24 +679,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         NextHop::Resolved(next_hop)
     }
 
-    pub async fn send_nwk_frame(
-        &self,
-        nwk_frame: NwkFrame,
-        security: NwkSecurityMode,
-        mode: SendMode,
-        policy: TxPolicy,
-    ) -> Result<(), ZigbeeStackError> {
-        if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-            // Broadcasts are fire-and-forget: the retransmit reactor owns delivery, and
-            // there is no end-to-end result to await.
-            self.send_broadcast_nwk_frame(nwk_frame, security, policy, None);
-            Ok(())
-        } else {
-            self.send_unicast_nwk_frame(nwk_frame, security, mode, policy)
-                .await
-        }
-    }
-
     pub(super) fn next_nwk_sequence_number(&self) -> u8 {
         let mut core = self.core();
         core.nib.sequence_number = core.nib.sequence_number.wrapping_add(1);
@@ -780,31 +752,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nib
             .routing
             .route_to(destination, self.tunables.max_source_route())
-    }
-
-    /// Originate a unicast and await its delivery result. The completion resolves once
-    /// the frame leaves the radio (or, for a sleepy child, once it polls), or with an
-    /// error on transmit failure, route-discovery failure, or discovery being
-    /// suppressed.
-    pub async fn send_unicast_nwk_frame(
-        &self,
-        nwk_frame: NwkFrame,
-        security: NwkSecurityMode,
-        mode: SendMode,
-        policy: TxPolicy,
-    ) -> Result<(), ZigbeeStackError> {
-        let (completion_tx, completion_rx) = signal::channel();
-        self.originate_unicast(
-            nwk_frame,
-            security,
-            mode,
-            policy,
-            TxOutcome::Signal(completion_tx),
-        );
-        completion_rx
-            .wait()
-            .await
-            .unwrap_or(Err(ZigbeeStackError::TransmitFailed(TxResult::Aborted)))
     }
 
     /// Wrap an encrypted NWK payload in a unicast 802.15.4 data frame. The sequence
@@ -1552,13 +1499,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Remove a data/group broadcast still being retransmitted, stopping its remaining
-    /// transmissions. Route-request broadcasts carry no `request_id` and are never matched.
+    /// transmissions. Route-request broadcasts carry no confirmable outcome and are
+    /// never matched.
     fn cancel_pending_broadcast(&self, request_id: RequestId) -> bool {
         let mut pending = self.state.pending_broadcasts.lock();
 
         pending
             .iter()
-            .find_map(|(key, broadcast)| (broadcast.request_id == Some(request_id)).then_some(*key))
+            .find_map(|(key, broadcast)| {
+                Self::confirms_request(&broadcast.outcome, request_id).then_some(*key)
+            })
             .is_some_and(|key| {
                 pending.remove(&key);
                 true
@@ -1640,18 +1590,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Originate a broadcast: assign its sequence number, fan it out to sleepy children,
-    /// form the passive-ack contract, transmit the first copy now, and hand any
-    /// retransmissions to the broadcast-retransmit reactor (spec 3.6.6). Fire-and-forget:
-    /// a broadcast has no end-to-end result to await.
-    pub fn send_broadcast_nwk_frame(
+    /// Originate a broadcast: admit it against the broadcast budget, assign its sequence
+    /// number, fan it out to sleepy children, form the passive-ack contract, transmit
+    /// the first copy now, and hand any retransmissions to the broadcast-retransmit
+    /// reactor (spec 3.6.6). The `outcome` resolves on the broadcast's terminal result:
+    /// rejection by the budget, its passive-ack quorum being heard (`Ok`), or its
+    /// attempts running out without one.
+    pub(super) fn originate_broadcast(
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         policy: TxPolicy,
-        // An application send awaiting confirmation on passive-ack quorum; internal
-        // broadcasts pass `None`.
-        request_id: Option<RequestId>,
+        outcome: TxOutcome,
     ) {
         // Stack-critical broadcasts always pass; host- and forwarding-class broadcasts
         // yield to the reserves when the bucket is drained.
@@ -1664,23 +1614,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.tunables.broadcast_forwarding_reserve(),
         );
 
-        match admission {
-            BroadcastAdmission::Admit => {}
-            BroadcastAdmission::Defer { retry_in } => {
-                // TODO(#43): park until `retry_in` and coalesce superseded copies
-                // (latest-wins per group + command) instead of dropping outright.
-                let _ = retry_in;
-                tracing::debug!(?policy, "broadcast budget exhausted; dropping");
-                if let Some(request_id) = request_id {
-                    self.push_notification(ZigbeeNotification::SendConfirm {
-                        request_id,
-                        result: SendResult::Failed {
-                            reason: "broadcast rate limit exceeded".to_string(),
-                        },
-                    });
-                }
-                return;
-            }
+        if let BroadcastAdmission::Defer { retry_in } = admission {
+            self.resolve_outcome(
+                outcome,
+                None,
+                Err(ZigbeeStackError::BroadcastRateLimited { retry_in }),
+            );
+            return;
         }
 
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
@@ -1709,8 +1649,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
-        // Transmit the first copy immediately; the reactor makes any retransmissions,
-        // each after an ack-collection window plus fresh jitter.
+        // Transmit the first copy immediately, fire-and-forget: a lost copy is not
+        // terminal, the reactor retransmits. The outcome rides the reactor, which owns
+        // the end-to-end result (the passive-ack quorum).
         self.enqueue_send(
             SendKind::Broadcast {
                 nwk_frame: nwk_frame.clone(),
@@ -1719,6 +1660,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             policy,
             TxOutcome::Discard,
         );
+
         self.schedule_broadcast(
             key,
             nwk_frame,
@@ -1727,7 +1669,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             BroadcastSchedule::PassiveAck,
             self.tunables.passive_ack_timeout() + self.broadcast_jitter(),
             self.tunables.max_broadcast_retries(),
-            request_id,
+            outcome,
         );
     }
 
@@ -2026,7 +1968,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             BroadcastSchedule::PassiveAck,
             self.broadcast_jitter(),
             self.tunables.max_broadcast_retries() + 1,
-            None,
+            TxOutcome::Discard,
         );
     }
 }

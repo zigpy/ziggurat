@@ -99,7 +99,7 @@ impl BroadcastBudget {
         let capacity = i32::from(capacity);
         self.refill(now, capacity, refill_interval);
 
-        let admission = if class == TrafficClass::Critical {
+        if class == TrafficClass::Critical {
             // Bypass: necessary broadcasts are always admitted AND draw no token, so a
             // burst of them can never drive the bucket negative and lock out host or
             // forwarding traffic while it refills.
@@ -115,8 +115,6 @@ impl BroadcastBudget {
                     retry_in: refill_interval.saturating_mul(deficit),
                 }
             }
-        };
-
-        admission
+        }
     }
 }

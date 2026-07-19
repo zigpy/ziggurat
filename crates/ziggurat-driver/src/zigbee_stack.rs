@@ -94,6 +94,10 @@ pub enum ZigbeeStackError {
     ApsSecurityFailed,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
+    #[error("broadcast rejected due to rate limiting, retry in {retry_in:?}")]
+    BroadcastRateLimited { retry_in: Duration },
+    #[error("broadcast passive-ack quorum not reached")]
+    BroadcastQuorumNotReached,
     #[error("radio error: {0}")]
     Radio(#[from] RadioError),
 }
@@ -441,9 +445,10 @@ pub struct PendingBroadcast {
     pub(crate) attempts_remaining: u8,
     /// When the next retransmission is due, unless the quorum is heard first.
     pub(crate) next_attempt: CoreInstant,
-    /// An application send awaiting confirmation: `SendConfirm { via: Quorum }` when the
-    /// passive-ack quorum is heard, or `Failed` when attempts run out.
-    pub(crate) request_id: Option<RequestId>,
+    /// The broadcast's terminal outcome, resolved by the reactor: `Ok` when the
+    /// passive-ack quorum is heard (or a fixed schedule completes), an error when
+    /// attempts run out without one.
+    pub(crate) outcome: TxOutcome,
     /// Held for the broadcast's whole retransmit schedule, only to be dropped with it.
     pub(crate) _token: FrameToken,
 }

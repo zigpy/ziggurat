@@ -321,14 +321,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             // The retransmit reactor owns the rebroadcasts; the jitter was applied by
             // the report deadline, and the cancel-if-already-reported check above.
-            self.send_broadcast_nwk_frame(
+            self.originate_broadcast(
                 conflict_frame,
                 NwkSecurityMode::NetworkKey,
                 TxPolicy {
                     priority: TxPriority::UserNormal,
                     class: TrafficClass::Critical,
                 },
-                None,
+                TxOutcome::Discard,
             );
         }
     }

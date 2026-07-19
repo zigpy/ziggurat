@@ -379,10 +379,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(())
     }
 
-    /// Enqueue a built APS/NWK frame fire-and-forget, routing broadcasts and unicasts like
-    /// [`send_nwk_frame`](Self::send_nwk_frame). The `outcome` rides the unicast path (the
-    /// sender confirms next-hop acceptance / failure); a broadcast is confirmed by the
-    /// retransmit reactor on quorum, so only its `request_id` is carried over.
+    /// Enqueue a built APS/NWK frame fire-and-forget. The `outcome` resolves on the
+    /// frame's terminal result: next-hop acceptance / failure for a unicast, the
+    /// passive-ack quorum (or budget rejection) for a broadcast.
     pub(super) fn enqueue_aps_frame(
         &self,
         nwk_frame: NwkFrame,
@@ -391,20 +390,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         mode: SendMode,
     ) {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-            let request_id = match outcome {
-                TxOutcome::Confirm { request_id, .. } => Some(request_id),
-                TxOutcome::Discard | TxOutcome::Signal(_) => None,
-                // Indirect-queue continuations never ride an APS frame
-                TxOutcome::IndirectDelivery { .. } | TxOutcome::DeliverNetworkKey { .. } => {
-                    unreachable!()
-                }
-            };
-            self.send_broadcast_nwk_frame(
-                nwk_frame,
-                NwkSecurityMode::NetworkKey,
-                policy,
-                request_id,
-            );
+            self.originate_broadcast(nwk_frame, NwkSecurityMode::NetworkKey, policy, outcome);
         } else {
             self.originate_unicast(
                 nwk_frame,
