@@ -861,9 +861,7 @@ pub enum ZigbeeNotification {
     },
     SendConfirm {
         request_id: RequestId,
-        /// `Ok(next_hop)` on delivery; the stack error otherwise, mapped onto the
-        /// wire's `SendStatus` by the protocol bridge.
-        result: Result<Option<Nwk>, ZigbeeStackError>,
+        result: Result<(), ZigbeeStackError>,
     },
     ApsAckConfirm {
         request_id: RequestId,

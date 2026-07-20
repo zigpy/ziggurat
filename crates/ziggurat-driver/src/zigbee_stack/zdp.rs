@@ -292,8 +292,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             TxOutcome::Discard,
             SendMode::Route(RouteDirective::StackDecides),
-        );
-        Ok(())
+        )
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming

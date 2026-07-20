@@ -99,7 +99,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (destination, transaction) in outcome.expired {
             self.resolve_outcome(
                 transaction.completion,
-                None,
                 Err(ZigbeeStackError::IndirectExpired { destination }),
             );
         }
@@ -177,7 +176,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (destination, transaction) in dropped {
             self.resolve_outcome(
                 transaction.completion,
-                None,
                 Err(ZigbeeStackError::IndirectExpired { destination }),
             );
         }
@@ -316,7 +314,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
             self.resolve_outcome(
                 transaction.completion,
-                None,
                 Err(ZigbeeStackError::IndirectExpired { destination }),
             );
         }

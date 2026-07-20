@@ -173,13 +173,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.originate_unicast(
+        if let Err(err) = self.originate_unicast(
             aps_ack_frame,
             NwkSecurityMode::NetworkKey,
             SendMode::Route(RouteDirective::StackDecides),
             TxPolicy::STACK_CRITICAL,
             TxOutcome::Discard,
-        );
+        ) {
+            tracing::warn!("Failed to send APS ack: {err}");
+        }
     }
 
     /// Build the NWK frame carrying an APS data frame, plus the ack-correlation data when
@@ -313,10 +315,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Build and enqueue the frame, then return an accept or reject. Delivery is
-    /// confirmed later as a [`ZigbeeNotification::SendConfirm`] carrying `request_id`,
-    /// triggered by the frame type: passive-ack quorum for a broadcast, next-hop
-    /// acceptance for a no-ack unicast, or the APS ack for an ack unicast.
+    /// Build and enqueue the frame. `Err` rejects at enqueue (malformed, rate limited,
+    /// frame budget) and no confirmation follows; on `Ok` delivery is confirmed later
+    /// as a [`ZigbeeNotification::SendConfirm`] carrying `request_id`: passive-ack
+    /// quorum for a broadcast, next-hop acceptance for a no-ack unicast, or the APS
+    /// ack for an ack unicast.
     #[allow(clippy::too_many_arguments)]
     pub fn send_aps(
         &self,
@@ -366,7 +369,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The class is fixed here, not host-chosen: a host send can never draw from
         // the forwarding or critical budget tiers, whatever its priority.
-        self.originate_aps_frame(
+        let accepted = self.originate_aps_frame(
             nwk_frame,
             TxPolicy {
                 priority,
@@ -374,25 +377,32 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             TxOutcome::Confirm {
                 request_id,
-                aps_ack: ack_data,
+                aps_ack: ack_data.clone(),
             },
             SendMode::Route(route),
         );
-        Ok(())
+
+        // A rejected frame gets no confirmation: unregister its pending ack.
+        if accepted.is_err()
+            && let Some(ack_data) = ack_data
+        {
+            self.state.pending_aps_acks.lock().remove(&ack_data);
+        }
+
+        accepted
     }
 
-    /// Enqueue a built APS/NWK frame fire-and-forget. The `outcome` resolves on the
-    /// frame's terminal result: next-hop acceptance / failure for a unicast, the
-    /// passive-ack quorum (or budget rejection) for a broadcast.
+    /// Originate a built APS/NWK frame, forking on its destination. `Err` rejects at
+    /// enqueue without consuming `outcome`.
     pub(super) fn originate_aps_frame(
         &self,
         nwk_frame: NwkFrame,
         policy: TxPolicy,
         outcome: TxOutcome,
         mode: SendMode,
-    ) {
+    ) -> Result<(), ZigbeeStackError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-            self.originate_broadcast(nwk_frame, NwkSecurityMode::NetworkKey, policy, outcome);
+            self.originate_broadcast(nwk_frame, NwkSecurityMode::NetworkKey, policy, outcome)
         } else {
             self.originate_unicast(
                 nwk_frame,
@@ -400,7 +410,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 mode,
                 policy,
                 outcome,
-            );
+            )
         }
     }
 

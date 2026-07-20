@@ -298,7 +298,14 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
             route,
             StackRequestId::from(request_id),
         )
-        .map_err(|e| Error::new(Status::TransmitFailed, &e.to_string()))
+        .map_err(|e| {
+            let status = match &e {
+                ZigbeeStackError::BroadcastRateLimited { .. } => Status::RateLimited,
+                ZigbeeStackError::FrameBudgetExhausted => Status::BudgetExhausted,
+                _ => Status::TransmitFailed,
+            };
+            Error::new(status, &e.to_string())
+        })
 }
 
 /// Build the driver's [`RouteDirective`] from the wire route control.
@@ -404,26 +411,11 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             data: data.clone(),
         }),
         ZigbeeNotification::SendConfirm { request_id, result } => {
-            let (status, next_hop, reason) = match result {
-                Ok(next_hop) => (
-                    SendStatus::Success,
-                    next_hop.unwrap_or(Nwk(0xFFFF)),
-                    Vec::new(),
-                ),
-                Err(err) => (
-                    error_to_send_status(err),
-                    Nwk(0xFFFF),
-                    err.to_string().into_bytes(),
-                ),
+            let (status, reason) = match result {
+                Ok(()) => (SendStatus::Success, Vec::new()),
+                Err(err) => (error_to_send_status(err), err.to_string().into_bytes()),
             };
-            Notification::SendConfirm(
-                *request_id as u16,
-                SendConfirmPayload {
-                    status,
-                    next_hop,
-                    reason,
-                },
-            )
+            Notification::SendConfirm(*request_id as u16, SendConfirmPayload { status, reason })
         }
         ZigbeeNotification::ApsAckConfirm { request_id, result } => {
             let (acked, reason) = match result {

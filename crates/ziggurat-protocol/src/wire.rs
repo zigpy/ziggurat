@@ -102,6 +102,8 @@ pub enum Status {
     TransmitFailed = 7,
     ScanFailed = 8,
     InvalidRequest = 9,
+    RateLimited = 10,
+    BudgetExhausted = 11,
 }
 
 /// Role a `configure` sets the coordinator up as.
@@ -588,7 +590,6 @@ pub enum SendStatus {
 #[derive(Debug, Clone)]
 pub struct SendConfirmPayload {
     pub status: SendStatus,
-    pub next_hop: Nwk, // 0xFFFF when unknown
     pub reason_len: u16,
     #[abstract_bits(length_from = reason_len)]
     pub reason: Vec<u8>,

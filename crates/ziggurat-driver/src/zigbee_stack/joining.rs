@@ -321,7 +321,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             // The retransmit reactor owns the rebroadcasts; the jitter was applied by
             // the report deadline, and the cancel-if-already-reported check above.
-            self.originate_broadcast(
+            if let Err(err) = self.originate_broadcast(
                 conflict_frame,
                 NwkSecurityMode::NetworkKey,
                 TxPolicy {
@@ -329,7 +329,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     class: TrafficClass::Critical,
                 },
                 TxOutcome::Discard,
-            );
+            ) {
+                tracing::warn!("Failed to broadcast address conflict report: {err}");
+            }
         }
     }
 
@@ -492,13 +494,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(destination, encrypted_command.to_bytes())
             .unsecured();
 
-        self.originate_unicast(
+        if let Err(err) = self.originate_unicast(
             nwk_frame,
             NwkSecurityMode::Unsecured,
             SendMode::Direct,
             TxPolicy::STACK_CRITICAL,
             TxOutcome::Discard,
-        );
+        ) {
+            tracing::warn!("Failed to send network key transport: {err}");
+        }
 
         let (device_type, rx_on_when_idle) = self.device_join_capability(destination_eui64);
         self.push_notification(ZigbeeNotification::DeviceJoined {
@@ -621,7 +625,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(destination, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.originate_unicast(
+        if let Err(err) = self.originate_unicast(
             nwk_frame,
             NwkSecurityMode::NetworkKey,
             if self.is_neighbor(destination) {
@@ -631,7 +635,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             TxPolicy::STACK_CRITICAL,
             TxOutcome::Discard,
-        );
+        ) {
+            tracing::warn!("Failed to send secured APS payload: {err}");
+        }
     }
 
     /// Zigbee spec 4.7.3.8: a device requests a unique trust center link key to replace
@@ -1200,13 +1206,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         // The rejoining device is within radio range
-        self.originate_unicast(
+        if let Err(err) = self.originate_unicast(
             response_frame,
             security,
             SendMode::Direct,
             TxPolicy::STACK_CRITICAL,
             TxOutcome::Discard,
-        );
+        ) {
+            tracing::warn!("Failed to send rejoin response: {err}");
+        }
     }
 
     /// Zigbee spec 3.6.1.10.3: a device announces that it is leaving the network, or
@@ -1316,13 +1324,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The child is a direct neighbor; responses to sleepy children go through the
         // indirect queue via the NWK unicast fork
-        self.originate_unicast(
+        if let Err(err) = self.originate_unicast(
             response_frame,
             NwkSecurityMode::NetworkKey,
             SendMode::Direct,
             TxPolicy::STACK_CRITICAL,
             TxOutcome::Discard,
-        );
+        ) {
+            tracing::warn!("Failed to send end device timeout response: {err}");
+        }
     }
 
     /// Open (or close, with `duration == 0`) the join window. The trust center

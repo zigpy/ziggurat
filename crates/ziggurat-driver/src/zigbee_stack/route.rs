@@ -98,13 +98,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_destination_ieee(Some(next_hop_link.eui64));
 
         // The next hop toward the originator is a direct radio neighbor
-        self.originate_unicast(
+        if let Err(err) = self.originate_unicast(
             relayed_route_reply_frame,
             NwkSecurityMode::NetworkKey,
             SendMode::Direct,
             TxPolicy::STACK_CRITICAL,
             TxOutcome::Discard,
-        );
+        ) {
+            tracing::warn!("Failed to relay route reply: {err}");
+        }
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -199,13 +201,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .with_destination_ieee(Some(sender_ieee));
 
             // The next hop toward the originator is a direct radio neighbor
-            self.originate_unicast(
+            if let Err(err) = self.originate_unicast(
                 route_reply_frame,
                 NwkSecurityMode::NetworkKey,
                 SendMode::Direct,
                 TxPolicy::STACK_CRITICAL,
                 TxOutcome::Discard,
-            );
+            ) {
+                tracing::warn!("Failed to send route reply: {err}");
+            }
             return;
         }
 
