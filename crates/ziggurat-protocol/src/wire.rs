@@ -561,11 +561,33 @@ pub struct ReceivedApsPayload {
     pub data: Vec<u8>,
 }
 
+/// Terminal status of a `SendAps`, carried in its `SendConfirm` notification.
+#[abstract_bits(bits = 8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
+#[repr(u8)]
+pub enum SendStatus {
+    Success = 0,
+    RouteDiscoveryTimeout = 1,
+    RouteDiscoveryNoEntry = 2,
+    RouteInactiveAfterDiscovery = 3,
+    RouteDiscoverySuppressed = 4,
+    NwkNoAck = 5,
+    CcaFailure = 6,
+    TransmitFailed = 7,
+    ApsAckTimeout = 8,
+    PayloadTooLong = 9,
+    FrameBudgetExhausted = 10,
+    ApsSecurityFailed = 11,
+    IndirectExpired = 12,
+    BroadcastRateLimited = 13,
+    BroadcastQuorumNotReached = 14,
+    RadioError = 15,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct SendConfirmPayload {
-    pub confirmed: bool,
-    pub reserved: u7,
+    pub status: SendStatus,
     pub next_hop: Nwk, // 0xFFFF when unknown
     pub reason_len: u16,
     #[abstract_bits(length_from = reason_len)]

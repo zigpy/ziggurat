@@ -2,7 +2,6 @@ use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame, ParseError
 
 use crate::frame_token::{self, FrameToken, TrafficClass};
 use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
-use crate::signal::Signal;
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
@@ -68,7 +67,7 @@ const FRAME_COUNTER_NOTIFY_INTERVAL: u32 = 100;
 /// that wasn't reading has already missed it and re-syncs on reconnect.
 const NOTIFICATION_QUEUE_CAP: usize = 64;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ZigbeeStackError {
     #[error("route discovery timed out")]
     RouteDiscoveryTimeout(#[from] Elapsed),
@@ -138,6 +137,16 @@ impl TxPriority {
 pub struct TxPolicy {
     pub priority: TxPriority,
     pub class: TrafficClass,
+}
+
+impl TxPolicy {
+    /// Stack machinery answering protocol events (key transports, rejoin responses,
+    /// APS acks, network status reports): critical for both transmit scheduling and
+    /// the frame budget.
+    pub const STACK_CRITICAL: Self = Self {
+        priority: TxPriority::StackCritical,
+        class: TrafficClass::Critical,
+    };
 }
 
 /// How an outgoing NWK frame is secured. Frames carrying the network key to a joining
@@ -319,19 +328,14 @@ impl ApsAckData {
     }
 }
 
-/// The pending half of a transmit's outcome.
-pub type TxCompletion = Signal<Result<(), ZigbeeStackError>>;
-
 /// The client's request id, supplied to `send_aps` and echoed back in its confirmation.
 pub type RequestId = u32;
 
 /// Where a transmit's terminal outcome is reported.
 #[derive(Debug)]
 pub enum TxOutcome {
-    /// Nobody is waiting; a failure is only logged (internal background sends).
+    /// Nobody is waiting; a failure is only logged (internal fire-and-forget sends).
     Discard,
-    /// Resolve an awaiting caller's signal (internal awaiters).
-    Signal(TxCompletion),
     /// Confirm an application send by `request_id`. `aps_ack` present means the end-to-end
     /// APS ack is the confirmation: this hop succeeding is silent, its failure fails
     /// the send; absent means next-hop acceptance is itself the confirmation.
@@ -857,22 +861,13 @@ pub enum ZigbeeNotification {
     },
     SendConfirm {
         request_id: RequestId,
-        result: SendResult,
+        /// `Ok(next_hop)` on delivery; the stack error otherwise, mapped onto the
+        /// wire's `SendStatus` by the protocol bridge.
+        result: Result<Option<Nwk>, ZigbeeStackError>,
     },
     ApsAckConfirm {
         request_id: RequestId,
         result: ApsAckResult,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum SendResult {
-    /// Handed off; `next_hop` is the neighbour it went to, `None` for a broadcast.
-    Confirmed {
-        next_hop: Option<Nwk>,
-    },
-    Failed {
-        reason: String,
     },
 }
 
@@ -1424,7 +1419,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // "respond" to empty link status broadcasts proactively, independent of the
         // link status period
         tracing::info!("Sending initial link status broadcast");
-        self.send_link_status_broadcast(true).await;
+        self.send_link_status_broadcast(true);
 
         let arc_self = self
             .self_weak

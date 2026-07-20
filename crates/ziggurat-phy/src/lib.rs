@@ -70,7 +70,7 @@ pub struct ResetEvent {
     pub reason: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum RadioError {
     #[error("radio command timed out")]
     Timeout,

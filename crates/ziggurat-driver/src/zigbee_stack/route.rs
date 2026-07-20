@@ -14,7 +14,9 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
-use super::{AddrConflictSource, NwkSecurityMode, SendMode, TxPolicy, TxPriority, ZigbeeStack};
+use super::{
+    AddrConflictSource, NwkSecurityMode, SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeStack,
+};
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
@@ -96,10 +98,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_destination_ieee(Some(next_hop_link.eui64));
 
         // The next hop toward the originator is a direct radio neighbor
-        self.background_send_nwk_frame(
+        self.originate_unicast(
             relayed_route_reply_frame,
             NwkSecurityMode::NetworkKey,
             SendMode::Direct,
+            TxPolicy::STACK_CRITICAL,
+            TxOutcome::Discard,
         );
     }
 
@@ -195,10 +199,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .with_destination_ieee(Some(sender_ieee));
 
             // The next hop toward the originator is a direct radio neighbor
-            self.background_send_nwk_frame(
+            self.originate_unicast(
                 route_reply_frame,
                 NwkSecurityMode::NetworkKey,
                 SendMode::Direct,
+                TxPolicy::STACK_CRITICAL,
+                TxOutcome::Discard,
             );
             return;
         }
@@ -260,7 +266,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// router records a path toward the concentrator. Devices can then reach us without
     /// per-device route discoveries, and respond with route record commands that we
     /// store for future source routing.
-    pub async fn send_many_to_one_route_request(&self) {
+    pub fn send_many_to_one_route_request(&self) {
         let route_request_identifier = self.core().nib.routing.begin_many_to_one_advertisement(
             self.state.network_address,
             self.core_now(),
@@ -280,24 +286,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     destination_eui64: None,
                 }),
             )
-            .with_radius(self.tunables.concentrator_radius())
-            // Sent via `transmit_*`, which does not assign sequence numbers
-            .with_sequence_number(self.next_nwk_sequence_number());
+            .with_radius(self.tunables.concentrator_radius());
 
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
-        if let Err(err) = self
-            .transmit_broadcast_nwk_frame(
-                many_to_one_request_frame,
-                NwkSecurityMode::NetworkKey,
-                TxPolicy {
-                    priority: TxPriority::Background,
-                    class: TrafficClass::Critical,
-                },
-            )
-            .await
-        {
-            tracing::warn!("Failed to broadcast many-to-one route request: {err}");
-        }
+        self.originate_oneshot_broadcast(
+            many_to_one_request_frame,
+            NwkSecurityMode::NetworkKey,
+            TxPolicy {
+                priority: TxPriority::Background,
+                class: TrafficClass::Critical,
+            },
+            TxOutcome::Discard,
+        );
     }
 
     pub async fn periodic_many_to_one_route_request_task(&self) {
@@ -321,7 +321,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         loop {
-            self.send_many_to_one_route_request().await;
+            self.send_many_to_one_route_request();
 
             self.core().nib.routing.reset_mtorr_triggers();
 

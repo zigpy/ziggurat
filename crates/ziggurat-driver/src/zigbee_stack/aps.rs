@@ -173,10 +173,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.background_send_nwk_frame(
+        self.originate_unicast(
             aps_ack_frame,
             NwkSecurityMode::NetworkKey,
             SendMode::Route(RouteDirective::StackDecides),
+            TxPolicy::STACK_CRITICAL,
+            TxOutcome::Discard,
         );
     }
 
@@ -187,7 +189,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// `aps_security` requests APS encryption of the ASDU with the link key shared
     /// with that device (unicast only: link keys are pairwise).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn prepare_aps_send(
+    pub(super) fn build_aps_frame(
         &self,
         delivery_mode: ApsDeliveryMode,
         destination: Nwk,
@@ -334,7 +336,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         route: RouteDirective,
         request_id: RequestId,
     ) -> Result<(), ZigbeeStackError> {
-        let (nwk_frame, ack_data) = self.prepare_aps_send(
+        let (nwk_frame, ack_data) = self.build_aps_frame(
             delivery_mode,
             destination,
             profile_id,
@@ -364,7 +366,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The class is fixed here, not host-chosen: a host send can never draw from
         // the forwarding or critical budget tiers, whatever its priority.
-        self.enqueue_aps_frame(
+        self.originate_aps_frame(
             nwk_frame,
             TxPolicy {
                 priority,
@@ -382,7 +384,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Enqueue a built APS/NWK frame fire-and-forget. The `outcome` resolves on the
     /// frame's terminal result: next-hop acceptance / failure for a unicast, the
     /// passive-ack quorum (or budget rejection) for a broadcast.
-    pub(super) fn enqueue_aps_frame(
+    pub(super) fn originate_aps_frame(
         &self,
         nwk_frame: NwkFrame,
         policy: TxPolicy,

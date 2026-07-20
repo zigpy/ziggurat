@@ -8,7 +8,7 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 
 use crate::frame_token::TrafficClass;
 
-use super::{NwkSecurityMode, TxPolicy, TxPriority, ZigbeeStack};
+use super::{NwkSecurityMode, TxOutcome, TxPolicy, TxPriority, ZigbeeStack};
 
 /// Maximum number of link status entries that can be carried in a single frame.
 const MAX_LINK_STATUSES: usize = 7;
@@ -91,7 +91,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.link_status_received.notify_one();
     }
 
-    pub async fn send_link_status_broadcast(&self, empty: bool) {
+    pub fn send_link_status_broadcast(&self, empty: bool) {
         tracing::debug!("Sending periodic link status broadcast");
 
         if self.state.network_address == Nwk(0xFFFF) {
@@ -138,28 +138,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         link_statuses: link_statuses[start..end].to_vec(),
                     }),
                 )
-                .with_radius(1)
-                // Sent via `transmit_*`, which does not assign sequence numbers
-                .with_sequence_number(self.next_nwk_sequence_number());
+                .with_radius(1);
 
             // Spec 3.6.4.4.1: link statuses are one-hop broadcasts sent without
             // retries. Nobody relays a radius-1 frame, so the passive ack machinery
             // of the regular broadcast path could never complete for them anyway.
-            if let Err(err) = self
-                .transmit_broadcast_nwk_frame(
-                    link_status_frame,
-                    NwkSecurityMode::NetworkKey,
-                    // Housekeeping the mesh depends on: last to transmit, but never
-                    // memory-starved by a host flood
-                    TxPolicy {
-                        priority: TxPriority::Background,
-                        class: TrafficClass::Critical,
-                    },
-                )
-                .await
-            {
-                tracing::warn!("Failed to broadcast link status: {err}");
-            }
+            self.originate_oneshot_broadcast(
+                link_status_frame,
+                NwkSecurityMode::NetworkKey,
+                // Housekeeping the mesh depends on: last to transmit, but never
+                // memory-starved by a host flood
+                TxPolicy {
+                    priority: TxPriority::Background,
+                    class: TrafficClass::Critical,
+                },
+                TxOutcome::Discard,
+            );
 
             if end == total {
                 break;
@@ -174,7 +168,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         loop {
             R::sleep(self.tunables.link_status_period()).await;
 
-            self.send_link_status_broadcast(false).await;
+            self.send_link_status_broadcast(false);
         }
     }
 }

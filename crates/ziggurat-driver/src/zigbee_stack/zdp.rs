@@ -269,7 +269,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tsn: u8,
         command: &T,
     ) -> Result<(), ZigbeeStackError> {
-        let (nwk_frame, _ack) = self.prepare_aps_send(
+        let (nwk_frame, _ack) = self.build_aps_frame(
             delivery_mode,
             destination,
             ZDP_PROFILE_ID,
@@ -284,7 +284,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         )?;
 
         // ZDP responses are answerable to the remote requester's retries: best-effort
-        self.enqueue_aps_frame(
+        self.originate_aps_frame(
             nwk_frame,
             TxPolicy {
                 priority: TxPriority::UserNormal,

@@ -12,8 +12,8 @@ use ziggurat_driver::runtime::Runtime;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, ApsAckResult, DeviceLeaveReason, HostRoute, NetworkBeacon, NetworkConfig,
-    NwkDeviceType, RequestId as StackRequestId, RouteDirective, SendResult, TclkSeed, TxPriority,
-    ZigbeeNotification, ZigbeeStack,
+    NwkDeviceType, RequestId as StackRequestId, RouteDirective, TclkSeed, TxPriority,
+    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -353,6 +353,28 @@ pub fn set_tunable<P: RadioPhy, R: Runtime>(
         .map_err(|e| Error::new(Status::InvalidRequest, &alloc::format!("{name}: {e}")))
 }
 
+/// Mirror a send's stack error onto its wire status. Exhaustive on purpose: a new
+/// `ZigbeeStackError` variant must pick its `SendStatus` here to compile.
+const fn error_to_send_status(err: &ZigbeeStackError) -> SendStatus {
+    match err {
+        ZigbeeStackError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
+        ZigbeeStackError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
+        ZigbeeStackError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
+        ZigbeeStackError::RouteDiscoverySuppressed => SendStatus::RouteDiscoverySuppressed,
+        ZigbeeStackError::NwkNoAck { .. } => SendStatus::NwkNoAck,
+        ZigbeeStackError::CcaFailure => SendStatus::CcaFailure,
+        ZigbeeStackError::TransmitFailed(_) => SendStatus::TransmitFailed,
+        ZigbeeStackError::ApsAckTimeout => SendStatus::ApsAckTimeout,
+        ZigbeeStackError::PayloadTooLong => SendStatus::PayloadTooLong,
+        ZigbeeStackError::FrameBudgetExhausted => SendStatus::FrameBudgetExhausted,
+        ZigbeeStackError::ApsSecurityFailed => SendStatus::ApsSecurityFailed,
+        ZigbeeStackError::IndirectExpired { .. } => SendStatus::IndirectExpired,
+        ZigbeeStackError::BroadcastRateLimited { .. } => SendStatus::BroadcastRateLimited,
+        ZigbeeStackError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
+        ZigbeeStackError::Radio(_) => SendStatus::RadioError,
+    }
+}
+
 /// Encode one unsolicited notification. `send_confirm`/`aps_ack_confirm` carry
 /// their originating request id in the envelope.
 pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
@@ -382,18 +404,22 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             data: data.clone(),
         }),
         ZigbeeNotification::SendConfirm { request_id, result } => {
-            let (confirmed, next_hop, reason) = match result {
-                SendResult::Confirmed { next_hop } => {
-                    (true, next_hop.unwrap_or(Nwk(0xFFFF)), Vec::new())
-                }
-                SendResult::Failed { reason } => {
-                    (false, Nwk(0xFFFF), reason.to_string().into_bytes())
-                }
+            let (status, next_hop, reason) = match result {
+                Ok(next_hop) => (
+                    SendStatus::Success,
+                    next_hop.unwrap_or(Nwk(0xFFFF)),
+                    Vec::new(),
+                ),
+                Err(err) => (
+                    error_to_send_status(err),
+                    Nwk(0xFFFF),
+                    err.to_string().into_bytes(),
+                ),
             };
             Notification::SendConfirm(
                 *request_id as u16,
                 SendConfirmPayload {
-                    confirmed,
+                    status,
                     next_hop,
                     reason,
                 },

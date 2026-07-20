@@ -492,7 +492,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(destination, encrypted_command.to_bytes())
             .unsecured();
 
-        self.background_send_nwk_frame(nwk_frame, NwkSecurityMode::Unsecured, SendMode::Direct);
+        self.originate_unicast(
+            nwk_frame,
+            NwkSecurityMode::Unsecured,
+            SendMode::Direct,
+            TxPolicy::STACK_CRITICAL,
+            TxOutcome::Discard,
+        );
 
         let (device_type, rx_on_when_idle) = self.device_join_capability(destination_eui64);
         self.push_notification(ZigbeeNotification::DeviceJoined {
@@ -615,7 +621,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(destination, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.background_send_nwk_frame(
+        self.originate_unicast(
             nwk_frame,
             NwkSecurityMode::NetworkKey,
             if self.is_neighbor(destination) {
@@ -623,6 +629,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             } else {
                 SendMode::Route(RouteDirective::StackDecides)
             },
+            TxPolicy::STACK_CRITICAL,
+            TxOutcome::Discard,
         );
     }
 
@@ -1192,7 +1200,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         // The rejoining device is within radio range
-        self.background_send_nwk_frame(response_frame, security, SendMode::Direct);
+        self.originate_unicast(
+            response_frame,
+            security,
+            SendMode::Direct,
+            TxPolicy::STACK_CRITICAL,
+            TxOutcome::Discard,
+        );
     }
 
     /// Zigbee spec 3.6.1.10.3: a device announces that it is leaving the network, or
@@ -1302,10 +1316,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The child is a direct neighbor; responses to sleepy children go through the
         // indirect queue via the NWK unicast fork
-        self.background_send_nwk_frame(
+        self.originate_unicast(
             response_frame,
             NwkSecurityMode::NetworkKey,
             SendMode::Direct,
+            TxPolicy::STACK_CRITICAL,
+            TxOutcome::Discard,
         );
     }
 

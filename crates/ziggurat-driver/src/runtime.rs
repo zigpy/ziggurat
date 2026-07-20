@@ -45,7 +45,7 @@ impl RtInstant for tokio::time::Instant {
 
 /// A deadline elapsed before the awaited future completed. Replaces
 /// `tokio::time::error::Elapsed` so the stack's error type stays runtime-agnostic.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("deadline elapsed")]
 pub struct Elapsed;
 
