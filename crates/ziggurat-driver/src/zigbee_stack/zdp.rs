@@ -302,12 +302,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         match delivery_mode {
-            ApsDeliveryMode::Broadcast => self.originate_broadcast(
-                nwk_frame,
-                NwkSecurityMode::NetworkKey,
-                policy,
-                TxOutcome::Discard,
-            ),
+            ApsDeliveryMode::Broadcast => {
+                self.originate_broadcast(nwk_frame, NwkSecurityMode::NetworkKey, policy, None)
+            }
             ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => self.originate_unicast(
                 nwk_frame,
                 NwkSecurityMode::NetworkKey,

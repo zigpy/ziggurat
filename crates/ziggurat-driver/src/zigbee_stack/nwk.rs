@@ -6,7 +6,7 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
 use alloc::boxed::Box;
-use alloc::collections::BinaryHeap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering as AtomicOrdering;
 use core::time::Duration;
@@ -29,8 +29,9 @@ use super::routing::{Route, Status as RouteStatus};
 use super::{
     AddrConflictSource, BroadcastSchedule, DeliveryError, EnqueueError, HostRoute, IndirectFrame,
     IndirectPayload, JoinKind, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast,
-    PendingFrame, PendingRoute, PendingUnicastRetry, RequestId, RouteDirective, SendKind, SendMode,
-    SendRequest, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
+    PendingFrame, PendingRoute, PendingUnicastRetry, RouteDirective, SendKind, SendMode,
+    SendRequest, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification,
+    ZigbeeStack,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -150,8 +151,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             {
                 tracing::debug!("Broadcast {key:?} passively acknowledged");
                 let removed = self.state.pending_broadcasts.lock().remove(&key);
-                if let Some(broadcast) = removed {
-                    self.resolve_outcome(broadcast.outcome, Ok(()));
+                if let Some(PendingBroadcast {
+                    slot: Some(slot), ..
+                }) = removed
+                {
+                    slot.resolve(TrackStage::Delivery, Ok(()));
                 }
                 continue;
             }
@@ -168,8 +172,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             #[allow(clippy::large_enum_variant)]
             enum Next {
                 Idle,
-                Retransmit(NwkFrame, NwkSecurityMode, TxPolicy),
-                Exhausted(TxOutcome),
+                Retransmit(NwkFrame, NwkSecurityMode, TxPolicy, Option<Arc<SendSlot>>),
+                Cancelled(Option<Arc<SendSlot>>),
+                Exhausted(Option<Arc<SendSlot>>),
             }
 
             // Decide under the lock; if a copy is due, extract it to transmit after release.
@@ -179,11 +184,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     continue;
                 };
 
-                if broadcast.next_attempt > now {
+                if broadcast
+                    .slot
+                    .as_ref()
+                    .is_some_and(|slot| slot.is_cancelled())
+                {
+                    Next::Cancelled(pending.remove(&key).unwrap().slot)
+                } else if broadcast.next_attempt > now {
                     Next::Idle
                 } else if broadcast.attempts_remaining == 0 {
-                    let broadcast = pending.remove(&key).unwrap();
-                    Next::Exhausted(broadcast.outcome)
+                    Next::Exhausted(pending.remove(&key).unwrap().slot)
                 } else {
                     broadcast.attempts_remaining -= 1;
                     broadcast.next_attempt = next_attempt;
@@ -191,34 +201,56 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         broadcast.nwk_frame.clone(),
                         broadcast.security,
                         broadcast.policy,
+                        broadcast.slot.clone(),
                     )
                 }
             };
 
             match action {
                 Next::Idle => {}
-                Next::Retransmit(nwk_frame, security, policy) => {
+                Next::Retransmit(nwk_frame, security, policy, slot) => {
                     tracing::debug!("Retransmitting broadcast {key:?}");
+                    // Each on-air copy resolves the send's handoff; write-once means only
+                    // the first successful one takes.
                     self.enqueue_send(
                         SendKind::Broadcast {
                             nwk_frame,
                             security,
                         },
                         policy,
-                        TxOutcome::Discard,
+                        Self::broadcast_copy_outcome(slot),
                     );
                 }
-                Next::Exhausted(outcome) => {
+                Next::Cancelled(slot) => {
+                    tracing::debug!("Broadcast {key:?} cancelled");
+                    if let Some(slot) = slot {
+                        slot.resolve(TrackStage::Delivery, Err(DeliveryError::Cancelled));
+                    }
+                }
+                Next::Exhausted(slot) => {
                     tracing::debug!("Broadcast {key:?} out of retransmit attempts");
-                    let result = match schedule {
-                        BroadcastSchedule::PassiveAck => Err(DeliveryError::QuorumNotReached),
-                        // A fixed-interval broadcast completes by running out of attempts
-                        BroadcastSchedule::FixedInterval { .. } => Ok(()),
-                    };
-                    self.resolve_outcome(outcome, result);
+                    // A fixed-interval broadcast (a route request) completes by running
+                    // out of attempts; a data broadcast fails its quorum.
+                    if let Some(slot) = slot {
+                        let result = match schedule {
+                            BroadcastSchedule::PassiveAck => Err(DeliveryError::QuorumNotReached),
+                            BroadcastSchedule::FixedInterval { .. } => Ok(()),
+                        };
+                        slot.resolve(TrackStage::Delivery, result);
+                    }
                 }
             }
         }
+    }
+
+    /// The outcome for one on-air broadcast copy: a tracked broadcast resolves its
+    /// `HandOff` stage (write-once, so only the first successful copy takes), an internal
+    /// one is fire-and-forget.
+    fn broadcast_copy_outcome(slot: Option<Arc<SendSlot>>) -> TxOutcome {
+        slot.map_or(TxOutcome::Discard, |slot| TxOutcome::Track {
+            slot,
+            stage: TrackStage::HandOff,
+        })
     }
 
     /// Insert a broadcast into the pending-retransmit map and wake the reactor.
@@ -232,13 +264,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         schedule: BroadcastSchedule,
         first_delay: Duration,
         attempts: u8,
-        outcome: TxOutcome,
+        slot: Option<Arc<SendSlot>>,
         // Caller-taken, held by the retained copy for the whole retransmit schedule
         token: FrameToken,
     ) {
-        // An awaited outcome is tracked even at zero retransmits, so the reactor can
-        // confirm its quorum (or fail it)
-        if attempts == 0 && matches!(outcome, TxOutcome::Discard) {
+        // A tracked broadcast is scheduled even at zero retransmits, so the reactor can
+        // resolve its quorum (or fail it); an untracked one with nothing to retransmit is
+        // a no-op.
+        if attempts == 0 && slot.is_none() {
             return;
         }
 
@@ -251,7 +284,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 schedule,
                 attempts_remaining: attempts,
                 next_attempt: self.core_now() + first_delay,
-                outcome,
+                slot,
                 _token: token,
             },
         );
@@ -287,7 +320,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             initial_delay,
             attempts,
-            TxOutcome::Discard,
+            None,
             token,
         );
     }
@@ -1069,6 +1102,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     ..
                 } = request;
 
+                // A send cancelled while queued never reaches the air; its token frees
+                // as `token` drops here.
+                if Self::outcome_cancelled(&outcome) {
+                    self.resolve_outcome(outcome, Err(DeliveryError::Cancelled));
+                    continue;
+                }
+
                 match *kind {
                     SendKind::Unicast {
                         nwk_frame,
@@ -1116,18 +1156,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     tracing::warn!("Background send failed: {err}");
                 }
             }
-            TxOutcome::Confirm {
-                request_id,
-                aps_ack,
-            } => {
-                // Drop any pending aps-ack so a late ack can't emit a stray ApsAckConfirm.
-                if result.is_err()
-                    && let Some(ack_data) = aps_ack
-                {
-                    self.state.pending_aps_acks.lock().remove(&ack_data);
-                }
-                self.push_notification(ZigbeeNotification::SendConfirm { request_id, result });
-            }
+            TxOutcome::Track { slot, stage } => slot.resolve(stage, result),
             TxOutcome::IndirectDelivery {
                 destination,
                 transaction,
@@ -1311,7 +1340,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let mut due = Vec::new();
             let mut i = 0;
             while i < pending.len() {
-                if pending[i].next_attempt <= now {
+                // A retry that is due, or cancelled, is pulled: due ones re-enqueue,
+                // cancelled ones resolve below (freeing their token early).
+                if pending[i].next_attempt <= now || Self::outcome_cancelled(&pending[i].outcome) {
                     // Order does not matter (the priority queue reorders anyway), so an
                     // O(1) swap-remove is fine.
                     due.push(pending.swap_remove(i));
@@ -1325,6 +1356,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         for retry in due {
+            if Self::outcome_cancelled(&retry.outcome) {
+                self.resolve_outcome(retry.outcome, Err(DeliveryError::Cancelled));
+                continue;
+            }
             self.enqueue_send_with_token(
                 SendKind::Unicast {
                     nwk_frame: retry.nwk_frame,
@@ -1339,109 +1374,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Best-effort cancellation of an application send by the `request_id` it was
-    /// issued under. Tears the send out of whichever pre-delivery queue still holds
-    /// it.
-    pub fn cancel_send(&self, request_id: RequestId) -> bool {
-        self.cancel_queued_send(request_id)
-            || self.cancel_pending_route(request_id)
-            || self.cancel_pending_unicast_retry(request_id)
-            || self.cancel_pending_broadcast(request_id)
+    /// Whether this outcome belongs to a cancelled send. Only a tracked send carries a
+    /// slot, and only a tracked send can be cancelled; every reactor checks this before
+    /// acting on the entry it holds, dropping it and resolving `Err(Cancelled)` if set.
+    fn outcome_cancelled(outcome: &TxOutcome) -> bool {
+        matches!(outcome, TxOutcome::Track { slot, .. } if slot.is_cancelled())
     }
 
-    /// Whether a transmit outcome is the confirmation of `request_id`.
-    const fn confirms_request(outcome: &TxOutcome, request_id: RequestId) -> bool {
-        matches!(outcome, TxOutcome::Confirm { request_id: rid, .. } if *rid == request_id)
-    }
-
-    /// Remove a send still waiting in the sender priority queue (not yet transmitted).
-    fn cancel_queued_send(&self, request_id: RequestId) -> bool {
-        let mut queue = self.send_queue.lock();
-        if !queue
-            .iter()
-            .any(|send| Self::confirms_request(&send.outcome, request_id))
-        {
-            return false;
-        }
-
-        // The heap has no keyed removal, so drain, drop the one match (freeing its
-        // token), and rebuild from the rest. Cancellation is rare, so the rebuild is
-        // fine.
-        let mut removed = false;
-        let kept: Vec<SendRequest> = queue
-            .drain()
-            .filter(|send| {
-                let drop_it = !removed && Self::confirms_request(&send.outcome, request_id);
-                removed |= drop_it;
-                !drop_it
-            })
-            .collect();
-        *queue = BinaryHeap::from(kept);
-        true
-    }
-
-    /// Remove a frame parked awaiting route discovery. When it was the last frame
-    /// waiting on that destination, drop the empty bucket so the reactor stops
-    /// inspecting it; the shared route request (critical-class, a fixed short burst)
-    /// and the routing table's `DiscoveryUnderway` entry are left to run out / expire
-    /// on their own.
-    fn cancel_pending_route(&self, request_id: RequestId) -> bool {
-        let mut pending = self.state.pending_routes.lock();
-
-        let mut emptied = None;
-        let mut found = false;
-
-        for (destination, bucket) in pending.iter_mut() {
-            let before = bucket.frames.len();
-            bucket
-                .frames
-                .retain(|frame| !Self::confirms_request(&frame.outcome, request_id));
-
-            if bucket.frames.len() != before {
-                found = true;
-
-                if bucket.frames.is_empty() {
-                    emptied = Some(*destination);
-                }
-
-                break;
-            }
-        }
-
-        if let Some(destination) = emptied {
-            pending.remove(&destination);
-        }
-        found
-    }
-
-    /// Remove a unicast parked in the retry backoff before its next attempt is due.
-    fn cancel_pending_unicast_retry(&self, request_id: RequestId) -> bool {
-        let mut pending = self.state.pending_unicast_retries.lock();
-
-        pending
-            .iter()
-            .position(|retry| Self::confirms_request(&retry.outcome, request_id))
-            .is_some_and(|index| {
-                pending.swap_remove(index);
-                true
-            })
-    }
-
-    /// Remove a data/group broadcast still being retransmitted, stopping its remaining
-    /// transmissions. Route-request broadcasts carry no confirmable outcome and are
-    /// never matched.
-    fn cancel_pending_broadcast(&self, request_id: RequestId) -> bool {
-        let mut pending = self.state.pending_broadcasts.lock();
-
-        pending
-            .iter()
-            .find_map(|(key, broadcast)| {
-                Self::confirms_request(&broadcast.outcome, request_id).then_some(*key)
-            })
-            .is_some_and(|key| {
-                pending.remove(&key);
-                true
-            })
+    /// Nudge every reactor that parks a cancellable send, so a just-set cancel flag is
+    /// acted on this pass rather than at the reactor's next scheduled wake. Called after a
+    /// [`SendHandle::cancel`](super::SendHandle::cancel).
+    pub fn nudge_cancellation(&self) {
+        self.send_wake.notify_one();
+        self.unicast_retry_wake.notify_one();
+        self.broadcast_retransmit_wake.notify_one();
+        self.pending_route_wake.notify_one();
+        self.aps_ack_wake.notify_one();
     }
 
     /// A unicast exhausted its retries at the sender. The next hop is dead: invalidate
@@ -1523,14 +1471,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// number, fan it out to sleepy children, form the passive-ack contract, transmit
     /// the first copy now, and hand any retransmissions to the broadcast-retransmit
     /// reactor (spec 3.6.6). `Err` rejects at enqueue (rate limited, frame budget)
-    /// without consuming `outcome`; on `Ok` the outcome resolves with the passive-ack
-    /// quorum result.
+    /// without consuming `slot`; on `Ok` the reactor resolves the slot's `Delivery` stage
+    /// with the passive-ack quorum result, and each on-air copy resolves its `HandOff`.
+    /// `slot` is `None` for an internal fire-and-forget broadcast.
     pub(super) fn originate_broadcast(
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
         policy: TxPolicy,
-        outcome: TxOutcome,
+        slot: Option<Arc<SendSlot>>,
     ) -> Result<(), EnqueueError> {
         // Stack-critical broadcasts always pass; host- and forwarding-class broadcasts
         // yield to the reserves when the bucket is drained.
@@ -1584,16 +1533,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
-        // Transmit the first copy immediately, fire-and-forget: a lost copy is not
-        // terminal, the reactor retransmits. The outcome rides the reactor, which owns
-        // the end-to-end result (the passive-ack quorum).
+        // Transmit the first copy immediately: a lost copy is not terminal, the reactor
+        // retransmits. The copy resolves the send's handoff (the first on-air copy wins);
+        // the reactor holds the slot and resolves the end-to-end quorum result.
         self.enqueue_send(
             SendKind::Broadcast {
                 nwk_frame: nwk_frame.clone(),
                 security,
             },
             policy,
-            TxOutcome::Discard,
+            Self::broadcast_copy_outcome(slot.clone()),
         );
 
         self.schedule_broadcast(
@@ -1604,7 +1553,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             BroadcastSchedule::PassiveAck,
             self.tunables.passive_ack_timeout() + self.broadcast_jitter(),
             self.tunables.max_broadcast_retries(),
-            outcome,
+            slot,
             token,
         );
         Ok(())
@@ -1918,7 +1867,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             BroadcastSchedule::PassiveAck,
             self.broadcast_jitter(),
             self.tunables.max_broadcast_retries() + 1,
-            TxOutcome::Discard,
+            None,
             token,
         );
     }

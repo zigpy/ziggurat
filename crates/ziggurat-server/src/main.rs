@@ -57,6 +57,16 @@ fn radio_error(e: impl ToString) -> proto::Error {
     proto::Error::new(proto::Status::RadioError, &e.to_string())
 }
 
+/// One connection's send-confirmation machinery: a per-connection [`proto::SendTracker`]
+/// and its shared wake. Confirms are per-connection (no cross-client `request_id`
+/// collisions on the shared hub) and lossless (they bypass the drop-oldest notification
+/// queue). Cheap to clone into each spawned request handler.
+#[derive(Clone)]
+struct Sends {
+    tracker: Arc<Mutex<proto::SendTracker>>,
+    wake: Arc<ziggurat_driver::sync::Notify>,
+}
+
 pub struct ZigguratServer {
     serial: SerialConfig,
     /// The radio transport owns the RCP link for the lifetime of the process: it is
@@ -194,6 +204,37 @@ impl ZigguratServer {
         })
     }
 
+    /// Set up one connection's [`Sends`] and spawn its wake-and-sweep reactor: the task
+    /// waits on the tracker's shared wake, sweeps for the confirm frames now owed, and
+    /// writes them to this connection's outbound queue.
+    fn spawn_send_sweeper(&self, outbound: mpsc::Sender<Vec<u8>>) -> (Sends, JoinHandle<()>) {
+        let wake = Arc::new(ziggurat_driver::sync::Notify::new());
+        let tracker = Arc::new(Mutex::new(proto::SendTracker::new(wake.clone())));
+
+        let sweep_tracker = tracker.clone();
+        let sweep_wake = wake.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                sweep_wake.notified().await;
+                let frames: Vec<Vec<u8>> = {
+                    let mut tracker = sweep_tracker.lock().unwrap();
+                    tracker
+                        .sweep()
+                        .into_iter()
+                        .filter_map(|n| n.frame())
+                        .collect()
+                };
+                for frame in frames {
+                    if outbound.send(frame).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        (Sends { tracker, wake }, task)
+    }
+
     async fn handle_connection<S>(
         self: &Arc<Self>,
         socket: S,
@@ -225,11 +266,12 @@ impl ZigguratServer {
         outbound_tx.send(self.hello_frame()).await?;
         let notification_forwarder =
             self.spawn_notification_forwarder(outbound_tx.clone(), addr.to_owned());
+        let (sends, send_sweeper) = self.spawn_send_sweeper(outbound_tx.clone());
 
         while let Some(message) = stream.next().await {
             match message {
                 Ok(Message::Binary(data)) => {
-                    if !self.handle_frame(&data, addr, &outbound_tx).await {
+                    if !self.handle_frame(&data, addr, &outbound_tx, &sends).await {
                         break;
                     }
                 }
@@ -243,6 +285,7 @@ impl ZigguratServer {
         }
 
         notification_forwarder.abort();
+        send_sweeper.abort();
         drop(outbound_tx);
         let _ = writer.await;
 
@@ -281,6 +324,7 @@ impl ZigguratServer {
         let _ = outbound_tx.send(self.hello_frame()).await;
         let notification_forwarder =
             self.spawn_notification_forwarder(outbound_tx.clone(), addr.to_owned());
+        let (sends, send_sweeper) = self.spawn_send_sweeper(outbound_tx.clone());
 
         let mut reader = reader;
         let mut buffer = [0u8; 1024];
@@ -302,7 +346,7 @@ impl ZigguratServer {
                 accumulator.clear();
                 match decoded {
                     Ok(frame) => {
-                        if !self.handle_frame(&frame, addr, &outbound_tx).await {
+                        if !self.handle_frame(&frame, addr, &outbound_tx, &sends).await {
                             break 'read;
                         }
                     }
@@ -318,6 +362,7 @@ impl ZigguratServer {
         }
 
         notification_forwarder.abort();
+        send_sweeper.abort();
         drop(outbound_tx);
         let _ = writer_task.await;
 
@@ -337,6 +382,7 @@ impl ZigguratServer {
         bytes: &[u8],
         addr: &str,
         outbound: &mpsc::Sender<Vec<u8>>,
+        sends: &Sends,
     ) -> bool {
         let Some((header, consumed)) = proto::RequestHeader::parse(bytes) else {
             return outbound
@@ -354,7 +400,7 @@ impl ZigguratServer {
 
         match request {
             Ok(request) => {
-                self.dispatch(header, request, outbound.clone());
+                self.dispatch(header, request, outbound.clone(), sends.clone());
                 true
             }
             Err(e) => outbound
@@ -372,6 +418,7 @@ impl ZigguratServer {
         header: proto::RequestHeader,
         request: proto::Request,
         outbound: mpsc::Sender<Vec<u8>>,
+        sends: Sends,
     ) {
         let server = self.clone();
 
@@ -382,7 +429,7 @@ impl ZigguratServer {
         tokio::spawn(
             async move {
                 let request_id = header.request_id;
-                let reply = server.handle(request_id, request, &outbound).await;
+                let reply = server.handle(request_id, request, &outbound, &sends).await;
                 let frame = match reply {
                     Ok(response) => response.frame(header.command, request_id),
                     Err(e) => e.frame(header.command, request_id),
@@ -428,6 +475,7 @@ impl ZigguratServer {
         request_id: proto::RequestId,
         request: proto::Request,
         outbound: &mpsc::Sender<Vec<u8>>,
+        sends: &Sends,
     ) -> Result<proto::Response, proto::Error> {
         use proto::Request as R;
         match request {
@@ -496,7 +544,15 @@ impl ZigguratServer {
                 self.stream_scan(request_id, outbound, events).await
             }
             R::SendAps(payload) => {
-                proto::send_aps(&*self.running()?, payload, request_id)?;
+                let (handle, projection) = proto::send_aps(&*self.running()?, payload)?;
+                // Register before self-notifying: the slot may already be resolved, and
+                // the sweep re-checks everything, so the wake closes the race.
+                sends
+                    .tracker
+                    .lock()
+                    .unwrap()
+                    .insert(request_id, handle, projection);
+                sends.wake.notify_one();
                 Ok(proto::Response::Empty)
             }
             R::PermitJoins(payload) => {
@@ -534,10 +590,15 @@ impl ZigguratServer {
                 proto::set_tunable(&*self.configured()?, &payload)?;
                 Ok(proto::Response::Empty)
             }
-            R::CancelRequest(payload) => Ok(proto::Response::CancelResult(proto::cancel_request(
-                &*self.running()?,
-                &payload,
-            ))),
+            R::CancelRequest(payload) => {
+                let stack = self.running()?;
+                let mut tracker = sends.tracker.lock().unwrap();
+                Ok(proto::Response::CancelResult(proto::cancel_request(
+                    &*stack,
+                    &mut tracker,
+                    &payload,
+                )))
+            }
         }
     }
 

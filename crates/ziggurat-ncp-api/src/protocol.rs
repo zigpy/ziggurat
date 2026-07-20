@@ -89,6 +89,14 @@ async fn dispatch<P: RadioPhy>(
             proto::apply_address_cache(&**loadable(app)?, payload);
             Ok(Response::Empty)
         }
+        Request::LoadRouteTable(payload) => {
+            proto::apply_route_table(&**loadable(app)?, payload);
+            Ok(Response::Empty)
+        }
+        Request::LoadSourceRoutes(payload) => {
+            proto::apply_source_routes(&**loadable(app)?, payload);
+            Ok(Response::Empty)
+        }
         Request::StartNetwork => handle_start_network(app).await,
         Request::GetNetworkInfo => Ok(Response::NetworkInfo(proto::network_info_payload(
             &**configured(app)?,
@@ -131,7 +139,8 @@ async fn dispatch<P: RadioPhy>(
             .await
         }
         Request::SendAps(payload) => {
-            proto::send_aps(&**running(app)?, payload, request_id)?;
+            let (handle, projection) = proto::send_aps(&**running(app)?, payload)?;
+            crate::track_send(&app.sends, request_id, handle, projection);
             Ok(Response::Empty)
         }
         Request::PermitJoins(payload) => handle_permit_joins(app, payload),
@@ -148,10 +157,13 @@ async fn dispatch<P: RadioPhy>(
             proto::set_tunable(&**configured(app)?, &payload)?;
             Ok(Response::Empty)
         }
-        Request::CancelRequest(payload) => Ok(Response::CancelResult(proto::cancel_request(
-            &**running(app)?,
-            &payload,
-        ))),
+        Request::CancelRequest(payload) => {
+            let stack = running(app)?.clone();
+            let result = crate::with_send_tracker(&app.sends, |tracker| {
+                proto::cancel_request(&*stack, tracker, &payload)
+            });
+            Ok(Response::CancelResult(result))
+        }
     }
 }
 
@@ -244,7 +256,7 @@ async fn handle_start_network<P: RadioPhy>(app: &mut App<P>) -> Result<Response,
         return Err(Error::new(Status::NetworkStartFailed, &e.to_string()));
     }
 
-    spawn_stack_pumps(&stack);
+    spawn_stack_pumps(&stack, app.sends.clone());
     app.started = true;
     Ok(Response::Empty)
 }

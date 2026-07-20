@@ -328,7 +328,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     priority: TxPriority::UserNormal,
                     class: TrafficClass::Critical,
                 },
-                TxOutcome::Discard,
+                None,
             ) {
                 tracing::warn!("Failed to broadcast address conflict report: {err}");
             }

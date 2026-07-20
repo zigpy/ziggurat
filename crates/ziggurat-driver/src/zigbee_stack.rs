@@ -34,7 +34,10 @@ mod mac;
 mod neighbor;
 mod nwk;
 mod route;
+mod send_handle;
 mod zdp;
+
+pub use send_handle::{SendHandle, SendProgress, SendSlot, TrackStage};
 
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
@@ -347,20 +350,18 @@ impl ApsAckData {
     }
 }
 
-/// The client's request id, supplied to `send_aps` and echoed back in its confirmation.
-pub type RequestId = u32;
-
 /// Where a transmit's terminal outcome is reported.
 #[derive(Debug)]
 pub enum TxOutcome {
     /// Nobody is waiting; a failure is only logged (internal fire-and-forget sends).
     Discard,
-    /// Confirm an application send by `request_id`. `aps_ack` present means the end-to-end
-    /// APS ack is the confirmation: this hop succeeding is silent, its failure fails
-    /// the send; absent means next-hop acceptance is itself the confirmation.
-    Confirm {
-        request_id: RequestId,
-        aps_ack: Option<ApsAckData>,
+    /// Resolve one stage of a send's [`SendSlot`]. The stage rides the outcome because
+    /// `resolve_outcome` is a single funnel called from stage-distinct sites (the sender
+    /// task resolves handoff, the broadcast/aps-ack reactor resolves delivery); the slot
+    /// itself is shapeless. See [`SendSlot::resolve`] for the write rules.
+    Track {
+        slot: Arc<SendSlot>,
+        stage: TrackStage,
     },
     /// An extracted indirect transaction in flight to the radio. Success resolves the
     /// transaction's own completion; a failed transmit puts it back at the head of its
@@ -378,11 +379,11 @@ pub enum TxOutcome {
 }
 
 /// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
-/// ack, confirmed (or timed out) as a [`ZigbeeNotification::SendConfirm`] carrying
-/// `request_id`.
+/// ack. The ack arrival (or its timeout) resolves the send's `delivered` stage through
+/// the held slot.
 #[derive(Debug)]
 pub struct PendingApsAck {
-    pub(crate) request_id: RequestId,
+    pub(crate) slot: Arc<SendSlot>,
     pub(crate) deadline: CoreInstant,
 }
 
@@ -468,10 +469,11 @@ pub struct PendingBroadcast {
     pub(crate) attempts_remaining: u8,
     /// When the next retransmission is due, unless the quorum is heard first.
     pub(crate) next_attempt: CoreInstant,
-    /// The broadcast's terminal outcome, resolved by the reactor: `Ok` when the
-    /// passive-ack quorum is heard (or a fixed schedule completes), an error when
-    /// attempts run out without one.
-    pub(crate) outcome: TxOutcome,
+    /// The tracked send's slot, if any. The reactor resolves its `Delivery` stage: `Ok`
+    /// when the passive-ack quorum is heard, `Err(QuorumNotReached)` when attempts run
+    /// out without one. `None` for an internal fire-and-forget broadcast (a relayed
+    /// broadcast, a route request). Each on-air copy resolves the `HandOff` stage.
+    pub(crate) slot: Option<Arc<SendSlot>>,
     /// Held for the broadcast's whole retransmit schedule, only to be dropped with it.
     pub(crate) _token: FrameToken,
 }
@@ -877,14 +879,6 @@ pub enum ZigbeeNotification {
         source_ieee: Eui64,
         frame_counter: u32,
         key_id: NwkSecurityHeaderKeyId,
-    },
-    SendConfirm {
-        request_id: RequestId,
-        result: Result<(), DeliveryError>,
-    },
-    ApsAckConfirm {
-        request_id: RequestId,
-        result: Result<(), DeliveryError>,
     },
 }
 

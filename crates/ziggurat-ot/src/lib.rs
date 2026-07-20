@@ -161,6 +161,7 @@ async fn ziggurat_main(spawner: embassy_executor::SendSpawner) {
         stack: None,
         started: false,
         capture_stop: None,
+        sends: api::new_send_tracker(),
     };
 
     api::emit_hello(false).await;

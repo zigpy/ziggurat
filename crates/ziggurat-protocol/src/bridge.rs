@@ -12,8 +12,8 @@ use ziggurat_driver::runtime::Runtime;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
     ApsAck, DeliveryError, DeviceLeaveReason, EnqueueError, HostRoute, NetworkBeacon,
-    NetworkConfig, NwkDeviceType, RequestId as StackRequestId, RouteDirective, TclkSeed,
-    TxPriority, ZigbeeNotification, ZigbeeStack,
+    NetworkConfig, NwkDeviceType, RouteDirective, SendHandle, TclkSeed, TxPriority,
+    ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -21,6 +21,8 @@ use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
 use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
 use ziggurat_zigbee::nwk::routing;
+
+use crate::send_tracker::{SendTracker, WireProjection};
 
 use crate::wire::*;
 
@@ -264,18 +266,17 @@ impl From<&NetworkBeacon> for BeaconPayload {
 
 /// Hand a `send_aps` to the stack, forking on the delivery mode.
 ///
-/// Each mode goes to its matching split entry point (unicast / broadcast / groupcast);
-/// the delivery outcome arrives later as a `SendConfirm` / `ApsAckConfirm` notification
-/// keyed by `request_id`. The wire is still the unified `SendApsPayload` (the split into
-/// three commands lands later), so for now the mode-only fields (ack, encryption, route)
-/// are simply ignored on the broadcast and groupcast arms.
+/// Each mode goes to its matching split entry point (unicast / broadcast / groupcast) and
+/// returns a [`SendHandle`] over the send's stages, together with the [`WireProjection`]
+/// that says which confirm frames it owes. The caller registers both in its
+/// [`SendTracker`]. The wire is still the unified `SendApsPayload` (the split into three
+/// commands lands later), so for now the mode-only fields (ack, encryption, route) are
+/// simply ignored on the broadcast and groupcast arms.
 pub fn send_aps<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: SendApsPayload,
-    request_id: RequestId,
-) -> Result<(), Error> {
+) -> Result<(SendHandle, WireProjection), Error> {
     let priority = TxPriority::from_host(payload.priority as i8);
-    let request_id = StackRequestId::from(request_id);
 
     let result = match payload.flags.delivery_mode {
         ApsDeliveryMode::Unicast => {
@@ -288,46 +289,55 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
             };
             let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
 
-            stack.send_aps_unicast(
+            let projection = if payload.flags.aps_ack {
+                WireProjection::UnicastApsAck
+            } else {
+                WireProjection::UnicastNoAck
+            };
+
+            stack
+                .send_aps_unicast(
+                    payload.destination,
+                    payload.profile_id,
+                    payload.cluster_id,
+                    payload.src_ep,
+                    payload.dst_ep,
+                    aps_ack,
+                    payload.radius,
+                    payload.aps_seq,
+                    payload.asdu,
+                    aps_security,
+                    payload.flags.sleepy_destination,
+                    priority,
+                    route,
+                )
+                .map(|handle| (handle, projection))
+        }
+        ApsDeliveryMode::Broadcast => stack
+            .send_aps_broadcast(
                 payload.destination,
                 payload.profile_id,
                 payload.cluster_id,
                 payload.src_ep,
                 payload.dst_ep,
-                aps_ack,
                 payload.radius,
                 payload.aps_seq,
                 payload.asdu,
-                aps_security,
-                payload.flags.sleepy_destination,
                 priority,
-                route,
-                request_id,
             )
-        }
-        ApsDeliveryMode::Broadcast => stack.send_aps_broadcast(
-            payload.destination,
-            payload.profile_id,
-            payload.cluster_id,
-            payload.src_ep,
-            payload.dst_ep,
-            payload.radius,
-            payload.aps_seq,
-            payload.asdu,
-            priority,
-            request_id,
-        ),
-        ApsDeliveryMode::Multicast => stack.send_aps_groupcast(
-            payload.destination.as_u16(),
-            payload.profile_id,
-            payload.cluster_id,
-            payload.src_ep,
-            payload.radius,
-            payload.aps_seq,
-            payload.asdu,
-            priority,
-            request_id,
-        ),
+            .map(|handle| (handle, WireProjection::Broadcast)),
+        ApsDeliveryMode::Multicast => stack
+            .send_aps_groupcast(
+                payload.destination.as_u16(),
+                payload.profile_id,
+                payload.cluster_id,
+                payload.src_ep,
+                payload.radius,
+                payload.aps_seq,
+                payload.asdu,
+                priority,
+            )
+            .map(|handle| (handle, WireProjection::Broadcast)),
     };
 
     result.map_err(|e| enqueue_error(&e))
@@ -375,13 +385,20 @@ fn route_directive(
     })
 }
 
-/// Cancel an in-flight send by the `request_id` it was issued under. Best-effort: the
-/// reply reports whether a still-cancellable (pre-delivery) send was found and removed.
+/// Cancel an in-flight send by the `request_id` it was issued under.
+///
+/// Best-effort: the reply reports whether the tracker held it and it was still
+/// unresolved. Setting the slot's flag is lazy, so the driver's reactors are nudged to
+/// act on it this pass.
 pub fn cancel_request<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
+    tracker: &mut SendTracker,
     payload: &CancelRequestPayload,
 ) -> CancelResultPayload {
-    let cancelled = stack.cancel_send(StackRequestId::from(payload.request_id));
+    let cancelled = tracker.cancel(payload.request_id);
+    if cancelled {
+        stack.nudge_cancellation();
+    }
     CancelResultPayload { cancelled }
 }
 
@@ -401,7 +418,7 @@ pub fn set_tunable<P: RadioPhy, R: Runtime>(
 
 /// Mirror a send's terminal result onto its wire status. Exhaustive on purpose: a new
 /// `DeliveryError` variant must pick its `SendStatus` here to compile.
-const fn send_status(result: &Result<(), DeliveryError>) -> SendStatus {
+pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatus {
     match result {
         Ok(()) => SendStatus::Success,
         Err(err) => match err {
@@ -449,18 +466,6 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             rssi: *rssi as u8,
             data: data.clone(),
         }),
-        ZigbeeNotification::SendConfirm { request_id, result } => Notification::SendConfirm(
-            *request_id as u16,
-            SendConfirmPayload {
-                status: send_status(result),
-            },
-        ),
-        ZigbeeNotification::ApsAckConfirm { request_id, result } => Notification::ApsAckConfirm(
-            *request_id as u16,
-            ApsAckConfirmPayload {
-                status: send_status(result),
-            },
-        ),
         ZigbeeNotification::DeviceJoined {
             nwk,
             ieee,

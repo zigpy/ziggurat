@@ -11,7 +11,9 @@
 extern crate alloc;
 
 pub mod bridge;
+pub mod send_tracker;
 pub mod wire;
 
 pub use bridge::*;
+pub use send_tracker::*;
 pub use wire::*;
