@@ -11,9 +11,9 @@ use core::time::Duration;
 use ziggurat_driver::runtime::Runtime;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ApsAckResult, DeviceLeaveReason, HostRoute, NetworkBeacon, NetworkConfig,
-    NwkDeviceType, RequestId as StackRequestId, RouteDirective, TclkSeed, TxPriority,
-    ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    ApsAck, DeviceLeaveReason, HostRoute, NetworkBeacon, NetworkConfig, NwkDeviceType,
+    RequestId as StackRequestId, RouteDirective, TclkSeed, TxPriority, ZigbeeNotification,
+    ZigbeeStack, ZigbeeStackError,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -360,25 +360,30 @@ pub fn set_tunable<P: RadioPhy, R: Runtime>(
         .map_err(|e| Error::new(Status::InvalidRequest, &alloc::format!("{name}: {e}")))
 }
 
-/// Mirror a send's stack error onto its wire status. Exhaustive on purpose: a new
+/// Mirror a send's terminal result onto its wire status. Exhaustive on purpose: a new
 /// `ZigbeeStackError` variant must pick its `SendStatus` here to compile.
-const fn error_to_send_status(err: &ZigbeeStackError) -> SendStatus {
-    match err {
-        ZigbeeStackError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
-        ZigbeeStackError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
-        ZigbeeStackError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
-        ZigbeeStackError::RouteDiscoverySuppressed => SendStatus::RouteDiscoverySuppressed,
-        ZigbeeStackError::NwkNoAck { .. } => SendStatus::NwkNoAck,
-        ZigbeeStackError::CcaFailure => SendStatus::CcaFailure,
-        ZigbeeStackError::TransmitFailed(_) => SendStatus::TransmitFailed,
-        ZigbeeStackError::ApsAckTimeout => SendStatus::ApsAckTimeout,
-        ZigbeeStackError::PayloadTooLong => SendStatus::PayloadTooLong,
-        ZigbeeStackError::FrameBudgetExhausted => SendStatus::FrameBudgetExhausted,
-        ZigbeeStackError::ApsSecurityFailed => SendStatus::ApsSecurityFailed,
-        ZigbeeStackError::IndirectExpired { .. } => SendStatus::IndirectExpired,
-        ZigbeeStackError::BroadcastRateLimited { .. } => SendStatus::BroadcastRateLimited,
-        ZigbeeStackError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
-        ZigbeeStackError::Radio(_) => SendStatus::RadioError,
+const fn send_status(result: &Result<(), ZigbeeStackError>) -> SendStatus {
+    match result {
+        Ok(()) => SendStatus::Success,
+        Err(err) => match err {
+            ZigbeeStackError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
+            ZigbeeStackError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
+            ZigbeeStackError::RouteInactiveAfterDiscovery => {
+                SendStatus::RouteInactiveAfterDiscovery
+            }
+            ZigbeeStackError::RouteDiscoverySuppressed => SendStatus::RouteDiscoverySuppressed,
+            ZigbeeStackError::NwkNoAck { .. } => SendStatus::NwkNoAck,
+            ZigbeeStackError::CcaFailure => SendStatus::CcaFailure,
+            ZigbeeStackError::TransmitFailed(_) => SendStatus::TransmitFailed,
+            ZigbeeStackError::ApsAckTimeout => SendStatus::ApsAckTimeout,
+            ZigbeeStackError::PayloadTooLong => SendStatus::PayloadTooLong,
+            ZigbeeStackError::FrameBudgetExhausted => SendStatus::FrameBudgetExhausted,
+            ZigbeeStackError::ApsSecurityFailed => SendStatus::ApsSecurityFailed,
+            ZigbeeStackError::IndirectExpired { .. } => SendStatus::IndirectExpired,
+            ZigbeeStackError::BroadcastRateLimited { .. } => SendStatus::BroadcastRateLimited,
+            ZigbeeStackError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
+            ZigbeeStackError::Radio(_) => SendStatus::RadioError,
+        },
     }
 }
 
@@ -410,20 +415,18 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             rssi: *rssi as u8,
             data: data.clone(),
         }),
-        ZigbeeNotification::SendConfirm { request_id, result } => {
-            let (status, reason) = match result {
-                Ok(()) => (SendStatus::Success, Vec::new()),
-                Err(err) => (error_to_send_status(err), err.to_string().into_bytes()),
-            };
-            Notification::SendConfirm(*request_id as u16, SendConfirmPayload { status, reason })
-        }
-        ZigbeeNotification::ApsAckConfirm { request_id, result } => {
-            let (acked, reason) = match result {
-                ApsAckResult::Acked => (true, Vec::new()),
-                ApsAckResult::Failed { reason } => (false, reason.to_string().into_bytes()),
-            };
-            Notification::ApsAckConfirm(*request_id as u16, ApsAckConfirmPayload { acked, reason })
-        }
+        ZigbeeNotification::SendConfirm { request_id, result } => Notification::SendConfirm(
+            *request_id as u16,
+            SendConfirmPayload {
+                status: send_status(result),
+            },
+        ),
+        ZigbeeNotification::ApsAckConfirm { request_id, result } => Notification::ApsAckConfirm(
+            *request_id as u16,
+            ApsAckConfirmPayload {
+                status: send_status(result),
+            },
+        ),
         ZigbeeNotification::DeviceJoined {
             nwk,
             ieee,

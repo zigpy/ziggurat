@@ -9,7 +9,6 @@ use ziggurat_zigbee::nwk::frame::{
     BROADCAST_LOW_POWER_ROUTERS, BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery,
 };
 
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cmp;
 use core::time::Duration;
@@ -18,8 +17,8 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::flat_map::Entry;
 
 use super::{
-    ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, RouteDirective,
-    SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    ApsAck, ApsAckData, NwkSecurityMode, PendingApsAck, RequestId, RouteDirective, SendMode,
+    TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
 };
 use crate::frame_token::TrafficClass;
 
@@ -90,7 +89,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if let Some(PendingApsAck { request_id, .. }) = pending {
             self.push_notification(ZigbeeNotification::ApsAckConfirm {
                 request_id,
-                result: ApsAckResult::Acked,
+                result: Ok(()),
             });
         }
     }
@@ -461,9 +460,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tracing::warn!("APS ack timed out for send {request_id}");
             self.push_notification(ZigbeeNotification::ApsAckConfirm {
                 request_id,
-                result: ApsAckResult::Failed {
-                    reason: "APS ack timed out".to_string(),
-                },
+                result: Err(ZigbeeStackError::ApsAckTimeout),
             });
         }
     }

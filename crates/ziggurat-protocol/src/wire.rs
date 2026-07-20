@@ -590,19 +590,12 @@ pub enum SendStatus {
 #[derive(Debug, Clone)]
 pub struct SendConfirmPayload {
     pub status: SendStatus,
-    pub reason_len: u16,
-    #[abstract_bits(length_from = reason_len)]
-    pub reason: Vec<u8>,
 }
 
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct ApsAckConfirmPayload {
-    pub acked: bool,
-    pub reserved: u7,
-    pub reason_len: u16,
-    #[abstract_bits(length_from = reason_len)]
-    pub reason: Vec<u8>,
+    pub status: SendStatus,
 }
 
 #[abstract_bits]

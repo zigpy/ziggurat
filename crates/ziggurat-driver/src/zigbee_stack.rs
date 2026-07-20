@@ -17,7 +17,6 @@ use thiserror::Error;
 use crate::sync::{AsyncMutex, Mutex, MutexGuard, Notify};
 use alloc::boxed::Box;
 use alloc::collections::{BinaryHeap, VecDeque};
-use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -865,14 +864,8 @@ pub enum ZigbeeNotification {
     },
     ApsAckConfirm {
         request_id: RequestId,
-        result: ApsAckResult,
+        result: Result<(), ZigbeeStackError>,
     },
-}
-
-#[derive(Debug, Clone)]
-pub enum ApsAckResult {
-    Acked,
-    Failed { reason: String },
 }
 
 #[derive(Debug, Clone)]
