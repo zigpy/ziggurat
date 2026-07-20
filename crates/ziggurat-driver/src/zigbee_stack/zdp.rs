@@ -1,8 +1,9 @@
 use crate::runtime::Runtime;
 use alloc::vec::Vec;
+use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
+use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use ziggurat_zigbee::zdp::{
@@ -12,8 +13,8 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendMode, TxOutcome, TxPolicy,
-    TxPriority, ZigbeeStack, neighbors, routing,
+    EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective, SendMode, TxOutcome,
+    TxPolicy, TxPriority, ZigbeeStack, neighbors, routing,
 };
 use crate::frame_token::TrafficClass;
 
@@ -261,7 +262,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Build and enqueue a ZDP command fire-and-forget.
+    /// Build and enqueue a ZDP command fire-and-forget. ZDP is only ever unicast or
+    /// broadcast (never groupcast), and never APS-secured or acked, so the frame is the
+    /// same either way; only the origination path forks on the delivery mode.
     fn send_zdp_command<T: ZdpCommand + Sync>(
         &self,
         destination: Nwk,
@@ -269,30 +272,50 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tsn: u8,
         command: &T,
     ) -> Result<(), EnqueueError> {
-        let (nwk_frame, _ack) = self.build_aps_frame(
-            delivery_mode,
-            destination,
-            ZDP_PROFILE_ID,
-            T::CLUSTER_ID as u16,
-            0,
-            0,
-            ApsAck::None,
-            2 * MAX_DEPTH,
-            self.next_aps_counter(),
-            command.serialize(tsn).unwrap(),
-            None,
-        )?;
+        let asdu = FrameBytes::from_slice(&command.serialize(tsn).unwrap())
+            .map_err(|_| EnqueueError::PayloadTooLong)?;
+
+        let aps_frame = ApsDataFrame {
+            frame_control: ApsFrameControl {
+                frame_type: ApsFrameType::Data,
+                delivery_mode,
+                reserved1: 0b0,
+                security: false,
+                ack_request: false,
+                extended_header: false,
+            },
+            group_id: None,
+            destination_endpoint: Some(0),
+            cluster_id: T::CLUSTER_ID as u16,
+            profile_id: ZDP_PROFILE_ID,
+            source_endpoint: 0,
+            counter: self.next_aps_counter(),
+            asdu,
+        };
+
+        let nwk_frame = self.wrap_aps_frame(&aps_frame, destination, 2 * MAX_DEPTH, None)?;
 
         // ZDP responses are answerable to the remote requester's retries: best-effort
-        self.originate_aps_frame(
-            nwk_frame,
-            TxPolicy {
-                priority: TxPriority::UserNormal,
-                class: TrafficClass::Host,
-            },
-            TxOutcome::Discard,
-            SendMode::Route(RouteDirective::StackDecides),
-        )
+        let policy = TxPolicy {
+            priority: TxPriority::UserNormal,
+            class: TrafficClass::Host,
+        };
+
+        match delivery_mode {
+            ApsDeliveryMode::Broadcast => self.originate_broadcast(
+                nwk_frame,
+                NwkSecurityMode::NetworkKey,
+                policy,
+                TxOutcome::Discard,
+            ),
+            ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => self.originate_unicast(
+                nwk_frame,
+                NwkSecurityMode::NetworkKey,
+                SendMode::Route(RouteDirective::StackDecides),
+                policy,
+                TxOutcome::Discard,
+            ),
+        }
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming

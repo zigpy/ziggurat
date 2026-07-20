@@ -17,6 +17,7 @@ use ziggurat_driver::zigbee_stack::{
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
+use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
 use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
 use ziggurat_zigbee::nwk::routing;
@@ -261,44 +262,75 @@ impl From<&NetworkBeacon> for BeaconPayload {
     }
 }
 
-/// Hand `send_aps` to the stack, translating the wire flags. The delivery outcome
-/// arrives later as a `SendConfirm` / `ApsAckConfirm` notification keyed by
-/// `request_id`.
+/// Hand a `send_aps` to the stack, forking on the delivery mode.
+///
+/// Each mode goes to its matching split entry point (unicast / broadcast / groupcast);
+/// the delivery outcome arrives later as a `SendConfirm` / `ApsAckConfirm` notification
+/// keyed by `request_id`. The wire is still the unified `SendApsPayload` (the split into
+/// three commands lands later), so for now the mode-only fields (ack, encryption, route)
+/// are simply ignored on the broadcast and groupcast arms.
 pub fn send_aps<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: SendApsPayload,
     request_id: RequestId,
 ) -> Result<(), Error> {
-    let aps_security = (payload.flags.aps_encryption && payload.flags.has_eui64)
-        .then_some(payload.destination_eui64);
+    let priority = TxPriority::from_host(payload.priority as i8);
+    let request_id = StackRequestId::from(request_id);
 
-    let aps_ack = if payload.flags.aps_ack {
-        ApsAck::Request
-    } else {
-        ApsAck::None
-    };
+    let result = match payload.flags.delivery_mode {
+        ApsDeliveryMode::Unicast => {
+            let aps_security = (payload.flags.aps_encryption && payload.flags.has_eui64)
+                .then_some(payload.destination_eui64);
+            let aps_ack = if payload.flags.aps_ack {
+                ApsAck::Request
+            } else {
+                ApsAck::None
+            };
+            let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
 
-    let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
-
-    stack
-        .send_aps(
-            payload.flags.delivery_mode,
+            stack.send_aps_unicast(
+                payload.destination,
+                payload.profile_id,
+                payload.cluster_id,
+                payload.src_ep,
+                payload.dst_ep,
+                aps_ack,
+                payload.radius,
+                payload.aps_seq,
+                payload.asdu,
+                aps_security,
+                payload.flags.sleepy_destination,
+                priority,
+                route,
+                request_id,
+            )
+        }
+        ApsDeliveryMode::Broadcast => stack.send_aps_broadcast(
             payload.destination,
             payload.profile_id,
             payload.cluster_id,
             payload.src_ep,
             payload.dst_ep,
-            aps_ack,
             payload.radius,
             payload.aps_seq,
             payload.asdu,
-            aps_security,
-            payload.flags.sleepy_destination,
-            TxPriority::from_host(payload.priority as i8),
-            route,
-            StackRequestId::from(request_id),
-        )
-        .map_err(|e| enqueue_error(&e))
+            priority,
+            request_id,
+        ),
+        ApsDeliveryMode::Multicast => stack.send_aps_groupcast(
+            payload.destination.as_u16(),
+            payload.profile_id,
+            payload.cluster_id,
+            payload.src_ep,
+            payload.radius,
+            payload.aps_seq,
+            payload.asdu,
+            priority,
+            request_id,
+        ),
+    };
+
+    result.map_err(|e| enqueue_error(&e))
 }
 
 /// Map a synchronous admission failure onto its wire `Error` frame.
