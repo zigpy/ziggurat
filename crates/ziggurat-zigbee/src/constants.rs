@@ -271,9 +271,9 @@ tunables! {
     max_children: u8 = 32,
 
     /// Trust center policy: allow an unsecured (trust center) rejoin from a device that
-    /// has not established a unique link key. Off by default — such a rejoin re-delivers
-    /// the network key encrypted with the well-known key, exposing it to anyone who
-    /// knows that key (spec 4.7.3.6).
+    /// has not established a unique link key. Off by default — such a rejoin
+    /// re-delivers the network key encrypted with the well-known key, exposing it to
+    /// anyone who knows that key (spec 4.7.3.6).
     allow_unsecured_rejoins: bool = false,
 
     /// Trust center policy: accept an Update-Device command that is not APS-encrypted
@@ -326,10 +326,11 @@ tunables! {
     unicast_retry_delay: Duration = Duration::from_millis(50),
     broadcast_delivery_time: Duration = Duration::from_millis(9000),
 
-    /// How many route discoveries a frame parked awaiting a route will trigger before it
-    /// is discarded. `1` (the default) means a single discovery: if it fails, every frame
-    /// waiting on that destination inherits the failure. Higher values keep the parked
-    /// frames waiting while discovery is retried, the whole bucket riding along together.
+    /// How many route discoveries a frame parked awaiting a route will trigger before
+    /// it is discarded. `1` (the default) means a single discovery: if it fails, every
+    /// frame waiting on that destination inherits the failure. Higher values keep the
+    /// parked frames waiting while discovery is retried, the whole bucket riding along
+    /// together.
     pending_route_discovery_attempts: u8 = 1,
 
     /// The default timeout for any end device child that does not negotiate a
@@ -355,8 +356,8 @@ tunables! {
     /// back.
     aps_ack_timeout_indirect: Duration = Duration::from_millis(10000),
 
-    /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel before
-    /// declaring a transmit failed.
+    /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel
+    /// before declaring a transmit failed.
     mac_max_csma_backoffs: u8 = 2,
 
     /// `macMaxFrameRetries`: how many times the radio retransmits a unicast that goes
@@ -374,22 +375,18 @@ tunables! {
     /// device from routing.
     forwarding_reserve_frames: usize = 16,
 
-    /// Broadcast admission budget (issue #43): a token bucket shared across traffic
-    /// classes, mirroring the frame budget above but bounding broadcast *rate*. As a
-    /// coordinator we intentionally break the spec's no-rate-limit rule so a host
-    /// broadcast flood cannot out-pace what surrounding routers can relay.
+    /// Broadcast admission budget: a token bucket shared across traffic classes,
+    /// mirroring the frame budget above but bounding broadcast *rate*.
     ///
     /// This is the burst capacity: a discrete host action (a button press, a scene)
     /// draws from it and goes out immediately, however low the sustained rate is, so
-    /// responsiveness comes from the burst — not from the rate below.
+    /// responsiveness comes from the burst, not from the rate below.
     broadcast_budget_tokens: u8 = 15,
 
     /// Time to regenerate one broadcast token; the reciprocal is the sustained
     /// admission rate (~0.55/s here). Held just under a stock SiLabs router's ~0.6/s
     /// relay budget so the surrounding mesh always keeps headroom to carry our
-    /// broadcasts. A sustained stream (a slider drag) is throttled to this rate;
-    /// deciding *which* frames survive the throttle (latest-wins coalescing) needs ZCL
-    /// semantics and belongs in the host, not here.
+    /// broadcasts.
     broadcast_token_refill: Duration = Duration::from_millis(1800),
 
     /// Broadcast tokens only stack-critical broadcasts (route discovery, key updates,
