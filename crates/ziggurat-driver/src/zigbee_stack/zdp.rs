@@ -12,8 +12,8 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, MAX_DEPTH, NwkDeviceType, RouteDirective, SendMode, TxOutcome, TxPolicy, TxPriority,
-    ZigbeeStack, ZigbeeStackError, neighbors, routing,
+    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendMode, TxOutcome, TxPolicy,
+    TxPriority, ZigbeeStack, neighbors, routing,
 };
 use crate::frame_token::TrafficClass;
 
@@ -268,7 +268,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         delivery_mode: ApsDeliveryMode,
         tsn: u8,
         command: &T,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), EnqueueError> {
         let (nwk_frame, _ack) = self.build_aps_frame(
             delivery_mode,
             destination,

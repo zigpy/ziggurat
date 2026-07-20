@@ -20,8 +20,8 @@ use ziggurat_zigbee::nwk::frame::{
 use crate::frame_token::TrafficClass;
 
 use super::{
-    NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPolicy, TxPriority,
-    ZigbeeStack, ZigbeeStackError,
+    DeliveryError, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPolicy,
+    TxPriority, ZigbeeStack,
 };
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
@@ -371,7 +371,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
         frame: Ieee802154Frame<Payload>,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), DeliveryError> {
         // Increment the 802.15.4 sequence number
         let final_frame = if !frame.header().frame_control.sequence_number_suppression {
             // Hold the lock for the shortest time possible
@@ -436,11 +436,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             TxResult::NoAck => final_frame
                 .header()
                 .dest_address
-                .map_or(Ok(()), |next_hop| {
-                    Err(ZigbeeStackError::NwkNoAck { next_hop })
-                }),
-            TxResult::ChannelAccessFailure => Err(ZigbeeStackError::CcaFailure),
-            other => Err(ZigbeeStackError::TransmitFailed(other)),
+                .map_or(Ok(()), |next_hop| Err(DeliveryError::NwkNoAck { next_hop })),
+            TxResult::ChannelAccessFailure => Err(DeliveryError::CcaFailure),
+            other => Err(DeliveryError::TransmitFailed(other)),
         }
     }
 }

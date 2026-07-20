@@ -9,6 +9,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use abstract_bits::{abstract_bits, AbstractBits, BitReader};
 use num_enum::TryFromPrimitive;
@@ -526,6 +527,16 @@ pub struct ErrorPayload {
     pub message: Vec<u8>,
 }
 
+/// The body of a `Status::RateLimited` response: the delay (milliseconds) after which
+/// the host may retry the rejected send. Leads with `status` like [`ErrorPayload`], so
+/// the client dispatches on that byte and parses this body when it reads `RateLimited`.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct RateLimitedPayload {
+    pub status: Status,
+    pub retry_in_ms: u32,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct HelloPayload {
@@ -584,6 +595,7 @@ pub enum SendStatus {
     BroadcastRateLimited = 13,
     BroadcastQuorumNotReached = 14,
     RadioError = 15,
+    Cancelled = 16,
 }
 
 #[abstract_bits]
@@ -765,16 +777,19 @@ impl Response {
     }
 }
 
-/// A failed reply: any non-`Ok` [`Status`] plus a diagnostic message. The client
-/// branches on the status; the text is for humans.
-pub struct Error {
-    pub status: Status,
-    pub message: String,
+/// A failed reply. The client always branches on the `Status` byte that leads the
+/// body; each variant serializes a body shaped for what that status needs to convey.
+pub enum Error {
+    /// The catch-all: a non-`Ok` [`Status`] plus a diagnostic message for humans.
+    Generic { status: Status, message: String },
+    /// `Status::RateLimited` with a machine-readable retry delay, so the host can pace
+    /// itself instead of busy-retrying a rejected broadcast.
+    RateLimited { retry_in: Duration },
 }
 
 impl Error {
     pub fn new(status: Status, message: &str) -> Self {
-        Self {
+        Self::Generic {
             status,
             message: message.to_string(),
         }
@@ -788,16 +803,33 @@ impl Error {
         Self::new(Status::NotConfigured, "")
     }
 
+    pub const fn rate_limited(retry_in: Duration) -> Self {
+        Self::RateLimited { retry_in }
+    }
+
     pub fn frame(&self, command: u8, request_id: RequestId) -> Vec<u8> {
-        let message = &self.message.as_bytes()[..self.message.len().min(255)];
         let mut bytes = envelope(FrameType::Response, command, request_id);
-        append(
-            &mut bytes,
-            &ErrorPayload {
-                status: self.status,
-                message: message.to_vec(),
-            },
-        );
+        match self {
+            Self::Generic { status, message } => {
+                let message = &message.as_bytes()[..message.len().min(255)];
+                append(
+                    &mut bytes,
+                    &ErrorPayload {
+                        status: *status,
+                        message: message.to_vec(),
+                    },
+                );
+            }
+            Self::RateLimited { retry_in } => {
+                append(
+                    &mut bytes,
+                    &RateLimitedPayload {
+                        status: Status::RateLimited,
+                        retry_in_ms: retry_in.as_millis() as u32,
+                    },
+                );
+            }
+        }
         bytes
     }
 }

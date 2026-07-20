@@ -27,10 +27,10 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, BroadcastSchedule, HostRoute, IndirectFrame, IndirectPayload, JoinKind,
-    MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame, PendingRoute,
-    PendingUnicastRetry, RequestId, RouteDirective, SendKind, SendMode, SendRequest, TxOutcome,
-    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    AddrConflictSource, BroadcastSchedule, DeliveryError, EnqueueError, HostRoute, IndirectFrame,
+    IndirectPayload, JoinKind, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast,
+    PendingFrame, PendingRoute, PendingUnicastRetry, RequestId, RouteDirective, SendKind, SendMode,
+    SendRequest, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -211,9 +211,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 Next::Exhausted(outcome) => {
                     tracing::debug!("Broadcast {key:?} out of retransmit attempts");
                     let result = match schedule {
-                        BroadcastSchedule::PassiveAck => {
-                            Err(ZigbeeStackError::BroadcastQuorumNotReached)
-                        }
+                        BroadcastSchedule::PassiveAck => Err(DeliveryError::QuorumNotReached),
                         // A fixed-interval broadcast completes by running out of attempts
                         BroadcastSchedule::FixedInterval { .. } => Ok(()),
                     };
@@ -524,7 +522,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         mode: SendMode,
         policy: TxPolicy,
         outcome: TxOutcome,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), EnqueueError> {
         debug_assert!(
             nwk_frame.nwk_header.destination.as_u16() < BROADCAST_LOW_POWER_ROUTERS.as_u16(),
             "originate_unicast is unicast only; got broadcast {:?}",
@@ -540,7 +538,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 frame_token::total(),
                 policy.class,
             );
-            return Err(ZigbeeStackError::FrameBudgetExhausted);
+            return Err(EnqueueError::BudgetExhausted);
         };
 
         let destination = nwk_frame.nwk_header.destination;
@@ -566,7 +564,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 tracing::debug!(
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
                 );
-                Err(ZigbeeStackError::RouteDiscoverySuppressed)
+                Err(EnqueueError::RouteDiscoverySuppressed)
             }
         }
     }
@@ -783,7 +781,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 frame_token::total(),
                 policy.class,
             );
-            self.resolve_outcome(outcome, Err(ZigbeeStackError::FrameBudgetExhausted));
+            self.resolve_outcome(outcome, Err(DeliveryError::BudgetExhausted));
             return;
         };
 
@@ -1001,10 +999,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     self.enqueue_unicast(nwk_frame, next_hop, security, priority, outcome, token);
                 }
                 NextHop::NeedDiscovery | NextHop::Discard => {
-                    self.resolve_outcome(
-                        outcome,
-                        Err(ZigbeeStackError::RouteInactiveAfterDiscovery),
-                    );
+                    self.resolve_outcome(outcome, Err(DeliveryError::RouteInactiveAfterDiscovery));
                 }
             }
         }
@@ -1044,7 +1039,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 for PendingFrame { outcome, .. } in frames {
                     self.resolve_outcome(
                         outcome,
-                        Err(ZigbeeStackError::RouteDiscoveryTimeout(Elapsed)),
+                        Err(DeliveryError::RouteDiscoveryTimeout(Elapsed)),
                     );
                 }
             }
@@ -1114,7 +1109,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Deliver a transmit's terminal outcome to wherever it is owed: log a dropped
     /// background failure, wake an awaiting caller, or confirm an application send.
-    pub(super) fn resolve_outcome(&self, outcome: TxOutcome, result: Result<(), ZigbeeStackError>) {
+    pub(super) fn resolve_outcome(&self, outcome: TxOutcome, result: Result<(), DeliveryError>) {
         match outcome {
             TxOutcome::Discard => {
                 if let Err(err) = result {
@@ -1211,7 +1206,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
         // against the next hop. Counted per MCPS-DATA.request, like `nwkTxTotal` above,
         // so the two stay on the same denominator.
-        if let ZigbeeStackError::NwkNoAck { .. } = e {
+        if let DeliveryError::NwkNoAck { .. } = e {
             let mut core = self.core();
             if let Some(next_hop_eui64) = core.nib.address_map.eui64_for(next_hop_address) {
                 core.nib.neighbors.record_transmit_failure(next_hop_eui64);
@@ -1536,7 +1531,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         policy: TxPolicy,
         outcome: TxOutcome,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), EnqueueError> {
         // Stack-critical broadcasts always pass; host- and forwarding-class broadcasts
         // yield to the reserves when the bucket is drained.
         let admission = self.broadcast_budget.lock().take(
@@ -1549,7 +1544,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         if let BroadcastAdmission::Defer { retry_in } = admission {
-            return Err(ZigbeeStackError::BroadcastRateLimited { retry_in });
+            return Err(EnqueueError::RateLimited { retry_in });
         }
 
         // The retained copy's token, held for the whole retransmit schedule.
@@ -1560,7 +1555,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 frame_token::total(),
                 policy.class,
             );
-            return Err(ZigbeeStackError::FrameBudgetExhausted);
+            return Err(EnqueueError::BudgetExhausted);
         };
 
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
@@ -1643,7 +1638,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), DeliveryError> {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
 
         let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);

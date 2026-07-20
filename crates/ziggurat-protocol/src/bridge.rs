@@ -11,9 +11,9 @@ use core::time::Duration;
 use ziggurat_driver::runtime::Runtime;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, DeviceLeaveReason, HostRoute, NetworkBeacon, NetworkConfig, NwkDeviceType,
-    RequestId as StackRequestId, RouteDirective, TclkSeed, TxPriority, ZigbeeNotification,
-    ZigbeeStack, ZigbeeStackError,
+    ApsAck, DeliveryError, DeviceLeaveReason, EnqueueError, HostRoute, NetworkBeacon,
+    NetworkConfig, NwkDeviceType, RequestId as StackRequestId, RouteDirective, TclkSeed,
+    TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -298,14 +298,21 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
             route,
             StackRequestId::from(request_id),
         )
-        .map_err(|e| {
-            let status = match &e {
-                ZigbeeStackError::BroadcastRateLimited { .. } => Status::RateLimited,
-                ZigbeeStackError::FrameBudgetExhausted => Status::BudgetExhausted,
-                _ => Status::TransmitFailed,
-            };
-            Error::new(status, &e.to_string())
-        })
+        .map_err(|e| enqueue_error(&e))
+}
+
+/// Map a synchronous admission failure onto its wire `Error` frame.
+fn enqueue_error(e: &EnqueueError) -> Error {
+    match e {
+        EnqueueError::RateLimited { retry_in } => Error::rate_limited(*retry_in),
+        EnqueueError::BudgetExhausted => Error::new(Status::BudgetExhausted, &e.to_string()),
+        EnqueueError::NotStarted => Error::new(Status::InvalidState, &e.to_string()),
+        EnqueueError::PayloadTooLong
+        | EnqueueError::SecurityUnavailable
+        | EnqueueError::RouteDiscoverySuppressed => {
+            Error::new(Status::InvalidRequest, &e.to_string())
+        }
+    }
 }
 
 /// Build the driver's [`RouteDirective`] from the wire route control.
@@ -361,28 +368,23 @@ pub fn set_tunable<P: RadioPhy, R: Runtime>(
 }
 
 /// Mirror a send's terminal result onto its wire status. Exhaustive on purpose: a new
-/// `ZigbeeStackError` variant must pick its `SendStatus` here to compile.
-const fn send_status(result: &Result<(), ZigbeeStackError>) -> SendStatus {
+/// `DeliveryError` variant must pick its `SendStatus` here to compile.
+const fn send_status(result: &Result<(), DeliveryError>) -> SendStatus {
     match result {
         Ok(()) => SendStatus::Success,
         Err(err) => match err {
-            ZigbeeStackError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
-            ZigbeeStackError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
-            ZigbeeStackError::RouteInactiveAfterDiscovery => {
-                SendStatus::RouteInactiveAfterDiscovery
-            }
-            ZigbeeStackError::RouteDiscoverySuppressed => SendStatus::RouteDiscoverySuppressed,
-            ZigbeeStackError::NwkNoAck { .. } => SendStatus::NwkNoAck,
-            ZigbeeStackError::CcaFailure => SendStatus::CcaFailure,
-            ZigbeeStackError::TransmitFailed(_) => SendStatus::TransmitFailed,
-            ZigbeeStackError::ApsAckTimeout => SendStatus::ApsAckTimeout,
-            ZigbeeStackError::PayloadTooLong => SendStatus::PayloadTooLong,
-            ZigbeeStackError::FrameBudgetExhausted => SendStatus::FrameBudgetExhausted,
-            ZigbeeStackError::ApsSecurityFailed => SendStatus::ApsSecurityFailed,
-            ZigbeeStackError::IndirectExpired { .. } => SendStatus::IndirectExpired,
-            ZigbeeStackError::BroadcastRateLimited { .. } => SendStatus::BroadcastRateLimited,
-            ZigbeeStackError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
-            ZigbeeStackError::Radio(_) => SendStatus::RadioError,
+            DeliveryError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
+            DeliveryError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
+            DeliveryError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
+            DeliveryError::NwkNoAck { .. } => SendStatus::NwkNoAck,
+            DeliveryError::CcaFailure => SendStatus::CcaFailure,
+            DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
+            DeliveryError::ApsAckTimeout => SendStatus::ApsAckTimeout,
+            DeliveryError::QuorumNotReached => SendStatus::BroadcastQuorumNotReached,
+            DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
+            DeliveryError::BudgetExhausted => SendStatus::FrameBudgetExhausted,
+            DeliveryError::Cancelled => SendStatus::Cancelled,
+            DeliveryError::Radio(_) => SendStatus::RadioError,
         },
     }
 }

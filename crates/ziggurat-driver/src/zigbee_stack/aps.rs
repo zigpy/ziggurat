@@ -17,8 +17,8 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::flat_map::Entry;
 
 use super::{
-    ApsAck, ApsAckData, NwkSecurityMode, PendingApsAck, RequestId, RouteDirective, SendMode,
-    TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    ApsAck, ApsAckData, DeliveryError, EnqueueError, NwkSecurityMode, PendingApsAck, RequestId,
+    RouteDirective, SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 use crate::frame_token::TrafficClass;
 
@@ -203,8 +203,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         aps_seq: u8,
         data: Vec<u8>,
         aps_security: Option<Eui64>,
-    ) -> Result<(NwkFrame, Option<ApsAckData>), ZigbeeStackError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| ZigbeeStackError::PayloadTooLong)?;
+    ) -> Result<(NwkFrame, Option<ApsAckData>), EnqueueError> {
+        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
 
         let aps_frame = match delivery_mode {
             ApsDeliveryMode::Unicast => ApsDataFrame {
@@ -273,7 +273,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     self.maybe_notify_aps_frame_counter();
                     encrypted.to_bytes()
                 }
-                None => return Err(ZigbeeStackError::ApsSecurityFailed),
+                None => return Err(EnqueueError::SecurityUnavailable),
             }
         } else {
             aps_frame.to_bytes()
@@ -337,7 +337,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
         route: RouteDirective,
         request_id: RequestId,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), EnqueueError> {
         let (nwk_frame, ack_data) = self.build_aps_frame(
             delivery_mode,
             destination,
@@ -399,7 +399,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         policy: TxPolicy,
         outcome: TxOutcome,
         mode: SendMode,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), EnqueueError> {
         if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
             self.originate_broadcast(nwk_frame, NwkSecurityMode::NetworkKey, policy, outcome)
         } else {
@@ -460,7 +460,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tracing::warn!("APS ack timed out for send {request_id}");
             self.push_notification(ZigbeeNotification::ApsAckConfirm {
                 request_id,
-                result: Err(ZigbeeStackError::ApsAckTimeout),
+                result: Err(DeliveryError::ApsAckTimeout),
             });
         }
     }

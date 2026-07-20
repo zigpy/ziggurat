@@ -66,16 +66,38 @@ const FRAME_COUNTER_NOTIFY_INTERVAL: u32 = 100;
 /// that wasn't reading has already missed it and re-syncs on reconnect.
 const NOTIFICATION_QUEUE_CAP: usize = 64;
 
+/// A synchronous admission failure, returned by the `send_*` entry points.
+///
+/// An `Err` means nothing was enqueued and no later confirmation follows; `retry_in`
+/// lives here structurally, so a rate-limited caller learns the backoff from the
+/// rejection itself. Maps to the wire `Error`/`Status` channel.
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum EnqueueError {
+    #[error("rejected due to rate limiting, retry in {retry_in:?}")]
+    RateLimited { retry_in: Duration },
+    #[error("frame memory budget exhausted")]
+    BudgetExhausted,
+    #[error("payload does not fit in a single frame")]
+    PayloadTooLong,
+    #[error("aps security material unavailable or unusable")]
+    SecurityUnavailable,
+    #[error("no route to destination and route discovery is suppressed")]
+    RouteDiscoverySuppressed,
+    #[error("network not started")]
+    NotStarted,
+}
+
+/// A send's terminal verdict, resolved into its slot once the mesh has spoken. `Clone`
+/// because a slot hands copies to its awaiter(s) and the wire tracker. Maps to the wire
+/// `SendStatus` channel only.
 #[derive(Error, Debug, Clone)]
-pub enum ZigbeeStackError {
+pub enum DeliveryError {
     #[error("route discovery timed out")]
     RouteDiscoveryTimeout(#[from] Elapsed),
     #[error("no route discovery entry found for the destination")]
     RouteDiscoveryNoEntry,
     #[error("route not active after discovery completed")]
     RouteInactiveAfterDiscovery,
-    #[error("no route to destination and route discovery is suppressed")]
-    RouteDiscoverySuppressed,
     #[error("next hop {next_hop:?} did not ACK")]
     NwkNoAck { next_hop: Ieee802154Address },
     #[error("transmit rejected due to CCA failure")]
@@ -84,18 +106,16 @@ pub enum ZigbeeStackError {
     TransmitFailed(TxResult),
     #[error("aps ack timeout")]
     ApsAckTimeout,
-    #[error("payload does not fit in a single frame")]
-    PayloadTooLong,
-    #[error("frame memory budget exhausted")]
-    FrameBudgetExhausted,
-    #[error("aps security material unavailable or unusable")]
-    ApsSecurityFailed,
+    #[error("broadcast passive-ack quorum not reached")]
+    QuorumNotReached,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
-    #[error("broadcast rejected due to rate limiting, retry in {retry_in:?}")]
-    BroadcastRateLimited { retry_in: Duration },
-    #[error("broadcast passive-ack quorum not reached")]
-    BroadcastQuorumNotReached,
+    /// A frame reached a mid-pipeline enqueue (an indirect delivery, a retry re-enqueue)
+    /// with the budget exhausted, so it could never be handed to the radio.
+    #[error("frame memory budget exhausted")]
+    BudgetExhausted,
+    #[error("send cancelled")]
+    Cancelled,
     #[error("radio error: {0}")]
     Radio(#[from] RadioError),
 }
@@ -860,11 +880,11 @@ pub enum ZigbeeNotification {
     },
     SendConfirm {
         request_id: RequestId,
-        result: Result<(), ZigbeeStackError>,
+        result: Result<(), DeliveryError>,
     },
     ApsAckConfirm {
         request_id: RequestId,
-        result: Result<(), ZigbeeStackError>,
+        result: Result<(), DeliveryError>,
     },
 }
 
@@ -1335,7 +1355,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    pub async fn start_network(&self) -> Result<(), ZigbeeStackError> {
+    pub async fn start_network(&self) -> Result<(), RadioError> {
         self.reset_radio().await?;
         self.apply_radio_configuration().await?;
 
@@ -1489,7 +1509,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Reset the RCP and wait for it to announce itself, retrying if it stays silent.
-    async fn reset_radio(&self) -> Result<(), ZigbeeStackError> {
+    async fn reset_radio(&self) -> Result<(), RadioError> {
         let mut reset_rx = self.reset_rx.try_lock().expect("Reset receiver is locked");
 
         for attempt in 1..=RESET_ATTEMPTS {
@@ -1500,19 +1520,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     tracing::info!("Radio reset complete: {:?}", event.reason);
                     return Ok(());
                 }
-                Ok(None) => return Err(RadioError::TransportClosed.into()),
+                Ok(None) => return Err(RadioError::TransportClosed),
                 Err(_) => {
                     tracing::warn!("No reset notification, attempt {attempt}/{RESET_ATTEMPTS}");
                 }
             }
         }
 
-        Err(RadioError::Timeout.into())
+        Err(RadioError::Timeout)
     }
 
     /// Program the radio with our network parameters. A radio reset wipes all of this,
     /// so it must be re-applied after every reset.
-    async fn apply_radio_configuration(&self) -> Result<(), ZigbeeStackError> {
+    async fn apply_radio_configuration(&self) -> Result<(), RadioError> {
         let (config, table) = {
             let core = self.core();
             let table = core
@@ -1635,7 +1655,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         channels: &[u8],
         duration_per_channel: Duration,
-    ) -> Result<(), ZigbeeStackError> {
+    ) -> Result<(), RadioError> {
         let beacon_request = self.beacon_request_psdu();
         let home_channel = self.core().mac.channel;
 
@@ -1676,7 +1696,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.scan_active.store(false, AtomicOrdering::Relaxed);
         self.scan_beacon_wake.notify_one();
 
-        result.map_err(Into::into)
+        result
     }
 
     /// Wait for and take beacons collected so far by the active scan. Drains any
@@ -1698,18 +1718,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// One channel of an energy-detect scan: the maximum RSSI seen on `channel`. The
     /// manager loops over channels and streams the results; no radio state is held
     /// between calls.
-    pub async fn energy_detect(
-        &self,
-        channel: u8,
-        duration: Duration,
-    ) -> Result<i8, ZigbeeStackError> {
-        Ok(self.radio.energy_detect(channel, duration).await?)
+    pub async fn energy_detect(&self, channel: u8, duration: Duration) -> Result<i8, RadioError> {
+        self.radio.energy_detect(channel, duration).await
     }
 
     /// Retune the radio to a new channel, the coordinator's half of a network-wide
     /// channel migration. Mesh state is untouched; subsequent resets and energy scans
     /// return to the new channel.
-    pub async fn set_channel(&self, channel: u8) -> Result<(), ZigbeeStackError> {
+    pub async fn set_channel(&self, channel: u8) -> Result<(), RadioError> {
         self.radio.lock().await.set_channel(channel).await?;
         self.core().mac.channel = channel;
         Ok(())
