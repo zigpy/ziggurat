@@ -2240,7 +2240,6 @@ dependencies = [
  "rand 0.10.1",
  "thiserror",
  "tokio",
- "tokio-serial",
  "tracing",
  "ziggurat-ieee-802154",
 ]

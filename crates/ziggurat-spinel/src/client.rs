@@ -5,19 +5,26 @@ use crate::{
 };
 use std::string::String;
 use thiserror::Error;
-use tokio_serial::SerialStream;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::Eui64;
 
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
-/// A local serial link answers in milliseconds; anything beyond this is a failure.
+/// A link to the RCP: a serial port or a TCP socket. Boxed so [`SpinelClient`] stays
+/// transport-agnostic regardless of which one a caller opens.
+pub trait RcpTransport: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> RcpTransport for T {}
+
+/// A local RCP link — serial, or Ethernet to a network-attached RCP — answers in
+/// milliseconds; anything beyond this is a failure. Wi-Fi is not supported: its
+/// latency variance can spuriously trip `MAX_CONSECUTIVE_TIMEOUTS` below and force a
+/// reset-recovery against a perfectly healthy radio.
 const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Consecutive command timeouts before the RCP is presumed wedged and the
@@ -227,17 +234,15 @@ pub enum SpinelError {
 
 /// The writer half of the port plus its serialization scratch: frames go out one at a
 /// time, so two persistent buffers cover every TX without per-frame allocation.
-#[derive(Debug)]
 struct SpinelWriter {
-    port: WriteHalf<SerialStream>,
+    port: WriteHalf<Box<dyn RcpTransport>>,
     frame_scratch: Vec<u8>,
     hdlc_scratch: Vec<u8>,
 }
 
-#[derive(Debug)]
 pub struct SpinelClient {
     /// The reader half of the port, owned by the task spawned in `spawn_reader`.
-    reader: Mutex<Option<ReadHalf<SerialStream>>>,
+    reader: Mutex<Option<ReadHalf<Box<dyn RcpTransport>>>>,
     /// The writer half of the port. The mutex also serializes outbound HDLC writes so
     /// concurrent commands cannot interleave partial frames inside the byte stream.
     writer: AsyncMutex<SpinelWriter>,
@@ -249,7 +254,7 @@ pub struct SpinelClient {
 }
 
 impl SpinelClient {
-    pub fn new(port: SerialStream) -> Self {
+    pub fn new(port: Box<dyn RcpTransport>) -> Self {
         let (reader, writer) = tokio::io::split(port);
 
         Self {

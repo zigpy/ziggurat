@@ -16,7 +16,6 @@ tracing = "0.1"
 num_enum = "0.7.3"
 thiserror = "2.0.12"
 tokio = { version = "1.43.0", features = ["rt", "time", "sync", "io-util"] }
-tokio-serial = "5.4"
 
 [dev-dependencies]
 hex-literal = "1.1.0"
