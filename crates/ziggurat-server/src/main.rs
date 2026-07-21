@@ -837,12 +837,28 @@ pub struct SerialConfig {
     flow_control: FlowControlMode,
 }
 
-/// Connects to the RCP per `serial.device`: a `tcp://host:port` address for a raw TCP
-/// socket (e.g. a network-attached RCP or a `ser2net`-style serial-to-TCP bridge), or a
-/// path for a local serial device.
+/// A local network hop should establish in well under this; past it, something (a
+/// blackholed host, a firewall silently dropping packets) is wrong. Without a bound,
+/// `TcpStream::connect` rides out the kernel's full SYN-retry window (minutes, by
+/// default) while `phy()`'s lock is held, wedging every other command behind it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connects to the RCP per `serial.device`: a `tcp://host:port` (or `socket://host:port`,
+/// accepted for parity with pyserial-style tools) address for a raw TCP socket — e.g. a
+/// network-attached RCP or a `ser2net`-style serial-to-TCP bridge — or a path for a
+/// local serial device.
 async fn open_transport(serial: &SerialConfig) -> std::io::Result<Box<dyn RcpTransport>> {
-    if let Some(addr) = serial.device.strip_prefix("tcp://") {
-        let stream = TcpStream::connect(addr).await?;
+    let tcp_addr = serial
+        .device
+        .strip_prefix("tcp://")
+        .or_else(|| serial.device.strip_prefix("socket://"));
+
+    if let Some(addr) = tcp_addr {
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "RCP connect timed out")
+            })??;
         // The Spinel control plane is latency-sensitive request/response traffic in
         // small frames; Nagle's algorithm would needlessly delay them.
         stream.set_nodelay(true)?;
