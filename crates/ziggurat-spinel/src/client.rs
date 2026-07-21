@@ -21,7 +21,10 @@ use tokio::time::{Duration, timeout};
 pub trait RcpTransport: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> RcpTransport for T {}
 
-/// A local serial link answers in milliseconds; anything beyond this is a failure.
+/// A local RCP link — serial, or Ethernet to a network-attached RCP — answers in
+/// milliseconds; anything beyond this is a failure. Wi-Fi is not supported: its
+/// latency variance can spuriously trip `MAX_CONSECUTIVE_TIMEOUTS` below and force a
+/// reset-recovery against a perfectly healthy radio.
 const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Consecutive command timeouts before the RCP is presumed wedged and the

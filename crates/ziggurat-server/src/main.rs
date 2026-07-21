@@ -59,9 +59,10 @@ fn radio_error(e: impl ToString) -> proto::Error {
 
 pub struct ZigguratServer {
     serial: SerialConfig,
-    /// The radio transport owns the serial port for the lifetime of the process: it is
+    /// The radio transport owns the RCP link for the lifetime of the process: it is
     /// opened lazily by the first command that needs it and never reopened, so stack
-    /// replacement cannot race a straggling port handle (`EBUSY`)
+    /// replacement cannot race a straggling handle — a serial port re-open failing
+    /// with `EBUSY`, or a second concurrent connection to the same TCP endpoint
     phy: AsyncMutex<Option<Arc<SpinelPhy>>>,
     stack: Mutex<Option<Arc<ZigbeeStack<SpinelPhy>>>>,
     started: AtomicBool,
@@ -70,7 +71,7 @@ pub struct ZigguratServer {
 }
 
 impl ZigguratServer {
-    /// The serial port is not opened and the Zigbee stack is not created until a
+    /// The RCP transport is not opened and the Zigbee stack is not created until a
     /// client sends a command that needs them.
     pub fn new(serial: SerialConfig) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_HUB_DEPTH);
@@ -140,7 +141,7 @@ impl ZigguratServer {
         self.stack.lock().unwrap().clone()
     }
 
-    /// The process-lifetime radio transport, opening the serial port on first use.
+    /// The process-lifetime radio transport, opening the RCP link on first use.
     async fn phy(&self) -> std::io::Result<Arc<SpinelPhy>> {
         let mut phy = self.phy.lock().await;
 
@@ -847,6 +848,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// accepted for parity with pyserial-style tools) address for a raw TCP socket — e.g. a
 /// network-attached RCP or a `ser2net`-style serial-to-TCP bridge — or a path for a
 /// local serial device.
+///
+/// The TCP path is meant for a wired (Ethernet) link. Wi-Fi's latency variance is not
+/// supported: a spike can spuriously trip `MAX_CONSECUTIVE_TIMEOUTS` and force a
+/// reset-recovery against a perfectly healthy radio.
 async fn open_transport(serial: &SerialConfig) -> std::io::Result<Box<dyn RcpTransport>> {
     let tcp_addr = serial
         .device
@@ -893,7 +898,9 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ApiMode::Ws)]
     api: ApiMode,
 
-    /// RCP transport: a serial device path, or `tcp://host:port` for a raw TCP socket
+    /// RCP transport: a serial device path, or `tcp://host:port` for a raw TCP socket.
+    /// The TCP form is for a wired (Ethernet) link; Wi-Fi is not recommended or
+    /// supported.
     #[arg(long)]
     device: String,
 
