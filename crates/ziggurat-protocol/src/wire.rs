@@ -15,7 +15,6 @@ use abstract_bits::{abstract_bits, AbstractBits, BitReader};
 use num_enum::TryFromPrimitive;
 
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
-use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub type RequestId = u16;
@@ -43,7 +42,7 @@ pub enum CommandId {
     ScanChildren = 0x1A,
     ScanAddressCache = 0x1B,
     ScanRouteTable = 0x1C,
-    SendAps = 0x20,
+    SendUnicast = 0x20,
     PermitJoins = 0x21,
     SetChannel = 0x22,
     SetNwkUpdateId = 0x23,
@@ -54,6 +53,8 @@ pub enum CommandId {
     PacketCaptureChannel = 0x28,
     SetTunable = 0x29,
     CancelRequest = 0x2A,
+    SendBroadcast = 0x2B,
+    SendGroupcast = 0x2C,
     // More notifications.
     ReceivedAps = 0x30,
     SendConfirm = 0x31,
@@ -66,6 +67,7 @@ pub enum CommandId {
     LastReset = 0x38,
     RouteRecord = 0x3A,
     ApsFrameCounter = 0x3B,
+    BroadcastConfirm = 0x3C,
 }
 
 impl From<CommandId> for u8 {
@@ -350,15 +352,14 @@ pub struct RouteEntry {
 
 #[abstract_bits]
 #[derive(Debug, Clone)]
-pub struct SendApsFlags {
+pub struct SendUnicastFlags {
     pub has_eui64: bool,
     pub aps_ack: bool,
     pub aps_encryption: bool,
-    pub delivery_mode: ApsDeliveryMode,
     /// The destination is a sleepy device. It only sees frames by polling its parent,
     /// so the APS ack wait must cover a poll cycle.
     pub sleepy_destination: bool,
-    pub reserved: u2,
+    pub reserved: u4,
 }
 
 /// How the host wants a unicast routed.
@@ -387,10 +388,12 @@ pub struct SourceRouteRelays {
     pub relays: Vec<Nwk>,
 }
 
+/// A unicast APS send. The route control and its optional `next_hop`/`relays` are
+/// unicast-only; broadcast and groupcast have their own commands.
 #[abstract_bits]
 #[derive(Debug, Clone)]
-pub struct SendApsPayload {
-    pub flags: SendApsFlags,
+pub struct SendUnicastPayload {
+    pub flags: SendUnicastFlags,
     pub destination: Nwk,
     pub destination_eui64: Eui64,
     pub profile_id: u16,
@@ -409,6 +412,41 @@ pub struct SendApsPayload {
         presence_from = matches!(route, RouteControl::HintSourceRoute | RouteControl::ForceSourceRoute)
     )]
     pub relays: Option<SourceRouteRelays>,
+    pub asdu_len: u16,
+    #[abstract_bits(length_from = asdu_len)]
+    pub asdu: Vec<u8>,
+}
+
+/// A broadcast APS send to a broadcast sink (`destination`). Never APS-secured or acked,
+/// so it carries no flags, EUI64, or route control.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SendBroadcastPayload {
+    pub destination: Nwk,
+    pub profile_id: u16,
+    pub cluster_id: u16,
+    pub src_ep: u8,
+    pub dst_ep: u8,
+    pub aps_seq: u8,
+    pub radius: u8,
+    pub priority: u8, // i8 two's complement
+    pub asdu_len: u16,
+    #[abstract_bits(length_from = asdu_len)]
+    pub asdu: Vec<u8>,
+}
+
+/// A groupcast (APS multicast) send. The group lives in the APS header and the NWK frame
+/// is broadcast to rx-on-when-idle devices, so there is no destination endpoint.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SendGroupcastPayload {
+    pub group_id: u16,
+    pub profile_id: u16,
+    pub cluster_id: u16,
+    pub src_ep: u8,
+    pub aps_seq: u8,
+    pub radius: u8,
+    pub priority: u8, // i8 two's complement
     pub asdu_len: u16,
     #[abstract_bits(length_from = asdu_len)]
     pub asdu: Vec<u8>,
@@ -574,7 +612,9 @@ pub struct ReceivedApsPayload {
     pub data: Vec<u8>,
 }
 
-/// Terminal status of a `SendAps`, carried in its `SendConfirm` notification.
+/// A send's terminal verdict, carried in its `SendConfirm` / `ApsAckConfirm` /
+/// `BroadcastConfirm` notification. Mirrors the driver's `DeliveryError`; admission
+/// failures ride the synchronous `Error` frame's [`Status`] instead.
 #[abstract_bits(bits = 8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
@@ -583,19 +623,15 @@ pub enum SendStatus {
     RouteDiscoveryTimeout = 1,
     RouteDiscoveryNoEntry = 2,
     RouteInactiveAfterDiscovery = 3,
-    RouteDiscoverySuppressed = 4,
-    NwkNoAck = 5,
-    CcaFailure = 6,
-    TransmitFailed = 7,
-    ApsAckTimeout = 8,
-    PayloadTooLong = 9,
+    NwkNoAck = 4,
+    CcaFailure = 5,
+    TransmitFailed = 6,
+    ApsAckTimeout = 7,
+    BroadcastQuorumNotReached = 8,
+    IndirectExpired = 9,
     FrameBudgetExhausted = 10,
-    ApsSecurityFailed = 11,
-    IndirectExpired = 12,
-    BroadcastRateLimited = 13,
-    BroadcastQuorumNotReached = 14,
-    RadioError = 15,
-    Cancelled = 16,
+    Cancelled = 11,
+    RadioError = 12,
 }
 
 #[abstract_bits]
@@ -607,6 +643,13 @@ pub struct SendConfirmPayload {
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct ApsAckConfirmPayload {
+    pub status: SendStatus,
+}
+
+/// The passive-ack quorum verdict of a broadcast or groupcast send.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct BroadcastConfirmPayload {
     pub status: SendStatus,
 }
 
@@ -691,7 +734,9 @@ pub enum Request {
     ScanChildren,
     ScanAddressCache,
     ScanRouteTable,
-    SendAps(SendApsPayload),
+    SendUnicast(SendUnicastPayload),
+    SendBroadcast(SendBroadcastPayload),
+    SendGroupcast(SendGroupcastPayload),
     PermitJoins(PermitJoinsPayload),
     SetChannel(ChannelPayload),
     SetNwkUpdateId(NwkUpdateIdPayload),
@@ -728,7 +773,9 @@ impl Request {
             CommandId::ScanChildren => Self::ScanChildren,
             CommandId::ScanAddressCache => Self::ScanAddressCache,
             CommandId::ScanRouteTable => Self::ScanRouteTable,
-            CommandId::SendAps => Self::SendAps(require(payload, "send_aps")?),
+            CommandId::SendUnicast => Self::SendUnicast(require(payload, "send_unicast")?),
+            CommandId::SendBroadcast => Self::SendBroadcast(require(payload, "send_broadcast")?),
+            CommandId::SendGroupcast => Self::SendGroupcast(require(payload, "send_groupcast")?),
             CommandId::PermitJoins => Self::PermitJoins(require(payload, "permit_joins")?),
             CommandId::SetChannel => Self::SetChannel(require(payload, "channel")?),
             CommandId::SetNwkUpdateId => Self::SetNwkUpdateId(require(payload, "update id")?),
@@ -879,6 +926,7 @@ pub enum Notification {
     ReceivedAps(ReceivedApsPayload),
     SendConfirm(RequestId, SendConfirmPayload),
     ApsAckConfirm(RequestId, ApsAckConfirmPayload),
+    BroadcastConfirm(RequestId, BroadcastConfirmPayload),
     DeviceJoined(DeviceJoinedPayload),
     DeviceLeft(DeviceLeftPayload),
     FrameCounter(FrameCounterPayload),
@@ -896,6 +944,7 @@ impl Notification {
             Self::ReceivedAps(_) => (CommandId::ReceivedAps, 0),
             Self::SendConfirm(request_id, _) => (CommandId::SendConfirm, *request_id),
             Self::ApsAckConfirm(request_id, _) => (CommandId::ApsAckConfirm, *request_id),
+            Self::BroadcastConfirm(request_id, _) => (CommandId::BroadcastConfirm, *request_id),
             Self::DeviceJoined(_) => (CommandId::DeviceJoined, 0),
             Self::DeviceLeft(_) => (CommandId::DeviceLeft, 0),
             Self::FrameCounter(_) => (CommandId::FrameCounter, 0),
@@ -911,6 +960,7 @@ impl Notification {
             Self::ReceivedAps(payload) => append(&mut bytes, payload),
             Self::SendConfirm(_, payload) => append(&mut bytes, payload),
             Self::ApsAckConfirm(_, payload) => append(&mut bytes, payload),
+            Self::BroadcastConfirm(_, payload) => append(&mut bytes, payload),
             Self::DeviceJoined(payload) => append(&mut bytes, payload),
             Self::DeviceLeft(payload) => append(&mut bytes, payload),
             Self::FrameCounter(payload) => append(&mut bytes, payload),

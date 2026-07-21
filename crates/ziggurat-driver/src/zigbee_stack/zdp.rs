@@ -1,5 +1,6 @@
 use crate::runtime::Runtime;
 use alloc::vec::Vec;
+use core::time::Duration;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -13,8 +14,8 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective, SendMode, TxOutcome,
-    TxPolicy, TxPriority, ZigbeeStack, neighbors, routing,
+    EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective, SendHandle, SendMode,
+    TrackStage, TxOutcome, TxPolicy, TxPriority, ZigbeeStack, neighbors, routing,
 };
 use crate::frame_token::TrafficClass;
 
@@ -262,16 +263,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Build and enqueue a ZDP command fire-and-forget. ZDP is only ever unicast or
-    /// broadcast (never groupcast), and never APS-secured or acked, so the frame is the
-    /// same either way; only the origination path forks on the delivery mode.
+    /// Build and enqueue a ZDP command.
     fn send_zdp_command<T: ZdpCommand + Sync>(
         &self,
         destination: Nwk,
         delivery_mode: ApsDeliveryMode,
         tsn: u8,
         command: &T,
-    ) -> Result<(), EnqueueError> {
+    ) -> Result<SendHandle, EnqueueError> {
         let asdu = FrameBytes::from_slice(&command.serialize(tsn).unwrap())
             .map_err(|_| EnqueueError::PayloadTooLong)?;
 
@@ -301,18 +300,30 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             class: TrafficClass::Host,
         };
 
+        let (handle, slot) = SendHandle::new();
+
         match delivery_mode {
             ApsDeliveryMode::Broadcast => {
-                self.originate_broadcast(nwk_frame, NwkSecurityMode::NetworkKey, policy, None)
+                self.originate_broadcast(
+                    nwk_frame,
+                    NwkSecurityMode::NetworkKey,
+                    policy,
+                    Some(slot),
+                )?;
             }
             ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => self.originate_unicast(
                 nwk_frame,
                 NwkSecurityMode::NetworkKey,
                 SendMode::Route(RouteDirective::StackDecides),
                 policy,
-                TxOutcome::Discard,
-            ),
+                TxOutcome::Track {
+                    slot,
+                    stage: TrackStage::Delivery,
+                },
+            )?,
         }
+
+        Ok(handle)
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming
@@ -344,14 +355,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// the table is empty at startup and nothing is sent.
     pub(super) async fn parent_annce_task(&self) {
         let mut remaining: Option<Vec<Eui64>> = None;
+        let mut send_time = Duration::ZERO;
 
         loop {
             let jitter = self
                 .tunables
                 .parent_annce_jitter_max()
                 .mul_f32(crate::rng::random_f32());
+
             let slept_at = self.core_now();
-            R::sleep(self.tunables.parent_annce_base_timer() + jitter).await;
+            R::sleep((self.tunables.parent_annce_base_timer() + jitter).saturating_sub(send_time))
+                .await;
 
             // Spec 2.4.3.1.12.2: an announcement from another router restarts the
             // countdown
@@ -393,15 +407,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             let announcement = ParentAnnce { children: chunk };
             let tsn = self.next_aps_counter();
+            let started = self.core_now();
 
-            if let Err(err) = self.send_zdp_command(
+            match self.send_zdp_command(
                 BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
                 ApsDeliveryMode::Broadcast,
                 tsn,
                 &announcement,
             ) {
-                tracing::warn!("Failed to broadcast a parent announcement: {err}");
+                Ok(send) => {
+                    let _ = send.handed_off().await;
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to broadcast a parent announcement: {err}");
+                }
             }
+
+            send_time = self.core_now().saturating_duration_since(started);
 
             if remaining.as_ref().is_some_and(Vec::is_empty) {
                 return;

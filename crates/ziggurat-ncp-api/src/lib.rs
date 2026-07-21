@@ -25,7 +25,7 @@ use ziggurat_driver::sync::Notify;
 use ziggurat_driver::zigbee_stack::{SendHandle, ZigbeeStack};
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy};
-use ziggurat_protocol::{RequestId, SendTracker, WireProjection};
+use ziggurat_protocol::{RequestId, SendTracker, ConfirmKind};
 
 pub(crate) const DEFAULT_TX_POWER: i8 = 8;
 
@@ -55,11 +55,11 @@ pub(crate) fn track_send(
     sends: &SendTrackerCell,
     id: RequestId,
     handle: SendHandle,
-    projection: WireProjection,
+    confirm_kind: ConfirmKind,
 ) {
     let wake = sends.lock(|sends| {
         let mut tracker = sends.borrow_mut();
-        tracker.insert(id, handle, projection);
+        tracker.insert(id, handle, confirm_kind);
         tracker.wake()
     });
     wake.notify_one();
@@ -98,7 +98,7 @@ pub struct App<P: RadioPhy> {
     /// `start_network` are separate phases).
     pub started: bool,
     pub capture_stop: Option<Arc<CaptureStop>>,
-    /// Projects tracked sends onto their wire confirm frames. Build with
+    /// Turns tracked sends into their wire confirm frames. Build with
     /// [`new_send_tracker`].
     pub sends: SendTrackerCell,
 }

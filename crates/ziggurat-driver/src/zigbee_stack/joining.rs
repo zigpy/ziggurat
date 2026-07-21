@@ -494,24 +494,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(destination, encrypted_command.to_bytes())
             .unsecured();
 
+        // The join is announced only once this send resolves
         if let Err(err) = self.originate_unicast(
             nwk_frame,
             NwkSecurityMode::Unsecured,
             SendMode::Direct,
             TxPolicy::STACK_CRITICAL,
-            TxOutcome::Discard,
+            TxOutcome::AnnounceJoin {
+                nwk: destination,
+                eui64: destination_eui64,
+            },
         ) {
-            tracing::warn!("Failed to send network key transport: {err}");
+            tracing::warn!("Failed to send network key transport to {destination_eui64:?}: {err}");
         }
-
-        let (device_type, rx_on_when_idle) = self.device_join_capability(destination_eui64);
-        self.push_notification(ZigbeeNotification::DeviceJoined {
-            nwk: destination,
-            ieee: destination_eui64,
-            parent: self.state.network_address,
-            device_type,
-            rx_on_when_idle,
-        });
     }
 
     pub fn handle_encrypted_aps_command_frame(

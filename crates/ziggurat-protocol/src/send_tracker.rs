@@ -1,14 +1,15 @@
-//! The wire projection of tracked sends: an `id -> SendHandle` map plus a sweep.
+//! Turns tracked sends into their wire confirm frames: an `id -> SendHandle` map plus a
+//! sweep.
 //!
 //! Once `request_id` leaves the driver, this map must exist at the protocol layer
 //! regardless — cancellation needs it. It is sans-io and shared verbatim by the host
-//! server and the NCP firmware, so the two transports project a send onto the wire
-//! identically and cannot drift.
+//! server and the NCP firmware, so the two transports emit the same confirm frames for
+//! a send and cannot drift.
 //!
-//! The tracker only ever calls [`SendHandle::status`] — it never awaits — so both of a
-//! handle's per-stage waiters stay free for a local caller. The async shell around it is
-//! one wake-and-sweep reactor per transport: it waits on the shared wake, sweeps the
-//! whole table, and emits the frames the sweep returns.
+//! The tracker only ever calls [`SendHandle::status`] (it never awaits) so both of a
+//! handle's per-stage waiters stay free for a local caller. The async shell around it
+//! is one wake-and-sweep reactor per transport: it waits on the shared wake, sweeps
+//! the whole table, and emits the frames the sweep returns.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -18,26 +19,29 @@ use ziggurat_driver::zigbee_stack::SendHandle;
 use ziggurat_zigbee::flat_map::FlatMap;
 
 use crate::bridge::send_status;
-use crate::wire::{ApsAckConfirmPayload, Notification, RequestId, SendConfirmPayload};
+use crate::wire::{
+    ApsAckConfirmPayload, BroadcastConfirmPayload, Notification, RequestId, SendConfirmPayload,
+};
 
-/// Which confirm frames a tracked send owes, stated once per send from its kind. Frame
-/// names stay truthful: `SendConfirm` = the mesh accepted a unicast; `ApsAckConfirm` =
-/// the end-to-end APS ack verdict.
+/// Which confirm frames a tracked send owes, fixed when the send is started.
+///
+/// Frame names stay truthful: `SendConfirm` = the mesh accepted a unicast; `ApsAckConfirm`
+/// = the end-to-end APS ack verdict; `BroadcastConfirm` = the passive-ack quorum verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WireProjection {
+pub enum ConfirmKind {
     /// `SendConfirm` at `delivered` (which equals `handed_off` for a no-ack unicast).
     UnicastNoAck,
     /// `SendConfirm` at `handed_off`, then `ApsAckConfirm` at `delivered`.
     UnicastApsAck,
-    /// `SendConfirm` at `delivered` (the passive-ack quorum verdict); groupcast too. The
-    /// broadcast `handed_off` checkpoint stays local-only and is not projected.
+    /// `BroadcastConfirm` at `delivered` (the passive-ack quorum verdict); groupcast
+    /// too. The broadcast `handed_off` checkpoint stays local-only, never a wire
+    /// frame.
     Broadcast,
 }
 
 struct TrackedSend {
     handle: SendHandle,
-    projection: WireProjection,
-    /// Whether the first frame a two-frame projection owes has been emitted.
+    confirm_kind: ConfirmKind,
     emitted_send_confirm: bool,
 }
 
@@ -67,13 +71,13 @@ impl SendTracker {
     /// Begin tracking a send under its wire `request_id`. Registers the shared wake on
     /// the handle; the slot may already be resolved, so the shell must self-notify once
     /// after inserting (the sweep re-checks everything, closing the race).
-    pub fn insert(&mut self, id: RequestId, handle: SendHandle, projection: WireProjection) {
+    pub fn insert(&mut self, id: RequestId, handle: SendHandle, confirm_kind: ConfirmKind) {
         handle.set_completion_wake(self.wake.clone());
         self.entries.insert(
             id,
             TrackedSend {
                 handle,
-                projection,
+                confirm_kind,
                 emitted_send_confirm: false,
             },
         );
@@ -91,9 +95,8 @@ impl SendTracker {
     }
 
     /// One reactor pass: emit every confirm frame now owed and drop entries that have
-    /// emitted their last. Per-entry `emitted_send_confirm` flags keep two-frame
-    /// projections exactly-once and ordered even though a coalesced wake sweeps the whole
-    /// table.
+    /// emitted their last. Per-entry `emitted_send_confirm` flags keep the two-frame kind
+    /// exactly-once and ordered even though a coalesced wake sweeps the whole table.
     pub fn sweep(&mut self) -> Vec<Notification> {
         let mut out = Vec::new();
         let mut done: Vec<RequestId> = Vec::new();
@@ -101,8 +104,8 @@ impl SendTracker {
         for (id, entry) in self.entries.iter_mut() {
             let progress = entry.handle.status();
 
-            match entry.projection {
-                WireProjection::UnicastNoAck | WireProjection::Broadcast => {
+            match entry.confirm_kind {
+                ConfirmKind::UnicastNoAck => {
                     if let Some(delivered) = &progress.delivered {
                         out.push(Notification::SendConfirm(
                             *id,
@@ -113,7 +116,18 @@ impl SendTracker {
                         done.push(*id);
                     }
                 }
-                WireProjection::UnicastApsAck => {
+                ConfirmKind::Broadcast => {
+                    if let Some(delivered) = &progress.delivered {
+                        out.push(Notification::BroadcastConfirm(
+                            *id,
+                            BroadcastConfirmPayload {
+                                status: send_status(delivered),
+                            },
+                        ));
+                        done.push(*id);
+                    }
+                }
+                ConfirmKind::UnicastApsAck => {
                     if !entry.emitted_send_confirm {
                         if let Some(handed_off) = &progress.handed_off {
                             out.push(Notification::SendConfirm(

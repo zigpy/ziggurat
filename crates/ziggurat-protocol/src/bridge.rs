@@ -17,12 +17,11 @@ use ziggurat_driver::zigbee_stack::{
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::aps::frame::ApsDeliveryMode;
 use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
 use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
 use ziggurat_zigbee::nwk::routing;
 
-use crate::send_tracker::{SendTracker, WireProjection};
+use crate::send_tracker::{ConfirmKind, SendTracker};
 
 use crate::wire::*;
 
@@ -264,83 +263,89 @@ impl From<&NetworkBeacon> for BeaconPayload {
     }
 }
 
-/// Hand a `send_aps` to the stack, forking on the delivery mode.
-///
-/// Each mode goes to its matching split entry point (unicast / broadcast / groupcast) and
-/// returns a [`SendHandle`] over the send's stages, together with the [`WireProjection`]
-/// that says which confirm frames it owes. The caller registers both in its
-/// [`SendTracker`]. The wire is still the unified `SendApsPayload` (the split into three
-/// commands lands later), so for now the mode-only fields (ack, encryption, route) are
-/// simply ignored on the broadcast and groupcast arms.
-pub fn send_aps<P: RadioPhy, R: Runtime>(
+/// Hand a unicast send to the stack, returning a [`SendHandle`] and the
+/// [`ConfirmKind`] that says which confirm frames it owes; the caller registers both
+/// in its [`SendTracker`].
+pub fn send_unicast<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
-    payload: SendApsPayload,
-) -> Result<(SendHandle, WireProjection), Error> {
-    let priority = TxPriority::from_host(payload.priority as i8);
+    payload: SendUnicastPayload,
+) -> Result<(SendHandle, ConfirmKind), Error> {
+    let aps_security = (payload.flags.aps_encryption && payload.flags.has_eui64)
+        .then_some(payload.destination_eui64);
+    let aps_ack = if payload.flags.aps_ack {
+        ApsAck::Request
+    } else {
+        ApsAck::None
+    };
+    let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
 
-    let result = match payload.flags.delivery_mode {
-        ApsDeliveryMode::Unicast => {
-            let aps_security = (payload.flags.aps_encryption && payload.flags.has_eui64)
-                .then_some(payload.destination_eui64);
-            let aps_ack = if payload.flags.aps_ack {
-                ApsAck::Request
-            } else {
-                ApsAck::None
-            };
-            let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
-
-            let projection = if payload.flags.aps_ack {
-                WireProjection::UnicastApsAck
-            } else {
-                WireProjection::UnicastNoAck
-            };
-
-            stack
-                .send_aps_unicast(
-                    payload.destination,
-                    payload.profile_id,
-                    payload.cluster_id,
-                    payload.src_ep,
-                    payload.dst_ep,
-                    aps_ack,
-                    payload.radius,
-                    payload.aps_seq,
-                    payload.asdu,
-                    aps_security,
-                    payload.flags.sleepy_destination,
-                    priority,
-                    route,
-                )
-                .map(|handle| (handle, projection))
-        }
-        ApsDeliveryMode::Broadcast => stack
-            .send_aps_broadcast(
-                payload.destination,
-                payload.profile_id,
-                payload.cluster_id,
-                payload.src_ep,
-                payload.dst_ep,
-                payload.radius,
-                payload.aps_seq,
-                payload.asdu,
-                priority,
-            )
-            .map(|handle| (handle, WireProjection::Broadcast)),
-        ApsDeliveryMode::Multicast => stack
-            .send_aps_groupcast(
-                payload.destination.as_u16(),
-                payload.profile_id,
-                payload.cluster_id,
-                payload.src_ep,
-                payload.radius,
-                payload.aps_seq,
-                payload.asdu,
-                priority,
-            )
-            .map(|handle| (handle, WireProjection::Broadcast)),
+    let confirm_kind = if payload.flags.aps_ack {
+        ConfirmKind::UnicastApsAck
+    } else {
+        ConfirmKind::UnicastNoAck
     };
 
-    result.map_err(|e| enqueue_error(&e))
+    stack
+        .send_aps_unicast(
+            payload.destination,
+            payload.profile_id,
+            payload.cluster_id,
+            payload.src_ep,
+            payload.dst_ep,
+            aps_ack,
+            payload.radius,
+            payload.aps_seq,
+            payload.asdu,
+            aps_security,
+            payload.flags.sleepy_destination,
+            TxPriority::from_host(payload.priority as i8),
+            route,
+        )
+        .map(|handle| (handle, confirm_kind))
+        .map_err(|e| enqueue_error(&e))
+}
+
+/// Hand a broadcast send to the stack; its confirm frame is the passive-ack quorum
+/// verdict.
+pub fn send_broadcast<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: SendBroadcastPayload,
+) -> Result<(SendHandle, ConfirmKind), Error> {
+    stack
+        .send_aps_broadcast(
+            payload.destination,
+            payload.profile_id,
+            payload.cluster_id,
+            payload.src_ep,
+            payload.dst_ep,
+            payload.radius,
+            payload.aps_seq,
+            payload.asdu,
+            TxPriority::from_host(payload.priority as i8),
+        )
+        .map(|handle| (handle, ConfirmKind::Broadcast))
+        .map_err(|e| enqueue_error(&e))
+}
+
+/// Hand a groupcast send to the stack; it rides the broadcast machinery, so its confirm
+/// frame is likewise the passive-ack quorum verdict.
+pub fn send_groupcast<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: SendGroupcastPayload,
+) -> Result<(SendHandle, ConfirmKind), Error> {
+    stack
+        .send_aps_groupcast(
+            payload.group_id,
+            payload.profile_id,
+            payload.cluster_id,
+            payload.src_ep,
+            payload.radius,
+            payload.aps_seq,
+            payload.asdu,
+            TxPriority::from_host(payload.priority as i8),
+        )
+        .map(|handle| (handle, ConfirmKind::Broadcast))
+        .map_err(|e| enqueue_error(&e))
 }
 
 /// Map a synchronous admission failure onto its wire `Error` frame.
@@ -429,7 +434,7 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
             DeliveryError::CcaFailure => SendStatus::CcaFailure,
             DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
             DeliveryError::ApsAckTimeout => SendStatus::ApsAckTimeout,
-            DeliveryError::QuorumNotReached => SendStatus::BroadcastQuorumNotReached,
+            DeliveryError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
             DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
             DeliveryError::BudgetExhausted => SendStatus::FrameBudgetExhausted,
             DeliveryError::Cancelled => SendStatus::Cancelled,

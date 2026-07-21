@@ -138,9 +138,19 @@ async fn dispatch<P: RadioPhy>(
             })
             .await
         }
-        Request::SendAps(payload) => {
-            let (handle, projection) = proto::send_aps(&**running(app)?, payload)?;
-            crate::track_send(&app.sends, request_id, handle, projection);
+        Request::SendUnicast(payload) => {
+            let (handle, confirm_kind) = proto::send_unicast(&**running(app)?, payload)?;
+            crate::track_send(&app.sends, request_id, handle, confirm_kind);
+            Ok(Response::Empty)
+        }
+        Request::SendBroadcast(payload) => {
+            let (handle, confirm_kind) = proto::send_broadcast(&**running(app)?, payload)?;
+            crate::track_send(&app.sends, request_id, handle, confirm_kind);
+            Ok(Response::Empty)
+        }
+        Request::SendGroupcast(payload) => {
+            let (handle, confirm_kind) = proto::send_groupcast(&**running(app)?, payload)?;
+            crate::track_send(&app.sends, request_id, handle, confirm_kind);
             Ok(Response::Empty)
         }
         Request::PermitJoins(payload) => handle_permit_joins(app, payload),

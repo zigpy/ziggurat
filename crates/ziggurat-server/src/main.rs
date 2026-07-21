@@ -17,7 +17,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use ziggurat_driver::runtime::TokioSpawner;
-use ziggurat_driver::zigbee_stack::{Tunables, ZigbeeNotification, ZigbeeStack};
+use ziggurat_driver::zigbee_stack::{SendHandle, Tunables, ZigbeeNotification, ZigbeeStack};
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
@@ -233,6 +233,24 @@ impl ZigguratServer {
         });
 
         (Sends { tracker, wake }, task)
+    }
+
+    /// Register a freshly-issued send in this connection's tracker, then self-notify so
+    /// the sweep runs even if the slot resolved before registration (it re-checks
+    /// everything, closing the race).
+    fn register_send(
+        &self,
+        request_id: proto::RequestId,
+        sends: &Sends,
+        tracked: (SendHandle, proto::ConfirmKind),
+    ) {
+        let (handle, confirm_kind) = tracked;
+        sends
+            .tracker
+            .lock()
+            .unwrap()
+            .insert(request_id, handle, confirm_kind);
+        sends.wake.notify_one();
     }
 
     async fn handle_connection<S>(
@@ -543,16 +561,19 @@ impl ZigguratServer {
                     .collect();
                 self.stream_scan(request_id, outbound, events).await
             }
-            R::SendAps(payload) => {
-                let (handle, projection) = proto::send_aps(&*self.running()?, payload)?;
-                // Register before self-notifying: the slot may already be resolved, and
-                // the sweep re-checks everything, so the wake closes the race.
-                sends
-                    .tracker
-                    .lock()
-                    .unwrap()
-                    .insert(request_id, handle, projection);
-                sends.wake.notify_one();
+            R::SendUnicast(payload) => {
+                let tracked = proto::send_unicast(&*self.running()?, payload)?;
+                self.register_send(request_id, sends, tracked);
+                Ok(proto::Response::Empty)
+            }
+            R::SendBroadcast(payload) => {
+                let tracked = proto::send_broadcast(&*self.running()?, payload)?;
+                self.register_send(request_id, sends, tracked);
+                Ok(proto::Response::Empty)
+            }
+            R::SendGroupcast(payload) => {
+                let tracked = proto::send_groupcast(&*self.running()?, payload)?;
+                self.register_send(request_id, sends, tracked);
                 Ok(proto::Response::Empty)
             }
             R::PermitJoins(payload) => {

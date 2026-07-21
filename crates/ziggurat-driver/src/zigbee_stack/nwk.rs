@@ -233,7 +233,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     // out of attempts; a data broadcast fails its quorum.
                     if let Some(slot) = slot {
                         let result = match schedule {
-                            BroadcastSchedule::PassiveAck => Err(DeliveryError::QuorumNotReached),
+                            BroadcastSchedule::PassiveAck => {
+                                Err(DeliveryError::BroadcastQuorumNotReached)
+                            }
                             BroadcastSchedule::FixedInterval { .. } => Ok(()),
                         };
                         slot.resolve(TrackStage::Delivery, result);
@@ -1186,6 +1188,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 Err(err) => {
                     tracing::warn!("Association response to {eui64:?} was not extracted: {err}");
                 }
+            },
+            TxOutcome::AnnounceJoin { nwk, eui64 } => match result {
+                // Announce the join only once its network key transport landed
+                Ok(()) => {
+                    let (device_type, rx_on_when_idle) = self.device_join_capability(eui64);
+                    self.push_notification(ZigbeeNotification::DeviceJoined {
+                        nwk,
+                        ieee: eui64,
+                        parent: self.state.network_address,
+                        device_type,
+                        rx_on_when_idle,
+                    });
+                }
+                Err(err) => tracing::warn!(
+                    "Network key transport to {eui64:?} was not delivered ({err}); \
+                     the device will retry"
+                ),
             },
         }
     }

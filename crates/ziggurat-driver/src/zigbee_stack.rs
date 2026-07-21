@@ -110,7 +110,7 @@ pub enum DeliveryError {
     #[error("aps ack timeout")]
     ApsAckTimeout,
     #[error("broadcast passive-ack quorum not reached")]
-    QuorumNotReached,
+    BroadcastQuorumNotReached,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
     /// A frame reached a mid-pipeline enqueue (an indirect delivery, a retry re-enqueue)
@@ -376,6 +376,8 @@ pub enum TxOutcome {
     /// short address: deliver the network key (spec 4.6.3.2). Expiry is only logged;
     /// the joiner retries the association.
     DeliverNetworkKey { nwk: Nwk, eui64: Eui64 },
+    /// The network key transport reached the joiner: announce the join.
+    AnnounceJoin { nwk: Nwk, eui64: Eui64 },
 }
 
 /// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
@@ -470,7 +472,7 @@ pub struct PendingBroadcast {
     /// When the next retransmission is due, unless the quorum is heard first.
     pub(crate) next_attempt: CoreInstant,
     /// The tracked send's slot, if any. The reactor resolves its `Delivery` stage: `Ok`
-    /// when the passive-ack quorum is heard, `Err(QuorumNotReached)` when attempts run
+    /// when the passive-ack quorum is heard, `Err(BroadcastQuorumNotReached)` when attempts run
     /// out without one. `None` for an internal fire-and-forget broadcast (a relayed
     /// broadcast, a route request). Each on-air copy resolves the `HandOff` stage.
     pub(crate) slot: Option<Arc<SendSlot>>,
@@ -1424,7 +1426,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // "respond" to empty link status broadcasts proactively, independent of the
         // link status period
         tracing::info!("Sending initial link status broadcast");
-        self.send_link_status_broadcast(true);
+        let _ = self.send_link_status_broadcast(true).handed_off().await;
 
         let arc_self = self
             .self_weak

@@ -1,11 +1,11 @@
 //! An awaitable, staged view over a single send.
 //!
-//! The driver stays reified: a send is a table entry (or a queued frame) whose terminal
-//! outcome is *resolved* as a value, not awaited. [`SendSlot`] is the seam where a
-//! caller that owns a suspendable context re-enters that model: the producer keeps its
-//! `Arc<SendSlot>` and resolves into it, while the [`SendHandle`] hands out linear
-//! `.await`s over the two verdicts a send earns — `handed_off` (the mesh accepted the
-//! frame) and `delivered` (the end-to-end verdict).
+//! The driver never awaits a send: a send is a table entry (or a queued frame) whose
+//! final outcome is written into a value, not awaited. [`SendSlot`] is that value. It is
+//! the seam where a caller that can suspend re-enters: the producer keeps its
+//! `Arc<SendSlot>` and writes the outcome into it, while the [`SendHandle`] hands out
+//! linear `.await`s over the two verdicts a send earns — `handed_off` (the mesh accepted
+//! the frame) and `delivered` (the end-to-end verdict).
 //!
 //! A send has two write-once stages. The [`SendSlot::resolve`] write rules keep every
 //! resolution site unambiguous and hang-free (see the method).
@@ -47,7 +47,7 @@ struct Progress {
     completion_wake: Option<Arc<Notify>>,
 }
 
-/// The reified substrate a send resolves into.
+/// The shared substrate a send's outcome is written into.
 ///
 /// Two write-once verdicts, a per-stage wake each (so the stages can be awaited
 /// independently), and a cancellation flag the reactors honour. The producer and every

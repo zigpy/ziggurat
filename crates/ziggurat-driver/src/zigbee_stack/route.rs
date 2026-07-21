@@ -15,7 +15,8 @@ use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
 use super::{
-    AddrConflictSource, NwkSecurityMode, SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeStack,
+    AddrConflictSource, NwkSecurityMode, SendHandle, SendMode, TrackStage, TxOutcome, TxPolicy,
+    TxPriority, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -270,7 +271,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// router records a path toward the concentrator. Devices can then reach us without
     /// per-device route discoveries, and respond with route record commands that we
     /// store for future source routing.
-    pub fn send_many_to_one_route_request(&self) {
+    pub fn send_many_to_one_route_request(&self) -> SendHandle {
         let route_request_identifier = self.core().nib.routing.begin_many_to_one_advertisement(
             self.state.network_address,
             self.core_now(),
@@ -292,6 +293,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             )
             .with_radius(self.tunables.concentrator_radius());
 
+        let (handle, slot) = SendHandle::new();
+
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
         self.originate_oneshot_broadcast(
             many_to_one_request_frame,
@@ -300,8 +303,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority: TxPriority::Background,
                 class: TrafficClass::Critical,
             },
-            TxOutcome::Discard,
+            TxOutcome::Track {
+                slot,
+                stage: TrackStage::Delivery,
+            },
         );
+
+        handle
     }
 
     pub async fn periodic_many_to_one_route_request_task(&self) {
@@ -325,18 +333,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         loop {
-            self.send_many_to_one_route_request();
-
-            self.core().nib.routing.reset_mtorr_triggers();
-
             let min_deadline = self.core_now() + self.tunables.mtorr_min_interval();
             let max_deadline = self.core_now() + self.tunables.mtorr_max_interval();
+
+            let _ = self.send_many_to_one_route_request().delivered().await;
+
+            self.core().nib.routing.reset_mtorr_triggers();
 
             // Advertise every max interval, sooner when accumulated route errors or
             // delivery failures signal that routes toward us have gone bad, but never
             // within the min interval
             let max_sleep = core::pin::pin!(self.sleep_until_core(max_deadline));
             let kicked = core::pin::pin!(self.mtorr_kick.notified());
+
             if let futures::future::Either::Right(((), _)) =
                 futures::future::select(max_sleep, kicked).await
             {
