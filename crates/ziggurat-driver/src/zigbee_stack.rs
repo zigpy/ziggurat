@@ -35,6 +35,7 @@ mod neighbor;
 mod nwk;
 mod route;
 mod send_handle;
+mod tasklets;
 mod zdp;
 
 pub use send_handle::{SendHandle, SendProgress, SendSlot, TrackStage};
@@ -372,12 +373,6 @@ pub enum TxOutcome {
         /// [`TxOutcome`].
         transaction: Box<Transaction<IndirectFrame, Self>>,
     },
-    /// A successful association response was extracted by the joiner, confirming its
-    /// short address: deliver the network key (spec 4.6.3.2). Expiry is only logged;
-    /// the joiner retries the association.
-    DeliverNetworkKey { nwk: Nwk, eui64: Eui64 },
-    /// The network key transport reached the joiner: announce the join.
-    AnnounceJoin { nwk: Nwk, eui64: Eui64 },
 }
 
 /// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
@@ -959,6 +954,10 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// could move the earliest expiry deadline closer
     pub(crate) maintenance_wake: Notify,
 
+    /// Dynamically-spawned tasklets (multi-step flows like the join), all multiplexed
+    /// on one pool task
+    pub(crate) tasklets: tasklets::Tasklets,
+
     /// Admission budget for outgoing broadcasts: a token bucket with per-class reserves
     /// so a host broadcast flood cannot starve stack-critical broadcasts.
     pub(crate) broadcast_budget: Mutex<crate::broadcast_budget::BroadcastBudget>,
@@ -1069,6 +1068,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             aps_ack_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
+            tasklets: tasklets::Tasklets::default(),
             broadcast_budget: Mutex::new(crate::broadcast_budget::BroadcastBudget::new(
                 initial_broadcast_tokens,
             )),
@@ -1481,14 +1481,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             arc_self.indirect_maintenance_task().await;
         });
 
-        // Announce our end device children to the other routers after boot
+        // Drive the in-flight tasklets (multi-step flows like the join) on one task
         let arc_self = self
             .self_weak
             .upgrade()
             .expect("Unable to upgrade self reference");
 
         self.spawn_tracked(async move {
-            arc_self.parent_annce_task().await;
+            arc_self.tasklet_task().await;
+        });
+
+        // Announce our end device children to the other routers after boot. A finite
+        // post-boot flow, so it rides the tasklet runner instead of holding a pool slot.
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.tasklets.push(async move {
+            arc_self.run_parent_annce().await;
         });
 
         // Broadcast jittered address-conflict reports (spec 3.6.1.10.5)

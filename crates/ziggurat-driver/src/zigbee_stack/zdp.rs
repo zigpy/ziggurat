@@ -352,8 +352,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Spec 2.4.3.1.12.1: after a reboot, announce our end device children so other
     /// routers drop stale entries for them. Until neighbor table restoration exists
-    /// the table is empty at startup and nothing is sent.
-    pub(super) async fn parent_annce_task(&self) {
+    /// the table is empty at startup and nothing is sent. A finite post-boot flow,
+    /// run as a tasklet.
+    pub(super) async fn run_parent_annce(&self) {
         let mut remaining: Option<Vec<Eui64>> = None;
         let mut send_time = Duration::ZERO;
 

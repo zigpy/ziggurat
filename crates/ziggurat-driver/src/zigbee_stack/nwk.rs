@@ -28,10 +28,9 @@ use ziggurat_zigbee::nwk::frame::{
 use super::routing::{Route, Status as RouteStatus};
 use super::{
     AddrConflictSource, BroadcastSchedule, DeliveryError, EnqueueError, HostRoute, IndirectFrame,
-    IndirectPayload, JoinKind, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast,
-    PendingFrame, PendingRoute, PendingUnicastRetry, RouteDirective, SendKind, SendMode,
-    SendRequest, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification,
-    ZigbeeStack,
+    IndirectPayload, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame,
+    PendingRoute, PendingUnicastRetry, RouteDirective, SendKind, SendMode, SendRequest, SendSlot,
+    TrackStage, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -1180,31 +1179,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     self.resolve_outcome(transaction.completion, result);
                     self.remove_indirect_queue_if_empty(destination);
                 }
-            },
-            TxOutcome::DeliverNetworkKey { nwk, eui64 } => match result {
-                // Zigbee spec 4.6.3.2: the network key is delivered once the device
-                // has confirmed receipt of its short address
-                Ok(()) => self.send_network_key(nwk, eui64, JoinKind::New),
-                Err(err) => {
-                    tracing::warn!("Association response to {eui64:?} was not extracted: {err}");
-                }
-            },
-            TxOutcome::AnnounceJoin { nwk, eui64 } => match result {
-                // Announce the join only once its network key transport landed
-                Ok(()) => {
-                    let (device_type, rx_on_when_idle) = self.device_join_capability(eui64);
-                    self.push_notification(ZigbeeNotification::DeviceJoined {
-                        nwk,
-                        ieee: eui64,
-                        parent: self.state.network_address,
-                        device_type,
-                        rx_on_when_idle,
-                    });
-                }
-                Err(err) => tracing::warn!(
-                    "Network key transport to {eui64:?} was not delivered ({err}); \
-                     the device will retry"
-                ),
             },
         }
     }
