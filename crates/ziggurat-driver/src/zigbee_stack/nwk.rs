@@ -27,10 +27,11 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, BroadcastSchedule, DeliveryError, EnqueueError, HostRoute, IndirectFrame,
-    IndirectPayload, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast, PendingFrame,
-    PendingRoute, PendingUnicastRetry, RouteDirective, SendKind, SendMode, SendRequest, SendSlot,
-    TrackStage, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, BroadcastSchedule, DeliveryError, EnqueueError, HostRoute,
+    IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast,
+    PendingFrame, PendingRoute, PendingUnicastRetry, RouteDirective, SendKind, SendMode,
+    SendRequest, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority, Unicast,
+    ZigbeeNotification, ZigbeeStack,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -544,22 +545,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Originate a unicast: assign its NWK sequence number, resolve a next hop, and
+    /// Send a unicast: assign its NWK sequence number, resolve a next hop, and
     /// either enqueue it, queue it awaiting route discovery, or drop it
     /// (discovery suppressed).
     /// `Err` rejects at enqueue without consuming `outcome`; on `Ok` the outcome
     /// resolves with the delivery result.
-    pub(super) fn originate_unicast(
-        &self,
-        mut nwk_frame: NwkFrame,
-        security: NwkSecurityMode,
-        mode: SendMode,
-        policy: TxPolicy,
-        outcome: TxOutcome,
-    ) -> Result<(), EnqueueError> {
+    pub(super) fn send_unicast(&self, send: Unicast) -> Result<(), EnqueueError> {
+        let Unicast {
+            frame: mut nwk_frame,
+            security,
+            mode,
+            policy,
+            outcome,
+        } = send;
         debug_assert!(
             nwk_frame.nwk_header.destination.as_u16() < BROADCAST_LOW_POWER_ROUTERS.as_u16(),
-            "originate_unicast is unicast only; got broadcast {:?}",
+            "send_unicast is unicast only; got broadcast {:?}",
             nwk_frame.nwk_header.destination
         );
         // The token is taken here, at the frame's entry into the stack's ownership, so
@@ -1460,20 +1461,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Originate a broadcast: admit it against the broadcast budget, assign its sequence
+    /// Send a broadcast: admit it against the broadcast budget, assign its sequence
     /// number, fan it out to sleepy children, form the passive-ack contract, transmit
     /// the first copy now, and hand any retransmissions to the broadcast-retransmit
     /// reactor (spec 3.6.6). `Err` rejects at enqueue (rate limited, frame budget)
     /// without consuming `slot`; on `Ok` the reactor resolves the slot's `Delivery` stage
     /// with the passive-ack quorum result, and each on-air copy resolves its `HandOff`.
     /// `slot` is `None` for an internal fire-and-forget broadcast.
-    pub(super) fn originate_broadcast(
-        &self,
-        mut nwk_frame: NwkFrame,
-        security: NwkSecurityMode,
-        policy: TxPolicy,
-        slot: Option<Arc<SendSlot>>,
-    ) -> Result<(), EnqueueError> {
+    pub(super) fn send_broadcast(&self, send: Broadcast) -> Result<(), EnqueueError> {
+        let Broadcast {
+            frame: mut nwk_frame,
+            security,
+            policy,
+            slot,
+        } = send;
         // Stack-critical broadcasts always pass; host- and forwarding-class broadcasts
         // yield to the reserves when the bucket is drained.
         let admission = self.broadcast_budget.lock().take(
@@ -1552,18 +1553,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(())
     }
 
-    /// Originate a single-copy broadcast: assign its sequence number and queue one copy
+    /// Send a single-copy broadcast: assign its sequence number and queue one copy
     /// for the sender task. No passive-ack contract, no retransmissions, no
     /// broadcast-budget draw: for frames whose schedule the spec fixes itself
     /// (link status, many-to-one route requests).
-    pub(super) fn originate_oneshot_broadcast(
-        &self,
-        mut nwk_frame: NwkFrame,
-        security: NwkSecurityMode,
-        policy: TxPolicy,
-        outcome: TxOutcome,
-    ) {
+    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) {
+        let Broadcast {
+            frame: mut nwk_frame,
+            security,
+            policy,
+            slot,
+        } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
+
+        // No reactor follows, so the single copy is the terminal event: it resolves the
+        // slot's `Delivery` directly (which back-fills `HandOff`).
+        #[allow(clippy::option_if_let_else)]
+        let outcome = match slot {
+            Some(slot) => TxOutcome::Track {
+                slot,
+                stage: TrackStage::Delivery,
+            },
+            None => TxOutcome::Discard,
+        };
 
         self.enqueue_send(
             SendKind::Broadcast {
@@ -1791,13 +1803,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_destination_ieee(destination_ieee)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        if let Err(err) = self.originate_unicast(
-            network_status_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Route(RouteDirective::StackDecides),
-            TxPolicy::STACK_CRITICAL,
-            TxOutcome::Discard,
-        ) {
+        let send = Unicast {
+            frame: network_status_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Route(RouteDirective::StackDecides),
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        };
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send network status report: {err}");
         }
     }

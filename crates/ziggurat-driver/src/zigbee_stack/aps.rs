@@ -16,9 +16,9 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::flat_map::Entry;
 
 use super::{
-    ApsAck, ApsAckData, DeliveryError, EnqueueError, NwkSecurityMode, PendingApsAck,
+    ApsAck, ApsAckData, Broadcast, DeliveryError, EnqueueError, NwkSecurityMode, PendingApsAck,
     RouteDirective, SendHandle, SendMode, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority,
-    ZigbeeStack,
+    Unicast, ZigbeeStack,
 };
 use crate::frame_token::TrafficClass;
 
@@ -169,13 +169,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        if let Err(err) = self.originate_unicast(
-            aps_ack_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Route(RouteDirective::StackDecides),
-            TxPolicy::STACK_CRITICAL,
-            TxOutcome::Discard,
-        ) {
+        let send = Unicast {
+            frame: aps_ack_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Route(RouteDirective::StackDecides),
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        };
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send APS ack: {err}");
         }
     }
@@ -321,13 +322,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.aps_ack_wake.notify_one();
         }
 
-        let accepted = self.originate_unicast(
-            nwk_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Route(route),
-            Self::host_policy(priority),
-            TxOutcome::Track { slot, stage },
-        );
+        let accepted = self.send_unicast(Unicast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Route(route),
+            policy: Self::host_policy(priority),
+            outcome: TxOutcome::Track { slot, stage },
+        });
 
         // A rejected frame gets no confirmation: unregister its pending ack and drop the
         // handle by returning the admission error.
@@ -381,12 +382,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let nwk_frame = self.wrap_aps_frame(&aps_frame, destination, radius, None)?;
 
         let (handle, slot) = SendHandle::new();
-        self.originate_broadcast(
-            nwk_frame,
-            NwkSecurityMode::NetworkKey,
-            Self::host_policy(priority),
-            Some(slot),
-        )?;
+        self.send_broadcast(Broadcast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            policy: Self::host_policy(priority),
+            slot: Some(slot),
+        })?;
         Ok(handle)
     }
 
@@ -430,12 +431,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let nwk_frame = self.wrap_aps_frame(&aps_frame, BROADCAST_RX_ON_WHEN_IDLE, radius, None)?;
 
         let (handle, slot) = SendHandle::new();
-        self.originate_broadcast(
-            nwk_frame,
-            NwkSecurityMode::NetworkKey,
-            Self::host_policy(priority),
-            Some(slot),
-        )?;
+        self.send_broadcast(Broadcast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            policy: Self::host_policy(priority),
+            slot: Some(slot),
+        })?;
         Ok(handle)
     }
 

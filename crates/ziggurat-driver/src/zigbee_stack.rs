@@ -375,6 +375,26 @@ pub enum TxOutcome {
     },
 }
 
+/// A unicast handed to [`ZigbeeStack::send_unicast`].
+#[derive(Debug)]
+pub struct Unicast {
+    pub frame: NwkFrame,
+    pub security: NwkSecurityMode,
+    pub mode: SendMode,
+    pub policy: TxPolicy,
+    pub outcome: TxOutcome,
+}
+
+/// A broadcast handed to [`ZigbeeStack::send_broadcast`] or
+/// [`ZigbeeStack::send_oneshot_broadcast`].
+#[derive(Debug)]
+pub struct Broadcast {
+    pub frame: NwkFrame,
+    pub security: NwkSecurityMode,
+    pub policy: TxPolicy,
+    pub slot: Option<Arc<SendSlot>>,
+}
+
 /// An entry of [`State::pending_aps_acks`]: a sent APS frame awaiting its end-to-end
 /// ack. The ack arrival (or its timeout) resolves the send's `delivered` stage through
 /// the held slot.

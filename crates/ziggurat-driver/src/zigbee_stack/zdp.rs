@@ -14,8 +14,9 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective, SendHandle, SendMode,
-    TrackStage, TxOutcome, TxPolicy, TxPriority, ZigbeeStack, neighbors, routing,
+    Broadcast, EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective, SendHandle,
+    SendMode, TrackStage, TxOutcome, TxPolicy, TxPriority, Unicast, ZigbeeStack, neighbors,
+    routing,
 };
 use crate::frame_token::TrafficClass;
 
@@ -304,23 +305,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         match delivery_mode {
             ApsDeliveryMode::Broadcast => {
-                self.originate_broadcast(
-                    nwk_frame,
-                    NwkSecurityMode::NetworkKey,
+                self.send_broadcast(Broadcast {
+                    frame: nwk_frame,
+                    security: NwkSecurityMode::NetworkKey,
                     policy,
-                    Some(slot),
-                )?;
+                    slot: Some(slot),
+                })?;
             }
-            ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => self.originate_unicast(
-                nwk_frame,
-                NwkSecurityMode::NetworkKey,
-                SendMode::Route(RouteDirective::StackDecides),
-                policy,
-                TxOutcome::Track {
-                    slot,
-                    stage: TrackStage::Delivery,
-                },
-            )?,
+            ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => {
+                self.send_unicast(Unicast {
+                    frame: nwk_frame,
+                    security: NwkSecurityMode::NetworkKey,
+                    mode: SendMode::Route(RouteDirective::StackDecides),
+                    policy,
+                    outcome: TxOutcome::Track {
+                        slot,
+                        stage: TrackStage::Delivery,
+                    },
+                })?
+            }
         }
 
         Ok(handle)

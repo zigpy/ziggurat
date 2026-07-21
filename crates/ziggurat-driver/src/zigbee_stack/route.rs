@@ -15,8 +15,8 @@ use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
 use super::{
-    AddrConflictSource, NwkSecurityMode, SendHandle, SendMode, TrackStage, TxOutcome, TxPolicy,
-    TxPriority, ZigbeeStack,
+    AddrConflictSource, Broadcast, NwkSecurityMode, SendHandle, SendMode, TxOutcome, TxPolicy,
+    TxPriority, Unicast, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -99,13 +99,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_destination_ieee(Some(next_hop_link.eui64));
 
         // The next hop toward the originator is a direct radio neighbor
-        if let Err(err) = self.originate_unicast(
-            relayed_route_reply_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Direct,
-            TxPolicy::STACK_CRITICAL,
-            TxOutcome::Discard,
-        ) {
+        let send = Unicast {
+            frame: relayed_route_reply_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        };
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to relay route reply: {err}");
         }
     }
@@ -202,13 +203,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .with_destination_ieee(Some(sender_ieee));
 
             // The next hop toward the originator is a direct radio neighbor
-            if let Err(err) = self.originate_unicast(
-                route_reply_frame,
-                NwkSecurityMode::NetworkKey,
-                SendMode::Direct,
-                TxPolicy::STACK_CRITICAL,
-                TxOutcome::Discard,
-            ) {
+            let send = Unicast {
+                frame: route_reply_frame,
+                security: NwkSecurityMode::NetworkKey,
+                mode: SendMode::Direct,
+                policy: TxPolicy::STACK_CRITICAL,
+                outcome: TxOutcome::Discard,
+            };
+            if let Err(err) = self.send_unicast(send) {
                 tracing::warn!("Failed to send route reply: {err}");
             }
             return;
@@ -296,18 +298,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let (handle, slot) = SendHandle::new();
 
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
-        self.originate_oneshot_broadcast(
-            many_to_one_request_frame,
-            NwkSecurityMode::NetworkKey,
-            TxPolicy {
+        self.send_oneshot_broadcast(Broadcast {
+            frame: many_to_one_request_frame,
+            security: NwkSecurityMode::NetworkKey,
+            policy: TxPolicy {
                 priority: TxPriority::Background,
                 class: TrafficClass::Critical,
             },
-            TxOutcome::Track {
-                slot,
-                stage: TrackStage::Delivery,
-            },
-        );
+            slot: Some(slot),
+        });
 
         handle
     }

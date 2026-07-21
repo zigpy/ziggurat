@@ -35,9 +35,9 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, DeviceLeaveReason, IndirectFrame, IndirectPayload, JoinKind, NwkDeviceType,
-    NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, TrackStage, TxOutcome,
-    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, neighbors,
+    AddrConflictSource, Broadcast, DeviceLeaveReason, IndirectFrame, IndirectPayload, JoinKind,
+    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, TrackStage,
+    TxOutcome, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -388,15 +388,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             // The retransmit reactor owns the rebroadcasts; the jitter was applied by
             // the report deadline, and the cancel-if-already-reported check above.
-            if let Err(err) = self.originate_broadcast(
-                conflict_frame,
-                NwkSecurityMode::NetworkKey,
-                TxPolicy {
+            let send = Broadcast {
+                frame: conflict_frame,
+                security: NwkSecurityMode::NetworkKey,
+                policy: TxPolicy {
                     priority: TxPriority::UserNormal,
                     class: TrafficClass::Critical,
                 },
-                None,
-            ) {
+                slot: None,
+            };
+            if let Err(err) = self.send_broadcast(send) {
                 tracing::warn!("Failed to broadcast address conflict report: {err}");
             }
         }
@@ -565,16 +566,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A direct one-hop unicast without an APS ack: next-hop acceptance is the
         // delivery verdict.
-        if let Err(err) = self.originate_unicast(
-            nwk_frame,
-            NwkSecurityMode::Unsecured,
-            SendMode::Direct,
-            TxPolicy::STACK_CRITICAL,
-            TxOutcome::Track {
+        let send = Unicast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::Unsecured,
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Track {
                 slot,
                 stage: TrackStage::Delivery,
             },
-        ) {
+        };
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send network key transport to {destination_eui64:?}: {err}");
             return None;
         }
@@ -693,17 +695,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nwk_data_frame(destination, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        if let Err(err) = self.originate_unicast(
-            nwk_frame,
-            NwkSecurityMode::NetworkKey,
-            if self.is_neighbor(destination) {
+        let send = Unicast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: if self.is_neighbor(destination) {
                 SendMode::Direct
             } else {
                 SendMode::Route(RouteDirective::StackDecides)
             },
-            TxPolicy::STACK_CRITICAL,
-            TxOutcome::Discard,
-        ) {
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        };
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send secured APS payload: {err}");
         }
     }
@@ -1275,13 +1278,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         // The rejoining device is within radio range
-        if let Err(err) = self.originate_unicast(
-            response_frame,
+        let send = Unicast {
+            frame: response_frame,
             security,
-            SendMode::Direct,
-            TxPolicy::STACK_CRITICAL,
-            TxOutcome::Discard,
-        ) {
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        };
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send rejoin response: {err}");
         }
     }
@@ -1393,13 +1397,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The child is a direct neighbor; responses to sleepy children go through the
         // indirect queue via the NWK unicast fork
-        if let Err(err) = self.originate_unicast(
-            response_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Direct,
-            TxPolicy::STACK_CRITICAL,
-            TxOutcome::Discard,
-        ) {
+        let send = Unicast {
+            frame: response_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        };
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send end device timeout response: {err}");
         }
     }
