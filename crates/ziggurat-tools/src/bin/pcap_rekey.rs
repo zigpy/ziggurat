@@ -20,11 +20,11 @@ use ziggurat_ieee_802154::{
 use ziggurat_zigbee::aps::frame::{
     ApsAuxHeader, ApsCommandFrame, ApsCommandFrameCommand, ApsDeliveryMode, ApsFrameControl,
     ApsFrameType, ApsNetworkKeyDescriptor, ApsStandardKeyType, ApsTransportKeyCommandFrame,
-    ApsTransportKeyDescriptor,
+    ApsTransportKeyDescriptor, EncryptedApsCommandFrame,
 };
 use ziggurat_zigbee::crypto::key_transport_key;
 use ziggurat_zigbee::nwk::frame::{
-    EncryptedNwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkRouteDiscovery,
+    EncryptedNwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload, NwkRouteDiscovery,
     NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
@@ -107,8 +107,14 @@ fn main() -> Result<()> {
     let mut link_types: Vec<Option<LinkType>> = Vec::new();
     let mut transport_key_injected = args.no_transport_key;
 
+    // The one key we can use to open APS Transport-Key commands: the key-transport key
+    // derived from the well-known global TC link key. Commands under a device-specific
+    // link key stay opaque (and don't leak the network key to a third party anyway).
+    let aps_transport_key = key_transport_key(&ZIGBEE_ALLIANCE_09);
+
     let mut total = 0u64;
     let mut rekeyed = 0u64;
+    let mut aps_rewrites = 0u64;
 
     let mut reader = reader;
     while let Some(block) = reader.next_block() {
@@ -129,7 +135,14 @@ fn main() -> Result<()> {
 
                 let new_block = match link_type {
                     Some(link_type) => {
-                        match rekey_packet(link_type, &packet.data, &args.old_key, &args.new_key) {
+                        match rekey_packet(
+                            link_type,
+                            &packet.data,
+                            &args.old_key,
+                            &args.new_key,
+                            &aps_transport_key,
+                            &mut aps_rewrites,
+                        ) {
                             Some(new_data) => {
                                 rekeyed += 1;
 
@@ -170,7 +183,8 @@ fn main() -> Result<()> {
     }
 
     eprintln!(
-        "Rekeyed {rekeyed} of {total} packets ({} left untouched)",
+        "Rekeyed {rekeyed} of {total} packets ({} left untouched); \
+rewrote {aps_rewrites} APS Transport-Key command(s) carrying the old network key",
         total - rekeyed
     );
     Ok(())
@@ -221,16 +235,28 @@ fn inject_transport_key(
     Ok(())
 }
 
-/// Rekey one capture packet, given its link type. Returns `Some(new_packet)` when the
-/// packet carried a NWK frame secured with `old_key` (re-encrypted under `new_key`), or
-/// `None` when the packet should be emitted unchanged (a foreign network, an
-/// unencrypted frame, or anything that does not parse).
-fn rekey_packet(link_type: LinkType, data: &[u8], old_key: &Key, new_key: &Key) -> Option<Vec<u8>> {
+/// Rekey one capture packet. `Some(new_packet)` if it changed (NWK re-secured under
+/// `new_key`, and/or a transported key swapped `old_key` -> `new_key`); `None` if it
+/// should be emitted verbatim (foreign network, or nothing to rewrite).
+fn rekey_packet(
+    link_type: LinkType,
+    data: &[u8],
+    old_key: &Key,
+    new_key: &Key,
+    aps_transport_key: &Key,
+    aps_rewrites: &mut u64,
+) -> Option<Vec<u8>> {
     match link_type {
-        LinkType::Raw => rekey_phy(data, old_key, new_key),
+        LinkType::Raw => rekey_phy(data, old_key, new_key, aps_transport_key, aps_rewrites),
         LinkType::Tap => {
             let header_len = tap_header_len(data)?;
-            let new_phy = rekey_phy(&data[header_len..], old_key, new_key)?;
+            let new_phy = rekey_phy(
+                &data[header_len..],
+                old_key,
+                new_key,
+                aps_transport_key,
+                aps_rewrites,
+            )?;
 
             let mut out = data[..header_len].to_vec();
             out.extend(new_phy);
@@ -268,38 +294,113 @@ fn mac_pan_id(link_type: LinkType, data: &[u8]) -> Option<PanId> {
 }
 
 /// Rekey a raw 802.15.4 PHY payload (including its FCS). See [`rekey_packet`].
-fn rekey_phy(phy: &[u8], old_key: &Key, new_key: &Key) -> Option<Vec<u8>> {
+fn rekey_phy(
+    phy: &[u8],
+    old_key: &Key,
+    new_key: &Key,
+    aps_transport_key: &Key,
+    aps_rewrites: &mut u64,
+) -> Option<Vec<u8>> {
     let Ieee802154Frame::Data(data_frame) = Ieee802154Frame::from_bytes(phy).ok()? else {
         return None;
     };
 
     let encrypted = EncryptedNwkFrame::from_bytes(&data_frame.payload).ok()?;
 
-    // Only NWK frames secured with the network key are ours to rekey.
-    if !encrypted.nwk_header.frame_control.security {
-        return None;
-    }
-    let aux_header = encrypted.aux_header.as_ref()?;
-    if aux_header.security_control.key_id != NwkSecurityHeaderKeyId::NetworkKey {
-        return None;
-    }
+    let new_nwk_bytes = if encrypted.nwk_header.frame_control.security {
+        // Network-key secured: decrypt, rewrite any transported key, re-secure under new_key.
+        let aux_header = encrypted.aux_header.as_ref()?;
+        if aux_header.security_control.key_id != NwkSecurityHeaderKeyId::NetworkKey {
+            return None;
+        }
+        // The CCM* nonce needs the originator's EUI64; without it we cannot re-encrypt.
+        if aux_header.extended_source.is_none() && encrypted.nwk_header.source_ieee.is_none() {
+            return None;
+        }
 
-    // The CCM* nonce needs the originator's EUI64; without it we cannot re-encrypt.
-    if aux_header.extended_source.is_none() && encrypted.nwk_header.source_ieee.is_none() {
-        return None;
-    }
+        // A MIC mismatch means the frame belongs to another network: leave it untouched.
+        let mut decrypted = encrypted.decrypt(old_key).ok()?;
 
-    // A MIC mismatch means the frame belongs to another network: leave it untouched.
-    let decrypted = encrypted.decrypt(old_key).ok()?;
-    let reencrypted = decrypted.encrypt(new_key);
+        if let NwkPayload::Opaque(aps) = &decrypted.payload
+            && let Some(new_aps) = rewrite_transport_key(aps, old_key, new_key, aps_transport_key)
+        {
+            *aps_rewrites += 1;
+            decrypted.payload = NwkPayload::Opaque(FrameBytes::from_slice(&new_aps).ok()?);
+        }
+
+        decrypted.encrypt(new_key).to_bytes()
+    } else {
+        // Unsecured join frame: rewrite a cleartext Transport-Key command if it carries the key.
+        if encrypted.nwk_header.frame_control.frame_type != NwkFrameType::Data {
+            return None;
+        }
+        let new_aps =
+            rewrite_transport_key(&encrypted.ciphertext, old_key, new_key, aps_transport_key)?;
+        *aps_rewrites += 1;
+
+        EncryptedNwkFrame {
+            nwk_header: encrypted.nwk_header,
+            aux_header: None,
+            ciphertext: FrameBytes::from_slice(&new_aps).ok()?,
+        }
+        .to_bytes()
+    };
 
     let new_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
         header: data_frame.header,
-        payload: FrameBytes::from_slice(&reencrypted.to_bytes()).ok()?,
+        payload: FrameBytes::from_slice(&new_nwk_bytes).ok()?,
         fcs: 0,
     });
 
     Some(new_frame.to_bytes())
+}
+
+/// Swap `old_key` for `new_key` inside an APS Transport-Key command that transports the
+/// network key and is decryptable with `aps_transport_key` (derived from the global TC
+/// link key), returning the re-encrypted, same-length command. `None` for anything
+/// else, including commands under a device-specific link key we don't hold.
+fn rewrite_transport_key(
+    aps: &[u8],
+    old_key: &Key,
+    new_key: &Key,
+    aps_transport_key: &Key,
+) -> Option<Vec<u8>> {
+    // Cleartext APS frame control: frame type in the low two bits, security is bit 5.
+    let &frame_control = aps.first()?;
+    if frame_control & 0b11 != ApsFrameType::Command as u8 || frame_control & 0b0010_0000 == 0 {
+        return None;
+    }
+
+    let encrypted = EncryptedApsCommandFrame::from_bytes(aps).ok()?;
+    let command = encrypted.decrypt(aps_transport_key).ok()?;
+
+    let ApsCommandFrameCommand::TransportKey(transport_key) = &command.command else {
+        return None;
+    };
+    let ApsTransportKeyDescriptor::NetworkKey(descriptor) = &transport_key.key_descriptor else {
+        return None;
+    };
+    if descriptor.key != *old_key {
+        return None;
+    }
+
+    let mut new_descriptor = descriptor.clone();
+    new_descriptor.key = new_key.clone();
+
+    let rewritten = ApsCommandFrame {
+        frame_control: command.frame_control.clone(),
+        counter: command.counter,
+        command: ApsCommandFrameCommand::TransportKey(ApsTransportKeyCommandFrame {
+            standard_key_type: transport_key.standard_key_type,
+            key_descriptor: ApsTransportKeyDescriptor::NetworkKey(new_descriptor),
+        }),
+    };
+
+    Some(
+        rewritten
+            .encrypt(aps_transport_key, &encrypted.aux_header)
+            .to_bytes(),
+    )
 }
 
 /// Build a synthetic capture packet carrying an APS Transport-Key command that transports
