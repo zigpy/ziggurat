@@ -1,0 +1,21 @@
+[package]
+name = "ziggurat-tools"
+version.workspace = true
+description = "Standalone CLI tools"
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pcap-rekey"
+path = "src/bin/pcap_rekey.rs"
+
+[dependencies]
+ziggurat-ieee-802154.workspace = true
+ziggurat-zigbee.workspace = true
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+pcap-file = "2"
