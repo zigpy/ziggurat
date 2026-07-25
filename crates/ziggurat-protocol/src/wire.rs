@@ -417,11 +417,18 @@ pub struct SendUnicastPayload {
     pub asdu: Vec<u8>,
 }
 
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SendBroadcastFlags {
+    pub reserved: u8,
+}
+
 /// A broadcast APS send to a broadcast sink (`destination`). Never APS-secured or acked,
 /// so it carries no flags, EUI64, or route control.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct SendBroadcastPayload {
+    pub flags: SendBroadcastFlags,
     pub destination: Nwk,
     pub profile_id: u16,
     pub cluster_id: u16,
@@ -435,11 +442,18 @@ pub struct SendBroadcastPayload {
     pub asdu: Vec<u8>,
 }
 
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SendGroupcastFlags {
+    pub reserved: u8,
+}
+
 /// A groupcast (APS multicast) send. The group lives in the APS header and the NWK frame
 /// is broadcast to rx-on-when-idle devices, so there is no destination endpoint.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct SendGroupcastPayload {
+    pub flags: SendGroupcastFlags,
     pub group_id: u16,
     pub profile_id: u16,
     pub cluster_id: u16,
