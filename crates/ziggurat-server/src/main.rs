@@ -711,9 +711,8 @@ impl ZigguratServer {
             ));
         }
 
-        let run_stack = stack.clone();
-        stack.spawn_tracked(async move {
-            run_stack.run().await;
+        stack.spawn_tracked(|arc_self| async move {
+            arc_self.run().await;
         });
 
         // Drain the stack's notification outbox into the server-level hub. The task is

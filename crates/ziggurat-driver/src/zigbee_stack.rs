@@ -1378,67 +1378,37 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The single sender task drains the transmit queue; it must run before anything
         // enqueues a frame (the initial link status broadcast below would otherwise
         // block on a completion nobody resolves).
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.sender_task().await;
         });
 
         // Drains frames queued awaiting route discovery, and discards them when
         // discovery is exhausted. Must run before anything can queue one.
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.pending_route_task().await;
         });
 
         // Retransmits broadcasts until their passive-ack quorum is heard or attempts run
         // out. Must run before anything can queue a broadcast.
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.broadcast_retransmit_task().await;
         });
 
         // Re-enqueues failed unicasts after their retry delay, so the sender task never
         // sleeps mid-queue. Must run before anything can queue a unicast.
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.unicast_retry_task().await;
         });
 
         // Times out fire-and-forget APS sends whose ack never arrived, reporting the
         // outcome as a notification.
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.aps_ack_timeout_task().await;
         });
 
         // Sprays beacons while a beacon-spam window is open (the hack_beacon_spam_duration
         // hack). Idle unless beacon requests open the window.
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.beacon_spam_task().await;
         });
 
@@ -1448,66 +1418,36 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::info!("Sending initial link status broadcast");
         let _ = self.send_link_status_broadcast(true).handed_off().await;
 
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
         // Start the background link status broadcaster task
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.periodic_link_status_broadcast_task().await;
         });
 
         // Advertise many-to-one routes to ourselves so that devices can route inbound
         // traffic without per-device route discoveries
         if self.state.is_concentrator {
-            let arc_self = self
-                .self_weak
-                .upgrade()
-                .expect("Unable to upgrade self reference");
-
-            self.spawn_tracked(async move {
+            self.spawn_tracked(|arc_self| async move {
                 arc_self.periodic_many_to_one_route_request_task().await;
             });
         }
 
         // Reprogram the radio whenever it resets out from under us
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.radio_recovery_task().await;
         });
 
         // Mirror the indirect queue state into the RCP source address match table
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.src_match_sync_task().await;
         });
 
         // Expire undelivered indirect transactions and age out silent children
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.indirect_maintenance_task().await;
         });
 
         // Drive the in-flight tasklets (multi-step flows like the join) on one task
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.tasklet_task().await;
         });
 
@@ -1523,12 +1463,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         });
 
         // Broadcast jittered address-conflict reports (spec 3.6.1.10.5)
-        let arc_self = self
-            .self_weak
-            .upgrade()
-            .expect("Unable to upgrade self reference");
-
-        self.spawn_tracked(async move {
+        self.spawn_tracked(|arc_self| async move {
             arc_self.address_conflict_task().await;
         });
 
@@ -1765,9 +1700,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Spawns a task tied to the stack's lifetime: it is stopped on `shutdown`.
-    pub fn spawn_tracked<F>(&self, future: F)
+    pub fn spawn_tracked<F, Fut>(&self, future_func: F)
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         let id = self.next_task_id.fetch_add(1, AtomicOrdering::Relaxed);
         let cancel = Arc::new(Notify::new());
@@ -1777,11 +1713,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // still deregister without keeping the stack alive.
         let weak = self.self_weak.clone();
 
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
         self.spawner.spawn(Box::pin(async move {
             // Run the task until it finishes or `shutdown` cancels it. Dropping the task
             // future at an await point is safe: the stack never holds the blocking core
             // lock across an await (enforced by `CoreGuard` being `!Send`).
             {
+                let future = future_func(arc_self);
                 let future = core::pin::pin!(future);
                 let cancelled = core::pin::pin!(cancel.notified());
                 let _ = futures::future::select(future, cancelled).await;
