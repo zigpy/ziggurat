@@ -1,22 +1,9 @@
 //! An awaitable, staged view over a single send.
 //!
-//! The driver never awaits a send: a send is a table entry (or a queued frame) whose
-//! final outcome is written into a value, not awaited. [`SendSlot`] is that value. It is
-//! the seam where a caller that can suspend re-enters: the producer keeps its
-//! `Arc<SendSlot>` and writes the outcome into it, while the [`SendHandle`] hands out
-//! linear `.await`s over the two verdicts a send earns — `handed_off` (the mesh accepted
-//! the frame) and `delivered` (the end-to-end verdict).
-//!
-//! A send has two write-once stages. The [`SendSlot::resolve`] write rules keep every
-//! resolution site unambiguous and hang-free (see the method).
-//!
-//! ## Single awaiter per stage
-//! Each stage's wake is a single-slot signal (embassy `Signal` / tokio `Notify`): a
-//! second concurrent waiter on the *same* stage silently overwrites the first's waker.
-//! Each of [`SendHandle::handed_off`] / [`SendHandle::delivered`] may therefore be
-//! awaited by at most one task at a time. The wire tracker never awaits — it polls
-//! [`SendHandle::status`] — so a wire-tracked send leaves both waiters free for a local
-//! caller.
+//! An outgoing request goes through two send stages: hand off (the frame was actually
+//! sent on air, either to a next hop or as an initial broadcast) and delivery
+//! (dependent on the request: APS ACK, broadcast relay quorum, etc.). A send point can
+//! decide what stage to block on (if any).
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +34,7 @@ struct Progress {
     completion_wake: Option<Arc<Notify>>,
 }
 
-/// The shared substrate a send's outcome is written into.
+/// The shared slot a send's outcome is written into.
 ///
 /// Two write-once verdicts, a per-stage wake each (so the stages can be awaited
 /// independently), and a cancellation flag the reactors honour. The producer and every

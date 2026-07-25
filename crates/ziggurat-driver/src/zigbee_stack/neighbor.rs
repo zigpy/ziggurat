@@ -183,6 +183,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         loop {
             self.sleep_until_core(next).await;
 
+            // The link status broadcast has a radius of 1 so delivery does not wait for
+            // a relay quorum.
             let _ = self.send_link_status_broadcast(false).delivered().await;
 
             next = next + self.tunables.link_status_period();

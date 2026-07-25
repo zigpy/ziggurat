@@ -167,6 +167,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Send our ACK back to the sender
         let aps_ack_frame = self
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
+            .expect("ACK frame is always valid")
             .with_discover_route(NwkRouteDiscovery::Enable);
 
         let send = Unicast {
@@ -181,43 +182,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Wrap a fully-built APS data frame in its NWK data frame: encrypt the ASDU with the
-    /// pairwise link key when `aps_security` is set (unicast only), otherwise send it in
-    /// the clear, then apply the route-discovery flag and radius. The mechanical tail
-    /// shared by the send entry points below; the frame itself, and its per-mode fields,
-    /// stays constructed inline at each origination site.
-    pub(super) fn wrap_aps_frame(
-        &self,
-        aps_frame: &ApsDataFrame,
-        nwk_destination: Nwk,
-        radius: u8,
-        aps_security: Option<Eui64>,
-    ) -> Result<NwkFrame, EnqueueError> {
-        tracing::trace!("Prepared APS frame: {aps_frame:?}");
-
-        let aps_payload = if let Some(destination_eui64) = aps_security {
-            let encrypted = self
-                .core()
-                .aib
-                .aps_security
-                .encrypt_data(destination_eui64, aps_frame);
-            match encrypted {
-                Some(encrypted) => {
-                    self.maybe_notify_aps_frame_counter();
-                    encrypted.to_bytes()
-                }
-                None => return Err(EnqueueError::SecurityUnavailable),
-            }
-        } else {
-            aps_frame.to_bytes()
-        };
-
-        Ok(self
-            .nwk_data_frame(nwk_destination, aps_payload)
-            .with_discover_route(NwkRouteDiscovery::Enable)
-            .with_radius(cmp::max(radius, 1)))
-    }
-
     /// How long to wait for a device's APS ack: longer for a sleepy destination, which
     /// only sees (and acks) the frame after polling.
     fn aps_ack_timeout(&self, destination: Nwk, sleepy_destination: bool) -> Duration {
@@ -225,16 +189,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.tunables.aps_ack_timeout_indirect()
         } else {
             self.tunables.aps_ack_timeout()
-        }
-    }
-
-    /// The traffic policy for a host-originated send. The class is fixed here, not
-    /// host-chosen: a host send can never draw from the forwarding or critical budget
-    /// tiers, whatever its priority.
-    const fn host_policy(priority: TxPriority) -> TxPolicy {
-        TxPolicy {
-            priority,
-            class: TrafficClass::Host,
         }
     }
 
@@ -283,7 +237,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             asdu,
         };
 
-        let nwk_frame = self.wrap_aps_frame(&aps_frame, destination, radius, aps_security)?;
+        tracing::trace!("Prepared unicast APS frame: {aps_frame:?}");
+
+        let aps_payload = if let Some(destination_eui64) = aps_security {
+            let encrypted = self
+                .core()
+                .aib
+                .aps_security
+                .encrypt_data(destination_eui64, &aps_frame);
+            match encrypted {
+                Some(encrypted) => {
+                    self.maybe_notify_aps_frame_counter();
+                    encrypted.to_bytes()
+                }
+                None => return Err(EnqueueError::SecurityUnavailable),
+            }
+        } else {
+            aps_frame.to_bytes()
+        };
+
+        let nwk_frame = self
+            .nwk_data_frame(destination, aps_payload)?
+            .with_discover_route(NwkRouteDiscovery::Enable)
+            .with_radius(cmp::max(radius, 1));
 
         // The end-to-end ack correlates on the swapped endpoints (our destination is the
         // acker's source, and vice-versa).
@@ -326,7 +302,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Route(route),
-            policy: Self::host_policy(priority),
+            policy: TxPolicy {
+                priority,
+                class: TrafficClass::Host,
+            },
             outcome: TxOutcome::Track { slot, stage },
         });
 
@@ -379,13 +358,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             asdu,
         };
 
-        let nwk_frame = self.wrap_aps_frame(&aps_frame, destination, radius, None)?;
+        tracing::trace!("Prepared broadcast APS frame: {aps_frame:?}");
+
+        let aps_payload = aps_frame.to_bytes();
+        let nwk_frame = self
+            .nwk_data_frame(destination, aps_payload)?
+            .with_discover_route(NwkRouteDiscovery::Enable)
+            .with_radius(cmp::max(radius, 1));
 
         let (handle, slot) = SendHandle::new();
         self.send_broadcast(Broadcast {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
-            policy: Self::host_policy(priority),
+            policy: TxPolicy {
+                priority,
+                class: TrafficClass::Host,
+            },
             slot: Some(slot),
         })?;
         Ok(handle)
@@ -428,13 +416,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             asdu,
         };
 
-        let nwk_frame = self.wrap_aps_frame(&aps_frame, BROADCAST_RX_ON_WHEN_IDLE, radius, None)?;
+        tracing::trace!("Prepared group broadcast APS frame: {aps_frame:?}");
+
+        let aps_payload = aps_frame.to_bytes();
+        let nwk_frame = self
+            .nwk_data_frame(BROADCAST_RX_ON_WHEN_IDLE, aps_payload)?
+            .with_discover_route(NwkRouteDiscovery::Enable)
+            .with_radius(cmp::max(radius, 1));
 
         let (handle, slot) = SendHandle::new();
         self.send_broadcast(Broadcast {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
-            policy: Self::host_policy(priority),
+            policy: TxPolicy {
+                priority,
+                class: TrafficClass::Host,
+            },
             slot: Some(slot),
         })?;
         Ok(handle)
@@ -495,6 +492,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             } else {
                 Err(DeliveryError::ApsAckTimeout)
             };
+
             slot.resolve(TrackStage::Delivery, result);
         }
     }

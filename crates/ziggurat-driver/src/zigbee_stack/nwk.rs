@@ -514,8 +514,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// A NWK data frame originated by us; same defaults as [`Self::nwk_command_frame`]
     /// except data frames carry no extended source.
-    pub(super) fn nwk_data_frame(&self, destination: Nwk, payload: Vec<u8>) -> NwkFrame {
-        NwkFrame {
+    pub(super) fn nwk_data_frame(
+        &self,
+        destination: Nwk,
+        payload: Vec<u8>,
+    ) -> Result<NwkFrame, EnqueueError> {
+        Ok(NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -540,9 +544,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             aux_header: None, // Applied at encryption time
             payload: NwkPayload::Opaque(
-                FrameBytes::from_slice(&payload).expect("NWK payload is frame-bounded"),
+                FrameBytes::from_slice(&payload).map_err(|_| EnqueueError::PayloadTooLong)?,
             ),
-        }
+        })
     }
 
     /// Send a unicast: assign its NWK sequence number, resolve a next hop, and
@@ -563,6 +567,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             "send_unicast is unicast only; got broadcast {:?}",
             nwk_frame.nwk_header.destination
         );
+
         // The token is taken here, at the frame's entry into the stack's ownership, so
         // that route-discovery parking is covered by the budget too. It travels with
         // the frame through every queue until its terminal outcome.
@@ -576,7 +581,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return Err(EnqueueError::BudgetExhausted);
         };
 
-        let destination = nwk_frame.nwk_header.destination;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
         match self.resolve_next_hop(&mut nwk_frame, &mode) {
@@ -596,6 +600,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 Ok(())
             }
             NextHop::Discard => {
+                let destination = nwk_frame.nwk_header.destination;
                 tracing::debug!(
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
                 );
@@ -1415,7 +1420,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// queue, since a sleeping radio never hears the broadcast itself. The NWK source is
     /// skipped (it already has the frame). Each copy is queued without waiting: it is only
     /// handed to the radio when the child polls, or dropped when it expires.
-    fn fan_out_broadcast_to_sleepy_children(
+    fn maybe_fan_out_broadcast_to_sleepy_children(
         &self,
         nwk_frame: &NwkFrame,
         security: NwkSecurityMode,
@@ -1461,13 +1466,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Send a broadcast: admit it against the broadcast budget, assign its sequence
-    /// number, fan it out to sleepy children, form the passive-ack contract, transmit
-    /// the first copy now, and hand any retransmissions to the broadcast-retransmit
-    /// reactor (spec 3.6.6). `Err` rejects at enqueue (rate limited, frame budget)
-    /// without consuming `slot`; on `Ok` the reactor resolves the slot's `Delivery` stage
-    /// with the passive-ack quorum result, and each on-air copy resolves its `HandOff`.
-    /// `slot` is `None` for an internal fire-and-forget broadcast.
+    /// Send a broadcast.
     pub(super) fn send_broadcast(&self, send: Broadcast) -> Result<(), EnqueueError> {
         let Broadcast {
             frame: mut nwk_frame,
@@ -1505,7 +1504,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
         // for each (spec 3.6.6).
-        self.fan_out_broadcast_to_sleepy_children(&nwk_frame, security, policy.class);
+        self.maybe_fan_out_broadcast_to_sleepy_children(&nwk_frame, security, policy.class);
 
         let key = (
             nwk_frame.nwk_header.source,
@@ -1554,9 +1553,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Send a single-copy broadcast: assign its sequence number and queue one copy
-    /// for the sender task. No passive-ack contract, no retransmissions, no
-    /// broadcast-budget draw: for frames whose schedule the spec fixes itself
-    /// (link status, many-to-one route requests).
+    /// for the sender task.
     pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) {
         let Broadcast {
             frame: mut nwk_frame,
@@ -1566,8 +1563,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        // No reactor follows, so the single copy is the terminal event: it resolves the
-        // slot's `Delivery` directly (which back-fills `HandOff`).
         #[allow(clippy::option_if_let_else)]
         let outcome = match slot {
             Some(slot) => TxOutcome::Track {
@@ -1834,7 +1829,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.6: deliver another device's 0xFFFF broadcast to our own sleepy
         // children as MAC unicasts (a no-op for non-0xFFFF destinations).
-        self.fan_out_broadcast_to_sleepy_children(
+        self.maybe_fan_out_broadcast_to_sleepy_children(
             nwk_frame,
             NwkSecurityMode::NetworkKey,
             TrafficClass::Forwarding,

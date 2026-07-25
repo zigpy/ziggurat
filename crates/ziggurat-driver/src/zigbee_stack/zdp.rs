@@ -5,7 +5,9 @@ use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType};
-use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use ziggurat_zigbee::nwk::frame::{
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, NwkRouteDiscovery,
+};
 
 use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
@@ -293,7 +295,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             asdu,
         };
 
-        let nwk_frame = self.wrap_aps_frame(&aps_frame, destination, 2 * MAX_DEPTH, None)?;
+        tracing::trace!("Prepared unicast ZDP APS frame: {aps_frame:?}");
+        let nwk_frame = self
+            .nwk_data_frame(destination, aps_frame.to_bytes())?
+            .with_discover_route(NwkRouteDiscovery::Enable)
+            .with_radius(2 * MAX_DEPTH);
 
         // ZDP responses are answerable to the remote requester's retries: best-effort
         let policy = TxPolicy {
