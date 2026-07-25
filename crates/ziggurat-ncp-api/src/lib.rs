@@ -158,15 +158,13 @@ pub async fn handle_frame<P: RadioPhy>(app: &mut App<P>, frame: &[u8]) {
 /// Start the receive loop, the notification pump, and the send-confirm sweep reactor for
 /// a freshly-started stack.
 pub(crate) fn spawn_stack_pumps<P: RadioPhy>(stack: &Arc<ZigbeeStack<P>>, sends: SendTrackerCell) {
-    let run_stack = stack.clone();
-    stack.spawn_tracked(async move {
-        run_stack.run().await;
+    stack.spawn_tracked(|arc_self| async move {
+        arc_self.run().await;
     });
 
-    let notify_stack = stack.clone();
-    stack.spawn_tracked(async move {
+    stack.spawn_tracked(|arc_self| async move {
         loop {
-            for notification in notify_stack.next_notifications().await {
+            for notification in arc_self.next_notifications().await {
                 if let Some(frame) = protocol::notification_frame(&notification) {
                     push_outbound(frame);
                 }
@@ -179,7 +177,7 @@ pub(crate) fn spawn_stack_pumps<P: RadioPhy>(stack: &Arc<ZigbeeStack<P>>, sends:
     // holds the same cell, so it sees the reset tracker.
     let wake = Arc::new(Notify::new());
     sends.lock(|cell| *cell.borrow_mut() = SendTracker::new(wake.clone()));
-    stack.spawn_tracked(async move {
+    stack.spawn_tracked(|_arc_self| async move {
         loop {
             wake.notified().await;
             let frames: Vec<Vec<u8>> = with_send_tracker(&sends, SendTracker::sweep)

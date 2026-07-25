@@ -4,7 +4,6 @@
 //! `configure`, `send_aps`, beacons, and notifications. Shared verbatim by the
 //! embedded firmware and the host server so the two cannot drift.
 
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -352,13 +351,11 @@ pub fn send_groupcast<P: RadioPhy, R: Runtime>(
 fn enqueue_error(e: &EnqueueError) -> Error {
     match e {
         EnqueueError::RateLimited { retry_in } => Error::rate_limited(*retry_in),
-        EnqueueError::BudgetExhausted => Error::new(Status::BudgetExhausted, &e.to_string()),
-        EnqueueError::NotStarted => Error::new(Status::InvalidState, &e.to_string()),
-        EnqueueError::PayloadTooLong
-        | EnqueueError::SecurityUnavailable
-        | EnqueueError::RouteDiscoverySuppressed => {
-            Error::new(Status::InvalidRequest, &e.to_string())
-        }
+        EnqueueError::BudgetExhausted => Status::BudgetExhausted.into(),
+        EnqueueError::NotStarted => Status::NotStarted.into(),
+        EnqueueError::PayloadTooLong => Status::PayloadTooLong.into(),
+        EnqueueError::SecurityUnavailable => Status::SecurityUnavailable.into(),
+        EnqueueError::RouteDiscoverySuppressed => Status::NoRoute.into(),
     }
 }
 
@@ -370,10 +367,8 @@ fn route_directive(
 ) -> Result<RouteDirective, Error> {
     let host_source_route = |relays: SourceRouteRelays| -> Result<HostRoute, Error> {
         if relays.relays.is_empty() {
-            Err(Error::new(
-                Status::InvalidRequest,
-                "a source route must contain at least one relay",
-            ))
+            tracing::warn!("Rejecting a host source route with no relays");
+            Err(Status::InvalidRequest.into())
         } else {
             Ok(HostRoute::SourceRoute(relays.relays))
         }
@@ -413,12 +408,15 @@ pub fn set_tunable<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: &SetTunablePayload,
 ) -> Result<(), Error> {
-    let name = core::str::from_utf8(&payload.name)
-        .map_err(|_| Error::new(Status::InvalidRequest, "tunable name is not UTF-8"))?;
+    let name = core::str::from_utf8(&payload.name).map_err(|_| {
+        tracing::warn!("Tunable name is not UTF-8");
+        Error::Status(Status::InvalidRequest)
+    })?;
 
-    stack
-        .set_tunable(name, payload.value)
-        .map_err(|e| Error::new(Status::InvalidRequest, &alloc::format!("{name}: {e}")))
+    stack.set_tunable(name, payload.value).map_err(|e| {
+        tracing::warn!("Rejecting set_tunable {name}: {e}");
+        Error::Status(Status::InvalidRequest)
+    })
 }
 
 /// Mirror a send's terminal result onto its wire status. Exhaustive on purpose: a new

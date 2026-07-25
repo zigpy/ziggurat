@@ -1,13 +1,37 @@
-//! The binary command set.
+//! The binary wire format, shared by both the WebSocket server and MCUs over serial.
 //!
-//! Request/response keyed by request id, streamed events, unsolicited notifications,
-//! fixed-layout payloads, and index-free scan/load state transfer. Pure codec: no
-//! runtime, no stack, no transport.
+//! The transport provides the framing: one frame per WebSocket binary message, or
+//! COBS-encoded frames delimited by `0x00` over a raw byte stream (serial, stdio).
+//! Within a frame, fields pack LSB-first in declaration order and multi-byte integers
+//! are little-endian.
+//!
+//! Every frame in both directions leads with the same 3-byte [`Header`], packing the
+//! command, frame type, and request id into 24 bits (bit 0 leftmost within a byte):
+//!
+//! ```text
+//!        byte 0            byte 1              byte 2
+//! +----------------+------+------------+------------------+
+//! |    command     | type | request id |    request id    |
+//! |       u8       |  u2  | u14 (low)  |    u14 (high)    |
+//! +----------------+------+------------+------------------+
+//! ```
+//!
+//! Bytes 1-2 read as one little-endian u16 equal to `request_id << 2 | frame_type`.
+//!
+//! The [`FrameType`] distinguishes between requests, responses, and notifications.
+//!
+//! - `Request` (host -> device): asks the device to do something. Every request is
+//!   answered by exactly one `Response` echoing its command and request id.
+//! - `Event` (device -> host): a streamed item belonging to a still-pending request
+//!   (table scan rows, beacons, captured packets), carrying that request's command and
+//!   id. All of a request's events precede its response.
+//! - `Response` (device -> host): the final reply to a request. The body begins with a
+//!   [`Status`] byte and contains either the command response or an error-specific
+//!   payload.
+//! - `Notification` (device -> host): unsolicited notifications.
+//!
+//! Request ids are host-chosen: 14 bits wide, with 0 left for notifications.
 
-// The `#[abstract_bits(length_from = …)]` expansion iterates `(0..len).into_iter()`.
-#![allow(clippy::useless_conversion)]
-
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -16,97 +40,135 @@ use num_enum::TryFromPrimitive;
 
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
+
+/// Host-chosen request id. 14 bits on the wire: values must stay below `0x4000`.
 pub type RequestId = u16;
 
+/// Host -> device opcodes. `Response` and `Event` frames echo the opcode of the
+/// request they belong to, so three frame types share this namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
-pub enum CommandId {
-    // Notifications (device -> host, unsolicited).
-    Hello = 0x00,
-    // Requests (host -> device).
-    Ping = 0x01,
-    Reset = 0x02,
-    GetFirmwareInfo = 0x03,
-    GetHwAddress = 0x04,
-    Shutdown = 0x05,
+pub enum RequestCommand {
+    // Device management.
+    Reset = 0x00,
+    GetFirmwareInfo = 0x01,
+    GetHwAddress = 0x02,
+    Shutdown = 0x03,
+    // Phased bring-up: configure, load state into the stopped stack, start.
     Configure = 0x10,
     LoadKeyTable = 0x11,
     LoadChildren = 0x12,
     LoadAddressCache = 0x13,
-    StartNetwork = 0x14,
-    LoadRouteTable = 0x15,
-    LoadSourceRoutes = 0x16,
-    GetNetworkInfo = 0x18,
-    ScanKeyTable = 0x19,
-    ScanChildren = 0x1A,
-    ScanAddressCache = 0x1B,
-    ScanRouteTable = 0x1C,
-    SendUnicast = 0x20,
-    PermitJoins = 0x21,
-    SetChannel = 0x22,
-    SetNwkUpdateId = 0x23,
-    SetProvisionalKey = 0x24,
-    EnergyScan = 0x25,
-    NetworkScan = 0x26,
-    PacketCapture = 0x27,
-    PacketCaptureChannel = 0x28,
-    SetTunable = 0x29,
-    CancelRequest = 0x2A,
-    SendBroadcast = 0x2B,
-    SendGroupcast = 0x2C,
-    // More notifications.
-    ReceivedAps = 0x30,
-    SendConfirm = 0x31,
-    ApsAckConfirm = 0x32,
-    DeviceJoined = 0x33,
-    DeviceLeft = 0x34,
-    FrameCounter = 0x35,
-    LinkKey = 0x36,
-    ApsDecryptFailure = 0x37,
-    LastReset = 0x38,
-    RouteRecord = 0x3A,
-    ApsFrameCounter = 0x3B,
-    BroadcastConfirm = 0x3C,
+    LoadRouteTable = 0x14,
+    LoadSourceRoutes = 0x15,
+    StartNetwork = 0x16,
+    // Introspection: one-shot info and streamed table scans.
+    GetNetworkInfo = 0x20,
+    ScanKeyTable = 0x21,
+    ScanChildren = 0x22,
+    ScanAddressCache = 0x23,
+    ScanRouteTable = 0x24,
+    // The send path and runtime control.
+    SendUnicast = 0x30,
+    SendBroadcast = 0x31,
+    SendGroupcast = 0x32,
+    CancelRequest = 0x33,
+    PermitJoins = 0x34,
+    SetChannel = 0x35,
+    SetNwkUpdateId = 0x36,
+    SetProvisionalKey = 0x37,
+    SetTunable = 0x38,
+    // Radio scans and packet capture.
+    EnergyScan = 0x40,
+    NetworkScan = 0x41,
+    PacketCapture = 0x42,
+    PacketCaptureChannel = 0x43,
 }
 
-impl From<CommandId> for u8 {
-    fn from(id: CommandId) -> Self {
-        id as Self
+impl From<RequestCommand> for u8 {
+    fn from(command: RequestCommand) -> Self {
+        command as Self
     }
 }
 
-/// How the host must route a device -> host frame. Inbound frames are always
-/// requests, so they carry no frame type. `Error` folds into `Response`: a
-/// response carries a [`Status`], so `Status::Ok` + payload is success and any
-/// other status + message is failure — one terminal path for the client.
-#[abstract_bits(bits = 8)]
+/// Device -> host opcodes for unsolicited [`FrameType::Notification`] frames. A
+/// separate namespace from [`RequestCommand`]; the frame type disambiguates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
+#[repr(u8)]
+pub enum NotificationCommand {
+    // Connection lifecycle.
+    Hello = 0x00,
+    LastReset = 0x01,
+    // Traffic: received frames and send verdicts.
+    ReceivedAps = 0x10,
+    SendConfirm = 0x11,
+    ApsAckConfirm = 0x12,
+    BroadcastConfirm = 0x13,
+    // Network membership.
+    DeviceJoined = 0x20,
+    DeviceLeft = 0x21,
+    // Security and routing state the host must persist or act on.
+    FrameCounter = 0x30,
+    ApsFrameCounter = 0x31,
+    LinkKey = 0x32,
+    ApsDecryptFailure = 0x33,
+    RouteRecord = 0x34,
+}
+
+impl From<NotificationCommand> for u8 {
+    fn from(command: NotificationCommand) -> Self {
+        command as Self
+    }
+}
+
+/// What a frame is, and which namespace its command byte indexes (see the module
+/// docs). Two bits of the [`Header`].
+#[abstract_bits(bits = 2)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum FrameType {
+    Request = 0,
     Response = 1,
     Event = 2,
     Notification = 3,
 }
 
-/// Response status. `Ok` carries the response payload; any other value carries a
-/// diagnostic message string instead (see [`Error`]).
+/// Response status. `Ok` is followed by the command's response payload; any other
+/// value by that status's tail (empty unless documented on the variant). The set is
+/// append-only — a new failure condition gets a new code, never a repurposed one —
+/// and clients must treat an unknown value as a generic failure.
 #[abstract_bits(bits = 8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Status {
-    Ok = 0,
-    Parse = 1,
-    UnknownCommand = 2,
-    InvalidState = 3,
-    NotConfigured = 4,
-    RadioError = 5,
-    NetworkStartFailed = 6,
-    TransmitFailed = 7,
-    ScanFailed = 8,
-    InvalidRequest = 9,
-    RateLimited = 10,
-    BudgetExhausted = 11,
+    Ok = 0x00,
+    /// The command is known but its payload did not decode.
+    MalformedPayload = 0x01,
+    UnknownCommand = 0x02,
+    /// The request decoded but is semantically invalid: a non-request frame type,
+    /// an empty source route, a bad tunable name or value.
+    InvalidRequest = 0x03,
+    // Lifecycle (the phased bring-up: unconfigured -> load window -> started).
+    NotConfigured = 0x10,
+    NotStarted = 0x11,
+    AlreadyStarted = 0x12,
+    // Send admission (synchronous rejects; delivery failures ride [`SendStatus`]).
+    /// Tail: `retry_in_ms: u32` ([`RateLimitedPayload`]).
+    RateLimited = 0x20,
+    BudgetExhausted = 0x21,
+    PayloadTooLong = 0x22,
+    SecurityUnavailable = 0x23,
+    /// No route to the destination exists, and the request's route control forbade
+    /// discovering one.
+    NoRoute = 0x24,
+    // Execution.
+    RadioError = 0x30,
+    NetworkStartFailed = 0x31,
+    ScanFailed = 0x32,
+    // Device-side failures.
+    /// The device built a reply exceeding [`MAX_FRAME`].
+    ResponseTooLarge = 0x40,
 }
 
 /// Role a `configure` sets the coordinator up as.
@@ -162,31 +224,24 @@ pub enum LeaveReason {
     KeepaliveTimeout = 2,
 }
 
-/// The 3-byte header of every host -> device frame (always a request).
+/// The 3-byte header leading every frame in both directions (the module docs show
+/// the bit layout). `request_id` is `u14` on the wire, `u16` in Rust.
 #[abstract_bits]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestHeader {
+pub struct Header {
     pub command: u8,
-    pub request_id: RequestId,
+    pub frame_type: FrameType,
+    pub request_id: u14,
 }
 
-impl RequestHeader {
-    /// Parse the request header off the front of a frame, returning it and the
-    /// number of bytes it consumed (the payload starts there).
+impl Header {
+    /// Parse the header off the front of a frame, returning it and the number of
+    /// bytes it consumed (the payload starts there).
     pub fn parse(bytes: &[u8]) -> Option<(Self, usize)> {
         let mut reader = BitReader::from(bytes);
         let header = Self::read_abstract_bits(&mut reader).ok()?;
         Some((header, reader.bytes_read()))
     }
-}
-
-/// The 4-byte header of every device -> host frame.
-#[abstract_bits]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplyHeader {
-    pub frame_type: FrameType,
-    pub command: u8,
-    pub request_id: RequestId,
 }
 
 // -- payload structs -------------------------------------------------------------
@@ -568,20 +623,10 @@ pub struct CapturedPacketPayload {
     pub psdu: Vec<u8>,
 }
 
-/// The body of a failed response: a `Status` other than `Ok` followed by a
-/// diagnostic, human-readable message.
-#[abstract_bits]
-#[derive(Debug, Clone)]
-pub struct ErrorPayload {
-    pub status: Status,
-    pub message_len: u16,
-    #[abstract_bits(length_from = message_len)]
-    pub message: Vec<u8>,
-}
-
 /// The body of a `Status::RateLimited` response: the delay (milliseconds) after which
-/// the host may retry the rejected send. Leads with `status` like [`ErrorPayload`], so
-/// the client dispatches on that byte and parses this body when it reads `RateLimited`.
+/// the host may retry the rejected send. Leads with `status` like every failed reply,
+/// so the client dispatches on that byte and parses this body when it reads
+/// `RateLimited`.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct RateLimitedPayload {
@@ -731,7 +776,6 @@ pub struct ApsDecryptFailPayload {
 
 /// A parsed host -> device request.
 pub enum Request {
-    Ping,
     Reset(ResetPayload),
     GetFirmwareInfo,
     GetHwAddress,
@@ -764,46 +808,37 @@ pub enum Request {
 }
 
 impl Request {
-    pub fn parse(command: CommandId, payload: &[u8]) -> Result<Self, Error> {
+    pub fn parse(command: RequestCommand, payload: &[u8]) -> Result<Self, Error> {
         Ok(match command {
-            CommandId::Ping => Self::Ping,
-            CommandId::Reset => Self::Reset(require(payload, "reset")?),
-            CommandId::GetFirmwareInfo => Self::GetFirmwareInfo,
-            CommandId::GetHwAddress => Self::GetHwAddress,
-            CommandId::Shutdown => Self::Shutdown,
-            CommandId::Configure => Self::Configure(require(payload, "configure")?),
-            CommandId::LoadKeyTable => Self::LoadKeyTable(require(payload, "key entries")?),
-            CommandId::LoadChildren => Self::LoadChildren(require(payload, "child entries")?),
-            CommandId::LoadAddressCache => {
-                Self::LoadAddressCache(require(payload, "addr entries")?)
-            }
-            CommandId::LoadRouteTable => Self::LoadRouteTable(require(payload, "route entries")?),
-            CommandId::LoadSourceRoutes => {
-                Self::LoadSourceRoutes(require(payload, "source route entries")?)
-            }
-            CommandId::StartNetwork => Self::StartNetwork,
-            CommandId::GetNetworkInfo => Self::GetNetworkInfo,
-            CommandId::ScanKeyTable => Self::ScanKeyTable,
-            CommandId::ScanChildren => Self::ScanChildren,
-            CommandId::ScanAddressCache => Self::ScanAddressCache,
-            CommandId::ScanRouteTable => Self::ScanRouteTable,
-            CommandId::SendUnicast => Self::SendUnicast(require(payload, "send_unicast")?),
-            CommandId::SendBroadcast => Self::SendBroadcast(require(payload, "send_broadcast")?),
-            CommandId::SendGroupcast => Self::SendGroupcast(require(payload, "send_groupcast")?),
-            CommandId::PermitJoins => Self::PermitJoins(require(payload, "permit_joins")?),
-            CommandId::SetChannel => Self::SetChannel(require(payload, "channel")?),
-            CommandId::SetNwkUpdateId => Self::SetNwkUpdateId(require(payload, "update id")?),
-            CommandId::SetProvisionalKey => Self::SetProvisionalKey(require(payload, "key")?),
-            CommandId::EnergyScan => Self::EnergyScan(require(payload, "energy_scan")?),
-            CommandId::NetworkScan => Self::NetworkScan(require(payload, "network_scan")?),
-            CommandId::PacketCapture => Self::PacketCapture(require(payload, "channel")?),
-            CommandId::PacketCaptureChannel => {
-                Self::PacketCaptureChannel(require(payload, "channel")?)
-            }
-            CommandId::SetTunable => Self::SetTunable(require(payload, "set_tunable")?),
-            CommandId::CancelRequest => Self::CancelRequest(require(payload, "cancel_request")?),
-            // Everything else (the device -> host notification opcodes) is not a request.
-            _ => return Err(Error::new(Status::UnknownCommand, "not a request")),
+            RequestCommand::Reset => Self::Reset(require(payload)?),
+            RequestCommand::GetFirmwareInfo => Self::GetFirmwareInfo,
+            RequestCommand::GetHwAddress => Self::GetHwAddress,
+            RequestCommand::Shutdown => Self::Shutdown,
+            RequestCommand::Configure => Self::Configure(require(payload)?),
+            RequestCommand::LoadKeyTable => Self::LoadKeyTable(require(payload)?),
+            RequestCommand::LoadChildren => Self::LoadChildren(require(payload)?),
+            RequestCommand::LoadAddressCache => Self::LoadAddressCache(require(payload)?),
+            RequestCommand::LoadRouteTable => Self::LoadRouteTable(require(payload)?),
+            RequestCommand::LoadSourceRoutes => Self::LoadSourceRoutes(require(payload)?),
+            RequestCommand::StartNetwork => Self::StartNetwork,
+            RequestCommand::GetNetworkInfo => Self::GetNetworkInfo,
+            RequestCommand::ScanKeyTable => Self::ScanKeyTable,
+            RequestCommand::ScanChildren => Self::ScanChildren,
+            RequestCommand::ScanAddressCache => Self::ScanAddressCache,
+            RequestCommand::ScanRouteTable => Self::ScanRouteTable,
+            RequestCommand::SendUnicast => Self::SendUnicast(require(payload)?),
+            RequestCommand::SendBroadcast => Self::SendBroadcast(require(payload)?),
+            RequestCommand::SendGroupcast => Self::SendGroupcast(require(payload)?),
+            RequestCommand::PermitJoins => Self::PermitJoins(require(payload)?),
+            RequestCommand::SetChannel => Self::SetChannel(require(payload)?),
+            RequestCommand::SetNwkUpdateId => Self::SetNwkUpdateId(require(payload)?),
+            RequestCommand::SetProvisionalKey => Self::SetProvisionalKey(require(payload)?),
+            RequestCommand::EnergyScan => Self::EnergyScan(require(payload)?),
+            RequestCommand::NetworkScan => Self::NetworkScan(require(payload)?),
+            RequestCommand::PacketCapture => Self::PacketCapture(require(payload)?),
+            RequestCommand::PacketCaptureChannel => Self::PacketCaptureChannel(require(payload)?),
+            RequestCommand::SetTunable => Self::SetTunable(require(payload)?),
+            RequestCommand::CancelRequest => Self::CancelRequest(require(payload)?),
         })
     }
 }
@@ -831,39 +866,30 @@ impl Response {
             Self::CancelResult(payload) => append(&mut bytes, payload),
         };
         if !fits {
-            return Error::new(Status::InvalidRequest, "reply too large")
-                .frame(command, request_id);
+            return Error::Status(Status::ResponseTooLarge).frame(command, request_id);
         }
         bytes
     }
 }
 
 /// A failed reply. The client always branches on the `Status` byte that leads the
-/// body; each variant serializes a body shaped for what that status needs to convey.
+/// body; each variant serializes that status's tail (nothing, for most of them).
 pub enum Error {
-    /// The catch-all: a non-`Ok` [`Status`] plus a diagnostic message for humans.
-    Generic { status: Status, message: String },
+    Status(Status),
     /// `Status::RateLimited` with a machine-readable retry delay, so the host can pace
     /// itself instead of busy-retrying a rejected broadcast.
-    RateLimited { retry_in: Duration },
+    RateLimited {
+        retry_in: Duration,
+    },
+}
+
+impl From<Status> for Error {
+    fn from(status: Status) -> Self {
+        Self::Status(status)
+    }
 }
 
 impl Error {
-    pub fn new(status: Status, message: &str) -> Self {
-        Self::Generic {
-            status,
-            message: message.to_string(),
-        }
-    }
-
-    pub fn parse(what: &str) -> Self {
-        Self::new(Status::Parse, what)
-    }
-
-    pub fn not_configured() -> Self {
-        Self::new(Status::NotConfigured, "")
-    }
-
     pub const fn rate_limited(retry_in: Duration) -> Self {
         Self::RateLimited { retry_in }
     }
@@ -871,15 +897,8 @@ impl Error {
     pub fn frame(&self, command: u8, request_id: RequestId) -> Vec<u8> {
         let mut bytes = envelope(FrameType::Response, command, request_id);
         match self {
-            Self::Generic { status, message } => {
-                let message = &message.as_bytes()[..message.len().min(255)];
-                append(
-                    &mut bytes,
-                    &ErrorPayload {
-                        status: *status,
-                        message: message.to_vec(),
-                    },
-                );
+            Self::Status(status) => {
+                append(&mut bytes, status);
             }
             Self::RateLimited { retry_in } => {
                 append(
@@ -910,13 +929,13 @@ pub enum Event {
 impl Event {
     pub fn frame(&self, request_id: RequestId) -> Option<Vec<u8>> {
         let command = match self {
-            Self::KeyEntry(_) => CommandId::ScanKeyTable,
-            Self::Child(_) => CommandId::ScanChildren,
-            Self::Address(_) => CommandId::ScanAddressCache,
-            Self::Route(_) => CommandId::ScanRouteTable,
-            Self::EnergyResult(_) => CommandId::EnergyScan,
-            Self::Beacon(_) => CommandId::NetworkScan,
-            Self::CapturedPacket(_) => CommandId::PacketCapture,
+            Self::KeyEntry(_) => RequestCommand::ScanKeyTable,
+            Self::Child(_) => RequestCommand::ScanChildren,
+            Self::Address(_) => RequestCommand::ScanAddressCache,
+            Self::Route(_) => RequestCommand::ScanRouteTable,
+            Self::EnergyResult(_) => RequestCommand::EnergyScan,
+            Self::Beacon(_) => RequestCommand::NetworkScan,
+            Self::CapturedPacket(_) => RequestCommand::PacketCapture,
         };
         let mut bytes = envelope(FrameType::Event, command.into(), request_id);
         let fits = match self {
@@ -953,19 +972,21 @@ pub enum Notification {
 impl Notification {
     pub fn frame(&self) -> Option<Vec<u8>> {
         let (command, request_id) = match self {
-            Self::Hello(_) => (CommandId::Hello, 0),
-            Self::LastReset(_) => (CommandId::LastReset, 0),
-            Self::ReceivedAps(_) => (CommandId::ReceivedAps, 0),
-            Self::SendConfirm(request_id, _) => (CommandId::SendConfirm, *request_id),
-            Self::ApsAckConfirm(request_id, _) => (CommandId::ApsAckConfirm, *request_id),
-            Self::BroadcastConfirm(request_id, _) => (CommandId::BroadcastConfirm, *request_id),
-            Self::DeviceJoined(_) => (CommandId::DeviceJoined, 0),
-            Self::DeviceLeft(_) => (CommandId::DeviceLeft, 0),
-            Self::FrameCounter(_) => (CommandId::FrameCounter, 0),
-            Self::LinkKey(_) => (CommandId::LinkKey, 0),
-            Self::ApsDecryptFailure(_) => (CommandId::ApsDecryptFailure, 0),
-            Self::RouteRecord(_) => (CommandId::RouteRecord, 0),
-            Self::ApsFrameCounter(_) => (CommandId::ApsFrameCounter, 0),
+            Self::Hello(_) => (NotificationCommand::Hello, 0),
+            Self::LastReset(_) => (NotificationCommand::LastReset, 0),
+            Self::ReceivedAps(_) => (NotificationCommand::ReceivedAps, 0),
+            Self::SendConfirm(request_id, _) => (NotificationCommand::SendConfirm, *request_id),
+            Self::ApsAckConfirm(request_id, _) => (NotificationCommand::ApsAckConfirm, *request_id),
+            Self::BroadcastConfirm(request_id, _) => {
+                (NotificationCommand::BroadcastConfirm, *request_id)
+            }
+            Self::DeviceJoined(_) => (NotificationCommand::DeviceJoined, 0),
+            Self::DeviceLeft(_) => (NotificationCommand::DeviceLeft, 0),
+            Self::FrameCounter(_) => (NotificationCommand::FrameCounter, 0),
+            Self::LinkKey(_) => (NotificationCommand::LinkKey, 0),
+            Self::ApsDecryptFailure(_) => (NotificationCommand::ApsDecryptFailure, 0),
+            Self::RouteRecord(_) => (NotificationCommand::RouteRecord, 0),
+            Self::ApsFrameCounter(_) => (NotificationCommand::ApsFrameCounter, 0),
         };
         let mut bytes = envelope(FrameType::Notification, command.into(), request_id);
         let fits = match self {
@@ -1010,9 +1031,9 @@ pub fn envelope(frame_type: FrameType, command: u8, request_id: RequestId) -> Ve
     let mut bytes = Vec::with_capacity(32);
     append(
         &mut bytes,
-        &ReplyHeader {
-            frame_type,
+        &Header {
             command,
+            frame_type,
             request_id,
         },
     );
@@ -1025,6 +1046,6 @@ pub fn parse<T: AbstractBits>(payload: &[u8]) -> Option<T> {
     T::read_abstract_bits(&mut reader).ok()
 }
 
-pub fn require<T: AbstractBits>(payload: &[u8], what: &str) -> Result<T, Error> {
-    parse(payload).ok_or_else(|| Error::parse(what))
+pub fn require<T: AbstractBits>(payload: &[u8]) -> Result<T, Error> {
+    parse(payload).ok_or(Error::Status(Status::MalformedPayload))
 }

@@ -15,3 +15,4 @@ ziggurat-driver = { path = "../ziggurat-driver", default-features = false }
 abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
 arbitrary-int = "2.1.1"
 num_enum = { version = "0.7.6", default-features = false }
+tracing = { version = "0.1", default-features = false }

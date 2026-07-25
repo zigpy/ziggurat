@@ -52,9 +52,11 @@ const fn capture_config(channel: u8) -> RadioConfig {
     }
 }
 
-/// Map a serial-port open failure to a protocol error.
-fn radio_error(e: impl ToString) -> proto::Error {
-    proto::Error::new(proto::Status::RadioError, &e.to_string())
+/// Log a radio-layer failure and map it to its wire error. The diagnostic stays in
+/// the log (correlated by the request span); the wire carries only the status.
+fn radio_error(e: impl std::fmt::Display) -> proto::Error {
+    tracing::warn!("Radio error: {e}");
+    proto::Status::RadioError.into()
 }
 
 /// One connection's send-confirmation machinery: a per-connection [`proto::SendTracker`]
@@ -368,13 +370,9 @@ impl ZigguratServer {
                             break 'read;
                         }
                     }
-                    Err(cobs::DecodeError::EmptyFrame)
-                    | Err(cobs::DecodeError::InvalidFrame { decoded_bytes: _ })
-                    | Err(cobs::DecodeError::TargetBufTooSmall) => {
-                        let _ = outbound_tx
-                            .send(proto::Error::parse("cobs").frame(0, 0))
-                            .await;
-                    }
+                    // Unframeable input is attributable to no request, so nothing
+                    // useful can be sent back; it only merits a log line.
+                    Err(e) => tracing::warn!("COBS decode failed: {e:?}"),
                 }
             }
         }
@@ -402,16 +400,25 @@ impl ZigguratServer {
         outbound: &mpsc::Sender<Vec<u8>>,
         sends: &Sends,
     ) -> bool {
-        let Some((header, consumed)) = proto::RequestHeader::parse(bytes) else {
-            return outbound
-                .send(proto::Error::parse("truncated header").frame(0, 0))
-                .await
-                .is_ok();
+        let Some((header, consumed)) = proto::Header::parse(bytes) else {
+            tracing::warn!("Frame from {addr} is shorter than a header");
+            return true;
         };
         let payload = &bytes[consumed..];
 
-        let request = proto::CommandId::try_from(header.command)
-            .map_err(|_| proto::Error::new(proto::Status::UnknownCommand, ""))
+        if header.frame_type != proto::FrameType::Request {
+            tracing::warn!("Inbound frame from {addr} is not a request");
+            return outbound
+                .send(
+                    proto::Error::from(proto::Status::InvalidRequest)
+                        .frame(header.command, header.request_id),
+                )
+                .await
+                .is_ok();
+        }
+
+        let request = proto::RequestCommand::try_from(header.command)
+            .map_err(|_| proto::Error::from(proto::Status::UnknownCommand))
             .and_then(|command| proto::Request::parse(command, payload));
 
         tracing::debug!("Request from {addr}: command={:#04x}", header.command);
@@ -433,7 +440,7 @@ impl ZigguratServer {
     /// emits exactly one response or error, preceded by any streamed events.
     fn dispatch(
         self: &Arc<Self>,
-        header: proto::RequestHeader,
+        header: proto::Header,
         request: proto::Request,
         outbound: mpsc::Sender<Vec<u8>>,
         sends: Sends,
@@ -463,18 +470,17 @@ impl ZigguratServer {
     /// The stack, in any state after `configure`.
     fn configured(&self) -> Result<Arc<ZigbeeStack<SpinelPhy>>, proto::Error> {
         self.current_stack()
-            .ok_or_else(proto::Error::not_configured)
+            .ok_or(proto::Error::Status(proto::Status::NotConfigured))
     }
 
     /// The stack, if it is in the load window (configured but not started).
     fn loadable(&self) -> Result<Arc<ZigbeeStack<SpinelPhy>>, proto::Error> {
         match self.current_stack() {
-            Some(_) if self.started.load(Ordering::SeqCst) => Err(proto::Error::new(
-                proto::Status::InvalidState,
-                "network already started",
-            )),
+            Some(_) if self.started.load(Ordering::SeqCst) => {
+                Err(proto::Status::AlreadyStarted.into())
+            }
             Some(stack) => Ok(stack),
-            None => Err(proto::Error::not_configured()),
+            None => Err(proto::Status::NotConfigured.into()),
         }
     }
 
@@ -482,7 +488,8 @@ impl ZigguratServer {
     fn running(&self) -> Result<Arc<ZigbeeStack<SpinelPhy>>, proto::Error> {
         match self.current_stack() {
             Some(stack) if self.started.load(Ordering::SeqCst) => Ok(stack),
-            _ => Err(proto::Error::not_configured()),
+            Some(_) => Err(proto::Status::NotStarted.into()),
+            None => Err(proto::Status::NotConfigured.into()),
         }
     }
 
@@ -497,7 +504,6 @@ impl ZigguratServer {
     ) -> Result<proto::Response, proto::Error> {
         use proto::Request as R;
         match request {
-            R::Ping => Ok(proto::Response::Empty),
             R::Reset(payload) => self.handle_reset(payload).await,
             R::GetFirmwareInfo => Ok(proto::Response::FirmwareInfo(proto::FirmwareInfoPayload {
                 protocol_version: proto::PROTOCOL_VERSION,
@@ -633,9 +639,7 @@ impl ZigguratServer {
     ) -> Result<proto::Response, proto::Error> {
         if payload.hard {
             let phy = self.phy().await.map_err(radio_error)?;
-            phy.reset()
-                .await
-                .map_err(|e| proto::Error::new(proto::Status::RadioError, &e.to_string()))?;
+            phy.reset().await.map_err(radio_error)?;
         }
 
         Ok(proto::Response::Empty)
@@ -643,10 +647,7 @@ impl ZigguratServer {
 
     async fn handle_get_hw_address(&self) -> Result<proto::Response, proto::Error> {
         let phy = self.phy().await.map_err(radio_error)?;
-        let ieee = phy
-            .hw_address()
-            .await
-            .map_err(|e| proto::Error::new(proto::Status::RadioError, &e.to_string()))?;
+        let ieee = phy.hw_address().await.map_err(radio_error)?;
         Ok(proto::Response::HwAddress(proto::HwAddressPayload { ieee }))
     }
 
@@ -657,7 +658,7 @@ impl ZigguratServer {
         let phy = self.phy().await.map_err(radio_error)?;
         phy.set_frame_pending_table(&[], &[])
             .await
-            .map_err(|e| proto::Error::new(proto::Status::RadioError, &e.to_string()))?;
+            .map_err(radio_error)?;
 
         Ok(proto::Response::Empty)
     }
@@ -705,10 +706,8 @@ impl ZigguratServer {
         let stack = self.loadable()?;
 
         if let Err(e) = stack.start_network().await {
-            return Err(proto::Error::new(
-                proto::Status::NetworkStartFailed,
-                &e.to_string(),
-            ));
+            tracing::warn!("Network start failed: {e}");
+            return Err(proto::Status::NetworkStartFailed.into());
         }
 
         stack.spawn_tracked(|arc_self| async move {
@@ -795,7 +794,8 @@ impl ZigguratServer {
                     }
                 }
                 Err(e) => {
-                    return Err(proto::Error::new(proto::Status::ScanFailed, &e.to_string()));
+                    tracing::warn!("Energy scan failed: {e}");
+                    return Err(proto::Status::ScanFailed.into());
                 }
             }
         }
@@ -838,8 +838,14 @@ impl ZigguratServer {
 
         match scan.await {
             Ok(Ok(())) => Ok(proto::Response::Empty),
-            Ok(Err(e)) => Err(proto::Error::new(proto::Status::ScanFailed, &e.to_string())),
-            Err(e) => Err(proto::Error::new(proto::Status::ScanFailed, &e.to_string())),
+            Ok(Err(e)) => {
+                tracing::warn!("Network scan failed: {e}");
+                Err(proto::Status::ScanFailed.into())
+            }
+            Err(e) => {
+                tracing::warn!("Network scan task failed: {e}");
+                Err(proto::Status::ScanFailed.into())
+            }
         }
     }
 
@@ -857,7 +863,7 @@ impl ZigguratServer {
 
         phy.reconfigure(&capture_config(payload.channel))
             .await
-            .map_err(|e| proto::Error::new(proto::Status::RadioError, &e.to_string()))?;
+            .map_err(radio_error)?;
 
         // The stream outlives this request, ending when the connection's outbound
         // queue closes (the client disconnected).
@@ -891,7 +897,7 @@ impl ZigguratServer {
 
         phy.reconfigure(&capture_config(payload.channel))
             .await
-            .map_err(|e| proto::Error::new(proto::Status::RadioError, &e.to_string()))?;
+            .map_err(radio_error)?;
 
         Ok(proto::Response::Empty)
     }

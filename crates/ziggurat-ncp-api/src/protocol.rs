@@ -1,7 +1,6 @@
 //! Embedded dispatch for the binary control protocol: it routes parsed requests to
 //! the live `ZigbeeStack` and streams the replies onto [`crate::OUTBOUND`].
 
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -10,9 +9,9 @@ use ziggurat_driver::runtime::Spawn;
 use ziggurat_driver::zigbee_stack::{Tunables, ZigbeeStack};
 use ziggurat_phy::{RadioPhy, Receiver};
 use ziggurat_protocol::{
-    self as proto, CapturedPacketPayload, ChannelPayload, CommandId, ConfigurePayload,
-    EnergyResultPayload, Error, Event, FirmwareInfoPayload, HwAddressPayload, NwkUpdateIdPayload,
-    PermitJoinsPayload, ProvisionalKeyPayload, Request, RequestHeader, RequestId, ResetPayload,
+    self as proto, CapturedPacketPayload, ChannelPayload, ConfigurePayload, EnergyResultPayload,
+    Error, Event, FirmwareInfoPayload, FrameType, Header, HwAddressPayload, NwkUpdateIdPayload,
+    PermitJoinsPayload, ProvisionalKeyPayload, Request, RequestCommand, RequestId, ResetPayload,
     Response, ScanCountPayload, ScanRequestPayload, Status,
 };
 
@@ -34,15 +33,21 @@ async fn send_event(request_id: RequestId, event: Event) {
 /// Dispatch one inbound frame; every path emits exactly one response or error,
 /// preceded by any streamed events.
 pub async fn handle_frame<P: RadioPhy>(app: &mut App<P>, bytes: &[u8]) {
-    let Some((header, consumed)) = RequestHeader::parse(bytes) else {
-        send_outbound(Error::parse("truncated header").frame(0, 0)).await;
+    let Some((header, consumed)) = Header::parse(bytes) else {
+        tracing::warn!("Inbound frame is shorter than a header");
         return;
     };
     let payload = &bytes[consumed..];
     let request_id = header.request_id;
 
-    let request = CommandId::try_from(header.command)
-        .map_err(|_| Error::new(Status::UnknownCommand, ""))
+    if header.frame_type != FrameType::Request {
+        tracing::warn!("Inbound frame is not a request");
+        send_outbound(Error::from(Status::InvalidRequest).frame(header.command, request_id)).await;
+        return;
+    }
+
+    let request = RequestCommand::try_from(header.command)
+        .map_err(|_| Error::from(Status::UnknownCommand))
         .and_then(|command| Request::parse(command, payload));
 
     let reply = match request {
@@ -63,7 +68,6 @@ async fn dispatch<P: RadioPhy>(
     request: Request,
 ) -> Result<Response, Error> {
     match request {
-        Request::Ping => Ok(Response::Empty),
         Request::Reset(payload) => handle_reset(app, payload),
         Request::GetFirmwareInfo => {
             let version = concat!("ziggurat/", env!("CARGO_PKG_VERSION"));
@@ -181,15 +185,15 @@ async fn dispatch<P: RadioPhy>(
 
 /// The stack, in any state after `configure`.
 fn configured<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
-    app.stack.as_ref().ok_or_else(Error::not_configured)
+    app.stack.as_ref().ok_or(Error::Status(Status::NotConfigured))
 }
 
 /// The stack, if it is in the load window (configured but not started).
 fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
     match app.stack.as_ref() {
         Some(stack) if !app.started => Ok(stack),
-        Some(_) => Err(Error::new(Status::InvalidState, "network already started")),
-        None => Err(Error::not_configured()),
+        Some(_) => Err(Status::AlreadyStarted.into()),
+        None => Err(Status::NotConfigured.into()),
     }
 }
 
@@ -197,7 +201,8 @@ fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
 fn running<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
     match app.stack.as_ref() {
         Some(stack) if app.started => Ok(stack),
-        _ => Err(Error::not_configured()),
+        Some(_) => Err(Status::NotStarted.into()),
+        None => Err(Status::NotConfigured.into()),
     }
 }
 
@@ -229,7 +234,8 @@ async fn handle_shutdown<P: RadioPhy>(app: &mut App<P>) -> Result<Response, Erro
 
     // Clear the source-match table
     if let Err(e) = app.phy.set_frame_pending_table(&[], &[]).await {
-        return Err(Error::new(Status::RadioError, &e.to_string()));
+        tracing::warn!("Failed to clear the frame-pending table: {e}");
+        return Err(Status::RadioError.into());
     }
 
     Ok(Response::Empty)
@@ -263,7 +269,8 @@ async fn handle_start_network<P: RadioPhy>(app: &mut App<P>) -> Result<Response,
     let stack = loadable(app)?.clone();
 
     if let Err(e) = stack.start_network().await {
-        return Err(Error::new(Status::NetworkStartFailed, &e.to_string()));
+        tracing::warn!("Network start failed: {e}");
+        return Err(Status::NetworkStartFailed.into());
     }
 
     spawn_stack_pumps(&stack, app.sends.clone());
@@ -307,7 +314,10 @@ async fn handle_set_channel<P: RadioPhy>(
 
     match stack.set_channel(request.channel).await {
         Ok(()) => Ok(Response::Empty),
-        Err(e) => Err(Error::new(Status::RadioError, &e.to_string())),
+        Err(e) => {
+            tracing::warn!("set_channel failed: {e}");
+            Err(Status::RadioError.into())
+        }
     }
 }
 
@@ -349,7 +359,10 @@ async fn handle_energy_scan<P: RadioPhy>(
                 )
                 .await;
             }
-            Err(e) => return Err(Error::new(Status::ScanFailed, &e.to_string())),
+            Err(e) => {
+                tracing::warn!("Energy scan failed: {e}");
+                return Err(Status::ScanFailed.into());
+            }
         }
     }
 
@@ -379,7 +392,10 @@ async fn handle_network_scan<P: RadioPhy>(
 
     match result {
         Ok(()) => Ok(Response::Empty),
-        Err(e) => Err(Error::new(Status::ScanFailed, &e.to_string())),
+        Err(e) => {
+            tracing::warn!("Network scan failed: {e}");
+            Err(Status::ScanFailed.into())
+        }
     }
 }
 
@@ -389,7 +405,8 @@ async fn handle_packet_capture<P: RadioPhy>(
     request: ChannelPayload,
 ) -> Result<Response, Error> {
     if let Err(e) = app.phy.reconfigure(&capture_config(request.channel)).await {
-        return Err(Error::new(Status::RadioError, &e.to_string()));
+        tracing::warn!("Capture reconfigure failed: {e}");
+        return Err(Status::RadioError.into());
     }
 
     // Already capturing: the reconfigure above retuned it; don't spawn a second task.
@@ -429,6 +446,9 @@ async fn handle_packet_capture_channel<P: RadioPhy>(
 ) -> Result<Response, Error> {
     match app.phy.reconfigure(&capture_config(request.channel)).await {
         Ok(()) => Ok(Response::Empty),
-        Err(e) => Err(Error::new(Status::RadioError, &e.to_string())),
+        Err(e) => {
+            tracing::warn!("Capture reconfigure failed: {e}");
+            Err(Status::RadioError.into())
+        }
     }
 }
