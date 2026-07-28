@@ -86,8 +86,7 @@ impl TableEntry {
     /// Update this entry to route through `next_hop` at advertised `cost`, honoring the
     /// spec 3.6.4.5.3 suitability rule: an ACTIVE entry is only replaced by a strictly
     /// cheaper route, so a worse advertisement never clobbers a good route or forms a
-    /// loop. Returns whether the active route actually changed (a fresh establishment or
-    /// a different hop), for change tracking.
+    /// loop.
     fn consider_route(&mut self, next_hop: Nwk, cost: u8) -> bool {
         if self.status == Status::Active && cost >= self.path_cost {
             return false;

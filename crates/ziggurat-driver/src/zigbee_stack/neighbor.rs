@@ -8,7 +8,9 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 
 use crate::frame_token::TrafficClass;
 
-use super::{NwkSecurityMode, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack};
+use super::{
+    Broadcast, NwkSecurityMode, SendHandle, TrackStage, TxPolicy, TxPriority, ZigbeeStack,
+};
 
 /// Maximum number of link status entries that can be carried in a single frame.
 const MAX_LINK_STATUSES: usize = 7;
@@ -33,9 +35,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::info!("Child {eui64:?} ({nwk:?}) is now parented by {new_parent:?}");
 
         self.drop_indirect_transactions(Some(eui64), nwk);
-        if self.core().nib.routing.remove_route(nwk) {
-            self.push_notification(ZigbeeNotification::RouteRemoved { destination: nwk });
-        }
+        self.core().nib.routing.remove_route(nwk);
     }
 
     /// Drop our child entry for a device known to have attached to another parent.
@@ -93,12 +93,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.link_status_received.notify_one();
     }
 
-    pub async fn send_link_status_broadcast(&self, empty: bool) {
+    /// Broadcast the link status notification.
+    pub fn send_link_status_broadcast(&self, empty: bool) -> SendHandle {
         tracing::debug!("Sending periodic link status broadcast");
+
+        let (handle, slot) = SendHandle::new();
 
         if self.state.network_address == Nwk(0xFFFF) {
             tracing::debug!("Skipping, stack has not been initialized yet");
-            return;
+            slot.resolve(TrackStage::Delivery, Ok(()));
+            return handle;
         }
 
         // Decrement the `recent_activity` field of every active routing table entry
@@ -140,43 +144,50 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         link_statuses: link_statuses[start..end].to_vec(),
                     }),
                 )
-                .with_radius(1)
-                // Sent via `transmit_*`, which does not assign sequence numbers
-                .with_sequence_number(self.next_nwk_sequence_number());
+                .with_radius(1);
+
+            // The last frame carries the tracking slot; earlier chunks are
+            // fire-and-forget. They drain the single sender in enqueue order, so the
+            // last frame's handoff implies the whole batch was transmitted.
+            let is_last = end == total;
 
             // Spec 3.6.4.4.1: link statuses are one-hop broadcasts sent without
             // retries. Nobody relays a radius-1 frame, so the passive ack machinery
             // of the regular broadcast path could never complete for them anyway.
-            if let Err(err) = self
-                .transmit_broadcast_nwk_frame(
-                    link_status_frame,
-                    NwkSecurityMode::NetworkKey,
-                    // Housekeeping the mesh depends on: last to transmit, but never
-                    // memory-starved by a host flood
-                    TxPolicy {
-                        priority: TxPriority::Background,
-                        class: TrafficClass::Critical,
-                    },
-                )
-                .await
-            {
-                tracing::warn!("Failed to broadcast link status: {err}");
-            }
+            self.send_oneshot_broadcast(Broadcast {
+                frame: link_status_frame,
+                security: NwkSecurityMode::NetworkKey,
+                // Housekeeping the mesh depends on: last to transmit, but never
+                // memory-starved by a host flood
+                policy: TxPolicy {
+                    priority: TxPriority::Background,
+                    class: TrafficClass::Critical,
+                },
+                slot: is_last.then(|| slot.clone()),
+            });
 
-            if end == total {
+            if is_last {
                 break;
             }
 
             // Repeat the boundary entry as the first of the next frame
             start = end - 1;
         }
+
+        handle
     }
 
     pub async fn periodic_link_status_broadcast_task(&self) {
-        loop {
-            R::sleep(self.tunables.link_status_period()).await;
+        let mut next = self.core_now() + self.tunables.link_status_period();
 
-            self.send_link_status_broadcast(false).await;
+        loop {
+            self.sleep_until_core(next).await;
+
+            // The link status broadcast has a radius of 1 so delivery does not wait for
+            // a relay quorum.
+            let _ = self.send_link_status_broadcast(false).delivered().await;
+
+            next = next + self.tunables.link_status_period();
         }
     }
 }

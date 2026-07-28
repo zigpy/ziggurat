@@ -4,7 +4,7 @@ use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Iee
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{RadioError, RadioPhy};
 
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
@@ -12,8 +12,8 @@ use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 use ziggurat_zigbee::indirect::Delivery;
 
 use super::{
-    DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind, TxOutcome,
-    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    DeliveryError, DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind,
+    TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -99,8 +99,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (destination, transaction) in outcome.expired {
             self.resolve_outcome(
                 transaction.completion,
-                None,
-                Err(ZigbeeStackError::IndirectExpired { destination }),
+                Err(DeliveryError::IndirectExpired { destination }),
             );
         }
 
@@ -177,8 +176,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (destination, transaction) in dropped {
             self.resolve_outcome(
                 transaction.completion,
-                None,
-                Err(ZigbeeStackError::IndirectExpired { destination }),
+                Err(DeliveryError::IndirectExpired { destination }),
             );
         }
 
@@ -250,7 +248,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Replace the RCP source address match table with the addresses of every device
     /// that has queued indirect transactions.
-    pub(super) async fn write_src_match_table(&self) -> Result<(), ZigbeeStackError> {
+    pub(super) async fn write_src_match_table(&self) -> Result<(), RadioError> {
         let table = {
             let core = self.core();
 
@@ -316,8 +314,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
             self.resolve_outcome(
                 transaction.completion,
-                None,
-                Err(ZigbeeStackError::IndirectExpired { destination }),
+                Err(DeliveryError::IndirectExpired { destination }),
             );
         }
 
@@ -337,9 +334,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // The address map entry and any negotiated link key are kept so that the
             // device can rejoin later (mirrors `handle_leave`)
             self.drop_indirect_transactions(Some(eui64), nwk);
-            if self.core().nib.routing.remove_route(nwk) {
-                self.push_notification(ZigbeeNotification::RouteRemoved { destination: nwk });
-            }
+            self.core().nib.routing.remove_route(nwk);
 
             self.push_notification(ZigbeeNotification::DeviceLeft {
                 nwk,

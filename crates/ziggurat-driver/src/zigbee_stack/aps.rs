@@ -5,11 +5,9 @@ use ziggurat_zigbee::aps::frame::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType,
     EncryptedApsAckFrame, EncryptedApsDataFrame,
 };
-use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_LOW_POWER_ROUTERS, BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery,
-};
+use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
-use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp;
 use core::time::Duration;
@@ -18,8 +16,9 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::flat_map::Entry;
 
 use super::{
-    ApsAck, ApsAckData, ApsAckResult, NwkSecurityMode, PendingApsAck, RequestId, RouteDirective,
-    SendMode, TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack, ZigbeeStackError,
+    ApsAck, ApsAckData, Broadcast, DeliveryError, EnqueueError, NwkSecurityMode, PendingApsAck,
+    RouteDirective, SendHandle, SendMode, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority,
+    Unicast, ZigbeeStack,
 };
 use crate::frame_token::TrafficClass;
 
@@ -87,11 +86,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::trace!("Received APS ack: {ack_data:?}");
 
         let pending = self.state.pending_aps_acks.lock().remove(&ack_data);
-        if let Some(PendingApsAck { request_id, .. }) = pending {
-            self.push_notification(ZigbeeNotification::ApsAckConfirm {
-                request_id,
-                result: ApsAckResult::Acked,
-            });
+        if let Some(PendingApsAck { slot, .. }) = pending {
+            slot.resolve(TrackStage::Delivery, Ok(()));
         }
     }
 
@@ -171,134 +167,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Send our ACK back to the sender
         let aps_ack_frame = self
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
+            .expect("ACK frame is always valid")
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.background_send_nwk_frame(
-            aps_ack_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Route(RouteDirective::StackDecides),
-        );
-    }
-
-    /// Build the NWK frame carrying an APS data frame, plus the ack-correlation data when
-    /// an end-to-end ack was requested. Shared by the awaiting [`Self::send_aps_command`]
-    /// and the fire-and-forget [`Self::send_aps`].
-    ///
-    /// `aps_security` requests APS encryption of the ASDU with the link key shared
-    /// with that device (unicast only: link keys are pairwise).
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn prepare_aps_send(
-        &self,
-        delivery_mode: ApsDeliveryMode,
-        destination: Nwk,
-        profile_id: u16,
-        cluster_id: u16,
-        src_ep: u8,
-        dst_ep: u8,
-        aps_ack: ApsAck,
-        radius: u8,
-        aps_seq: u8,
-        data: Vec<u8>,
-        aps_security: Option<Eui64>,
-    ) -> Result<(NwkFrame, Option<ApsAckData>), ZigbeeStackError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| ZigbeeStackError::PayloadTooLong)?;
-
-        let aps_frame = match delivery_mode {
-            ApsDeliveryMode::Unicast => ApsDataFrame {
-                frame_control: ApsFrameControl {
-                    frame_type: ApsFrameType::Data,
-                    delivery_mode: ApsDeliveryMode::Unicast,
-                    reserved1: 0b0,
-                    security: aps_security.is_some(),
-                    ack_request: aps_ack == ApsAck::Request,
-                    extended_header: false,
-                },
-                group_id: None,
-                destination_endpoint: Some(dst_ep),
-                cluster_id,
-                profile_id,
-                source_endpoint: src_ep,
-                counter: aps_seq,
-                asdu,
-            },
-            ApsDeliveryMode::Broadcast => ApsDataFrame {
-                frame_control: ApsFrameControl {
-                    frame_type: ApsFrameType::Data,
-                    delivery_mode: ApsDeliveryMode::Broadcast,
-                    reserved1: 0b0,
-                    security: false,
-                    ack_request: false,
-                    extended_header: false,
-                },
-                group_id: None,
-                destination_endpoint: Some(dst_ep),
-                cluster_id,
-                profile_id,
-                source_endpoint: src_ep,
-                counter: aps_seq,
-                asdu,
-            },
-            ApsDeliveryMode::Multicast => ApsDataFrame {
-                frame_control: ApsFrameControl {
-                    frame_type: ApsFrameType::Data,
-                    delivery_mode: ApsDeliveryMode::Multicast,
-                    reserved1: 0b0,
-                    security: false,
-                    ack_request: false,
-                    extended_header: false,
-                },
-                group_id: Some(destination.as_u16()),
-                destination_endpoint: None,
-                cluster_id,
-                profile_id,
-                source_endpoint: src_ep,
-                counter: aps_seq,
-                asdu,
-            },
+        let send = Unicast {
+            frame: aps_ack_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Route(RouteDirective::StackDecides),
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
         };
-
-        tracing::trace!("Prepared APS frame: {aps_frame:?}");
-
-        let aps_payload = if let Some(destination_eui64) = aps_security {
-            let encrypted = self
-                .core()
-                .aib
-                .aps_security
-                .encrypt_data(destination_eui64, &aps_frame);
-            match encrypted {
-                Some(encrypted) => {
-                    self.maybe_notify_aps_frame_counter();
-                    encrypted.to_bytes()
-                }
-                None => return Err(ZigbeeStackError::ApsSecurityFailed),
-            }
-        } else {
-            aps_frame.to_bytes()
-        };
-
-        // Zigbee 3.0 groupcast: the group lives only in the APS header; the NWK frame
-        // is broadcast to all rx-on-when-idle devices (spec 2.2.4.1.1.1)
-        let nwk_destination = if delivery_mode == ApsDeliveryMode::Multicast {
-            BROADCAST_RX_ON_WHEN_IDLE
-        } else {
-            destination
-        };
-
-        let nwk_frame = self
-            .nwk_data_frame(nwk_destination, aps_payload)
-            .with_discover_route(NwkRouteDiscovery::Enable)
-            .with_radius(cmp::max(radius, 1));
-
-        let ack_data = (aps_ack == ApsAck::Request).then_some(ApsAckData {
-            src: destination,
-            destination_endpoint: Some(src_ep), // These are swapped
-            cluster_id: Some(cluster_id),
-            profile_id: Some(profile_id),
-            source_endpoint: Some(dst_ep), // These are swapped
-            counter: aps_seq,
-        });
-
-        Ok((nwk_frame, ack_data))
+        if let Err(err) = self.send_unicast(send) {
+            tracing::warn!("Failed to send APS ack: {err}");
+        }
     }
 
     /// How long to wait for a device's APS ack: longer for a sleepy destination, which
@@ -311,14 +192,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Build and enqueue the frame, then return an accept or reject. Delivery is
-    /// confirmed later as a [`ZigbeeNotification::SendConfirm`] carrying `request_id`,
-    /// triggered by the frame type: passive-ack quorum for a broadcast, next-hop
-    /// acceptance for a no-ack unicast, or the APS ack for an ack unicast.
+    /// Send a unicast APS data frame, returning a [`SendHandle`] over its two stages.
+    /// `Err` rejects at admission (malformed, rate limited, frame budget) and no handle is
+    /// returned. On `Ok`, `handed_off` resolves on next-hop acceptance and `delivered` on
+    /// the end-to-end APS ack (for an ack send) or on that same acceptance (rule 4, for a
+    /// no-ack send).
+    ///
+    /// `aps_security` requests APS encryption of the ASDU with the link key shared with
+    /// that device (link keys are pairwise, so this is unicast-only).
     #[allow(clippy::too_many_arguments)]
-    pub fn send_aps(
+    pub fn send_aps_unicast(
         &self,
-        delivery_mode: ApsDeliveryMode,
         destination: Nwk,
         profile_id: u16,
         cluster_id: u16,
@@ -332,88 +216,225 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         sleepy_destination: bool,
         priority: TxPriority,
         route: RouteDirective,
-        request_id: RequestId,
-    ) -> Result<(), ZigbeeStackError> {
-        let (nwk_frame, ack_data) = self.prepare_aps_send(
-            delivery_mode,
-            destination,
-            profile_id,
-            cluster_id,
-            src_ep,
-            dst_ep,
-            aps_ack,
-            radius,
-            aps_seq,
-            data,
-            aps_security,
-        )?;
+    ) -> Result<SendHandle, EnqueueError> {
+        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
 
-        // An APS-ack send is confirmed by the end-to-end ack: register it (with the
-        // deadline the timeout reactor uses) before enqueueing so a fast reply is caught.
+        let aps_frame = ApsDataFrame {
+            frame_control: ApsFrameControl {
+                frame_type: ApsFrameType::Data,
+                delivery_mode: ApsDeliveryMode::Unicast,
+                reserved1: 0b0,
+                security: aps_security.is_some(),
+                ack_request: aps_ack == ApsAck::Request,
+                extended_header: false,
+            },
+            group_id: None,
+            destination_endpoint: Some(dst_ep),
+            cluster_id,
+            profile_id,
+            source_endpoint: src_ep,
+            counter: aps_seq,
+            asdu,
+        };
+
+        tracing::trace!("Prepared unicast APS frame: {aps_frame:?}");
+
+        let aps_payload = if let Some(destination_eui64) = aps_security {
+            let encrypted = self
+                .core()
+                .aib
+                .aps_security
+                .encrypt_data(destination_eui64, &aps_frame);
+            match encrypted {
+                Some(encrypted) => {
+                    self.maybe_notify_aps_frame_counter();
+                    encrypted.to_bytes()
+                }
+                None => return Err(EnqueueError::SecurityUnavailable),
+            }
+        } else {
+            aps_frame.to_bytes()
+        };
+
+        let nwk_frame = self
+            .nwk_data_frame(destination, aps_payload)?
+            .with_discover_route(NwkRouteDiscovery::Enable)
+            .with_radius(cmp::max(radius, 1));
+
+        // The end-to-end ack correlates on the swapped endpoints (our destination is the
+        // acker's source, and vice-versa).
+        let ack_data = (aps_ack == ApsAck::Request).then_some(ApsAckData {
+            src: destination,
+            destination_endpoint: Some(src_ep),
+            cluster_id: Some(cluster_id),
+            profile_id: Some(profile_id),
+            source_endpoint: Some(dst_ep),
+            counter: aps_seq,
+        });
+
+        let (handle, slot) = SendHandle::new();
+
+        // With an APS ack, the sender resolves only `handed_off` (next-hop acceptance);
+        // the ack arrival/timeout resolves `delivered` through the slot held here. Without
+        // one, next-hop acceptance is the whole verdict, so the sender resolves
+        // `Delivery` directly (rule 4 back-fills `handed_off`).
+        let stage = if ack_data.is_some() {
+            TrackStage::HandOff
+        } else {
+            TrackStage::Delivery
+        };
+
+        // An APS-ack send registers its pending ack (with the deadline the timeout
+        // reactor uses) before enqueueing so a fast reply is caught.
         if let Some(ack_data) = &ack_data {
             let deadline = self.core_now() + self.aps_ack_timeout(destination, sleepy_destination);
             self.state.pending_aps_acks.lock().insert(
                 ack_data.clone(),
                 PendingApsAck {
-                    request_id,
+                    slot: slot.clone(),
                     deadline,
                 },
             );
             self.aps_ack_wake.notify_one();
         }
 
-        // The class is fixed here, not host-chosen: a host send can never draw from
-        // the forwarding or critical budget tiers, whatever its priority.
-        self.enqueue_aps_frame(
-            nwk_frame,
-            TxPolicy {
+        let accepted = self.send_unicast(Unicast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Route(route),
+            policy: TxPolicy {
                 priority,
                 class: TrafficClass::Host,
             },
-            TxOutcome::Confirm {
-                request_id,
-                aps_ack: ack_data,
-            },
-            SendMode::Route(route),
-        );
-        Ok(())
+            outcome: TxOutcome::Track { slot, stage },
+        });
+
+        // A rejected frame gets no confirmation: unregister its pending ack and drop the
+        // handle by returning the admission error.
+        if let Err(err) = accepted {
+            if let Some(ack_data) = ack_data {
+                self.state.pending_aps_acks.lock().remove(&ack_data);
+            }
+            return Err(err);
+        }
+
+        Ok(handle)
     }
 
-    /// Enqueue a built APS/NWK frame fire-and-forget, routing broadcasts and unicasts like
-    /// [`send_nwk_frame`](Self::send_nwk_frame). The `outcome` rides the unicast path (the
-    /// sender confirms next-hop acceptance / failure); a broadcast is confirmed by the
-    /// retransmit reactor on quorum, so only its `request_id` is carried over.
-    pub(super) fn enqueue_aps_frame(
+    /// Send a broadcast APS data frame to a broadcast sink, returning a [`SendHandle`].
+    /// `Err` rejects at admission; on `Ok`, `handed_off` resolves when the first copy
+    /// reaches the air and `delivered` on the passive-ack quorum result. A broadcast is
+    /// never APS-secured nor end-to-end acked: the quorum is its confirmation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_aps_broadcast(
         &self,
-        nwk_frame: NwkFrame,
-        policy: TxPolicy,
-        outcome: TxOutcome,
-        mode: SendMode,
-    ) {
-        if nwk_frame.nwk_header.destination.as_u16() >= BROADCAST_LOW_POWER_ROUTERS.as_u16() {
-            let request_id = match outcome {
-                TxOutcome::Confirm { request_id, .. } => Some(request_id),
-                TxOutcome::Discard | TxOutcome::Signal(_) => None,
-                // Indirect-queue continuations never ride an APS frame
-                TxOutcome::IndirectDelivery { .. } | TxOutcome::DeliverNetworkKey { .. } => {
-                    unreachable!()
-                }
-            };
-            self.send_broadcast_nwk_frame(
-                nwk_frame,
-                NwkSecurityMode::NetworkKey,
-                policy,
-                request_id,
-            );
-        } else {
-            self.originate_unicast(
-                nwk_frame,
-                NwkSecurityMode::NetworkKey,
-                mode,
-                policy,
-                outcome,
-            );
-        }
+        destination: Nwk,
+        profile_id: u16,
+        cluster_id: u16,
+        src_ep: u8,
+        dst_ep: u8,
+        radius: u8,
+        aps_seq: u8,
+        data: Vec<u8>,
+        priority: TxPriority,
+    ) -> Result<SendHandle, EnqueueError> {
+        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+
+        let aps_frame = ApsDataFrame {
+            frame_control: ApsFrameControl {
+                frame_type: ApsFrameType::Data,
+                delivery_mode: ApsDeliveryMode::Broadcast,
+                reserved1: 0b0,
+                security: false,
+                ack_request: false,
+                extended_header: false,
+            },
+            group_id: None,
+            destination_endpoint: Some(dst_ep),
+            cluster_id,
+            profile_id,
+            source_endpoint: src_ep,
+            counter: aps_seq,
+            asdu,
+        };
+
+        tracing::trace!("Prepared broadcast APS frame: {aps_frame:?}");
+
+        let aps_payload = aps_frame.to_bytes();
+        let nwk_frame = self
+            .nwk_data_frame(destination, aps_payload)?
+            .with_discover_route(NwkRouteDiscovery::Enable)
+            .with_radius(cmp::max(radius, 1));
+
+        let (handle, slot) = SendHandle::new();
+        self.send_broadcast(Broadcast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            policy: TxPolicy {
+                priority,
+                class: TrafficClass::Host,
+            },
+            slot: Some(slot),
+        })?;
+        Ok(handle)
+    }
+
+    /// Send a groupcast (APS multicast) data frame, returning a [`SendHandle`]. The group
+    /// lives only in the APS header; the NWK frame is broadcast to all rx-on-when-idle
+    /// devices (spec 2.2.4.1.1.1), so it rides the broadcast machinery and, like a
+    /// broadcast, its confirmation is the passive-ack quorum result and it is never
+    /// APS-secured or acked.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_aps_groupcast(
+        &self,
+        group_id: u16,
+        profile_id: u16,
+        cluster_id: u16,
+        src_ep: u8,
+        radius: u8,
+        aps_seq: u8,
+        data: Vec<u8>,
+        priority: TxPriority,
+    ) -> Result<SendHandle, EnqueueError> {
+        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+
+        let aps_frame = ApsDataFrame {
+            frame_control: ApsFrameControl {
+                frame_type: ApsFrameType::Data,
+                delivery_mode: ApsDeliveryMode::Multicast,
+                reserved1: 0b0,
+                security: false,
+                ack_request: false,
+                extended_header: false,
+            },
+            group_id: Some(group_id),
+            destination_endpoint: None,
+            cluster_id,
+            profile_id,
+            source_endpoint: src_ep,
+            counter: aps_seq,
+            asdu,
+        };
+
+        tracing::trace!("Prepared group broadcast APS frame: {aps_frame:?}");
+
+        let aps_payload = aps_frame.to_bytes();
+        let nwk_frame = self
+            .nwk_data_frame(BROADCAST_RX_ON_WHEN_IDLE, aps_payload)?
+            .with_discover_route(NwkRouteDiscovery::Enable)
+            .with_radius(cmp::max(radius, 1));
+
+        let (handle, slot) = SendHandle::new();
+        self.send_broadcast(Broadcast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            policy: TxPolicy {
+                priority,
+                class: TrafficClass::Host,
+            },
+            slot: Some(slot),
+        })?;
+        Ok(handle)
     }
 
     /// The APS-ack timeout reactor: sleeps to the earliest pending send's deadline, then
@@ -442,31 +463,37 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .min()
     }
 
+    /// Expire pending APS acks: an entry past its deadline resolves `delivered` with a
+    /// timeout, and a cancelled entry with `Cancelled`. A stale entry whose send already
+    /// failed at handoff still expires here; its slot is already resolved, so the late
+    /// write is ignored (write-once, rule 1).
     fn expire_aps_acks(&self) {
         let now = self.core_now();
 
-        let expired: Vec<RequestId> = {
+        let due: Vec<(Arc<SendSlot>, bool)> = {
             let mut pending = self.state.pending_aps_acks.lock();
-            let due: Vec<(ApsAckData, RequestId)> = pending
+            let due: Vec<(ApsAckData, Arc<SendSlot>, bool)> = pending
                 .iter()
-                .filter(|(_, p)| p.deadline <= now)
-                .map(|(key, p)| (key.clone(), p.request_id))
+                .filter(|(_, p)| p.deadline <= now || p.slot.is_cancelled())
+                .map(|(key, p)| (key.clone(), p.slot.clone(), p.slot.is_cancelled()))
                 .collect();
-            for (key, _) in &due {
+            for (key, _, _) in &due {
                 pending.remove(key);
             }
             drop(pending);
-            due.into_iter().map(|(_, request_id)| request_id).collect()
+            due.into_iter()
+                .map(|(_, slot, cancelled)| (slot, cancelled))
+                .collect()
         };
 
-        for request_id in expired {
-            tracing::warn!("APS ack timed out for send {request_id}");
-            self.push_notification(ZigbeeNotification::ApsAckConfirm {
-                request_id,
-                result: ApsAckResult::Failed {
-                    reason: "APS ack timed out".to_string(),
-                },
-            });
+        for (slot, cancelled) in due {
+            let result = if cancelled {
+                Err(DeliveryError::Cancelled)
+            } else {
+                Err(DeliveryError::ApsAckTimeout)
+            };
+
+            slot.resolve(TrackStage::Delivery, result);
         }
     }
 }

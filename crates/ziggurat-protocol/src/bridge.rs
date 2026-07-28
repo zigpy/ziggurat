@@ -4,15 +4,14 @@
 //! `configure`, `send_aps`, beacons, and notifications. Shared verbatim by the
 //! embedded firmware and the host server so the two cannot drift.
 
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::time::Duration;
 
 use ziggurat_driver::runtime::Runtime;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, ApsAckResult, DeviceLeaveReason, HostRoute, NetworkBeacon, NetworkConfig,
-    NwkDeviceType, RequestId as StackRequestId, RouteDirective, SendResult, TclkSeed, TxPriority,
+    ApsAck, DeliveryError, DeviceLeaveReason, EnqueueError, HostRoute, NetworkBeacon,
+    NetworkConfig, NwkDeviceType, RouteDirective, SendHandle, TclkSeed, TxPriority,
     ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
@@ -20,6 +19,8 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
 use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
 use ziggurat_zigbee::nwk::routing;
+
+use crate::send_tracker::{ConfirmKind, SendTracker};
 
 use crate::wire::*;
 
@@ -261,28 +262,30 @@ impl From<&NetworkBeacon> for BeaconPayload {
     }
 }
 
-/// Hand `send_aps` to the stack, translating the wire flags. The delivery outcome
-/// arrives later as a `SendConfirm` / `ApsAckConfirm` notification keyed by
-/// `request_id`.
-pub fn send_aps<P: RadioPhy, R: Runtime>(
+/// Hand a unicast send to the stack, returning a [`SendHandle`] and the
+/// [`ConfirmKind`] that says which confirm frames it owes; the caller registers both
+/// in its [`SendTracker`].
+pub fn send_unicast<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
-    payload: SendApsPayload,
-    request_id: RequestId,
-) -> Result<(), Error> {
+    payload: SendUnicastPayload,
+) -> Result<(SendHandle, ConfirmKind), Error> {
     let aps_security = (payload.flags.aps_encryption && payload.flags.has_eui64)
         .then_some(payload.destination_eui64);
-
     let aps_ack = if payload.flags.aps_ack {
         ApsAck::Request
     } else {
         ApsAck::None
     };
-
     let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
 
+    let confirm_kind = if payload.flags.aps_ack {
+        ConfirmKind::UnicastApsAck
+    } else {
+        ConfirmKind::UnicastNoAck
+    };
+
     stack
-        .send_aps(
-            payload.flags.delivery_mode,
+        .send_aps_unicast(
             payload.destination,
             payload.profile_id,
             payload.cluster_id,
@@ -296,9 +299,64 @@ pub fn send_aps<P: RadioPhy, R: Runtime>(
             payload.flags.sleepy_destination,
             TxPriority::from_host(payload.priority as i8),
             route,
-            StackRequestId::from(request_id),
         )
-        .map_err(|e| Error::new(Status::TransmitFailed, &e.to_string()))
+        .map(|handle| (handle, confirm_kind))
+        .map_err(|e| enqueue_error(&e))
+}
+
+/// Hand a broadcast send to the stack; its confirm frame is the passive-ack quorum
+/// verdict.
+pub fn send_broadcast<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: SendBroadcastPayload,
+) -> Result<(SendHandle, ConfirmKind), Error> {
+    stack
+        .send_aps_broadcast(
+            payload.destination,
+            payload.profile_id,
+            payload.cluster_id,
+            payload.src_ep,
+            payload.dst_ep,
+            payload.radius,
+            payload.aps_seq,
+            payload.asdu,
+            TxPriority::from_host(payload.priority as i8),
+        )
+        .map(|handle| (handle, ConfirmKind::Broadcast))
+        .map_err(|e| enqueue_error(&e))
+}
+
+/// Hand a groupcast send to the stack; it rides the broadcast machinery, so its confirm
+/// frame is likewise the passive-ack quorum verdict.
+pub fn send_groupcast<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: SendGroupcastPayload,
+) -> Result<(SendHandle, ConfirmKind), Error> {
+    stack
+        .send_aps_groupcast(
+            payload.group_id,
+            payload.profile_id,
+            payload.cluster_id,
+            payload.src_ep,
+            payload.radius,
+            payload.aps_seq,
+            payload.asdu,
+            TxPriority::from_host(payload.priority as i8),
+        )
+        .map(|handle| (handle, ConfirmKind::Broadcast))
+        .map_err(|e| enqueue_error(&e))
+}
+
+/// Map a synchronous admission failure onto its wire `Error` frame.
+fn enqueue_error(e: &EnqueueError) -> Error {
+    match e {
+        EnqueueError::RateLimited { retry_in } => Error::rate_limited(*retry_in),
+        EnqueueError::BudgetExhausted => Status::BudgetExhausted.into(),
+        EnqueueError::NotStarted => Status::NotStarted.into(),
+        EnqueueError::PayloadTooLong => Status::PayloadTooLong.into(),
+        EnqueueError::SecurityUnavailable => Status::SecurityUnavailable.into(),
+        EnqueueError::RouteDiscoverySuppressed => Status::NoRoute.into(),
+    }
 }
 
 /// Build the driver's [`RouteDirective`] from the wire route control.
@@ -309,10 +367,8 @@ fn route_directive(
 ) -> Result<RouteDirective, Error> {
     let host_source_route = |relays: SourceRouteRelays| -> Result<HostRoute, Error> {
         if relays.relays.is_empty() {
-            Err(Error::new(
-                Status::InvalidRequest,
-                "a source route must contain at least one relay",
-            ))
+            tracing::warn!("Rejecting a host source route with no relays");
+            Err(Status::InvalidRequest.into())
         } else {
             Ok(HostRoute::SourceRoute(relays.relays))
         }
@@ -329,13 +385,20 @@ fn route_directive(
     })
 }
 
-/// Cancel an in-flight send by the `request_id` it was issued under. Best-effort: the
-/// reply reports whether a still-cancellable (pre-delivery) send was found and removed.
+/// Cancel an in-flight send by the `request_id` it was issued under.
+///
+/// Best-effort: the reply reports whether the tracker held it and it was still
+/// unresolved. Setting the slot's flag is lazy, so the driver's reactors are nudged to
+/// act on it this pass.
 pub fn cancel_request<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
+    tracker: &mut SendTracker,
     payload: &CancelRequestPayload,
 ) -> CancelResultPayload {
-    let cancelled = stack.cancel_send(StackRequestId::from(payload.request_id));
+    let cancelled = tracker.cancel(payload.request_id);
+    if cancelled {
+        stack.nudge_cancellation();
+    }
     CancelResultPayload { cancelled }
 }
 
@@ -345,12 +408,37 @@ pub fn set_tunable<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: &SetTunablePayload,
 ) -> Result<(), Error> {
-    let name = core::str::from_utf8(&payload.name)
-        .map_err(|_| Error::new(Status::InvalidRequest, "tunable name is not UTF-8"))?;
+    let name = core::str::from_utf8(&payload.name).map_err(|_| {
+        tracing::warn!("Tunable name is not UTF-8");
+        Error::Status(Status::InvalidRequest)
+    })?;
 
-    stack
-        .set_tunable(name, payload.value)
-        .map_err(|e| Error::new(Status::InvalidRequest, &alloc::format!("{name}: {e}")))
+    stack.set_tunable(name, payload.value).map_err(|e| {
+        tracing::warn!("Rejecting set_tunable {name}: {e}");
+        Error::Status(Status::InvalidRequest)
+    })
+}
+
+/// Mirror a send's terminal result onto its wire status. Exhaustive on purpose: a new
+/// `DeliveryError` variant must pick its `SendStatus` here to compile.
+pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatus {
+    match result {
+        Ok(()) => SendStatus::Success,
+        Err(err) => match err {
+            DeliveryError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
+            DeliveryError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
+            DeliveryError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
+            DeliveryError::NwkNoAck { .. } => SendStatus::NwkNoAck,
+            DeliveryError::CcaFailure => SendStatus::CcaFailure,
+            DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
+            DeliveryError::ApsAckTimeout => SendStatus::ApsAckTimeout,
+            DeliveryError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
+            DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
+            DeliveryError::BudgetExhausted => SendStatus::FrameBudgetExhausted,
+            DeliveryError::Cancelled => SendStatus::Cancelled,
+            DeliveryError::Radio(_) => SendStatus::RadioError,
+        },
+    }
 }
 
 /// Encode one unsolicited notification. `send_confirm`/`aps_ack_confirm` carry
@@ -381,31 +469,6 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             rssi: *rssi as u8,
             data: data.clone(),
         }),
-        ZigbeeNotification::SendConfirm { request_id, result } => {
-            let (confirmed, next_hop, reason) = match result {
-                SendResult::Confirmed { next_hop } => {
-                    (true, next_hop.unwrap_or(Nwk(0xFFFF)), Vec::new())
-                }
-                SendResult::Failed { reason } => {
-                    (false, Nwk(0xFFFF), reason.to_string().into_bytes())
-                }
-            };
-            Notification::SendConfirm(
-                *request_id as u16,
-                SendConfirmPayload {
-                    confirmed,
-                    next_hop,
-                    reason,
-                },
-            )
-        }
-        ZigbeeNotification::ApsAckConfirm { request_id, result } => {
-            let (acked, reason) = match result {
-                ApsAckResult::Acked => (true, Vec::new()),
-                ApsAckResult::Failed { reason } => (false, reason.to_string().into_bytes()),
-            };
-            Notification::ApsAckConfirm(*request_id as u16, ApsAckConfirmPayload { acked, reason })
-        }
         ZigbeeNotification::DeviceJoined {
             nwk,
             ieee,
@@ -468,20 +531,6 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             ieee: *ieee,
             key: key.clone(),
         }),
-        ZigbeeNotification::RouteChanged {
-            destination,
-            next_hop,
-            path_cost,
-        } => Notification::RouteChanged(RouteChangedPayload {
-            destination: *destination,
-            next_hop: *next_hop,
-            path_cost: *path_cost,
-        }),
-        ZigbeeNotification::RouteRemoved { destination } => {
-            Notification::RouteRemoved(RouteRemovedPayload {
-                destination: *destination,
-            })
-        }
         ZigbeeNotification::RouteRecord {
             destination,
             relays,

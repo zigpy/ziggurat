@@ -16,14 +16,14 @@ ziggurat-driver.workspace = true
 ziggurat-zigbee.workspace = true
 ziggurat-protocol.workspace = true
 
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-cobs = "0.2"
+cobs = "0.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
-tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "io-std"] }
-tokio-serial = "5.4"
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "io-std"] }
+tokio-serial = "5.5"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [[bin]]
 name = "ziggurat"

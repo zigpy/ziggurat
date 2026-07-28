@@ -11,4 +11,4 @@ repository.workspace = true
 [dependencies]
 ziggurat-ieee-802154.workspace = true
 
-thiserror = { version = "2.0.12", default-features = false }
+thiserror = { version = "2.0.19", default-features = false }

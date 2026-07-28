@@ -15,8 +15,8 @@ use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
 use super::{
-    AddrConflictSource, NwkSecurityMode, SendMode, TxPolicy, TxPriority, ZigbeeNotification,
-    ZigbeeStack,
+    AddrConflictSource, Broadcast, NwkSecurityMode, SendHandle, SendMode, TxOutcome, TxPolicy,
+    TxPriority, Unicast, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -55,8 +55,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source,
             updated_path_cost,
         );
-
-        self.notify_route_update(outcome.update);
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
             RouteReplyDisposition::Drop => return,
@@ -101,11 +99,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_destination_ieee(Some(next_hop_link.eui64));
 
         // The next hop toward the originator is a direct radio neighbor
-        self.background_send_nwk_frame(
-            relayed_route_reply_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Direct,
-        );
+        self.send_unicast(Unicast {
+            frame: relayed_route_reply_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        })
+        .map_err(|err| tracing::warn!("Failed to relay route reply: {err}"))
+        .ok();
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -159,8 +161,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.tunables.route_discovery_time(),
         );
 
-        self.notify_route_update(outcome.update);
-
         if !outcome.accepted {
             return;
         }
@@ -202,11 +202,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .with_destination_ieee(Some(sender_ieee));
 
             // The next hop toward the originator is a direct radio neighbor
-            self.background_send_nwk_frame(
-                route_reply_frame,
-                NwkSecurityMode::NetworkKey,
-                SendMode::Direct,
-            );
+            self.send_unicast(Unicast {
+                frame: route_reply_frame,
+                security: NwkSecurityMode::NetworkKey,
+                mode: SendMode::Direct,
+                policy: TxPolicy::STACK_CRITICAL,
+                outcome: TxOutcome::Discard,
+            })
+            .map_err(|err| tracing::warn!("Failed to send route reply: {err}"))
+            .ok();
+
             return;
         }
 
@@ -267,7 +272,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// router records a path toward the concentrator. Devices can then reach us without
     /// per-device route discoveries, and respond with route record commands that we
     /// store for future source routing.
-    pub async fn send_many_to_one_route_request(&self) {
+    pub fn send_many_to_one_route_request(&self) -> SendHandle {
         let route_request_identifier = self.core().nib.routing.begin_many_to_one_advertisement(
             self.state.network_address,
             self.core_now(),
@@ -287,24 +292,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     destination_eui64: None,
                 }),
             )
-            .with_radius(self.tunables.concentrator_radius())
-            // Sent via `transmit_*`, which does not assign sequence numbers
-            .with_sequence_number(self.next_nwk_sequence_number());
+            .with_radius(self.tunables.concentrator_radius());
+
+        let (handle, slot) = SendHandle::new();
 
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
-        if let Err(err) = self
-            .transmit_broadcast_nwk_frame(
-                many_to_one_request_frame,
-                NwkSecurityMode::NetworkKey,
-                TxPolicy {
-                    priority: TxPriority::Background,
-                    class: TrafficClass::Critical,
-                },
-            )
-            .await
-        {
-            tracing::warn!("Failed to broadcast many-to-one route request: {err}");
-        }
+        self.send_oneshot_broadcast(Broadcast {
+            frame: many_to_one_request_frame,
+            security: NwkSecurityMode::NetworkKey,
+            policy: TxPolicy {
+                priority: TxPriority::Background,
+                class: TrafficClass::Critical,
+            },
+            slot: Some(slot),
+        });
+
+        handle
     }
 
     pub async fn periodic_many_to_one_route_request_task(&self) {
@@ -328,18 +331,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         loop {
-            self.send_many_to_one_route_request().await;
-
-            self.core().nib.routing.reset_mtorr_triggers();
-
             let min_deadline = self.core_now() + self.tunables.mtorr_min_interval();
             let max_deadline = self.core_now() + self.tunables.mtorr_max_interval();
+
+            let _ = self.send_many_to_one_route_request().delivered().await;
+
+            self.core().nib.routing.reset_mtorr_triggers();
 
             // Advertise every max interval, sooner when accumulated route errors or
             // delivery failures signal that routes toward us have gone bad, but never
             // within the min interval
             let max_sleep = core::pin::pin!(self.sleep_until_core(max_deadline));
             let kicked = core::pin::pin!(self.mtorr_kick.notified());
+
             if let futures::future::Either::Right(((), _)) =
                 futures::future::select(max_sleep, kicked).await
             {
@@ -408,8 +412,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             | NwkNetworkStatus::SourceRouteFailure => {
                 let mut core = self.core();
 
-                let removed_route = core
-                    .nib
+                core.nib
                     .routing
                     .remove_route(network_status_cmd.network_address);
 
@@ -424,15 +427,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                 drop(core);
 
-                if removed_route {
-                    tracing::info!(
-                        "Removed failed route to {:?}",
-                        network_status_cmd.network_address
-                    );
-                    self.push_notification(ZigbeeNotification::RouteRemoved {
-                        destination: network_status_cmd.network_address,
-                    });
-                }
                 if removed_record {
                     tracing::info!(
                         "Removed failed source route to {:?}",

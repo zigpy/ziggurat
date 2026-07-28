@@ -35,9 +35,10 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, DeviceLeaveReason, IndirectFrame, IndirectPayload, JoinKind, NwkDeviceType,
-    NwkSecurityMode, RadioPhy, RouteDirective, SendMode, TxOutcome, TxPolicy, TxPriority,
-    ZigbeeNotification, ZigbeeStack, neighbors,
+    AddrConflictSource, Broadcast, DeviceLeaveReason, EnqueueError, IndirectFrame, IndirectPayload,
+    JoinKind, NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode,
+    TrackStage, TxOutcome, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
+    neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -124,43 +125,109 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // A new child deadline may precede everything the maintenance task knows
         self.maintenance_wake.notify_one();
 
-        self.queue_association_response(
-            source_eui64,
+        // The rest of the join awaits its way through the remaining steps; every
+        // in-flight join multiplexes onto the one tasklet runner.
+        let stack = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        self.tasklets.push(async move {
+            stack.run_join(source_eui64, short_address).await;
+        });
+    }
+
+    /// The join follow-up flow (spec 4.6.3.2), one tasklet per joiner: the joiner polls
+    /// the association response out of the indirect queue, confirming its short
+    /// address; the network key follows; the join is announced once the key transport
+    /// lands.
+    async fn run_join(&self, eui64: Eui64, short_address: Nwk) {
+        let Some(response) = self.queue_association_response(
+            eui64,
             short_address,
             Ieee802154AssociationStatus::AssociationSuccessful,
-        );
+        ) else {
+            return;
+        };
+
+        // A retried association drops the stale response, failing this await: this
+        // tasklet ends and the retry's fresh tasklet takes over.
+        if let Err(err) = response.delivered().await {
+            tracing::warn!("Association response to {eui64:?} was not extracted: {err}");
+            return;
+        }
+
+        self.deliver_key_and_announce(short_address, eui64, JoinKind::New)
+            .await;
+    }
+
+    /// Deliver the network key and, once the transport lands, announce the join. The
+    /// shared tail of the association and unsecured-rejoin flows.
+    async fn deliver_key_and_announce(&self, nwk: Nwk, eui64: Eui64, join_kind: JoinKind) {
+        let Some(key_transport) = self.send_network_key(nwk, eui64, join_kind) else {
+            return;
+        };
+
+        if let Err(err) = key_transport.delivered().await {
+            tracing::warn!(
+                "Network key transport to {eui64:?} was not delivered ({err}); \
+                 the device will retry"
+            );
+            return;
+        }
+
+        self.announce_join(nwk, eui64);
+    }
+
+    /// Emit the `DeviceJoined` notification for a device whose key material is in place.
+    fn announce_join(&self, nwk: Nwk, eui64: Eui64) {
+        let (device_type, rx_on_when_idle) = self.device_join_capability(eui64);
+
+        self.push_notification(ZigbeeNotification::DeviceJoined {
+            nwk,
+            ieee: eui64,
+            parent: self.state.network_address,
+            device_type,
+            rx_on_when_idle,
+        });
     }
 
     /// 802.15.4 spec 6.4.1: association responses are sent indirectly. The joiner
-    /// extracts the queued response by polling with a MAC Data Request; once the
-    /// response is extracted and acknowledged, the network key follows (delivered by
-    /// the resolution of the queued [`TxOutcome::DeliverNetworkKey`]).
+    /// extracts the queued response by polling with a MAC Data Request. For a
+    /// successful association the returned handle's `delivered` is that extraction;
+    /// a denial (or an exhausted frame budget) returns `None`.
     fn queue_association_response(
         &self,
         eui64: Eui64,
         short_address: Nwk,
         status: Ieee802154AssociationStatus,
-    ) {
+    ) -> Option<SendHandle> {
         // Joiners that miss the response retry the association request, so anything
         // still queued from the previous attempt is stale
         self.drop_indirect_transactions(Some(eui64), short_address);
 
         let Some(token) = frame_token::take(TrafficClass::Critical) else {
             tracing::warn!("Frame budget exhausted; dropping association response to {eui64:?}");
-            return;
+            return None;
         };
 
         let response_frame = self.build_802154_association_response(eui64, short_address, status);
 
-        // A denial has no follow-up; a successful join hands the joiner its network
-        // key once the response is extracted (spec 4.6.3.2).
-        let outcome = if matches!(status, Ieee802154AssociationStatus::AssociationSuccessful) {
-            TxOutcome::DeliverNetworkKey {
-                nwk: short_address,
-                eui64,
+        // A denial has no follow-up; a successful join's tasklet awaits the
+        // extraction. A raw MAC frame has no later verdict: extraction is delivery.
+        let (handle, outcome) = match status {
+            Ieee802154AssociationStatus::AssociationSuccessful => {
+                let (handle, slot) = SendHandle::new();
+
+                (
+                    Some(handle),
+                    TxOutcome::Track {
+                        slot,
+                        stage: TrackStage::Delivery,
+                    },
+                )
             }
-        } else {
-            TxOutcome::Discard
+            _ => (None, TxOutcome::Discard),
         };
 
         self.enqueue_indirect_frame(
@@ -171,6 +238,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             outcome,
         );
+
+        handle
     }
 
     /// Pick an unused random network address for a joining device, reusing the previous
@@ -248,16 +317,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Routers resolve their own conflicts after hearing the notification; our
         // mapping for the address is ambiguous until the keeper re-announces
-        let removed = {
-            let mut core = self.core();
-            core.nib.address_map.forget_address(address);
-            core.nib.routing.remove_route(address)
-        };
-        if removed {
-            self.push_notification(ZigbeeNotification::RouteRemoved {
-                destination: address,
-            });
-        }
+        let mut core = self.core();
+        core.nib.address_map.forget_address(address);
+        core.nib.routing.remove_route(address);
     }
 
     /// The address-conflict report reactor: a single long-lived task owning the
@@ -328,15 +390,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             // The retransmit reactor owns the rebroadcasts; the jitter was applied by
             // the report deadline, and the cancel-if-already-reported check above.
-            self.send_broadcast_nwk_frame(
-                conflict_frame,
-                NwkSecurityMode::NetworkKey,
-                TxPolicy {
+            if let Err(err) = self.send_broadcast(Broadcast {
+                frame: conflict_frame,
+                security: NwkSecurityMode::NetworkKey,
+                policy: TxPolicy {
                     priority: TxPriority::UserNormal,
                     class: TrafficClass::Critical,
                 },
-                None,
-            );
+                slot: None,
+            }) {
+                tracing::warn!("Failed to broadcast address conflict report: {err}");
+            }
         }
     }
 
@@ -485,30 +549,40 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Zigbee spec 4.6.3.2: deliver the network key to a joining device. The NWK frame
     /// is unsecured; the APS command is encrypted with the key-transport key derived
-    /// from the joiner's link key.
-    pub(super) fn send_network_key(
+    /// from the joiner's link key. `None` when the send is rejected at enqueue.
+    fn send_network_key(
         &self,
         destination: Nwk,
         destination_eui64: Eui64,
         join_kind: JoinKind,
-    ) {
+    ) -> Option<SendHandle> {
         let encrypted_command =
             self.build_encrypted_network_key_transport(destination_eui64, join_kind);
 
         let nwk_frame = self
             .nwk_data_frame(destination, encrypted_command.to_bytes())
+            .expect("Transport-Key command should always fit")
             .unsecured();
 
-        self.background_send_nwk_frame(nwk_frame, NwkSecurityMode::Unsecured, SendMode::Direct);
+        let (handle, slot) = SendHandle::new();
 
-        let (device_type, rx_on_when_idle) = self.device_join_capability(destination_eui64);
-        self.push_notification(ZigbeeNotification::DeviceJoined {
-            nwk: destination,
-            ieee: destination_eui64,
-            parent: self.state.network_address,
-            device_type,
-            rx_on_when_idle,
-        });
+        // A direct one-hop unicast without an APS ack: next-hop acceptance is the
+        // delivery verdict.
+        if let Err(err) = self.send_unicast(Unicast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::Unsecured,
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Track {
+                slot,
+                stage: TrackStage::Delivery,
+            },
+        }) {
+            tracing::warn!("Failed to send network key transport to {destination_eui64:?}: {err}");
+            return None;
+        }
+
+        Some(handle)
     }
 
     pub fn handle_encrypted_aps_command_frame(
@@ -615,22 +689,28 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Send a serialized APS frame to an on-network device, with NWK security. Direct
     /// children do not participate in route discovery, so they are addressed directly.
-    fn send_secured_aps_payload(&self, destination: Nwk, payload: Vec<u8>) {
+    fn send_secured_aps_payload(
+        &self,
+        destination: Nwk,
+        payload: Vec<u8>,
+    ) -> Result<(), EnqueueError> {
         // Routed delivery to a non-neighbor must be allowed to discover a route (NWK data
         // frames default to suppressing discovery).
         let nwk_frame = self
-            .nwk_data_frame(destination, payload)
+            .nwk_data_frame(destination, payload)?
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.background_send_nwk_frame(
-            nwk_frame,
-            NwkSecurityMode::NetworkKey,
-            if self.is_neighbor(destination) {
+        self.send_unicast(Unicast {
+            frame: nwk_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: if self.is_neighbor(destination) {
                 SendMode::Direct
             } else {
                 SendMode::Route(RouteDirective::StackDecides)
             },
-        );
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        })
     }
 
     /// Zigbee spec 4.7.3.8: a device requests a unique trust center link key to replace
@@ -737,7 +817,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         };
 
-        self.send_secured_aps_payload(nwk_frame.nwk_header.source, encrypted_command.to_bytes());
+        self.send_secured_aps_payload(nwk_frame.nwk_header.source, encrypted_command.to_bytes())
+            .map_err(|err| tracing::warn!("Failed to send transport key to {source_ieee:?}: {err}"))
+            .ok();
     }
 
     /// Zigbee spec 4.4.8.1: a device proves possession of its new link key by sending a
@@ -854,7 +936,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             confirm_key_command.to_bytes()
         };
 
-        self.send_secured_aps_payload(destination, payload);
+        self.send_secured_aps_payload(destination, payload)
+            .map_err(|err| {
+                tracing::warn!("Failed to send confirm key to {destination_eui64:?}: {err}")
+            })
+            .ok();
     }
 
     /// Zigbee spec 4.6.3.2.2: a router notifies us that a device joined (or rejoined)
@@ -1012,7 +1098,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }),
         };
 
-        self.send_secured_aps_payload(router_nwk, tunnel_command.to_bytes());
+        self.send_secured_aps_payload(router_nwk, tunnel_command.to_bytes()).map_err(|err| tracing::warn!("Failed to send tunneled network key to {device_eui64:?} via {router_nwk:?}: {err}")).ok();
     }
 
     /// Process the rare NWK frames that arrive without encryption. The only one we
@@ -1155,18 +1241,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 );
                 return;
             }
-            // `send_network_key` also emits the join notification
-            self.send_network_key(assigned_nwk, source_ieee, JoinKind::Rejoin);
-        } else {
-            let (device_type, rx_on_when_idle) = self.device_join_capability(source_ieee);
+            // The join is announced only once the key transport lands
+            let stack = self
+                .self_weak
+                .upgrade()
+                .expect("Unable to upgrade self reference");
 
-            self.push_notification(ZigbeeNotification::DeviceJoined {
-                nwk: assigned_nwk,
-                ieee: source_ieee,
-                parent: self.state.network_address,
-                device_type,
-                rx_on_when_idle,
+            self.tasklets.push(async move {
+                stack
+                    .deliver_key_and_announce(assigned_nwk, source_ieee, JoinKind::Rejoin)
+                    .await;
             });
+        } else {
+            self.announce_join(assigned_nwk, source_ieee);
         }
     }
 
@@ -1199,7 +1286,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         // The rejoining device is within radio range
-        self.background_send_nwk_frame(response_frame, security, SendMode::Direct);
+        self.send_unicast(Unicast {
+            frame: response_frame,
+            security,
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        })
+        .map_err(|err| tracing::warn!("Failed to send rejoin response: {err}"))
+        .ok();
     }
 
     /// Zigbee spec 3.6.1.10.3: a device announces that it is leaving the network, or
@@ -1230,11 +1325,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The address map entry and any negotiated link key are kept around so that the
         // device can rejoin later
         self.drop_indirect_transactions(source_ieee, source);
-        if self.core().nib.routing.remove_route(source) {
-            self.push_notification(ZigbeeNotification::RouteRemoved {
-                destination: source,
-            });
-        }
+        self.core().nib.routing.remove_route(source);
 
         self.push_notification(ZigbeeNotification::DeviceLeft {
             nwk: source,
@@ -1313,11 +1404,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The child is a direct neighbor; responses to sleepy children go through the
         // indirect queue via the NWK unicast fork
-        self.background_send_nwk_frame(
-            response_frame,
-            NwkSecurityMode::NetworkKey,
-            SendMode::Direct,
-        );
+        let send = Unicast {
+            frame: response_frame,
+            security: NwkSecurityMode::NetworkKey,
+            mode: SendMode::Direct,
+            policy: TxPolicy::STACK_CRITICAL,
+            outcome: TxOutcome::Discard,
+        };
+        if let Err(err) = self.send_unicast(send) {
+            tracing::warn!("Failed to send end device timeout response: {err}");
+        }
     }
 
     /// Open (or close, with `duration == 0`) the join window. The trust center
