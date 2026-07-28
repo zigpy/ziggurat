@@ -377,17 +377,11 @@ tunables! {
 
     /// Broadcast admission budget: a token bucket shared across traffic classes,
     /// mirroring the frame budget above but bounding broadcast *rate*.
-    ///
-    /// This is the burst capacity: a discrete host action (a button press, a scene)
-    /// draws from it and goes out immediately, however low the sustained rate is, so
-    /// responsiveness comes from the burst, not from the rate below.
-    broadcast_budget_tokens: u8 = 15,
+    broadcast_budget_tokens: u8 = 40,
 
     /// Time to regenerate one broadcast token; the reciprocal is the sustained
-    /// admission rate (~0.55/s here). Held just under a stock SiLabs router's ~0.6/s
-    /// relay budget so the surrounding mesh always keeps headroom to carry our
-    /// broadcasts.
-    broadcast_token_refill: Duration = Duration::from_millis(1800),
+    /// admission rate (~1.48/s here).
+    broadcast_token_refill: Duration = Duration::from_millis(675),
 
     /// Broadcast tokens only stack-critical broadcasts (route discovery, key updates,
     /// leaves, ZDO management) may draw; a host flood can never consume them.
