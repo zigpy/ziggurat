@@ -400,6 +400,7 @@ pub struct Broadcast {
 /// the held slot.
 #[derive(Debug)]
 pub struct PendingApsAck {
+    pub(crate) ack_data: ApsAckData,
     pub(crate) slot: Arc<SendSlot>,
     pub(crate) deadline: CoreInstant,
 }
@@ -678,7 +679,10 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub pending_aps_acks: Mutex<FlatMap<ApsAckData, PendingApsAck>>,
+    /// Sends awaiting an end-to-end APS ack. Unordered, like
+    /// [`Self::pending_unicast_retries`]: an ack key does not identify an entry, so
+    /// several in-flight frames can share one and the oldest match wins.
+    pub pending_aps_acks: Mutex<Vec<PendingApsAck>>,
     pub pending_routes: Mutex<FlatMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
     pub pending_broadcasts: Mutex<FlatMap<(Nwk, u8), PendingBroadcast>>,
@@ -780,7 +784,7 @@ impl State {
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
             }),
-            pending_aps_acks: Mutex::new(FlatMap::new()),
+            pending_aps_acks: Mutex::new(Vec::new()),
             pending_routes: Mutex::new(FlatMap::new()),
             pending_broadcasts: Mutex::new(FlatMap::new()),
             pending_unicast_retries: Mutex::new(Vec::new()),
