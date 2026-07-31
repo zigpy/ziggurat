@@ -217,7 +217,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         dst_ep: u8,
         aps_ack: ApsAck,
         radius: u8,
-        aps_seq: u8,
         data: Vec<u8>,
         aps_security: Option<Eui64>,
         sleepy_destination: bool,
@@ -225,6 +224,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         route: RouteDirective,
     ) -> Result<SendHandle, EnqueueError> {
         let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let aps_seq = self.next_aps_counter();
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
@@ -343,7 +343,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         src_ep: u8,
         dst_ep: u8,
         radius: u8,
-        aps_seq: u8,
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
@@ -363,7 +362,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             cluster_id,
             profile_id,
             source_endpoint: src_ep,
-            counter: aps_seq,
+            counter: self.next_aps_counter(),
             asdu,
         };
 
@@ -401,7 +400,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         cluster_id: u16,
         src_ep: u8,
         radius: u8,
-        aps_seq: u8,
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
@@ -421,7 +419,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             cluster_id,
             profile_id,
             source_endpoint: src_ep,
-            counter: aps_seq,
+            counter: self.next_aps_counter(),
             asdu,
         };
 

@@ -573,6 +573,10 @@ pub struct Nib {
 /// link-key store and APS-layer counter.
 #[derive(Debug)]
 pub struct Aib {
+    /// The APS counter stamped on every outgoing APS frame, stack-owned so that one
+    /// counter space covers both stack-originated frames (ZDP, APS commands) and host
+    /// sends. Randomly seeded, since a restart must not reuse the counters a peer still
+    /// holds in its duplicate-rejection table.
     pub aps_counter: u8,
     /// APS-layer security material and operations (`apsDeviceKeyPairSet`, link-key
     /// derivation, command encryption). Holds the non-spec TCLK seed used to derive
@@ -767,7 +771,7 @@ impl State {
                     address_map: AddressMap::new(config.network_address, config.ieee_address),
                 },
                 aib: Aib {
-                    aps_counter: 0,
+                    aps_counter: crate::rng::random_u8(),
                     aps_security: ApsSecurity::new(
                         config.tc_link_key.clone(),
                         config.ieee_address,
