@@ -293,7 +293,6 @@ pub fn send_unicast<P: RadioPhy, R: Runtime>(
             payload.dst_ep,
             aps_ack,
             payload.radius,
-            payload.aps_seq,
             payload.asdu,
             aps_security,
             payload.flags.sleepy_destination,
@@ -318,7 +317,6 @@ pub fn send_broadcast<P: RadioPhy, R: Runtime>(
             payload.src_ep,
             payload.dst_ep,
             payload.radius,
-            payload.aps_seq,
             payload.asdu,
             TxPriority::from_host(payload.priority as i8),
         )
@@ -339,7 +337,6 @@ pub fn send_groupcast<P: RadioPhy, R: Runtime>(
             payload.cluster_id,
             payload.src_ep,
             payload.radius,
-            payload.aps_seq,
             payload.asdu,
             TxPriority::from_host(payload.priority as i8),
         )

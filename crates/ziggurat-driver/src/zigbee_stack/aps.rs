@@ -85,8 +85,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
         tracing::trace!("Received APS ack: {ack_data:?}");
 
-        let pending = self.state.pending_aps_acks.lock().remove(&ack_data);
-        if let Some(PendingApsAck { slot, .. }) = pending {
+        // The oldest match: the ack carries no way to tell two frames sharing a key apart
+        let mut pending = self.state.pending_aps_acks.lock();
+        let matched = pending
+            .iter()
+            .position(|entry| entry.ack_data == ack_data)
+            .map(|index| pending.remove(index));
+        drop(pending);
+
+        if let Some(PendingApsAck { slot, .. }) = matched {
             slot.resolve(TrackStage::Delivery, Ok(()));
         }
     }
@@ -210,7 +217,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         dst_ep: u8,
         aps_ack: ApsAck,
         radius: u8,
-        aps_seq: u8,
         data: Vec<u8>,
         aps_security: Option<Eui64>,
         sleepy_destination: bool,
@@ -218,6 +224,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         route: RouteDirective,
     ) -> Result<SendHandle, EnqueueError> {
         let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let aps_seq = self.next_aps_counter();
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
@@ -286,15 +293,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // An APS-ack send registers its pending ack (with the deadline the timeout
         // reactor uses) before enqueueing so a fast reply is caught.
-        if let Some(ack_data) = &ack_data {
+        let registered_slot = ack_data.is_some().then(|| slot.clone());
+        if let Some(ack_data) = ack_data {
             let deadline = self.core_now() + self.aps_ack_timeout(destination, sleepy_destination);
-            self.state.pending_aps_acks.lock().insert(
-                ack_data.clone(),
-                PendingApsAck {
-                    slot: slot.clone(),
-                    deadline,
-                },
-            );
+            self.state.pending_aps_acks.lock().push(PendingApsAck {
+                ack_data,
+                slot: slot.clone(),
+                deadline,
+            });
             self.aps_ack_wake.notify_one();
         }
 
@@ -312,8 +318,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // A rejected frame gets no confirmation: unregister its pending ack and drop the
         // handle by returning the admission error.
         if let Err(err) = accepted {
-            if let Some(ack_data) = ack_data {
-                self.state.pending_aps_acks.lock().remove(&ack_data);
+            if let Some(registered_slot) = registered_slot {
+                self.state
+                    .pending_aps_acks
+                    .lock()
+                    .retain(|entry| !Arc::ptr_eq(&entry.slot, &registered_slot));
             }
             return Err(err);
         }
@@ -334,7 +343,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         src_ep: u8,
         dst_ep: u8,
         radius: u8,
-        aps_seq: u8,
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
@@ -354,7 +362,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             cluster_id,
             profile_id,
             source_endpoint: src_ep,
-            counter: aps_seq,
+            counter: self.next_aps_counter(),
             asdu,
         };
 
@@ -392,7 +400,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         cluster_id: u16,
         src_ep: u8,
         radius: u8,
-        aps_seq: u8,
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
@@ -412,7 +419,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             cluster_id,
             profile_id,
             source_endpoint: src_ep,
-            counter: aps_seq,
+            counter: self.next_aps_counter(),
             asdu,
         };
 
@@ -458,7 +465,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.state
             .pending_aps_acks
             .lock()
-            .values()
+            .iter()
             .map(|pending| pending.deadline)
             .min()
     }
@@ -470,21 +477,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn expire_aps_acks(&self) {
         let now = self.core_now();
 
-        let due: Vec<(Arc<SendSlot>, bool)> = {
-            let mut pending = self.state.pending_aps_acks.lock();
-            let due: Vec<(ApsAckData, Arc<SendSlot>, bool)> = pending
-                .iter()
-                .filter(|(_, p)| p.deadline <= now || p.slot.is_cancelled())
-                .map(|(key, p)| (key.clone(), p.slot.clone(), p.slot.is_cancelled()))
-                .collect();
-            for (key, _, _) in &due {
-                pending.remove(key);
-            }
-            drop(pending);
-            due.into_iter()
-                .map(|(_, slot, cancelled)| (slot, cancelled))
-                .collect()
-        };
+        let due: Vec<(Arc<SendSlot>, bool)> = self
+            .state
+            .pending_aps_acks
+            .lock()
+            .extract_if(.., |entry| {
+                entry.deadline <= now || entry.slot.is_cancelled()
+            })
+            .map(|entry| {
+                let cancelled = entry.slot.is_cancelled();
+                (entry.slot, cancelled)
+            })
+            .collect();
 
         for (slot, cancelled) in due {
             let result = if cancelled {

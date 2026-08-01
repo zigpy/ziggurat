@@ -455,7 +455,9 @@ pub struct SendUnicastPayload {
     pub cluster_id: u16,
     pub src_ep: u8,
     pub dst_ep: u8,
-    pub aps_seq: u8,
+    /// Ignored: the stack owns the APS counter space so that host sends cannot collide
+    /// with stack-originated frames (ZDP, APS commands). Kept for wire stability.
+    pub _aps_seq: u8,
     pub radius: u8,
     pub priority: u8, // i8 two's complement
     pub route: RouteControl,
@@ -489,7 +491,8 @@ pub struct SendBroadcastPayload {
     pub cluster_id: u16,
     pub src_ep: u8,
     pub dst_ep: u8,
-    pub aps_seq: u8,
+    /// Ignored, as in [`SendUnicastPayload::_aps_seq`].
+    pub _aps_seq: u8,
     pub radius: u8,
     pub priority: u8, // i8 two's complement
     pub asdu_len: u16,
@@ -513,7 +516,8 @@ pub struct SendGroupcastPayload {
     pub profile_id: u16,
     pub cluster_id: u16,
     pub src_ep: u8,
-    pub aps_seq: u8,
+    /// Ignored, as in [`SendUnicastPayload::_aps_seq`].
+    pub _aps_seq: u8,
     pub radius: u8,
     pub priority: u8, // i8 two's complement
     pub asdu_len: u16,

@@ -8,6 +8,13 @@ pub fn random_f32() -> f32 {
     (u32::from_le_bytes(bytes) >> 8) as f32 / (1u32 << 24) as f32
 }
 
+/// A uniform `u8`, for the initial APS counter.
+pub fn random_u8() -> u8 {
+    let mut bytes = [0u8; 1];
+    fill_bytes(&mut bytes);
+    bytes[0]
+}
+
 /// A uniform `u16`, for stochastic address allocation.
 pub fn random_u16() -> u16 {
     let mut bytes = [0u8; 2];

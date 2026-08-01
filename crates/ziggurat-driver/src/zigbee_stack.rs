@@ -222,7 +222,8 @@ pub enum HostRoute {
 }
 
 /// Whether a unicast APS data frame requests an end-to-end acknowledgement. When it
-/// does, [`ZigbeeStack::send_aps_command`] returns an [`ApsAckWaiter`] to await it.
+/// does, the [`SendHandle`]'s `delivered` stage resolves on that ack rather than on
+/// next-hop acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApsAck {
     Request,
@@ -400,6 +401,7 @@ pub struct Broadcast {
 /// the held slot.
 #[derive(Debug)]
 pub struct PendingApsAck {
+    pub(crate) ack_data: ApsAckData,
     pub(crate) slot: Arc<SendSlot>,
     pub(crate) deadline: CoreInstant,
 }
@@ -572,6 +574,10 @@ pub struct Nib {
 /// link-key store and APS-layer counter.
 #[derive(Debug)]
 pub struct Aib {
+    /// The APS counter stamped on every outgoing APS frame, stack-owned so that one
+    /// counter space covers both stack-originated frames (ZDP, APS commands) and host
+    /// sends. Randomly seeded, since a restart must not reuse the counters a peer still
+    /// holds in its duplicate-rejection table.
     pub aps_counter: u8,
     /// APS-layer security material and operations (`apsDeviceKeyPairSet`, link-key
     /// derivation, command encryption). Holds the non-spec TCLK seed used to derive
@@ -678,7 +684,11 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub pending_aps_acks: Mutex<FlatMap<ApsAckData, PendingApsAck>>,
+    /// Sends awaiting an end-to-end APS ack. Unkeyed, like
+    /// [`Self::pending_unicast_retries`]: an ack key does not identify an entry, so
+    /// several in-flight frames can share one. Insertion order is load-bearing — an ack
+    /// resolves the oldest match — so every mutation here must preserve it.
+    pub pending_aps_acks: Mutex<Vec<PendingApsAck>>,
     pub pending_routes: Mutex<FlatMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
     pub pending_broadcasts: Mutex<FlatMap<(Nwk, u8), PendingBroadcast>>,
@@ -763,7 +773,7 @@ impl State {
                     address_map: AddressMap::new(config.network_address, config.ieee_address),
                 },
                 aib: Aib {
-                    aps_counter: 0,
+                    aps_counter: crate::rng::random_u8(),
                     aps_security: ApsSecurity::new(
                         config.tc_link_key.clone(),
                         config.ieee_address,
@@ -780,7 +790,7 @@ impl State {
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
             }),
-            pending_aps_acks: Mutex::new(FlatMap::new()),
+            pending_aps_acks: Mutex::new(Vec::new()),
             pending_routes: Mutex::new(FlatMap::new()),
             pending_broadcasts: Mutex::new(FlatMap::new()),
             pending_unicast_retries: Mutex::new(Vec::new()),
