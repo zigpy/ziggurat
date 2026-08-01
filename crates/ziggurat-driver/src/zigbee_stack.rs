@@ -222,7 +222,8 @@ pub enum HostRoute {
 }
 
 /// Whether a unicast APS data frame requests an end-to-end acknowledgement. When it
-/// does, [`ZigbeeStack::send_aps_command`] returns an [`ApsAckWaiter`] to await it.
+/// does, the [`SendHandle`]'s `delivered` stage resolves on that ack rather than on
+/// next-hop acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApsAck {
     Request,
@@ -683,9 +684,10 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    /// Sends awaiting an end-to-end APS ack. Unordered, like
+    /// Sends awaiting an end-to-end APS ack. Unkeyed, like
     /// [`Self::pending_unicast_retries`]: an ack key does not identify an entry, so
-    /// several in-flight frames can share one and the oldest match wins.
+    /// several in-flight frames can share one. Insertion order is load-bearing — an ack
+    /// resolves the oldest match — so every mutation here must preserve it.
     pub pending_aps_acks: Mutex<Vec<PendingApsAck>>,
     pub pending_routes: Mutex<FlatMap<Nwk, PendingRoute>>,
     /// Broadcasts awaiting retransmission, keyed by (source, sequence number).
