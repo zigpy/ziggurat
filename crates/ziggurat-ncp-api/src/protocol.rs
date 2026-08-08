@@ -354,7 +354,7 @@ async fn handle_energy_scan<P: RadioPhy>(
                     request_id,
                     Event::EnergyResult(EnergyResultPayload {
                         channel,
-                        rssi: rssi as u8,
+                        rssi,
                     }),
                 )
                 .await;
@@ -422,7 +422,7 @@ async fn handle_packet_capture<P: RadioPhy>(
                     embassy_futures::select::Either::First(Some(frame)) => {
                         let event = Event::CapturedPacket(CapturedPacketPayload {
                             channel: frame.channel,
-                            rssi: frame.rssi as u8,
+                            rssi: frame.rssi,
                             lqi: frame.lqi,
                             psdu: frame.psdu,
                         });

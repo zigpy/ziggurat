@@ -287,7 +287,7 @@ pub struct NetworkState {
     pub reserved: u7,
     pub tclk_seed: Key,
     pub tclk_flavor: TclkFlavorId,
-    pub tx_power: u8, // i8 two's complement (abstract-bits has no signed types)
+    pub tx_power: i8,
     pub aps_frame_counter: u32,
 }
 
@@ -459,7 +459,7 @@ pub struct SendUnicastPayload {
     /// with stack-originated frames (ZDP, APS commands). Kept for wire stability.
     pub _aps_seq: u8,
     pub radius: u8,
-    pub priority: u8, // i8 two's complement
+    pub priority: i8,
     pub route: RouteControl,
     #[abstract_bits(
         presence_from = matches!(route, RouteControl::HintNextHop | RouteControl::ForceNextHop)
@@ -494,7 +494,7 @@ pub struct SendBroadcastPayload {
     /// Ignored, as in [`SendUnicastPayload::_aps_seq`].
     pub _aps_seq: u8,
     pub radius: u8,
-    pub priority: u8, // i8 two's complement
+    pub priority: i8,
     pub asdu_len: u16,
     #[abstract_bits(length_from = asdu_len)]
     pub asdu: Vec<u8>,
@@ -519,7 +519,7 @@ pub struct SendGroupcastPayload {
     /// Ignored, as in [`SendUnicastPayload::_aps_seq`].
     pub _aps_seq: u8,
     pub radius: u8,
-    pub priority: u8, // i8 two's complement
+    pub priority: i8,
     pub asdu_len: u16,
     #[abstract_bits(length_from = asdu_len)]
     pub asdu: Vec<u8>,
@@ -594,7 +594,7 @@ pub struct ScanRequestPayload {
 #[derive(Debug, Clone)]
 pub struct EnergyResultPayload {
     pub channel: u8,
-    pub rssi: u8, // i8 two's complement
+    pub rssi: i8,
 }
 
 #[abstract_bits]
@@ -613,14 +613,14 @@ pub struct BeaconPayload {
     pub device_depth: u8,
     pub update_id: u8,
     pub lqi: u8,
-    pub rssi: u8, // i8 two's complement
+    pub rssi: i8,
 }
 
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct CapturedPacketPayload {
     pub channel: u8,
-    pub rssi: u8, // i8 two's complement
+    pub rssi: i8,
     pub lqi: u8,
     pub psdu_len: u16,
     #[abstract_bits(length_from = psdu_len)]
@@ -669,7 +669,7 @@ pub struct ReceivedApsPayload {
     pub src_ep: u8,
     pub dst_ep: u8,
     pub lqi: u8,
-    pub rssi: u8, // i8 two's complement
+    pub rssi: i8,
     pub data_len: u16,
     #[abstract_bits(length_from = data_len)]
     pub data: Vec<u8>,
