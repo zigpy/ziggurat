@@ -785,10 +785,8 @@ impl ZigguratServer {
         for channel in payload.channels {
             match phy.energy_detect(channel, duration).await {
                 Ok(rssi) => {
-                    let event = proto::Event::EnergyResult(proto::EnergyResultPayload {
-                        channel,
-                        rssi: rssi as u8,
-                    });
+                    let event =
+                        proto::Event::EnergyResult(proto::EnergyResultPayload { channel, rssi });
                     if let Some(frame) = event.frame(request_id) {
                         let _ = outbound.send(frame).await;
                     }
@@ -873,7 +871,7 @@ impl ZigguratServer {
             while let Some(frame) = rx.recv().await {
                 let event = proto::Event::CapturedPacket(proto::CapturedPacketPayload {
                     channel: frame.channel,
-                    rssi: frame.rssi as u8,
+                    rssi: frame.rssi,
                     lqi: frame.lqi,
                     psdu: frame.psdu,
                 });
