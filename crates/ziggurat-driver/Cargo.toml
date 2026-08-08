@@ -13,7 +13,7 @@ ziggurat-ieee-802154.workspace = true
 ziggurat-phy.workspace = true
 ziggurat-zigbee.workspace = true
 
-abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
+abstract-bits = { git = "https://github.com/puddly/abstract-bits.git", rev = "1f67dd91dce8a4c3b2c760ac317780856c1d6805", version = "0.2.0" }
 arbitrary-int = "2.1.1"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }

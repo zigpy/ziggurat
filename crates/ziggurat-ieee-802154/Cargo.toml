@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
+abstract-bits = { git = "https://github.com/puddly/abstract-bits.git", rev = "1f67dd91dce8a4c3b2c760ac317780856c1d6805", version = "0.2.0" }
 num_enum = { version = "0.7.6", default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 thiserror = { version = "2.0.19", default-features = false }
