@@ -1,38 +1,6 @@
-use abstract_bits::{
-    AbstractBits, BitReader, BitWriter, FromBytesError, ToBytesError, abstract_bits,
-};
+use abstract_bits::abstract_bits;
 use arbitrary_int::{u2, u4, u24};
 use ziggurat_ieee_802154::types::Eui64;
-
-// TODO: report this bug to abstract-bits
-#[derive(Debug, Eq, PartialEq)]
-pub struct RenamedU24(pub u24);
-
-impl AbstractBits for RenamedU24 {
-    const MIN_BITS: usize = 24;
-    const MAX_BITS: usize = 24;
-
-    fn write_abstract_bits(&self, writer: &mut BitWriter) -> Result<(), ToBytesError> {
-        // `u24::value()` widens to a `u32`, whose fourth byte must not be written
-        let [b0, b1, b2, _] = self.0.value().to_le_bytes();
-        b0.write_abstract_bits(writer)?;
-        b1.write_abstract_bits(writer)?;
-        b2.write_abstract_bits(writer)?;
-
-        Ok(())
-    }
-
-    fn read_abstract_bits(reader: &mut BitReader) -> Result<Self, FromBytesError>
-    where
-        Self: Sized,
-    {
-        Ok(Self(u24::from_le_bytes([
-            u8::read_abstract_bits(reader)?,
-            u8::read_abstract_bits(reader)?,
-            u8::read_abstract_bits(reader)?,
-        ])))
-    }
-}
 
 #[derive(Debug, Eq, PartialEq)]
 #[abstract_bits]
@@ -45,13 +13,14 @@ pub struct ZigbeeBeacon {
     pub device_depth: u4,
     pub end_device_capacity: bool,
     pub extended_pan_id: Eui64,
-    pub tx_offset: RenamedU24,
+    pub tx_offset: u24,
     pub update_id: u8,
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use abstract_bits::{AbstractBits, BitReader};
     use hex_literal::hex;
 
     #[test]
@@ -65,7 +34,7 @@ mod test {
             device_depth: 0,
             end_device_capacity: true,
             extended_pan_id: Eui64::from_hex("3a:9f:44:01:0b:3c:cb:93"),
-            tx_offset: RenamedU24(u24::new(0xFFFFFF)),
+            tx_offset: 0xFFFFFF,
             update_id: 0,
         };
 
