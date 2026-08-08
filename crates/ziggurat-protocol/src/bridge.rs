@@ -54,7 +54,7 @@ pub fn network_config(payload: &ConfigurePayload) -> NetworkConfig {
                 TclkFlavorId::ZStack => TclkFlavor::ZStack,
             },
         }),
-        tx_power: state.tx_power as i8,
+        tx_power: state.tx_power,
         source_routing: payload.source_routing,
     }
 }
@@ -97,7 +97,7 @@ pub fn network_info_payload<P: RadioPhy, R: Runtime>(
             has_tclk_seed,
             tclk_seed,
             tclk_flavor,
-            tx_power: stack.config.tx_power as u8,
+            tx_power: stack.config.tx_power,
             aps_frame_counter: aps_security.outgoing_frame_counter(),
         },
         key_count: aps_security.device_key_count() as u16,
@@ -257,7 +257,7 @@ impl From<&NetworkBeacon> for BeaconPayload {
             device_depth: beacon.device_depth,
             update_id: beacon.update_id,
             lqi: beacon.lqi,
-            rssi: beacon.rssi as u8,
+            rssi: beacon.rssi,
         }
     }
 }
@@ -296,7 +296,7 @@ pub fn send_unicast<P: RadioPhy, R: Runtime>(
             payload.asdu,
             aps_security,
             payload.flags.sleepy_destination,
-            TxPriority::from_host(payload.priority as i8),
+            TxPriority::from_host(payload.priority),
             route,
         )
         .map(|handle| (handle, confirm_kind))
@@ -318,7 +318,7 @@ pub fn send_broadcast<P: RadioPhy, R: Runtime>(
             payload.dst_ep,
             payload.radius,
             payload.asdu,
-            TxPriority::from_host(payload.priority as i8),
+            TxPriority::from_host(payload.priority),
         )
         .map(|handle| (handle, ConfirmKind::Broadcast))
         .map_err(|e| enqueue_error(&e))
@@ -338,7 +338,7 @@ pub fn send_groupcast<P: RadioPhy, R: Runtime>(
             payload.src_ep,
             payload.radius,
             payload.asdu,
-            TxPriority::from_host(payload.priority as i8),
+            TxPriority::from_host(payload.priority),
         )
         .map(|handle| (handle, ConfirmKind::Broadcast))
         .map_err(|e| enqueue_error(&e))
@@ -463,7 +463,7 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             src_ep: *src_ep,
             dst_ep: *dst_ep,
             lqi: *lqi,
-            rssi: *rssi as u8,
+            rssi: *rssi,
             data: data.clone(),
         }),
         ZigbeeNotification::DeviceJoined {
