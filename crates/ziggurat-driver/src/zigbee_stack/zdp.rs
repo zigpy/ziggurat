@@ -216,6 +216,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nib
             .neighbors
             .update_network_address(annce.ieee_addr, annce.nwk_addr);
+
+        if self.state.role == NwkDeviceType::Coordinator {
+            self.initiate_trust_center_link_key_update(annce.nwk_addr, annce.ieee_addr);
+        }
     }
 
     /// Spec 2.4.3.1.12: a router announces the end devices it believes are its
