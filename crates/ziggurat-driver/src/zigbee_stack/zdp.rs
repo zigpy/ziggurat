@@ -26,6 +26,10 @@ use crate::frame_token::TrafficClass;
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
 
+fn should_process_parent_annce(source: Nwk, local: Nwk) -> bool {
+    source != local
+}
+
 /// Neighbor records per Mgmt_Lqi_rsp; the spec caps the count field at 2
 /// (Table 2-101) and clients paginate with the start index.
 const MGMT_LQI_DESCRIPTORS_PER_FRAME: usize = 2;
@@ -262,6 +266,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn handle_parent_annce(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
         let source = nwk_frame.nwk_header.source;
 
+        if !should_process_parent_annce(source, self.state.network_address) {
+            tracing::debug!(
+                "Ignoring looped-back parent announcement from our own network address"
+            );
+            return;
+        }
+
         let (tsn, annce) = match ParentAnnce::deserialize(&aps_frame.asdu) {
             Ok(parsed) => parsed,
             Err(err) => {
@@ -476,5 +487,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_process_parent_annce;
+    use ziggurat_ieee_802154::types::Nwk;
+
+    #[test]
+    fn coordinator_ignores_its_own_looped_back_parent_announcement() {
+        assert!(!should_process_parent_annce(Nwk(0x0000), Nwk(0x0000)));
+        assert!(should_process_parent_annce(Nwk(0x1234), Nwk(0x0000)));
     }
 }
