@@ -10,8 +10,9 @@ use ziggurat_zigbee::nwk::frame::{
 };
 
 use ziggurat_zigbee::zdp::{
-    DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
-    ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
+    DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, NodeDescReq,
+    NodeDescRsp, NodeDescriptor, ParentAnnce, ParentAnnceRsp, RoutingDescriptor,
+    STACK_COMPLIANCE_REVISION, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
     ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus,
 };
 
@@ -24,6 +25,10 @@ use crate::frame_token::TrafficClass;
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
+
+fn should_process_parent_annce(source: Nwk, local: Nwk) -> bool {
+    source != local
+}
 
 /// Neighbor records per Mgmt_Lqi_rsp; the spec caps the count field at 2
 /// (Table 2-101) and clients paginate with the start index.
@@ -41,13 +46,49 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         match ZdpClusterId::try_from(aps_frame.cluster_id) {
+            Ok(ZdpClusterId::NodeDescReq) => self.handle_node_desc_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::DeviceAnnce) => self.handle_device_annce(nwk_frame, aps_frame),
             Ok(ZdpClusterId::ParentAnnce) => self.handle_parent_annce(nwk_frame, aps_frame),
             Ok(ZdpClusterId::ParentAnnceRsp) => self.handle_parent_annce_rsp(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtLqiReq) => self.handle_mgmt_lqi_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtRtgReq) => self.handle_mgmt_rtg_req(nwk_frame, aps_frame),
             // Management responses from other devices are the client's business
-            Ok(ZdpClusterId::MgmtLqiRsp | ZdpClusterId::MgmtRtgRsp) | Err(_) => {}
+            Ok(ZdpClusterId::NodeDescRsp | ZdpClusterId::MgmtLqiRsp | ZdpClusterId::MgmtRtgRsp)
+            | Err(_) => {}
+        }
+    }
+
+    /// Zigbee spec 2.4.4.1.2: answer a Node_Desc_req addressed to this node.
+    /// Zigbee 3.0 joiners use the advertised stack revision to decide whether
+    /// the Trust Center supports the Request-Key update procedure.
+    fn handle_node_desc_req(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
+        if nwk_frame.nwk_header.destination != self.state.network_address {
+            return;
+        }
+
+        let source = nwk_frame.nwk_header.source;
+        let (tsn, request) = match NodeDescReq::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!("Malformed node descriptor request from {source:?}: {err}");
+                return;
+            }
+        };
+        if request.nwk_addr_of_interest != self.state.network_address {
+            return;
+        }
+
+        let response = NodeDescRsp {
+            status: ZdpStatus::Success,
+            nwk_addr_of_interest: self.state.network_address,
+            node_descriptor: NodeDescriptor::coordinator(),
+        };
+
+        tracing::info!(
+            "Answering node descriptor request from {source:?} with stack compliance revision {STACK_COMPLIANCE_REVISION}"
+        );
+        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+            tracing::warn!("Failed to send a node descriptor response to {source:?}: {err}");
         }
     }
 
@@ -224,6 +265,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// are claimed back with a Parent_annce_rsp.
     fn handle_parent_annce(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
         let source = nwk_frame.nwk_header.source;
+
+        if !should_process_parent_annce(source, self.state.network_address) {
+            tracing::debug!(
+                "Ignoring looped-back parent announcement from our own network address"
+            );
+            return;
+        }
 
         let (tsn, annce) = match ParentAnnce::deserialize(&aps_frame.asdu) {
             Ok(parsed) => parsed,
@@ -439,5 +487,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_process_parent_annce;
+    use ziggurat_ieee_802154::types::Nwk;
+
+    #[test]
+    fn coordinator_ignores_its_own_looped_back_parent_announcement() {
+        assert!(!should_process_parent_annce(Nwk(0x0000), Nwk(0x0000)));
+        assert!(should_process_parent_annce(Nwk(0x1234), Nwk(0x0000)));
     }
 }
