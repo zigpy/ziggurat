@@ -10,8 +10,9 @@ use ziggurat_zigbee::nwk::frame::{
 };
 
 use ziggurat_zigbee::zdp::{
-    DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
-    ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
+    DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, NodeDescReq,
+    NodeDescRsp, NodeDescriptor, ParentAnnce, ParentAnnceRsp, RoutingDescriptor,
+    STACK_COMPLIANCE_REVISION, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
     ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus,
 };
 
@@ -41,13 +42,49 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         match ZdpClusterId::try_from(aps_frame.cluster_id) {
+            Ok(ZdpClusterId::NodeDescReq) => self.handle_node_desc_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::DeviceAnnce) => self.handle_device_annce(nwk_frame, aps_frame),
             Ok(ZdpClusterId::ParentAnnce) => self.handle_parent_annce(nwk_frame, aps_frame),
             Ok(ZdpClusterId::ParentAnnceRsp) => self.handle_parent_annce_rsp(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtLqiReq) => self.handle_mgmt_lqi_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtRtgReq) => self.handle_mgmt_rtg_req(nwk_frame, aps_frame),
             // Management responses from other devices are the client's business
-            Ok(ZdpClusterId::MgmtLqiRsp | ZdpClusterId::MgmtRtgRsp) | Err(_) => {}
+            Ok(ZdpClusterId::NodeDescRsp | ZdpClusterId::MgmtLqiRsp | ZdpClusterId::MgmtRtgRsp)
+            | Err(_) => {}
+        }
+    }
+
+    /// Zigbee spec 2.4.4.1.2: answer a Node_Desc_req addressed to this node.
+    /// Zigbee 3.0 joiners use the advertised stack revision to decide whether
+    /// the Trust Center supports the Request-Key update procedure.
+    fn handle_node_desc_req(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
+        if nwk_frame.nwk_header.destination != self.state.network_address {
+            return;
+        }
+
+        let source = nwk_frame.nwk_header.source;
+        let (tsn, request) = match NodeDescReq::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!("Malformed node descriptor request from {source:?}: {err}");
+                return;
+            }
+        };
+        if request.nwk_addr_of_interest != self.state.network_address {
+            return;
+        }
+
+        let response = NodeDescRsp {
+            status: ZdpStatus::Success,
+            nwk_addr_of_interest: self.state.network_address,
+            node_descriptor: NodeDescriptor::coordinator(),
+        };
+
+        tracing::info!(
+            "Answering node descriptor request from {source:?} with stack compliance revision {STACK_COMPLIANCE_REVISION}"
+        );
+        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+            tracing::warn!("Failed to send a node descriptor response to {source:?}: {err}");
         }
     }
 
@@ -216,10 +253,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .nib
             .neighbors
             .update_network_address(annce.ieee_addr, annce.nwk_addr);
-
-        if self.state.role == NwkDeviceType::Coordinator {
-            self.initiate_trust_center_link_key_update(annce.nwk_addr, annce.ieee_addr);
-        }
     }
 
     /// Spec 2.4.3.1.12: a router announces the end devices it believes are its
