@@ -21,7 +21,7 @@ tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 cobs = "0.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
-tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "io-std"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "io-std"] }
 tokio-serial = "5.5"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 

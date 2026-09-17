@@ -14,8 +14,8 @@ ziggurat-ieee-802154.workspace = true
 crc_all = "0.2.2"
 tracing = "0.1"
 num_enum = "0.7.6"
-thiserror = "2.0.19"
-tokio = { version = "1.53.0", features = ["rt", "time", "sync", "io-util"] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "time", "sync", "io-util"] }
 tokio-serial = "5.5"
 
 [dev-dependencies]

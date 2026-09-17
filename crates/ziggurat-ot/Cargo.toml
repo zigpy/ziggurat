@@ -23,7 +23,7 @@ embassy-time = "0.5"
 embassy-time-driver = "0.2"
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-16"] }
 critical-section = "1"
-embedded-alloc = "0.6"
+embedded-alloc = "0.7"
 
 [build-dependencies]
 cbindgen = "0.29"
@@ -31,11 +31,11 @@ cbindgen = "0.29"
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 # inline-asm: without it cortex-m injects prebuilt path-named archive members
 # (bin/thumbv8m...o) that arm-none-eabi-objcopy --strip-debug chokes on.
-cortex-m = { version = "0.7.7", features = ["critical-section-single-core", "inline-asm"] }
+cortex-m = { version = "0.7.9", features = ["critical-section-single-core", "inline-asm"] }
 
 # ESP32-C6 (firmwares/esp32-c6): single-hart machine-mode critical section.
 [target.'cfg(all(target_arch = "riscv32", target_os = "none"))'.dependencies]
-riscv = { version = "0.12", features = ["critical-section-single-hart"] }
+riscv = { version = "0.16", features = ["critical-section-single-hart"] }
 
 # debug = false: the firmware builder's DWARF-reproducibility check rejects the
 # absolute cargo/rustup paths Rust debug info carries.
