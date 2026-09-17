@@ -86,6 +86,7 @@ pub struct ApsAckFrame {
 
 impl ApsAckFrame {
     #[allow(clippy::useless_let_if_seq)]
+    #[allow(clippy::needless_late_init)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.is_empty() {
             return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });

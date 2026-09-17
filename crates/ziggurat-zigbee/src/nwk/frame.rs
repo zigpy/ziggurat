@@ -433,18 +433,11 @@ impl EncryptedNwkFrame {
         aux_header
     }
 
-    #[allow(clippy::unnecessary_unwrap)]
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
-        let source;
-
-        if aux_header.extended_source.is_some() {
-            source = aux_header.extended_source.unwrap();
-        } else if self.nwk_header.source_ieee.is_some() {
-            source = self.nwk_header.source_ieee.unwrap();
-        } else {
-            // XXX: this can't happen
-            panic!("Cannot compute nonce with no source address");
-        }
+        let source = aux_header
+            .extended_source
+            .or(self.nwk_header.source_ieee)
+            .expect("Cannot compute nonce with no source address");
 
         let mut nonce = [0; 13];
         nonce[..8].copy_from_slice(&source.to_bytes());
@@ -538,18 +531,11 @@ impl NwkFrame {
         aux_header
     }
 
-    #[allow(clippy::unnecessary_unwrap)]
     pub fn get_nonce(&self, aux_header: &NwkAuxHeader) -> [u8; 13] {
-        let source;
-
-        if aux_header.extended_source.is_some() {
-            source = aux_header.extended_source.unwrap();
-        } else if self.nwk_header.source_ieee.is_some() {
-            source = self.nwk_header.source_ieee.unwrap();
-        } else {
-            // XXX: this can't happen
-            panic!("Cannot compute nonce with no source address");
-        }
+        let source = aux_header
+            .extended_source
+            .or(self.nwk_header.source_ieee)
+            .expect("Cannot compute nonce with no source address");
 
         let mut nonce = [0; 13];
         nonce[..8].copy_from_slice(&source.to_bytes());
