@@ -489,7 +489,7 @@ pub struct SpinelHeader {
 }
 
 impl SpinelHeader {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
+    pub const fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelFrameParsingError> {
         if bytes.is_empty() {
             return Err(SpinelFrameParsingError::PayloadTooShort {
                 expected: 1,

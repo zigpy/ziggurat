@@ -12,7 +12,7 @@ ziggurat-driver = { path = "../ziggurat-driver", default-features = false, featu
 ziggurat-zigbee = { path = "../ziggurat-zigbee" }
 ziggurat-protocol = { path = "../ziggurat-protocol" }
 abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
-num_enum = { version = "0.7.3", default-features = false }
+num_enum = { version = "0.7.6", default-features = false }
 embassy-sync = "0.8"
 embassy-futures = "0.1"
 tracing = { version = "0.1", default-features = false }

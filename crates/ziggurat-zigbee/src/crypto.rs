@@ -134,11 +134,10 @@ pub fn aes_mmo_hash(data: &[u8]) -> [u8; 16] {
     let backend = backend();
     let mut digest = [0u8; 16];
 
-    for chunk in padded.chunks_exact(16) {
+    for block in padded.as_chunks::<16>().0 {
         // MMO: encrypt the message block under the running digest as the key, then XOR the
         // ciphertext with the plaintext block.
-        let block: [u8; 16] = chunk.try_into().expect("16-byte chunk is always valid");
-        let mut encrypted = block;
+        let mut encrypted = *block;
         backend.aes128_encrypt_block(&digest, &mut encrypted);
 
         for (digest_byte, (encrypted_byte, block_byte)) in

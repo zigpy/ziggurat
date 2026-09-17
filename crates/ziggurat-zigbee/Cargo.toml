@@ -12,16 +12,16 @@ repository.workspace = true
 ziggurat-ieee-802154.workspace = true
 
 abstract-bits = { git = "https://github.com/yara-blue/abstract-bits.git", version = "0.2.0" }
-aes = "0.9.1"
-arbitrary-int = "2.1.1"
-ccm = { version = "0.6.0-rc.3", default-features = false }
-educe = { version = "0.7.4", default-features = false, features = ["Debug"] }
+aes = "0.9.3"
+arbitrary-int = "2.2.0"
+ccm = { version = "0.6.1", default-features = false }
+educe = { version = "0.8.1", default-features = false, features = ["Debug"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }
 num_enum = { version = "0.7.6", default-features = false }
 once_cell = { version = "1", default-features = false, features = ["race", "alloc"] }
 subtle = { version = "2", default-features = false }
-thiserror = { version = "2.0.19", default-features = false }
+thiserror = { version = "2.0.20", default-features = false }
 
 [dev-dependencies]
 hex-literal = "1.1.0"

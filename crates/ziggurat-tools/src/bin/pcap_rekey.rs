@@ -267,7 +267,7 @@ fn rekey_packet(
 
 /// The length of the IEEE 802.15.4 TAP pseudo-header (its little-endian length field),
 /// or `None` if the buffer is too short to contain one.
-fn tap_header_len(data: &[u8]) -> Option<usize> {
+const fn tap_header_len(data: &[u8]) -> Option<usize> {
     if data.len() < 4 {
         return None;
     }
