@@ -452,11 +452,13 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
             dst_ep,
             lqi,
             rssi,
+            aps_encrypted,
             data,
         } => Notification::ReceivedAps(ReceivedApsPayload {
             source: *source,
             destination: *destination,
             has_group: group.is_some(),
+            aps_encrypted: *aps_encrypted,
             group: group.unwrap_or(0),
             profile_id: *profile_id,
             cluster_id: *cluster_id,

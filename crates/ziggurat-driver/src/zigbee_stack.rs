@@ -866,6 +866,7 @@ pub enum ZigbeeNotification {
         dst_ep: u8,
         lqi: u8,
         rssi: i8,
+        aps_encrypted: bool,
         data: Vec<u8>,
     },
     /// The outgoing NWK security frame counter has advanced; the client should persist
@@ -1258,47 +1259,48 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         continue;
                     };
 
-                    let (aps_frame, aps_source_eui64) = match parse_aps_frame(aps_payload) {
-                        Ok(ApsFrame::Data(data)) => (data, None),
-                        Ok(ApsFrame::EncryptedData(encrypted)) => {
-                            match self.decrypt_aps_data_frame(&nwk_frame, &encrypted) {
-                                Some((data, source_eui64)) => (data, Some(source_eui64)),
-                                None => {
-                                    tracing::warn!(
-                                        "Failed to decrypt APS data frame from {:?}",
-                                        nwk_frame.nwk_header.source
-                                    );
-                                    continue;
+                    let (aps_frame, aps_source_eui64, aps_encrypted) =
+                        match parse_aps_frame(aps_payload) {
+                            Ok(ApsFrame::Data(data)) => (data, None, false),
+                            Ok(ApsFrame::EncryptedData(encrypted)) => {
+                                match self.decrypt_aps_data_frame(&nwk_frame, &encrypted) {
+                                    Some((data, source_eui64)) => (data, Some(source_eui64), true),
+                                    None => {
+                                        tracing::warn!(
+                                            "Failed to decrypt APS data frame from {:?}",
+                                            nwk_frame.nwk_header.source
+                                        );
+                                        continue;
+                                    }
                                 }
                             }
-                        }
-                        Ok(ApsFrame::Ack(ack)) => {
-                            self.handle_aps_ack(&nwk_frame, &ack);
-                            continue;
-                        }
-                        Ok(ApsFrame::EncryptedAck(encrypted)) => {
-                            match self.decrypt_aps_ack_frame(&nwk_frame, &encrypted) {
-                                Some(ack) => self.handle_aps_ack(&nwk_frame, &ack),
-                                None => tracing::warn!(
-                                    "Failed to decrypt APS ACK from {:?}",
-                                    nwk_frame.nwk_header.source
-                                ),
+                            Ok(ApsFrame::Ack(ack)) => {
+                                self.handle_aps_ack(&nwk_frame, &ack);
+                                continue;
                             }
-                            continue;
-                        }
-                        Ok(ApsFrame::Command(cmd)) => {
-                            self.handle_aps_command_frame(&nwk_frame, &cmd, None, None);
-                            continue;
-                        }
-                        Ok(ApsFrame::EncryptedCommand(encrypted_cmd)) => {
-                            self.handle_encrypted_aps_command_frame(&nwk_frame, &encrypted_cmd);
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Error parsing APS frame: {e:?}");
-                            continue;
-                        }
-                    };
+                            Ok(ApsFrame::EncryptedAck(encrypted)) => {
+                                match self.decrypt_aps_ack_frame(&nwk_frame, &encrypted) {
+                                    Some(ack) => self.handle_aps_ack(&nwk_frame, &ack),
+                                    None => tracing::warn!(
+                                        "Failed to decrypt APS ACK from {:?}",
+                                        nwk_frame.nwk_header.source
+                                    ),
+                                }
+                                continue;
+                            }
+                            Ok(ApsFrame::Command(cmd)) => {
+                                self.handle_aps_command_frame(&nwk_frame, &cmd, None, None);
+                                continue;
+                            }
+                            Ok(ApsFrame::EncryptedCommand(encrypted_cmd)) => {
+                                self.handle_encrypted_aps_command_frame(&nwk_frame, &encrypted_cmd);
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Error parsing APS frame: {e:?}");
+                                continue;
+                            }
+                        };
 
                     tracing::trace!("Received APS data frame: {aps_frame:?}");
 
@@ -1335,6 +1337,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         dst_ep: aps_frame.destination_endpoint.unwrap_or(0),
                         lqi: packet.lqi,
                         rssi: packet.rssi,
+                        aps_encrypted,
                         data: aps_frame.asdu.to_vec(),
                     };
                     self.push_notification(notification);
