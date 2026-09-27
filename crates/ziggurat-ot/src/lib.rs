@@ -51,7 +51,8 @@ static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Chann
 /// NCP buffer space became available; retry a failed `ziggurat_platform_host_send`.
 static HOST_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-#[cfg(target_os = "none")]
+// Bare metal without a firmware heap (EFR32): carve a fixed arena out of .bss.
+#[cfg(all(target_os = "none", not(feature = "esp-idf")))]
 mod heap {
     use embedded_alloc::LlffHeap;
 
@@ -64,6 +65,63 @@ mod heap {
     pub fn init() {
         unsafe { HEAP.init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES) }
     }
+}
+
+// ESP-IDF: the staticlib links into the IDF app, so allocate from its capability-aware
+// heap instead of a fixed arena. Pinned to internal RAM; PSRAM (MALLOC_CAP_SPIRAM) is
+// reserved for an explicitly tagged slow heap.
+//
+/// cbindgen:ignore
+#[cfg(feature = "esp-idf")]
+mod heap {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::ffi::c_void;
+    use core::ptr;
+
+    const MALLOC_CAP_8BIT: u32 = 1 << 2;
+    const MALLOC_CAP_INTERNAL: u32 = 1 << 11;
+    const CAPS: u32 = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+
+    unsafe extern "C" {
+        fn heap_caps_aligned_alloc(alignment: usize, size: usize, caps: u32) -> *mut c_void;
+        fn heap_caps_realloc(ptr: *mut c_void, size: usize, caps: u32) -> *mut c_void;
+        fn heap_caps_free(ptr: *mut c_void);
+    }
+
+    struct IdfHeap;
+
+    unsafe impl GlobalAlloc for IdfHeap {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { heap_caps_aligned_alloc(layout.align(), layout.size(), CAPS).cast() }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+            unsafe { heap_caps_free(ptr.cast()) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // TLSF can grow a block in place, but a moved block only gets the heap's
+            // default (word) alignment, so over-aligned layouts take the copying path.
+            if layout.align() > core::mem::align_of::<usize>() {
+                let new_layout =
+                    unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+                let out = unsafe { self.alloc(new_layout) };
+                if !out.is_null() {
+                    unsafe {
+                        ptr::copy_nonoverlapping(ptr, out, layout.size().min(new_size));
+                        self.dealloc(ptr, layout);
+                    }
+                }
+                return out;
+            }
+            unsafe { heap_caps_realloc(ptr.cast(), new_size, CAPS).cast() }
+        }
+    }
+
+    #[global_allocator]
+    static HEAP: IdfHeap = IdfHeap;
+
+    pub fn init() {}
 }
 
 #[cfg(target_os = "none")]

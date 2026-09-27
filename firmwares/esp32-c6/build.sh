@@ -15,7 +15,7 @@ RUST_TARGET=riscv32imac-unknown-none-elf
 
 # 1. The Rust stack as a RISC-V staticlib (also regenerates include/ziggurat.h).
 rustup target add "$RUST_TARGET" 2>/dev/null
-(cd "$ZIGGURAT/crates/ziggurat-ot" && cargo build --release --target "$RUST_TARGET")
+(cd "$ZIGGURAT/crates/ziggurat-ot" && cargo build --release --target "$RUST_TARGET" --features esp-idf)
 
 # 2. Project-local override of the IDF openthread component: identical except the
 #    NCP vendor hook is ours (Espressif's SPINEL_PROP_VENDOR_ESP_* handlers and

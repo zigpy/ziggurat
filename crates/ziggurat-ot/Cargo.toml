@@ -25,6 +25,9 @@ embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-16"] }
 critical-section = "1"
 embedded-alloc = "0.7"
 
+[features]
+esp-idf = []
+
 [build-dependencies]
 cbindgen = "0.29"
 
