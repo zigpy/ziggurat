@@ -8,10 +8,9 @@ use crate::ziggurat_ieee_802154::{
 };
 use abstract_bits::AbstractBits;
 use alloc::vec::Vec;
-use arbitrary_int::u24;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
 use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
-use ziggurat_zigbee::beacon::{RenamedU24, ZigbeeBeacon};
+use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
@@ -127,7 +126,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 device_depth: 0,
                 end_device_capacity,
                 extended_pan_id: self.state.extended_pan_id,
-                tx_offset: RenamedU24(u24::new(0xFFFFFF)),
+                tx_offset: 0xFFFFFF,
                 update_id,
             }
             .to_abstract_bytes()
