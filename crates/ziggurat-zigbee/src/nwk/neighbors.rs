@@ -4,6 +4,7 @@ use core::cmp;
 
 use crate::Instant;
 use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
+use crate::nwk::frame::NwkHeader;
 use crate::ring_buffer::RingBuffer;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
@@ -240,6 +241,22 @@ impl Neighbors {
                 None
             }
         })
+    }
+
+    /// Spec 3.3.1.1.8: after validating the source (3.6.2.2), a router parent SHALL
+    /// clear the End Device Initiator bit when relaying a frame sent by one of its end
+    /// device children. Otherwise the next router searches its own neighbor table for
+    /// the source, finds no end device there, and drops the frame (3.6.2.2). Frames
+    /// from any other source are left untouched. Returns whether the bit was cleared.
+    pub fn clear_end_device_initiator_for_relay(&self, header: &mut NwkHeader) -> bool {
+        if !header.frame_control.end_device_initiator
+            || self.end_device_child_eui64(header.source).is_none()
+        {
+            return false;
+        }
+
+        header.frame_control.end_device_initiator = false;
+        true
     }
 
     /// The EUI64 of the sleepy (rx-off-when-idle) child with the given network
@@ -719,5 +736,74 @@ impl Neighbors {
         let lost_link = previous_outgoing_cost > 0 && neighbor_entry.outgoing_cost == 0;
 
         lost_link.then_some(neighbor_entry.network_address)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use hex_literal::hex;
+
+    const CHILD_NWK: Nwk = Nwk(0x1234);
+
+    fn neighbors_with(device_type: NwkDeviceType) -> Neighbors {
+        let mut neighbors = Neighbors::default();
+        neighbors.upsert_child(
+            ChildDescriptor {
+                eui64: Eui64::from_hex("00:11:22:33:44:55:66:77"),
+                network_address: CHILD_NWK,
+                device_type,
+                rx_on_when_idle: false,
+                device_timeout: Duration::from_secs(60),
+                relationship: Relationship::Child,
+            },
+            Instant::from_micros(0),
+        );
+        neighbors
+    }
+
+    /// A group command broadcast to 0xFFFD by end device 0x1234: data frame, route
+    /// discovery enabled, secured, End Device Initiator set (frame control 0x2248).
+    fn end_device_broadcast_header() -> NwkHeader {
+        let (header, rest) = NwkHeader::deserialize(&hex!("4822fdff34121e05")).unwrap();
+        assert!(rest.is_empty());
+        assert!(header.frame_control.end_device_initiator);
+        header
+    }
+
+    #[test]
+    fn test_relay_clears_end_device_initiator_of_end_device_child() {
+        let neighbors = neighbors_with(NwkDeviceType::EndDevice);
+        let mut header = end_device_broadcast_header();
+
+        assert!(neighbors.clear_end_device_initiator_for_relay(&mut header));
+        assert!(!header.frame_control.end_device_initiator);
+
+        // Only the End Device Initiator bit changes: frame control 0x2248 -> 0x0248
+        let mut bytes = Vec::new();
+        header.serialize_into(&mut bytes);
+        assert_eq!(bytes, hex!("4802fdff34121e05"));
+    }
+
+    #[test]
+    fn test_relay_keeps_end_device_initiator_of_other_sources() {
+        // Not an end device in our table: the bit is not ours to clear
+        for neighbors in [Neighbors::default(), neighbors_with(NwkDeviceType::Router)] {
+            let mut header = end_device_broadcast_header();
+
+            assert!(!neighbors.clear_end_device_initiator_for_relay(&mut header));
+            assert!(header.frame_control.end_device_initiator);
+        }
+    }
+
+    #[test]
+    fn test_relay_without_end_device_initiator_is_unchanged() {
+        let neighbors = neighbors_with(NwkDeviceType::EndDevice);
+        let mut header = end_device_broadcast_header();
+        header.frame_control.end_device_initiator = false;
+        let expected = header.clone();
+
+        assert!(!neighbors.clear_end_device_initiator_for_relay(&mut header));
+        assert_eq!(header, expected);
     }
 }
