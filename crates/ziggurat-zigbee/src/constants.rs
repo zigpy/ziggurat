@@ -348,12 +348,8 @@ tunables! {
     /// duplicate rejection. Must cover the sender's full APS retransmission window.
     aps_duplicate_rejection_timeout: Duration = Duration::from_secs(9),
 
+    /// How long to wait for an APS ack once the next hop has accepted the frame.
     aps_ack_timeout: Duration = Duration::from_millis(5000),
-
-    /// APS acks from a sleepy child arrive only after it polls for the frame, so the
-    /// wait must cover a full indirect transaction lifetime (7.68s) plus the ack's trip
-    /// back.
-    aps_ack_timeout_indirect: Duration = Duration::from_millis(10000),
 
     /// How long any send may wait to reach the mesh before it fails with
     /// `HandoffTimeout`. Should be longer than route discovery plus indirect

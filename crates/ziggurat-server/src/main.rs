@@ -568,9 +568,9 @@ impl ZigguratServer {
                 self.stream_scan(request_id, outbound, events).await
             }
             R::SendUnicast(payload) => {
-                let tracked = proto::send_unicast(&*self.running()?, payload)?;
+                let (tracked, result) = proto::send_unicast(&*self.running()?, payload)?;
                 self.register_send(request_id, sends, tracked);
-                Ok(proto::Response::Empty)
+                Ok(proto::Response::SendUnicastResult(result))
             }
             R::SendBroadcast(payload) => {
                 let tracked = proto::send_broadcast(&*self.running()?, payload)?;
