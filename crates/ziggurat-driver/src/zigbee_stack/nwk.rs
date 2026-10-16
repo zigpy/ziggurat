@@ -1666,6 +1666,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
+        // Spec 3.3.1.1.8: a frame from one of our end device children is relayed with
+        // its End Device Initiator bit cleared
+        self.core()
+            .nib
+            .neighbors
+            .clear_end_device_initiator_for_relay(&mut nwk_frame.nwk_header);
+
         let destination = nwk_frame.nwk_header.destination;
 
         // Spec 3.6.4.5.5: each relay appends its network address to a transiting route
@@ -1827,15 +1834,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
+        let mut relayed_frame = nwk_frame.clone();
+
+        // Spec 3.3.1.1.8: a broadcast from one of our end device children is relayed
+        // with its End Device Initiator bit cleared, both over the air and in the
+        // copies queued for sleepy children
+        self.core()
+            .nib
+            .neighbors
+            .clear_end_device_initiator_for_relay(&mut relayed_frame.nwk_header);
+
         // Spec 3.6.6: deliver another device's 0xFFFF broadcast to our own sleepy
         // children as MAC unicasts (a no-op for non-0xFFFF destinations).
         self.maybe_fan_out_broadcast_to_sleepy_children(
-            nwk_frame,
+            &relayed_frame,
             NwkSecurityMode::NetworkKey,
             TrafficClass::Forwarding,
         );
-
-        let mut relayed_frame = nwk_frame.clone();
 
         relayed_frame.nwk_header.radius = relayed_frame.nwk_header.radius.saturating_sub(1);
         if relayed_frame.nwk_header.radius == 0 {
