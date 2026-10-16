@@ -365,6 +365,9 @@ pub enum TxOutcome {
         slot: Arc<SendSlot>,
         stage: TrackStage,
     },
+    /// The handoff of an APS-ack unicast. Success resolves `HandOff` and arms the
+    /// pending ack's deadline; failure resolves both stages and drops the pending ack.
+    ApsAck { slot: Arc<SendSlot> },
     /// An extracted indirect transaction in flight to the radio. Success resolves the
     /// transaction's own completion; a failed transmit puts it back at the head of its
     /// queue for the device's next poll (802.15.4 spec 6.7.3), unless it has expired.
@@ -403,7 +406,10 @@ pub struct Broadcast {
 pub struct PendingApsAck {
     pub(crate) ack_data: ApsAckData,
     pub(crate) slot: Arc<SendSlot>,
-    pub(crate) deadline: CoreInstant,
+    /// How long to wait for the ack once the frame is handed off.
+    pub(crate) wait: Duration,
+    /// Armed at handoff, so route discovery and queueing do not eat into `wait`.
+    pub(crate) deadline: Option<CoreInstant>,
 }
 
 /// A transmit queued for the single sender task ([`ZigbeeStack::sender_task`]). The NWK
