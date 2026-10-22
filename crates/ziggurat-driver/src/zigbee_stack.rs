@@ -869,6 +869,16 @@ pub enum ZigbeeNotification {
         aps_encrypted: bool,
         data: Vec<u8>,
     },
+    /// A Green Power frame received directly from a GPD, without any processing: the
+    /// stub NWK header onward, including the MIC (GP A.1.2.1.3). Of the MAC header,
+    /// only the fields GP uses are kept.
+    ReceivedGpdf {
+        mac_sequence_number: u8,
+        source_ieee: Option<Eui64>,
+        lqi: u8,
+        rssi: i8,
+        data: Vec<u8>,
+    },
     /// The outgoing NWK security frame counter has advanced; the client should persist
     /// it to prevent a rollback on restart
     FrameCounterUpdate { frame_counter: u32 },

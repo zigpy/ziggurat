@@ -521,6 +521,20 @@ pub fn notification_frame(update: &ZigbeeNotification) -> Option<Vec<u8>> {
                 router_ieee: router_ieee.unwrap_or(Eui64([0; 8])),
             })
         }
+        ZigbeeNotification::ReceivedGpdf {
+            mac_sequence_number,
+            source_ieee,
+            lqi,
+            rssi,
+            data,
+        } => Notification::ReceivedGpdf(ReceivedGpdfPayload {
+            mac_sequence_number: *mac_sequence_number,
+            has_source_ieee: source_ieee.is_some(),
+            source_ieee: source_ieee.unwrap_or(Eui64([0; 8])),
+            lqi: *lqi,
+            rssi: *rssi,
+            data: data.clone(),
+        }),
         ZigbeeNotification::FrameCounterUpdate { frame_counter } => {
             Notification::FrameCounter(FrameCounterPayload {
                 frame_counter: *frame_counter,

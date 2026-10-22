@@ -13,6 +13,9 @@ use crate::nwk::commands::EndDeviceTimeout;
 /// `nwkcProtocolVersion`: the NWK protocol version carried in every frame.
 pub const PROTOCOL_VERSION: u8 = 2;
 
+/// The protocol version in the stub NWK header of a Green Power frame (GP A.1.4.1.2).
+pub const GP_PROTOCOL_VERSION: u8 = 3;
+
 /// The stack profile advertised in beacons: 2 is Zigbee PRO.
 pub const STACK_PROFILE: u8 = 2;
 
