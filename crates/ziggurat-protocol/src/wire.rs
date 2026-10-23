@@ -696,6 +696,7 @@ pub enum SendStatus {
     FrameBudgetExhausted = 10,
     Cancelled = 11,
     RadioError = 12,
+    HandoffTimeout = 13,
 }
 
 #[abstract_bits]
