@@ -43,7 +43,7 @@ pub struct Placement {
 pub struct Unicast<F, W> {
     pub frame: F,
     pub priority: TxPriority,
-    pub waiter: Option<W>,
+    pub waiter: W,
     pub confirm: Confirm,
     pub delivery: Delivery,
     /// When the send fails if still not handed off (for an indirect delivery, if still
@@ -70,7 +70,7 @@ enum Stage {
 struct Record<F, W> {
     frame: F,
     priority: TxPriority,
-    waiter: Option<W>,
+    waiter: W,
     confirm: Confirm,
     delivery: Delivery,
     stage: Stage,
@@ -143,9 +143,12 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn admit(&mut self, id: SendId, unicast: Unicast<F, W>) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
-
+    pub(super) fn admit(
+        &mut self,
+        id: SendId,
+        unicast: Unicast<F, W>,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
         let stage = match unicast.delivery {
             Delivery::Direct { .. } => Stage::Queued,
             Delivery::Indirect { .. } => {
@@ -166,8 +169,6 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 deadline: unicast.deadline,
             },
         );
-
-        actions
     }
 
     /// The highest-priority queued send, oldest first within a priority.
@@ -218,9 +219,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
-    ) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
-
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
         let record = self
             .records
             .get(&id)
@@ -252,9 +252,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         };
 
         match after {
-            AfterTransmit::HandedOff => self.handed_off(id, now, &mut actions),
+            AfterTransmit::HandedOff => self.handed_off(id, now, actions),
             AfterTransmit::Settle(result, failed_hop) => {
-                self.settle(id, result, failed_hop, &mut actions);
+                self.settle(id, result, failed_hop, actions);
             }
             AfterTransmit::Retry { attempts_remaining } => {
                 let record = self.records.get_mut(&id).unwrap();
@@ -273,8 +273,6 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 self.records.get_mut(&id).unwrap().stage = Stage::AwaitingPoll;
             }
         }
-
-        actions
     }
 
     /// The frame reached its next hop: settle the send, or start waiting for its ack.
@@ -295,9 +293,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         record.stage = Stage::AwaitingApsAck;
         record.deadline = now + wait;
 
-        if let Some(waiter) = &record.waiter {
-            actions.push(Action::HandedOff(waiter.clone()));
-        }
+        actions.push(Action::HandedOff(record.waiter.clone()));
         if left_poll_set {
             actions.push(Action::PollAddressesChanged);
         }
@@ -359,9 +355,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
     /// An end-to-end APS ack arrived. It settles the oldest send waiting for it; the
     /// ack carries no way to tell two frames sharing a key apart.
-    pub(super) fn ack_received(&mut self, ack: &ApsAckData) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
-
+    pub(super) fn ack_received(&mut self, ack: &ApsAckData, actions: &mut Vec<Action<F, W, E>>) {
         let matched = self.records.iter().find_map(|(id, record)| {
             let expected = match &record.confirm {
                 Confirm::ApsAck { ack: expected, .. } => expected,
@@ -378,7 +372,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         });
 
         match matched {
-            Some((id, true)) => self.settle(id, Ok(()), None, &mut actions),
+            Some((id, true)) => self.settle(id, Ok(()), None, actions),
             // Faster than the radio's own report: `transmitted` settles it
             Some((id, false)) => {
                 if let Confirm::ApsAck { acked, .. } =
@@ -389,14 +383,15 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             }
             None => {}
         }
-
-        actions
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
-    pub(super) fn drop_indirect(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
-
+    pub(super) fn drop_indirect(
+        &mut self,
+        eui64: Option<Eui64>,
+        nwk: Nwk,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
         let dropped: Vec<(SendId, Ieee802154Address)> = self
             .records
             .iter()
@@ -416,27 +411,24 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 id,
                 Err(SendFailure::IndirectExpired { destination }.into()),
                 None,
-                &mut actions,
+                actions,
             );
         }
-
-        actions
     }
 
-    /// `None` if the send is in the radio right now.
-    pub(super) fn cancel(&mut self, id: SendId) -> Option<Vec<Action<F, W, E>>> {
-        if self.records.get(&id)?.stage == Stage::Transmitting {
-            return None;
+    /// `false` if the send is in the radio right now, or the send is unknown.
+    pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
+        match self.records.get(&id) {
+            Some(record) if record.stage != Stage::Transmitting => {
+                self.settle(id, Err(SendFailure::Cancelled.into()), None, actions);
+                true
+            }
+            _ => false,
         }
-
-        let mut actions = Vec::new();
-        self.settle(id, Err(SendFailure::Cancelled.into()), None, &mut actions);
-        Some(actions)
     }
 
     /// Re-queue retries that are due and fail records past their deadline.
-    pub(super) fn tick(&mut self, now: Instant) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    pub(super) fn tick(&mut self, now: Instant, actions: &mut Vec<Action<F, W, E>>) {
         let mut lapsed: Vec<(SendId, SendFailure)> = Vec::new();
 
         for (id, record) in self.records.iter_mut() {
@@ -454,10 +446,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         }
 
         for (id, failure) in lapsed {
-            self.settle(id, Err(failure.into()), None, &mut actions);
+            self.settle(id, Err(failure.into()), None, actions);
         }
-
-        actions
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {

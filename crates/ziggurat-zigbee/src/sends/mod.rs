@@ -15,9 +15,9 @@
 //! table holding the id.
 //!
 //! The tables never read a clock and never notify anyone: `now` is passed in, and every
-//! mutation returns the [`Action`]s the driver must carry out. They are generic over the
-//! frame type `F`, the waiter type `W` and the driver's error type `E`, which they only
-//! ever need to build from a [`SendFailure`].
+//! mutation appends the [`Action`]s the driver must carry out to the `actions` it is
+//! given. They are generic over the frame type `F`, the waiter type `W` and the driver's
+//! error type `E`, which they only ever need to build from a [`SendFailure`].
 //!
 //! Every record carries a deadline, so no send can be stranded: a record past its
 //! deadline fails with the error its state implies.
@@ -163,7 +163,7 @@ pub enum Action<F, W, E> {
     /// budget it holds). `failed_hop` names the next hop a unicast exhausted its
     /// attempts at.
     Settled {
-        waiter: Option<W>,
+        waiter: W,
         result: Result<(), E>,
         frame: F,
         failed_hop: Option<Nwk>,
@@ -231,10 +231,14 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// Admit a unicast with a known next hop.
-    pub fn admit_unicast(&mut self, unicast: Unicast<F, W>) -> (SendId, Vec<Action<F, W, E>>) {
+    pub fn admit_unicast(
+        &mut self,
+        unicast: Unicast<F, W>,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) -> SendId {
         let id = self.next_id();
-        let actions = self.unicasts.admit(id, unicast);
-        (id, actions)
+        self.unicasts.admit(id, unicast, actions);
+        id
     }
 
     /// Admit a unicast with no route yet, parked on its destination's discovery. One
@@ -245,12 +249,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         now: Instant,
         discovery_time: Duration,
         attempts: u8,
-    ) -> (SendId, Vec<Action<F, W, E>>) {
+        actions: &mut Vec<Action<F, W, E>>,
+    ) -> SendId {
         let id = self.next_id();
-        let actions = self.parked.admit(id, send, now, discovery_time, attempts);
-        (id, actions)
+        self.parked
+            .admit(id, send, now, discovery_time, attempts, actions);
+        id
     }
 
+    /// Admit a broadcast. Its first copy goes out on the next tick its schedule says
+    /// it is due (a `Once` schedule queues it right away).
     pub fn admit_broadcast(&mut self, broadcast: Broadcast<F, W>) -> SendId {
         let id = self.next_id();
         self.broadcasts.admit(id, broadcast);
@@ -291,11 +299,13 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
-    ) -> Vec<Action<F, W, E>> {
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
         if self.unicasts.contains(id) {
-            self.unicasts.transmitted(id, result, now, retry_delay)
+            self.unicasts
+                .transmitted(id, result, now, retry_delay, actions);
         } else {
-            self.broadcasts.transmitted(id, result)
+            self.broadcasts.transmitted(id, result, actions);
         }
     }
 
@@ -306,28 +316,22 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// An end-to-end APS ack arrived.
-    pub fn ack_received(&mut self, ack: &ApsAckData) -> Vec<Action<F, W, E>> {
-        self.unicasts.ack_received(ack)
-    }
-
-    /// Every destination with sends parked on its route discovery.
-    pub fn awaiting_route_destinations(&self) -> Vec<Nwk> {
-        self.parked.destinations()
+    pub fn ack_received(&mut self, ack: &ApsAckData, actions: &mut Vec<Action<F, W, E>>) {
+        self.unicasts.ack_received(ack, actions);
     }
 
     /// A route to `destination` is active: move every send parked on it to the unicasts.
     /// `place` resolves each frame's next hop (rewriting the frame for a source route),
     /// or fails the send.
-    pub fn route_resolved(
+    fn route_resolved(
         &mut self,
         destination: Nwk,
-        mut place: impl FnMut(&mut F) -> Result<Placement, E>,
-    ) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
-
+        place: &mut impl FnMut(&mut F) -> Result<Placement, E>,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
         for (id, mut parked) in self.parked.resolved(destination) {
             match place(&mut parked.frame) {
-                Ok(placement) => actions.extend(self.unicasts.admit(
+                Ok(placement) => self.unicasts.admit(
                     id,
                     Unicast {
                         frame: parked.frame,
@@ -337,7 +341,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                         delivery: placement.delivery,
                         deadline: placement.deadline,
                     },
-                )),
+                    actions,
+                ),
                 Err(err) => actions.push(Action::Settled {
                     waiter: parked.waiter,
                     result: Err(err),
@@ -346,45 +351,61 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                 }),
             }
         }
-
-        actions
-    }
-
-    /// The keys of every broadcast awaiting its passive-ack quorum.
-    pub fn passive_ack_keys(&self) -> Vec<(Nwk, u8)> {
-        self.broadcasts.passive_ack_keys()
-    }
-
-    /// The passive-ack quorum for a broadcast was heard: it is delivered.
-    pub fn broadcast_acked(&mut self, key: (Nwk, u8)) -> Vec<Action<F, W, E>> {
-        self.broadcasts.acked(key)
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
-    pub fn drop_indirect(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Vec<Action<F, W, E>> {
-        self.unicasts.drop_indirect(eui64, nwk)
+    pub fn drop_indirect(
+        &mut self,
+        eui64: Option<Eui64>,
+        nwk: Nwk,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
+        self.unicasts.drop_indirect(eui64, nwk, actions);
     }
 
-    /// Cancel a send. `None` if it is unknown, already over, or in the radio right now
+    /// Cancel a send. `false` if it is unknown, already over, or in the radio right now
     /// (its own report settles it within the radio's timeout).
-    pub fn cancel(&mut self, id: SendId) -> Option<Vec<Action<F, W, E>>> {
+    pub fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
         if self.unicasts.contains(id) {
-            self.unicasts.cancel(id)
+            self.unicasts.cancel(id, actions)
         } else if self.parked.contains(id) {
-            Some(self.parked.cancel(id))
+            self.parked.cancel(id, actions);
+            true
         } else {
-            self.broadcasts.cancel(id)
+            self.broadcasts.cancel(id, actions)
         }
     }
 
-    /// The timer pass: re-queue what is due, fail what is past its deadline, and retry
-    /// or fail lapsed route discoveries. `passive_ack_interval` spaces passive-ack
-    /// broadcast copies.
-    pub fn tick(&mut self, now: Instant, passive_ack_interval: Duration) -> Vec<Action<F, W, E>> {
-        let mut actions = self.unicasts.tick(now);
-        actions.extend(self.parked.tick(now));
-        actions.extend(self.broadcasts.tick(now, passive_ack_interval));
-        actions
+    /// The timer pass. First the facts the tables cannot see for themselves: a
+    /// broadcast whose passive-ack quorum `quorum_heard` confirms is delivered, and
+    /// the sends parked on a destination `route_active` confirms are admitted as
+    /// unicasts through `place`. Then the timed transitions: re-queue what is due,
+    /// fail what is past its deadline, and retry or fail lapsed route discoveries.
+    /// `passive_ack_interval` spaces passive-ack broadcast copies.
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        passive_ack_interval: Duration,
+        mut quorum_heard: impl FnMut((Nwk, u8)) -> bool,
+        mut route_active: impl FnMut(Nwk) -> bool,
+        mut place: impl FnMut(&mut F) -> Result<Placement, E>,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
+        for key in self.broadcasts.passive_ack_keys() {
+            if quorum_heard(key) {
+                self.broadcasts.acked(key, actions);
+            }
+        }
+
+        for destination in self.parked.destinations() {
+            if route_active(destination) {
+                self.route_resolved(destination, &mut place, actions);
+            }
+        }
+
+        self.unicasts.tick(now, actions);
+        self.parked.tick(now, actions);
+        self.broadcasts.tick(now, passive_ack_interval, actions);
     }
 
     /// When the timer must next run, or `None` when nothing is waiting on time.

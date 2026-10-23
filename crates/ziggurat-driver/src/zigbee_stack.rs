@@ -49,6 +49,7 @@ pub use ziggurat_zigbee::nwk::NwkDeviceType;
 pub use ziggurat_zigbee::nwk::addresses::AddressMap;
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
 pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
+pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
 pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
@@ -172,47 +173,6 @@ impl TxPolicy {
 pub enum NwkSecurityMode {
     NetworkKey,
     Unsecured,
-}
-
-/// How the MAC next hop for an outgoing unicast is chosen.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendMode {
-    /// The destination is its own next hop: transmit straight to it with no routing
-    /// lookup (and route discovery suppressed). Used for frames to a one-hop neighbor,
-    /// e.g. delivering the network key to a joining device.
-    Direct,
-    /// Resolve the next hop through the routing layer, subject to a host [`RouteDirective`]:
-    /// the route table or an applicable source route, discovering a route first if none is
-    /// known.
-    Route(RouteDirective),
-}
-
-/// How the host wants an originated unicast routed.
-///
-/// Hints and forces are per-frame: they steer a single send and are never written into
-/// the routing tables (so they never echo back through the route-change notification
-/// stream).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RouteDirective {
-    /// The stack resolves the route entirely on its own (source route, route table, or
-    /// discovery). What all stack-originated traffic passes.
-    StackDecides,
-    /// Use the supplied route only when the stack has no route of its own; it stands in
-    /// for route discovery rather than triggering it. A known route still wins.
-    Hint(HostRoute),
-    /// Use the supplied route unconditionally, overriding even a known route and
-    /// suppressing discovery.
-    Force(HostRoute),
-}
-
-/// A route the host supplies alongside a send.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostRoute {
-    /// Hand the frame to this next hop and let it route onward.
-    NextHop(Nwk),
-    /// The ordered relay path to embed as a source route; the MAC destination is the
-    /// last relay. An empty list means direct delivery to the destination.
-    SourceRoute(Vec<Nwk>),
 }
 
 /// Whether a unicast APS data frame requests an end-to-end acknowledgement. When it
@@ -399,6 +359,13 @@ pub struct Nib {
     pub address_map: AddressMap,
 }
 
+impl Nib {
+    pub const fn next_sequence_number(&mut self) -> u8 {
+        self.sequence_number = self.sequence_number.wrapping_add(1);
+        self.sequence_number
+    }
+}
+
 /// The APS sub-layer Information Base (spec Table 4-35 and §4.4): the trust-center
 /// link-key store and APS-layer counter.
 #[derive(Debug)]
@@ -429,6 +396,12 @@ pub struct ZigbeeCore {
     pub nib: Nib,
     pub aib: Aib,
     pub mac: MacState,
+
+    /// Every outgoing frame the stack holds, from admission to its verdict. It lives
+    /// under the core lock because its decisions read the core's tables: a send is
+    /// placed by the routing and neighbor tables, and a tick asks them whether a route
+    /// became active or a broadcast's quorum was heard.
+    pub sends: SendTable,
 
     /// Deadline until which the coordinator advertises `association_permit` in its
     /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
@@ -559,6 +532,7 @@ impl State {
                     ieee802154_sequence_number: 0,
                     pan_id: config.pan_id,
                 },
+                sends: SendTable::default(),
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
@@ -763,9 +737,6 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// so a host broadcast flood cannot starve stack-critical broadcasts.
     pub(crate) broadcast_budget: Mutex<crate::broadcast_budget::BroadcastBudget>,
 
-    /// Every outgoing frame the stack holds, from admission to its verdict. Locked only
-    /// briefly and never while `core` is held: the send table's callbacks lock `core`.
-    pub(crate) sends: Mutex<SendTable>,
     /// Wakes the sender task when a frame may have become ready to transmit.
     pub(crate) send_wake: Notify,
     /// Wakes the send timer task when the send table's next deadline may have moved.
@@ -867,7 +838,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             broadcast_budget: Mutex::new(crate::broadcast_budget::BroadcastBudget::new(
                 initial_broadcast_tokens,
             )),
-            sends: Mutex::new(SendTable::default()),
             send_wake: Notify::new(),
             send_timer_wake: Notify::new(),
             last_persisted_aps_counter: AtomicU32::new(0),
@@ -1253,13 +1223,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// so it must be re-applied after every reset.
     async fn apply_radio_configuration(&self) -> Result<(), RadioError> {
         let (config, table) = {
-            // Lock order: the send table before the core, never the reverse
-            let table = {
-                let sends = self.sends.lock();
-                let core = self.core();
-                sends.poll_addresses(core.nib.address_map.map())
-            };
             let core = self.core();
+            let table = core.sends.poll_addresses(core.nib.address_map.map());
 
             let config = RadioConfig {
                 channel: core.mac.channel,

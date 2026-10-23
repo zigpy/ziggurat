@@ -20,7 +20,7 @@ use super::{Action, Confirm, SendFailure, SendId, TxPriority};
 pub struct ParkedSend<F, W> {
     pub frame: F,
     pub priority: TxPriority,
-    pub waiter: Option<W>,
+    pub waiter: W,
     pub confirm: Confirm,
     pub destination: Nwk,
     /// When the send fails if still parked.
@@ -67,8 +67,8 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
         now: Instant,
         discovery_time: Duration,
         attempts: u8,
-    ) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
         let destination = send.destination;
 
         self.records.insert(id, send);
@@ -84,8 +84,6 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
             );
             actions.push(Action::StartDiscovery(destination));
         }
-
-        actions
     }
 
     pub(super) fn destinations(&self) -> Vec<Nwk> {
@@ -125,15 +123,13 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
 
     /// The discovery stays, so a new send to the destination does not start a second
     /// one; it lapses on its own once nothing is parked on it.
-    pub(super) fn cancel(&mut self, id: SendId) -> Vec<Action<F, W, E>> {
+    pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) {
         let send = self.records.remove(&id).unwrap();
-        alloc::vec![Self::settled(send, SendFailure::Cancelled)]
+        actions.push(Self::settled(send, SendFailure::Cancelled));
     }
 
     /// Fail sends past their deadline, and restart or fail lapsed discoveries.
-    pub(super) fn tick(&mut self, now: Instant) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
-
+    pub(super) fn tick(&mut self, now: Instant, actions: &mut Vec<Action<F, W, E>>) {
         let lapsed: Vec<SendId> = self
             .records
             .iter()
@@ -173,8 +169,6 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
                 actions.push(Self::settled(send, SendFailure::RouteDiscoveryTimeout));
             }
         }
-
-        actions
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {

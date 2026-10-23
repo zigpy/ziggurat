@@ -2,8 +2,9 @@
 //! feeds the radio, the timer task that drives everything waiting on time, and the
 //! execution of the actions the table returns.
 //!
-//! The table is locked briefly for every mutation and released before its actions are
-//! carried out, since an action (starting a route discovery) can admit a new send.
+//! The table lives in the core, so one lock covers a mutation and the core facts it
+//! reads. The lock is released before the actions are carried out, since an action
+//! (starting a route discovery) can admit a new send.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -12,24 +13,23 @@ use core::time::Duration;
 use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::sends::{
-    Action, Broadcast as BroadcastRecord, ParkedSend, Unicast as UnicastRecord,
-};
+use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
+use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as UnicastRecord};
 
 use crate::frame_token::{self, FrameToken};
 use crate::runtime::Runtime;
 
 use super::routing::Status as RouteStatus;
 use super::{
-    Confirm, Delivery, DeliveryError, EnqueueError, Frame, Held, NwkSecurityMode, Placement,
-    RouteDirective, Schedule, SendAction, SendId, SendMode, SendSlot, SendTable, TrackStage,
-    Transmit, TxPolicy, ZigbeeStack,
+    Confirm, Delivery, DeliveryError, EnqueueError, Frame, Held, Nib, NwkSecurityMode, Placement,
+    RouteDirective, Schedule, SendAction, SendHandle, SendId, SendMode, SendSlot, TrackStage,
+    Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Take a frame token from the policy's budget tier. A refused token rejects the
     /// send at admission.
-    fn take_token(&self, policy: TxPolicy) -> Result<FrameToken, EnqueueError> {
+    pub(super) fn take_token(&self, policy: TxPolicy) -> Result<FrameToken, EnqueueError> {
         frame_token::take(policy.class).ok_or_else(|| {
             tracing::warn!(
                 "Frame budget exhausted ({}/{} tokens); rejecting {:?} frame",
@@ -41,60 +41,33 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    /// Admit a unicast with a known next hop.
+    /// Admit a unicast with a known next hop. Every send gets a slot: dropping the
+    /// returned handle is how a caller detaches from a send it does not await.
     pub(super) fn admit_unicast(
         &self,
         frame: Frame,
         policy: TxPolicy,
         confirm: Confirm,
-        waiter: Option<Arc<SendSlot>>,
         placement: Placement,
-    ) -> Result<SendId, EnqueueError> {
+    ) -> Result<SendHandle, EnqueueError> {
         let token = self.take_token(policy)?;
+        let slot = Arc::new(SendSlot::default());
 
-        let id = self.mutate_sends(|sends| {
-            sends.admit_unicast(UnicastRecord {
-                frame: Held { frame, token },
-                priority: policy.priority,
-                waiter,
-                confirm,
-                delivery: placement.delivery,
-                deadline: placement.deadline,
-            })
-        });
-
-        Ok(id)
-    }
-
-    /// Admit a unicast with no route yet, parked on `destination`'s route discovery.
-    pub(super) fn admit_parked(
-        &self,
-        frame: Frame,
-        policy: TxPolicy,
-        confirm: Confirm,
-        waiter: Option<Arc<SendSlot>>,
-        destination: Nwk,
-    ) -> Result<SendId, EnqueueError> {
-        let token = self.take_token(policy)?;
-        let now = self.core_now();
-
-        let id = self.mutate_sends(|sends| {
-            sends.admit_parked(
-                ParkedSend {
+        let id = self.mutate_sends(|core, actions| {
+            core.sends.admit_unicast(
+                UnicastRecord {
                     frame: Held { frame, token },
                     priority: policy.priority,
-                    waiter,
+                    waiter: slot.clone(),
                     confirm,
-                    destination,
-                    deadline: now + self.tunables.handoff_timeout(),
+                    delivery: placement.delivery,
+                    deadline: placement.deadline,
                 },
-                now,
-                self.tunables.route_discovery_time(),
-                self.tunables.pending_route_discovery_attempts(),
+                actions,
             )
         });
 
-        Ok(id)
+        Ok(SendHandle::new(id, slot))
     }
 
     /// Admit a broadcast, or any frame transmitted on a schedule.
@@ -102,42 +75,41 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         frame: Frame,
         policy: TxPolicy,
-        waiter: Option<Arc<SendSlot>>,
         schedule: Schedule,
-        copy_now: bool,
-    ) -> Result<SendId, EnqueueError> {
+    ) -> Result<SendHandle, EnqueueError> {
         let token = self.take_token(policy)?;
+        let slot = Arc::new(SendSlot::default());
         let deadline = self.core_now() + self.tunables.handoff_timeout();
 
-        let id = self.mutate_sends(|sends| {
-            let id = sends.admit_broadcast(BroadcastRecord {
+        let id = self.mutate_sends(|core, _| {
+            core.sends.admit_broadcast(BroadcastRecord {
                 frame: Held { frame, token },
                 priority: policy.priority,
-                waiter,
+                waiter: slot.clone(),
                 schedule,
-                copy_now,
                 deadline,
-            });
-            (id, Vec::new())
+            })
         });
 
-        Ok(id)
+        Ok(SendHandle::new(id, slot))
     }
 
-    /// Run one mutation of the send table, then carry out the actions it returned and
-    /// wake the sender and timer tasks, whose next step may have changed.
+    /// Run one mutation of the send table under the core lock, then carry out the
+    /// actions it appended and wake the sender and timer tasks, whose next step may
+    /// have changed.
     pub(super) fn mutate_sends<T>(
         &self,
-        mutate: impl FnOnce(&mut SendTable) -> (T, Vec<SendAction>),
+        mutate: impl FnOnce(&mut ZigbeeCore, &mut Vec<SendAction>) -> T,
     ) -> T {
-        let (value, actions) = mutate(&mut self.sends.lock());
+        let mut actions = Vec::new();
+        let value = mutate(&mut self.core(), &mut actions);
         self.execute(actions);
         self.send_wake.notify_one();
         self.send_timer_wake.notify_one();
         value
     }
 
-    /// Carry out what the send table decided. Called with the table unlocked.
+    /// Carry out what the send table decided. Called with the core unlocked.
     fn execute(&self, actions: Vec<SendAction>) {
         for action in actions {
             match action {
@@ -155,14 +127,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         self.handle_unicast_send_failure(nwk_frame, next_hop);
                     }
 
-                    match waiter {
-                        Some(slot) => slot.resolve(TrackStage::Delivery, result),
-                        None => {
-                            if let Err(err) = result {
-                                tracing::warn!("Background send failed: {err}");
-                            }
-                        }
-                    }
+                    waiter.resolve(TrackStage::Delivery, result);
 
                     // Frees the frame token
                     drop(frame);
@@ -179,19 +144,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Cancel a send. Returns whether it was still pending and is now settled with
     /// `Cancelled`. A send in the radio right now is refused: its own report settles it
     /// within the radio's timeout.
-    #[allow(clippy::option_if_let_else)]
     pub fn cancel_send(&self, id: SendId) -> bool {
-        self.mutate_sends(|sends| match sends.cancel(id) {
-            Some(actions) => (true, actions),
-            None => (false, Vec::new()),
-        })
+        self.mutate_sends(|core, actions| core.sends.cancel(id, actions))
+    }
+
+    /// The stack settings next-hop resolution reads.
+    pub(super) fn next_hop_policy(&self) -> next_hop::Policy {
+        next_hop::Policy {
+            is_concentrator: self.state.is_concentrator,
+            force_route_discovery: self.state.hack_force_route_discovery,
+            max_source_route: self.tunables.max_source_route(),
+        }
     }
 
     /// Where a unicast with a resolved next hop goes: a sleepy child's frame awaits its
     /// poll, everything else is queued for the sender.
     #[allow(clippy::option_if_let_else)]
-    pub(super) fn place_unicast(&self, next_hop: Nwk) -> Placement {
-        match self.sleepy_child_eui64(next_hop) {
+    pub(super) fn place_unicast(&self, nib: &Nib, next_hop: Nwk) -> Placement {
+        match nib.neighbors.sleepy_child_eui64(next_hop) {
             Some(child_eui64) => {
                 self.place_indirect(Ieee802154Address::Eui64(child_eui64), next_hop)
             }
@@ -216,14 +186,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Re-place a frame whose route discovery resolved. The route can have vanished in
     /// the race, which fails the send.
-    fn place_released(&self, held: &mut Held) -> Result<Placement, DeliveryError> {
+    fn place_released(&self, nib: &Nib, held: &mut Held) -> Result<Placement, DeliveryError> {
         let Frame::Nwk { nwk_frame, .. } = &mut held.frame else {
             unreachable!("only NWK unicasts await a route")
         };
 
-        match self.resolve_next_hop(nwk_frame, &SendMode::Route(RouteDirective::StackDecides)) {
-            super::nwk::NextHop::Resolved(next_hop) => Ok(self.place_unicast(next_hop)),
-            super::nwk::NextHop::NeedDiscovery | super::nwk::NextHop::Discard => {
+        let resolved = next_hop::resolve(
+            &nib.routing,
+            &nib.neighbors,
+            nwk_frame,
+            &SendMode::Route(RouteDirective::StackDecides),
+            self.next_hop_policy(),
+        );
+
+        match resolved {
+            NextHop::Resolved(next_hop) => Ok(self.place_unicast(nib, next_hop)),
+            NextHop::NeedDiscovery | NextHop::Discard => {
                 Err(DeliveryError::RouteInactiveAfterDiscovery)
             }
         }
@@ -236,12 +214,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn sender_task(&self) {
         loop {
             loop {
-                let dequeued = {
-                    let mut sends = self.sends.lock();
-                    sends.dequeue().map(|dequeued| {
+                let dequeued =
+                    self.core().sends.dequeue().map(|dequeued| {
                         (dequeued.id, dequeued.frame.frame.clone(), dequeued.transmit)
-                    })
-                };
+                    });
 
                 let Some((id, frame, transmit)) = dequeued else {
                     break;
@@ -251,7 +227,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                 let now = self.core_now();
                 let retry_delay = self.unicast_retry_delay();
-                self.mutate_sends(|sends| ((), sends.transmitted(id, result, now, retry_delay)));
+                self.mutate_sends(|core, actions| {
+                    core.sends
+                        .transmitted(id, result, now, retry_delay, actions);
+                });
             }
 
             self.send_wake.notified().await;
@@ -301,7 +280,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         loop {
             self.drive_sends();
 
-            let next_wake = self.sends.lock().next_wake();
+            let next_wake = self.core().sends.next_wake();
             match next_wake {
                 Some(deadline) => {
                     let _ = self
@@ -313,42 +292,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// One timer pass. The checks that need the core's tables (a broadcast's passive-ack
-    /// quorum, a route becoming active) are made first, then fed to the table with its
-    /// own timed transitions.
+    /// One timer pass. The table asks back for the facts only the core holds: whether
+    /// a broadcast's passive-ack quorum was heard, whether a route became active, and
+    /// where a released frame goes.
     fn drive_sends(&self) {
         let now = self.core_now();
-
-        let keys = self.sends.lock().passive_ack_keys();
-        let acked: Vec<(Nwk, u8)> = keys
-            .into_iter()
-            .filter(|key| self.broadcast_passively_acked(*key))
-            .collect();
-
-        let destinations = self.sends.lock().awaiting_route_destinations();
-        let active: Vec<Nwk> = {
-            let core = self.core();
-            destinations
-                .into_iter()
-                .filter(|destination| {
-                    core.nib.routing.route_status(*destination) == Some(RouteStatus::Active)
-                })
-                .collect()
-        };
-
         let retransmit_interval = self.tunables.passive_ack_timeout() + self.broadcast_jitter();
 
-        self.mutate_sends(|sends| {
-            let mut actions = Vec::new();
-            for key in acked {
-                tracing::debug!("Broadcast {key:?} passively acknowledged");
-                actions.extend(sends.broadcast_acked(key));
-            }
-            for destination in active {
-                actions.extend(sends.route_resolved(destination, |held| self.place_released(held)));
-            }
-            actions.extend(sends.tick(now, retransmit_interval));
-            ((), actions)
+        self.mutate_sends(|core, actions| {
+            let ZigbeeCore { sends, nib, .. } = core;
+            sends.tick(
+                now,
+                retransmit_interval,
+                |key| self.broadcast_passively_acked(nib, key),
+                |destination| nib.routing.route_status(destination) == Some(RouteStatus::Active),
+                |held| self.place_released(nib, held),
+                actions,
+            );
         });
     }
 }

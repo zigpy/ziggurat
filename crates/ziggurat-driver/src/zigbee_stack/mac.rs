@@ -153,8 +153,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        let admitted =
-            self.admit_broadcast(Frame::Raw(beacon_frame), policy, None, Schedule::Once, true);
+        let admitted = self.admit_broadcast(Frame::Raw(beacon_frame), policy, Schedule::Once);
         if let Err(err) = admitted {
             tracing::warn!("Dropping beacon: {err}");
         }

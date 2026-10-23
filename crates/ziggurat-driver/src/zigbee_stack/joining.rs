@@ -36,10 +36,9 @@ use ziggurat_zigbee::nwk::commands::{
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, DeviceLeaveReason, EnqueueError, Frame, JoinKind,
-    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, SendSlot,
-    TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
+    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, TxPolicy,
+    TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
 };
-use alloc::sync::Arc;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
@@ -212,23 +211,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A denial has no follow-up; a successful join's tasklet awaits the
         // extraction. A raw MAC frame has no later verdict: extraction is delivery.
-        let slot = match status {
-            Ieee802154AssociationStatus::AssociationSuccessful => {
-                Some(Arc::new(SendSlot::default()))
-            }
-            _ => None,
-        };
-
         let admitted = self.admit_unicast(
             Frame::Raw(response_frame),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
-            slot.clone(),
             placement,
         );
 
         match admitted {
-            Ok(id) => slot.map(|slot| SendHandle::new(id, slot)),
+            Ok(handle) => match status {
+                Ieee802154AssociationStatus::AssociationSuccessful => Some(handle),
+                _ => None,
+            },
             Err(err) => {
                 tracing::warn!("Dropping association response to {eui64:?}: {err}");
                 None
@@ -384,7 +378,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             // The retransmit reactor owns the rebroadcasts; the jitter was applied by
             // the report deadline, and the cancel-if-already-reported check above.
-            if let Err(err) = self.send_broadcast_untracked(Broadcast {
+            if let Err(err) = self.send_broadcast(Broadcast {
                 frame: conflict_frame,
                 security: NwkSecurityMode::NetworkKey,
                 policy: TxPolicy {
@@ -686,14 +680,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         destination: Nwk,
         payload: Vec<u8>,
-    ) -> Result<(), EnqueueError> {
+    ) -> Result<SendHandle, EnqueueError> {
         // Routed delivery to a non-neighbor must be allowed to discover a route (NWK data
         // frames default to suppressing discovery).
         let nwk_frame = self
             .nwk_data_frame(destination, payload)?
             .with_discover_route(NwkRouteDiscovery::Enable);
 
-        self.send_unicast_untracked(Unicast {
+        self.send_unicast(Unicast {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
             mode: if self.is_neighbor(destination) {
@@ -1279,7 +1273,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         // The rejoining device is within radio range
-        self.send_unicast_untracked(Unicast {
+        self.send_unicast(Unicast {
             frame: response_frame,
             security,
             mode: SendMode::Direct,
@@ -1404,7 +1398,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             policy: TxPolicy::STACK_CRITICAL,
             confirm: Confirm::OnHandoff,
         };
-        if let Err(err) = self.send_unicast_untracked(send) {
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send end device timeout response: {err}");
         }
     }
