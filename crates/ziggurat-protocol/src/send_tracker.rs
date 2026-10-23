@@ -83,15 +83,13 @@ impl SendTracker {
         );
     }
 
-    /// Cancel the send tracked under `id`. Returns whether an entry was present and still
-    /// unresolved (its terminal frame not yet owed). The caller must also nudge the
-    /// driver's reactors so the cancellation is acted on promptly.
+    /// Cancel the send tracked under `id`. Returns true if the entry exists and was not
+    /// yet settled. The caller should then call `nudge_cancellation`, so the driver
+    /// removes the send's entries promptly.
     pub fn cancel(&mut self, id: RequestId) -> bool {
-        self.entries.get(&id).is_some_and(|entry| {
-            let unresolved = entry.handle.status().delivered.is_none();
-            entry.handle.cancel();
-            unresolved
-        })
+        self.entries
+            .get(&id)
+            .is_some_and(|entry| entry.handle.cancel())
     }
 
     /// One reactor pass: emit every confirm frame now owed and drop entries that have

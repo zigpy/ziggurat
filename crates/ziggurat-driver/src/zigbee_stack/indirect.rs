@@ -90,17 +90,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         source_eui64: Option<Eui64>,
         source_nwk: Option<Nwk>,
     ) -> bool {
-        let outcome =
-            self.core()
-                .mac
-                .indirect_queue
-                .extract(source_eui64, source_nwk, self.core_now());
+        let outcome = self.core().mac.indirect_queue.extract(
+            source_eui64,
+            source_nwk,
+            self.core_now(),
+            Self::outcome_settled,
+        );
 
         for (destination, transaction) in outcome.expired {
             self.resolve_outcome(
                 transaction.completion,
                 Err(DeliveryError::IndirectExpired { destination }),
             );
+        }
+
+        for (_, transaction) in outcome.settled {
+            self.drop_settled_outcome(transaction.completion);
         }
 
         let Some(delivery) = outcome.delivery else {
@@ -274,13 +279,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(())
     }
 
-    /// Expires undelivered indirect transactions and evicts children whose keepalive
-    /// deadline has lapsed (spec 3.6.10.1). Sleeps until the earliest pending
-    /// deadline, woken early when a new transaction or child entry could move it
-    /// closer; keepalive refreshes only push deadlines out and need no wake.
+    /// Expires undelivered indirect transactions, drops settled ones, and evicts children
+    /// whose keepalive deadline has lapsed (spec 3.6.10.1). Sleeps until the earliest
+    /// pending deadline. It is woken early when a new transaction or child entry could
+    /// move that deadline closer, or when a send is cancelled. Keepalive refreshes only
+    /// push deadlines out and need no wake.
     pub(super) async fn indirect_maintenance_task(&self) {
         loop {
             self.expire_indirect_transactions();
+            self.drop_settled_indirect_transactions();
             self.evict_timed_out_children();
 
             match self.next_maintenance_deadline() {
@@ -316,6 +323,26 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 transaction.completion,
                 Err(DeliveryError::IndirectExpired { destination }),
             );
+        }
+
+        self.src_match_sync.notify_one();
+    }
+
+    /// Drop queued transactions whose send is already settled, so the child is no longer
+    /// told that a frame is pending for it.
+    fn drop_settled_indirect_transactions(&self) {
+        let settled = self
+            .core()
+            .mac
+            .indirect_queue
+            .drop_settled(Self::outcome_settled);
+
+        if settled.is_empty() {
+            return;
+        }
+
+        for (_, transaction) in settled {
+            self.drop_settled_outcome(transaction.completion);
         }
 
         self.src_match_sync.notify_one();

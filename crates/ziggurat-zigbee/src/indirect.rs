@@ -41,11 +41,16 @@ pub struct Delivery<F, C> {
 
 /// What a poll extracted from the queue.
 #[derive(Debug)]
-#[must_use = "the expired transactions must be failed and the delivery transmitted; \
-    dropping the outcome silently loses queued frames and leaks their completions"]
+#[must_use = "the expired transactions must be failed, the settled ones cleaned up, and \
+    the delivery transmitted; dropping the outcome silently loses queued frames and leaks \
+    their completions"]
 pub struct PollOutcome<F, C> {
     /// Transactions that expired at the head of the queue, to be failed
     pub expired: Vec<(Ieee802154Address, Transaction<F, C>)>,
+    /// Transactions whose completion is already settled, skipped at the head of the
+    /// queue. Their frames are not wanted any more; only their completions need cleaning
+    /// up.
+    pub settled: Vec<(Ieee802154Address, Transaction<F, C>)>,
     /// The oldest live transaction, if any
     pub delivery: Option<Delivery<F, C>>,
 }
@@ -122,13 +127,15 @@ impl<F, C> IndirectQueue<F, C> {
     }
 
     /// Match a poll against the queue: pop the oldest live transaction queued under
-    /// either of the polling device's addresses, also popping any expired
-    /// transactions found ahead of it.
+    /// either of the polling device's addresses, also popping any expired or settled
+    /// transactions found ahead of it. `is_settled` tells whether a completion is
+    /// already settled, so its frame must not be sent.
     pub fn extract(
         &mut self,
         eui64: Option<Eui64>,
         nwk: Option<Nwk>,
         now: Instant,
+        is_settled: impl Fn(&C) -> bool,
     ) -> PollOutcome<F, C> {
         let keys = eui64
             .map(Ieee802154Address::Eui64)
@@ -136,6 +143,7 @@ impl<F, C> IndirectQueue<F, C> {
             .chain(nwk.map(Ieee802154Address::Nwk));
 
         let mut expired = Vec::new();
+        let mut settled = Vec::new();
 
         for key in keys {
             let Some(transactions) = self.queue.get_mut(&key) else {
@@ -148,13 +156,21 @@ impl<F, C> IndirectQueue<F, C> {
                     continue;
                 }
 
+                if is_settled(&transaction.completion) {
+                    settled.push((key, transaction));
+                    continue;
+                }
+
                 // The deque is intentionally kept (even when empty) until the
                 // delivery resolves: the device keeps polling with frame-pending=1
                 // while its transaction is in flight, and a failed transmit requeues
-                let more_pending = !transactions.is_empty();
+                let more_pending = transactions
+                    .iter()
+                    .any(|transaction| !is_settled(&transaction.completion));
 
                 return PollOutcome {
                     expired,
+                    settled,
                     delivery: Some(Delivery {
                         destination: key,
                         transaction,
@@ -168,6 +184,7 @@ impl<F, C> IndirectQueue<F, C> {
 
         PollOutcome {
             expired,
+            settled,
             delivery: None,
         }
     }
@@ -230,6 +247,35 @@ impl<F, C> IndirectQueue<F, C> {
         });
 
         expired
+    }
+
+    /// Pop every transaction whose completion is settled, wherever it sits in its queue,
+    /// returning them for clean-up. A queue this empties is removed; a queue that was
+    /// already empty (its transaction in flight) is kept.
+    #[must_use = "settled transactions' completions must be cleaned up"]
+    pub fn drop_settled(
+        &mut self,
+        is_settled: impl Fn(&C) -> bool,
+    ) -> Vec<(Ieee802154Address, Transaction<F, C>)> {
+        let mut settled = Vec::new();
+
+        self.queue.retain(|&destination, transactions| {
+            let (dropped, live): (VecDeque<_>, VecDeque<_>) = transactions
+                .drain(..)
+                .partition(|transaction| is_settled(&transaction.completion));
+            *transactions = live;
+
+            let emptied = !dropped.is_empty() && transactions.is_empty();
+            settled.extend(
+                dropped
+                    .into_iter()
+                    .map(|transaction| (destination, transaction)),
+            );
+
+            !emptied
+        });
+
+        settled
     }
 
     /// The earliest transaction deadline, for scheduling the expiry sweep. Each

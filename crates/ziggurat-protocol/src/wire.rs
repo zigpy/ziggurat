@@ -525,9 +525,9 @@ pub struct SendGroupcastPayload {
     pub asdu: Vec<u8>,
 }
 
-/// Cancels an in-flight send by the `request_id` it was issued under. Best-effort:
-/// the send is torn down only if it is still in a pre-delivery state (queued, awaiting
-/// route discovery, or between retries). The reply reports whether anything was caught.
+/// Cancels an in-flight send by the `request_id` it was issued under. If the send has no
+/// final status yet, it fails with `Cancelled`, and its frame is not transmitted unless
+/// it already was. The reply reports whether the send still had no final status.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct CancelRequestPayload {
