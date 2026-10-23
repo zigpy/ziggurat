@@ -12,7 +12,8 @@ use crate::Instant;
 use crate::flat_map::FlatMap;
 
 use super::{
-    Action, ApsAckData, Confirm, Dequeued, SendFailure, SendId, SrcMatchTable, Transmit, TxPriority,
+    Action, ApsAckData, Confirm, DequeuedSend, SendFailure, SendId, SrcMatchTable, Transmit,
+    TxPriority,
 };
 
 /// How a unicast reaches its next hop. Fixed at admission.
@@ -23,7 +24,7 @@ pub enum Delivery {
         next_hop: Nwk,
         attempts_remaining: u8,
     },
-    /// Held until the device polls under `address`, then transmitted to `next_hop`. A
+    /// HeldFrame until the device polls under `address`, then transmitted to `next_hop`. A
     /// failed transmit waits for the next poll until the frame expires.
     Indirect {
         address: Ieee802154Address,
@@ -186,7 +187,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         best
     }
 
-    pub(super) fn dequeue(&mut self, id: SendId) -> Dequeued<'_, F> {
+    pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {
         let (next_hop, frame_pending) = match self.records.get(&id).unwrap().delivery {
             Delivery::Direct { next_hop, .. } => (next_hop, false),
             // More frames await the same device: it keeps polling
@@ -203,7 +204,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         debug_assert_eq!(record.stage, Stage::Queued);
         record.stage = Stage::Transmitting;
 
-        Dequeued {
+        DequeuedSend {
             id,
             frame: &record.frame,
             transmit: Transmit::Unicast {

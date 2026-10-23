@@ -21,9 +21,9 @@ use crate::runtime::Runtime;
 
 use super::routing::Status as RouteStatus;
 use super::{
-    Confirm, Delivery, DeliveryError, EnqueueError, Frame, Held, Nib, NwkSecurityMode, Placement,
-    RouteDirective, Schedule, SendAction, SendHandle, SendId, SendMode, SendSlot, TrackStage,
-    Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
+    Confirm, Delivery, DeliveryError, EnqueueError, Frame, HeldFrame, Nib, NwkSecurityMode,
+    Placement, RouteDirective, Schedule, SendAction, SendHandle, SendId, SendMode, SendSlot,
+    TrackStage, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -56,7 +56,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let id = self.mutate_sends(|core, actions| {
             core.sends.admit_unicast(
                 UnicastRecord {
-                    frame: Held { frame, token },
+                    frame: HeldFrame { frame, token },
                     priority: policy.priority,
                     waiter: slot.clone(),
                     confirm,
@@ -83,7 +83,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let id = self.mutate_sends(|core, _| {
             core.sends.admit_broadcast(BroadcastRecord {
-                frame: Held { frame, token },
+                frame: HeldFrame { frame, token },
                 priority: policy.priority,
                 waiter: slot.clone(),
                 schedule,
@@ -163,7 +163,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn place_unicast(&self, nib: &Nib, next_hop: Nwk) -> Placement {
         match nib.neighbors.sleepy_child_eui64(next_hop) {
             Some(child_eui64) => {
-                self.place_indirect(Ieee802154Address::Eui64(child_eui64), next_hop)
+                self.place_indirect_unicast(Ieee802154Address::Eui64(child_eui64), next_hop)
             }
             None => Placement {
                 delivery: Delivery::Direct {
@@ -177,17 +177,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// A frame held for a sleepy device until it polls under `address`, then transmitted
     /// to `next_hop`. It expires after the transaction persistence time.
-    pub(super) fn place_indirect(&self, address: Ieee802154Address, next_hop: Nwk) -> Placement {
+    pub(super) fn place_indirect_unicast(
+        &self,
+        address: Ieee802154Address,
+        next_hop: Nwk,
+    ) -> Placement {
         Placement {
             delivery: Delivery::Indirect { address, next_hop },
             deadline: self.core_now() + self.tunables.transaction_persistence_time(),
         }
     }
 
-    /// Re-place a frame whose route discovery resolved. The route can have vanished in
-    /// the race, which fails the send.
-    fn place_released(&self, nib: &Nib, held: &mut Held) -> Result<Placement, DeliveryError> {
-        let Frame::Nwk { nwk_frame, .. } = &mut held.frame else {
+    /// Where a frame goes once the route it was parked on is known. The route can have
+    /// vanished in the race, which fails the send.
+    fn place_unparked_unicast(
+        &self,
+        nib: &Nib,
+        frame: &mut Frame,
+    ) -> Result<Placement, DeliveryError> {
+        let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
         };
 
@@ -300,17 +308,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let passive_ack_interval = self.tunables.passive_ack_timeout() + self.broadcast_jitter();
 
         self.mutate_sends(|core, actions| {
-            for key in core.sends.passive_ack_keys() {
-                if self.broadcast_passively_acked(&core.nib, key) {
-                    core.sends.broadcast_acked(key, actions);
+            for key in core.sends.broadcasts_awaiting_quorum() {
+                if self.passive_ack_quorum_heard(&core.nib, key) {
+                    core.sends.broadcast_delivered(key, actions);
                 }
             }
 
-            for destination in core.sends.awaiting_route_destinations() {
+            for destination in core.sends.destinations_awaiting_route() {
                 if core.nib.routing.route_status(destination) == Some(RouteStatus::Active) {
-                    core.sends.route_resolved(
+                    core.sends.unpark_unicasts(
                         destination,
-                        |held| self.place_released(&core.nib, held),
+                        |send| self.place_unparked_unicast(&core.nib, &mut send.frame),
                         actions,
                     );
                 }

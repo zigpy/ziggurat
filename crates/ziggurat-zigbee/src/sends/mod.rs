@@ -5,7 +5,7 @@
 //!
 //! - [`Unicasts`](unicasts::Unicasts): a frame with a known next hop, delivered directly
 //!   (with retries) or to a sleepy child when it polls.
-//! - [`Parked`](parked::Parked): a unicast with no route yet, waiting on its
+//! - [`ParkedUnicasts`](parked::ParkedUnicasts): a unicast with no route yet, waiting on its
 //!   destination's route discovery. It moves to the unicasts once the route resolves.
 //! - [`Broadcasts`](broadcasts::Broadcasts): a frame sent once, or rebroadcast on a
 //!   schedule until its passive-ack quorum is heard.
@@ -37,11 +37,11 @@ use crate::aps::frame::ApsAckFrame;
 use crate::flat_map::{FlatMap, FlatSet};
 
 pub use broadcasts::{Broadcast, Schedule};
-pub use parked::ParkedSend;
+pub use parked::ParkedUnicast;
 pub use unicasts::{Delivery, Placement, Unicast};
 
 use broadcasts::Broadcasts;
-use parked::Parked;
+use parked::ParkedUnicasts;
 use unicasts::Unicasts;
 
 /// Identifies a send for its whole life. Allocated in admission order and never reused,
@@ -147,7 +147,7 @@ pub enum Transmit {
 }
 
 #[derive(Debug)]
-pub struct Dequeued<'a, F> {
+pub struct DequeuedSend<'a, F> {
     pub id: SendId,
     pub frame: &'a F,
     pub transmit: Transmit,
@@ -196,7 +196,7 @@ impl SrcMatchTable {
 pub struct Sends<F, W, E> {
     next_id: u32,
     unicasts: Unicasts<F, W, E>,
-    parked: Parked<F, W, E>,
+    parked_unicasts: ParkedUnicasts<F, W, E>,
     broadcasts: Broadcasts<F, W, E>,
 }
 
@@ -205,7 +205,7 @@ impl<F, W, E> Default for Sends<F, W, E> {
         Self {
             next_id: 0,
             unicasts: Unicasts::default(),
-            parked: Parked::default(),
+            parked_unicasts: ParkedUnicasts::default(),
             broadcasts: Broadcasts::default(),
         }
     }
@@ -220,7 +220,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     /// What the fattest record costs, for pricing the frame budget.
     pub const RECORD_BYTES: usize = max3(
         Unicasts::<F, W, E>::RECORD_BYTES,
-        Parked::<F, W, E>::RECORD_BYTES,
+        ParkedUnicasts::<F, W, E>::RECORD_BYTES,
         Broadcasts::<F, W, E>::RECORD_BYTES,
     );
 
@@ -243,16 +243,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
 
     /// Admit a unicast with no route yet, parked on its destination's discovery. One
     /// discovery runs per destination; `attempts` bounds how often it is restarted.
-    pub fn admit_parked(
+    pub fn admit_parked_unicast(
         &mut self,
-        send: ParkedSend<F, W>,
+        send: ParkedUnicast<F, W>,
         now: Instant,
         discovery_time: Duration,
         attempts: u8,
         actions: &mut Vec<Action<F, W, E>>,
     ) -> SendId {
         let id = self.next_id();
-        self.parked
+        self.parked_unicasts
             .admit(id, send, now, discovery_time, attempts, actions);
         id
     }
@@ -267,7 +267,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
 
     /// Hand the highest-priority queued frame (oldest first within a priority) to the
     /// sender, which must report back through `transmitted`.
-    pub fn dequeue(&mut self) -> Option<Dequeued<'_, F>> {
+    pub fn dequeue(&mut self) -> Option<DequeuedSend<'_, F>> {
         let unicast = self.unicasts.best_queued();
         let broadcast = self.broadcasts.best_queued();
 
@@ -316,25 +316,25 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// An end-to-end APS ack arrived.
-    pub fn ack_received(&mut self, ack: &ApsAckData, actions: &mut Vec<Action<F, W, E>>) {
+    pub fn aps_ack_received(&mut self, ack: &ApsAckData, actions: &mut Vec<Action<F, W, E>>) {
         self.unicasts.ack_received(ack, actions);
     }
 
     /// Every destination with sends parked on its route discovery.
-    pub fn awaiting_route_destinations(&self) -> Vec<Nwk> {
-        self.parked.destinations()
+    pub fn destinations_awaiting_route(&self) -> Vec<Nwk> {
+        self.parked_unicasts.destinations()
     }
 
-    /// A route to `destination` is active: move every send parked on it to the unicasts.
+    /// A route to `destination` is known: move every send parked on it to the unicasts.
     /// `place` resolves each frame's next hop (rewriting the frame for a source route),
     /// or fails the send.
-    pub fn route_resolved(
+    pub fn unpark_unicasts(
         &mut self,
         destination: Nwk,
         mut place: impl FnMut(&mut F) -> Result<Placement, E>,
         actions: &mut Vec<Action<F, W, E>>,
     ) {
-        for (id, mut parked) in self.parked.resolved(destination) {
+        for (id, mut parked) in self.parked_unicasts.unpark(destination) {
             match place(&mut parked.frame) {
                 Ok(placement) => self.unicasts.admit(
                     id,
@@ -358,18 +358,18 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         }
     }
 
-    /// The keys of every broadcast awaiting its passive-ack quorum.
-    pub fn passive_ack_keys(&self) -> Vec<(Nwk, u8)> {
-        self.broadcasts.passive_ack_keys()
+    /// The key of every broadcast awaiting its passive-ack quorum.
+    pub fn broadcasts_awaiting_quorum(&self) -> Vec<(Nwk, u8)> {
+        self.broadcasts.awaiting_quorum()
     }
 
-    /// The passive-ack quorum for a broadcast was heard: it is delivered.
-    pub fn broadcast_acked(&mut self, key: (Nwk, u8), actions: &mut Vec<Action<F, W, E>>) {
-        self.broadcasts.acked(key, actions);
+    /// The passive-ack quorum for a broadcast was heard: the send is delivered.
+    pub fn broadcast_delivered(&mut self, key: (Nwk, u8), actions: &mut Vec<Action<F, W, E>>) {
+        self.broadcasts.delivered(key, actions);
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
-    pub fn drop_indirect(
+    pub fn drop_indirect_unicasts(
         &mut self,
         eui64: Option<Eui64>,
         nwk: Nwk,
@@ -383,8 +383,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     pub fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
         if self.unicasts.contains(id) {
             self.unicasts.cancel(id, actions)
-        } else if self.parked.contains(id) {
-            self.parked.cancel(id, actions);
+        } else if self.parked_unicasts.contains(id) {
+            self.parked_unicasts.cancel(id, actions);
             true
         } else {
             self.broadcasts.cancel(id, actions)
@@ -401,7 +401,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         actions: &mut Vec<Action<F, W, E>>,
     ) {
         self.unicasts.tick(now, actions);
-        self.parked.tick(now, actions);
+        self.parked_unicasts.tick(now, actions);
         self.broadcasts.tick(now, passive_ack_interval, actions);
     }
 
@@ -409,7 +409,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     pub fn next_wake(&self) -> Option<Instant> {
         [
             self.unicasts.next_wake(),
-            self.parked.next_wake(),
+            self.parked_unicasts.next_wake(),
             self.broadcasts.next_wake(),
         ]
         .into_iter()
@@ -423,7 +423,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// Whether a device has a frame awaiting its poll under this exact address.
-    pub fn has_awaiting_poll(&self, address: Ieee802154Address) -> bool {
+    pub fn has_unicast_awaiting_poll(&self, address: Ieee802154Address) -> bool {
         self.unicasts.has_awaiting_poll(address)
     }
 }

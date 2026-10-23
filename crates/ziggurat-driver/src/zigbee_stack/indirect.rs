@@ -68,7 +68,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
-        self.mutate_sends(|core, actions| core.sends.drop_indirect(eui64, nwk, actions));
+        self.mutate_sends(|core, actions| core.sends.drop_indirect_unicasts(eui64, nwk, actions));
     }
 
     /// Spec 3.6.10.4: a poll from a device with no neighbor table entry is answered
@@ -78,7 +78,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let destination = Ieee802154Address::Nwk(nwk);
 
         // One queued leave at a time, or every poll until extraction would add one
-        if self.core().sends.has_awaiting_poll(destination) {
+        if self.core().sends.has_unicast_awaiting_poll(destination) {
             return;
         }
 
@@ -103,7 +103,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
-            self.place_indirect(destination, nwk),
+            self.place_indirect_unicast(destination, nwk),
         );
 
         if let Err(err) = admitted {

@@ -17,7 +17,7 @@ use super::{Action, Confirm, SendFailure, SendId, TxPriority};
 /// A parked unicast: what it is admitted with, and what it carries to the unicasts
 /// once its route resolves.
 #[derive(Debug)]
-pub struct ParkedSend<F, W> {
+pub struct ParkedUnicast<F, W> {
     pub frame: F,
     pub priority: TxPriority,
     pub waiter: W,
@@ -36,13 +36,13 @@ struct Discovery {
 }
 
 #[derive(Debug)]
-pub(super) struct Parked<F, W, E> {
-    records: FlatMap<SendId, ParkedSend<F, W>>,
+pub(super) struct ParkedUnicasts<F, W, E> {
+    records: FlatMap<SendId, ParkedUnicast<F, W>>,
     discoveries: FlatMap<Nwk, Discovery>,
     _error: PhantomData<fn() -> E>,
 }
 
-impl<F, W, E> Default for Parked<F, W, E> {
+impl<F, W, E> Default for ParkedUnicasts<F, W, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
@@ -52,8 +52,8 @@ impl<F, W, E> Default for Parked<F, W, E> {
     }
 }
 
-impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
-    pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, ParkedSend<F, W>)>();
+impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
+    pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, ParkedUnicast<F, W>)>();
 
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
@@ -63,7 +63,7 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
     pub(super) fn admit(
         &mut self,
         id: SendId,
-        send: ParkedSend<F, W>,
+        send: ParkedUnicast<F, W>,
         now: Instant,
         discovery_time: Duration,
         attempts: u8,
@@ -91,7 +91,7 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
     }
 
     /// Take every send parked on `destination`, ending its discovery.
-    pub(super) fn resolved(&mut self, destination: Nwk) -> Vec<(SendId, ParkedSend<F, W>)> {
+    pub(super) fn unpark(&mut self, destination: Nwk) -> Vec<(SendId, ParkedUnicast<F, W>)> {
         if self.discoveries.remove(&destination).is_none() {
             return Vec::new();
         }
@@ -99,7 +99,7 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
         self.take(destination)
     }
 
-    fn take(&mut self, destination: Nwk) -> Vec<(SendId, ParkedSend<F, W>)> {
+    fn take(&mut self, destination: Nwk) -> Vec<(SendId, ParkedUnicast<F, W>)> {
         let ids: Vec<SendId> = self
             .records
             .iter()
@@ -112,7 +112,7 @@ impl<F, W, E: From<SendFailure>> Parked<F, W, E> {
             .collect()
     }
 
-    fn settled(send: ParkedSend<F, W>, failure: SendFailure) -> Action<F, W, E> {
+    fn settled(send: ParkedUnicast<F, W>, failure: SendFailure) -> Action<F, W, E> {
         Action::Settled {
             waiter: send.waiter,
             result: Err(failure.into()),

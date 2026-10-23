@@ -23,12 +23,12 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityLevel,
 };
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
-use ziggurat_zigbee::sends::{ParkedSend, Unicast as UnicastRecord};
+use ziggurat_zigbee::sends::{ParkedUnicast, Unicast as UnicastRecord};
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, Held, MAX_DEPTH,
-    Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendHandle, SendMode,
-    SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, HeldFrame,
+    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendHandle,
+    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -117,7 +117,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience
     /// members that are still live neighbors.
-    pub(super) fn broadcast_passively_acked(&self, nib: &Nib, key: (Nwk, u8)) -> bool {
+    pub(super) fn passive_ack_quorum_heard(&self, nib: &Nib, key: (Nwk, u8)) -> bool {
         let live_relayers = nib.neighbors.expected_broadcast_relayers();
 
         let acked = nib.broadcasts.passively_acked(
@@ -375,7 +375,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     let placement = self.place_unicast(&core.nib, next_hop);
                     Ok(core.sends.admit_unicast(
                         UnicastRecord {
-                            frame: Held {
+                            frame: HeldFrame {
                                 frame: Frame::nwk(nwk_frame, security),
                                 token,
                             },
@@ -390,9 +390,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
                 NextHop::NeedDiscovery => {
                     tracing::debug!("Parking frame awaiting a route to {destination:?}");
-                    Ok(core.sends.admit_parked(
-                        ParkedSend {
-                            frame: Held {
+                    Ok(core.sends.admit_parked_unicast(
+                        ParkedUnicast {
+                            frame: HeldFrame {
                                 frame: Frame::nwk(nwk_frame, security),
                                 token,
                             },
@@ -623,7 +623,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     class,
                 },
                 Confirm::OnHandoff,
-                self.place_indirect(Ieee802154Address::Eui64(child_eui64), child_nwk),
+                self.place_indirect_unicast(Ieee802154Address::Eui64(child_eui64), child_nwk),
             );
 
             if let Err(err) = admitted {
