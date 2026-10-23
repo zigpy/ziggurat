@@ -160,10 +160,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 },
             };
 
+            let handle = self.send_oneshot_broadcast(send);
             if is_last {
-                return self.send_oneshot_broadcast(send);
+                return handle;
             }
-            self.send_oneshot_broadcast_untracked(send);
 
             // Repeat the boundary entry as the first of the next frame
             start = end - 1;

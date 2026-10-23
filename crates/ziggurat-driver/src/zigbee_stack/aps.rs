@@ -81,7 +81,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
         tracing::trace!("Received APS ack: {ack_data:?}");
 
-        self.mutate_sends(|sends| ((), sends.ack_received(&ack_data)));
+        self.mutate_sends(|core, actions| core.sends.ack_received(&ack_data, actions));
     }
 
     /// Spec 2.2.8.4.2: record an inbound APS data frame and report whether it duplicates
@@ -170,7 +170,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             policy: TxPolicy::STACK_CRITICAL,
             confirm: Confirm::OnHandoff,
         };
-        if let Err(err) = self.send_unicast_untracked(send) {
+        if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send APS ack: {err}");
         }
     }

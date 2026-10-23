@@ -49,7 +49,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let now = self.core_now();
         let delivered = fp_advertised
-            && self.mutate_sends(|sends| (sends.poll(source_eui64, source_nwk, now), Vec::new()));
+            && self.mutate_sends(|core, _| core.sends.poll(source_eui64, source_nwk, now));
 
         if delivered {
             tracing::debug!("Delivering queued indirect frame to {poll_source:?}");
@@ -68,7 +68,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
-        self.mutate_sends(|sends| ((), sends.drop_indirect(eui64, nwk)));
+        self.mutate_sends(|core, actions| core.sends.drop_indirect(eui64, nwk, actions));
     }
 
     /// Spec 3.6.10.4: a poll from a device with no neighbor table entry is answered
@@ -78,7 +78,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let destination = Ieee802154Address::Nwk(nwk);
 
         // One queued leave at a time, or every poll until extraction would add one
-        if self.sends.lock().has_awaiting_poll(destination) {
+        if self.core().sends.has_awaiting_poll(destination) {
             return;
         }
 
@@ -103,7 +103,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
-            None,
             self.place_indirect(destination, nwk),
         );
 
@@ -132,11 +131,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// that has a frame awaiting its poll. An unchanged table is not rewritten.
     pub(super) async fn write_src_match_table(&self) -> Result<(), RadioError> {
         let table = {
-            // Lock order: the send table before the core, never the reverse
-            let sends = self.sends.lock();
             let core = self.core();
-
-            sends.poll_addresses(core.nib.address_map.map())
+            core.sends.poll_addresses(core.nib.address_map.map())
         };
 
         if *self.src_match_written.lock() == table {

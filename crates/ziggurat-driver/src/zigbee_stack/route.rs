@@ -99,7 +99,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_destination_ieee(Some(next_hop_link.eui64));
 
         // The next hop toward the originator is a direct radio neighbor
-        self.send_unicast_untracked(Unicast {
+        self.send_unicast(Unicast {
             frame: relayed_route_reply_frame,
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Direct,
@@ -202,7 +202,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .with_destination_ieee(Some(sender_ieee));
 
             // The next hop toward the originator is a direct radio neighbor
-            self.send_unicast_untracked(Unicast {
+            self.send_unicast(Unicast {
                 frame: route_reply_frame,
                 security: NwkSecurityMode::NetworkKey,
                 mode: SendMode::Direct,
