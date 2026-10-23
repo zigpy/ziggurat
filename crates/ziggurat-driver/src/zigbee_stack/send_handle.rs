@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 
 use crate::sync::{Mutex, Notify};
 
-use super::DeliveryError;
+use super::{DeliveryError, SendId};
 
 /// Which of a send's two verdicts a resolution supplies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,15 +33,13 @@ struct Progress {
     completion_wake: Option<Arc<Notify>>,
 }
 
-/// The shared slot a send's outcome is written into.
+/// The slot a send's verdicts are written into: the send table's waiter.
 ///
 /// Two write-once verdicts and a per-stage wake each (so the stages can be awaited
-/// independently). The producer and every awaiter/poller share one via `Arc`.
-///
-/// A send is settled once `delivered` is written. A settled send's frame is never
-/// transmitted: whichever queue holds it drops it. Cancelling a send settles it with
-/// `Cancelled`.
-#[derive(Debug)]
+/// independently). The send table's record and every awaiter/poller share one via
+/// `Arc`. The table writes each verdict exactly once; the write-once rule here only
+/// back-fills `handed_off` from a delivery verdict.
+#[derive(Debug, Default)]
 pub struct SendSlot {
     progress: Mutex<Progress>,
     handed_off_wake: Notify,
@@ -56,24 +54,6 @@ pub struct SendProgress {
 }
 
 impl SendSlot {
-    fn new() -> Self {
-        Self {
-            progress: Mutex::new(Progress::default()),
-            handed_off_wake: Notify::new(),
-            delivered_wake: Notify::new(),
-        }
-    }
-
-    /// Whether `delivered` is written. A settled send's frame must not be transmitted.
-    pub fn is_settled(&self) -> bool {
-        self.progress.lock().delivered.is_some()
-    }
-
-    /// Whether the send's handoff has resolved, successfully or not.
-    pub(crate) fn is_handed_off(&self) -> bool {
-        self.progress.lock().handed_off.is_some()
-    }
-
     /// Resolve one of the send's stages, applying the write rules:
     ///
     /// 1. **First write wins** — both fields are write-once; a later write is ignored.
@@ -81,12 +61,7 @@ impl SendSlot {
     /// 3. **`Err` at either stage writes both** — a failed handoff is a failed delivery.
     /// 4. **A `Delivery` write back-fills `handed_off`** if unset, with the same result,
     ///    so `handed_off().await` can never outlive the send.
-    ///
-    /// Rules 1, 3 and 4 collapse to: any resolution establishes `handed_off` if still
-    /// unset; `delivered` is written by a `Delivery` resolution or by any failure.
-    ///
-    /// Returns whether this call settled the send.
-    pub(crate) fn resolve(&self, stage: TrackStage, result: Result<(), DeliveryError>) -> bool {
+    pub(crate) fn resolve(&self, stage: TrackStage, result: Result<(), DeliveryError>) {
         let (woke_handed_off, woke_delivered, completion) = {
             let mut progress = self.progress.lock();
 
@@ -119,8 +94,6 @@ impl SendSlot {
         {
             completion.notify_one();
         }
-
-        woke_delivered
     }
 }
 
@@ -128,20 +101,33 @@ impl SendSlot {
 ///
 /// Cloning it is deliberately not offered: each stage has a single-waiter wake (see the
 /// module docs), so a send is awaited by one task. Dropping the handle detaches — the
-/// producer keeps its own `Arc` and resolves harmlessly into the slot; nothing is
+/// send table keeps its own `Arc` and resolves harmlessly into the slot; nothing is
 /// cancelled (fire-and-forget is "drop the handle").
 #[derive(Debug)]
 pub struct SendHandle {
     slot: Arc<SendSlot>,
+    /// The send's id in the table, for cancellation. `None` for a handle that was
+    /// resolved without a send ever being admitted.
+    id: Option<SendId>,
 }
 
 impl SendHandle {
-    /// Create a fresh slot and a handle over it. The caller passes the returned
-    /// `Arc<SendSlot>` into the send's [`TxOutcome::Track`](super::TxOutcome::Track) so
-    /// the producer and this handle share it.
-    pub(crate) fn new() -> (Self, Arc<SendSlot>) {
-        let slot = Arc::new(SendSlot::new());
-        (Self { slot: slot.clone() }, slot)
+    /// A handle over the slot the send table holds as the waiter of `id`.
+    pub(crate) const fn new(id: SendId, slot: Arc<SendSlot>) -> Self {
+        Self { slot, id: Some(id) }
+    }
+
+    /// A handle already carrying its final verdict, for a send that never entered the
+    /// table.
+    pub(crate) fn resolved(result: Result<(), DeliveryError>) -> Self {
+        let slot = Arc::new(SendSlot::default());
+        slot.resolve(TrackStage::Delivery, result);
+        Self { slot, id: None }
+    }
+
+    /// The send's id, to cancel it through `ZigbeeStack::cancel_send`.
+    pub const fn id(&self) -> Option<SendId> {
+        self.id
     }
 
     /// Await the mesh accepting the (first) frame: the next-hop MAC ack of a unicast, or
@@ -183,14 +169,6 @@ impl SendHandle {
             handed_off: progress.handed_off.clone(),
             delivered: progress.delivered.clone(),
         }
-    }
-
-    /// Settle the send with `Err(Cancelled)`, so its frame is never transmitted. Returns
-    /// false if it was already settled. Reactors remove its entries on their next pass;
-    /// call `ZigbeeStack::nudge_cancellation` to make that happen now.
-    pub fn cancel(&self) -> bool {
-        self.slot
-            .resolve(TrackStage::Delivery, Err(DeliveryError::Cancelled))
     }
 
     /// Register the tracker's aggregate wake, notified on any stage resolution in

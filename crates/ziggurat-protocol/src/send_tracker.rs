@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use ziggurat_driver::sync::Notify;
-use ziggurat_driver::zigbee_stack::SendHandle;
+use ziggurat_driver::zigbee_stack::{SendHandle, SendId};
 use ziggurat_zigbee::flat_map::FlatMap;
 
 use crate::bridge::send_status;
@@ -83,13 +83,10 @@ impl SendTracker {
         );
     }
 
-    /// Cancel the send tracked under `id`. Returns true if the entry exists and was not
-    /// yet settled. The caller should then call `nudge_cancellation`, so the driver
-    /// removes the send's entries promptly.
-    pub fn cancel(&mut self, id: RequestId) -> bool {
-        self.entries
-            .get(&id)
-            .is_some_and(|entry| entry.handle.cancel())
+    /// The driver's id of the send tracked under `id`, to cancel it with
+    /// `ZigbeeStack::cancel_send`. `None` if nothing is tracked under `id`.
+    pub fn send_id(&self, id: RequestId) -> Option<SendId> {
+        self.entries.get(&id).and_then(|entry| entry.handle.id())
     }
 
     /// One reactor pass: emit every confirm frame now owed and drop entries that have

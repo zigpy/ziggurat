@@ -384,17 +384,16 @@ fn route_directive(
 
 /// Cancel an in-flight send by the `request_id` it was issued under.
 ///
-/// The reply is true if the tracker held the send and it was not yet settled. The
-/// driver's reactors are then woken to remove its entries.
+/// The reply is true if the tracker held the send and the driver settled it with
+/// `Cancelled`. A send in the radio at that moment is refused: its own result follows.
 pub fn cancel_request<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     tracker: &mut SendTracker,
     payload: &CancelRequestPayload,
 ) -> CancelResultPayload {
-    let cancelled = tracker.cancel(payload.request_id);
-    if cancelled {
-        stack.nudge_cancellation();
-    }
+    let cancelled = tracker
+        .send_id(payload.request_id)
+        .is_some_and(|send_id| stack.cancel_send(send_id));
     CancelResultPayload { cancelled }
 }
 
