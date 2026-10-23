@@ -311,6 +311,7 @@ pub struct HeldFrame {
 /// The send table, specialised to the driver's types. See [`Sends`].
 pub type SendTable = Sends<HeldFrame, Arc<SendSlot>, DeliveryError>;
 pub type SendAction = ziggurat_zigbee::sends::Action<HeldFrame, Arc<SendSlot>, DeliveryError>;
+pub type SendActions = ziggurat_zigbee::sends::Actions<HeldFrame, Arc<SendSlot>, DeliveryError>;
 
 /// A unicast handed to [`ZigbeeStack::send_unicast`].
 #[derive(Debug)]

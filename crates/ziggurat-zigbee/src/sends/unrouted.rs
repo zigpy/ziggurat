@@ -12,7 +12,7 @@ use ziggurat_ieee_802154::types::Nwk;
 use crate::Instant;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Confirm, SendFailure, SendId, TxPriority};
+use super::{Action, Actions, Confirm, SendFailure, SendId, TxPriority};
 
 /// An unrouted unicast: what it is enqueued with, and what it carries to the unicasts
 /// once its route is known.
@@ -118,7 +118,7 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
     }
 
     /// Fail every send to `destination`: its discovery is over without a route.
-    pub(super) fn fail(&mut self, destination: Nwk) -> Vec<Action<F, W, E>> {
+    pub(super) fn fail(&mut self, destination: Nwk) -> Actions<F, W, E> {
         self.retries.remove(&destination);
         self.take(destination)
             .into_iter()
@@ -128,13 +128,15 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
 
     /// The destination stays awaited, so a new send to it does not start a second
     /// discovery; it lapses on its own once nothing waits on it.
-    pub(super) fn cancel(&mut self, id: SendId) -> Action<F, W, E> {
+    pub(super) fn cancel(&mut self, id: SendId) -> Actions<F, W, E> {
         let send = self.records.remove(&id).unwrap();
-        Self::settled(send, SendFailure::Cancelled)
+        let mut actions = Actions::new();
+        actions.push(Self::settled(send, SendFailure::Cancelled));
+        actions
     }
 
     /// Fail sends past their deadline.
-    pub(super) fn tick(&mut self, now: Instant) -> Vec<Action<F, W, E>> {
+    pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
         let lapsed: Vec<SendId> = self
             .records
             .iter()

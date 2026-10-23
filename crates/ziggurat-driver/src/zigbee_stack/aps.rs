@@ -81,8 +81,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
         tracing::trace!("Received APS ack: {ack_data:?}");
 
-        let actions = self.core().sends.aps_ack_received(&ack_data);
-        self.commit_sends(actions);
+        let mut core = self.core();
+        let actions = core.sends.aps_ack_received(&ack_data);
+        self.commit_sends(core, actions);
     }
 
     /// Spec 2.2.8.4.2: record an inbound APS data frame and report whether it duplicates
