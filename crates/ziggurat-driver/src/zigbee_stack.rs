@@ -110,6 +110,10 @@ pub enum DeliveryError {
     TransmitFailed(TxResult),
     #[error("aps ack timeout")]
     ApsAckTimeout,
+    /// An APS-ack send's handoff never resolved within `aps_ack_handoff_timeout`: a
+    /// stalled sender, or a path that dropped its outcome.
+    #[error("handoff timeout")]
+    HandoffTimeout,
     #[error("broadcast passive-ack quorum not reached")]
     BroadcastQuorumNotReached,
     #[error("indirect transaction expired before {destination:?} polled")]
@@ -365,7 +369,7 @@ pub enum TxOutcome {
         slot: Arc<SendSlot>,
         stage: TrackStage,
     },
-    /// The handoff of an APS-ack unicast. Success resolves `HandOff` and arms the
+    /// The handoff of an APS-ack unicast. Success resolves `HandOff` and resets the
     /// pending ack's deadline; failure resolves both stages and drops the pending ack.
     ApsAck { slot: Arc<SendSlot> },
     /// An extracted indirect transaction in flight to the radio. Success resolves the
@@ -408,8 +412,9 @@ pub struct PendingApsAck {
     pub(crate) slot: Arc<SendSlot>,
     /// How long to wait for the ack once the frame is handed off.
     pub(crate) wait: Duration,
-    /// Armed at handoff, so route discovery and queueing do not eat into `wait`.
-    pub(crate) deadline: Option<CoreInstant>,
+    /// When the entry expires. Set to `aps_ack_handoff_timeout` at registration, then
+    /// reset to `wait` at handoff.
+    pub(crate) deadline: CoreInstant,
 }
 
 /// A transmit queued for the single sender task ([`ZigbeeStack::sender_task`]). The NWK

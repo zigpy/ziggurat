@@ -273,7 +273,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // With an APS ack, the sender resolves only `handed_off` (next-hop acceptance);
         // the ack arrival/timeout resolves `delivered` through the slot held here. The
         // pending ack is registered before enqueueing so a fast reply is caught, but
-        // its deadline is armed only at handoff. Without an ack, next-hop acceptance
+        // its ack deadline is armed only at handoff. Without an ack, next-hop acceptance
         // is the whole verdict, so the sender resolves `Delivery` directly (rule 4
         // back-fills `handed_off`).
         let outcome = match aps_ack {
@@ -291,8 +291,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     },
                     slot: slot.clone(),
                     wait: self.aps_ack_timeout(destination, sleepy_destination),
-                    deadline: None,
+                    deadline: self.core_now() + self.tunables.aps_ack_handoff_timeout(),
                 });
+                self.aps_ack_wake.notify_one();
                 TxOutcome::ApsAck { slot: slot.clone() }
             }
             ApsAck::None => TxOutcome::Track {
@@ -322,8 +323,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(handle)
     }
 
-    /// An APS-ack unicast's handoff resolved. Success arms its pending ack's deadline;
-    /// failure drops the pending ack, since the slot already holds the real cause.
+    /// An APS-ack unicast's handoff resolved. Success resets its pending ack's deadline
+    /// to `wait`; failure drops the pending ack, since the slot already holds the real
+    /// cause.
     pub(super) fn resolve_aps_ack_handoff(
         &self,
         slot: Arc<SendSlot>,
@@ -338,9 +340,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .iter_mut()
                 .find(|entry| Arc::ptr_eq(&entry.slot, &slot))
             {
-                entry.deadline = Some(now + entry.wait);
+                entry.deadline = now + entry.wait;
+                self.aps_ack_wake.notify_one();
             }
-            self.aps_ack_wake.notify_one();
         } else {
             self.remove_pending_aps_ack(&slot);
         }
@@ -491,36 +493,40 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .pending_aps_acks
             .lock()
             .iter()
-            .filter_map(|pending| pending.deadline)
+            .map(|pending| pending.deadline)
             .min()
     }
 
-    /// Expire pending APS acks: an armed entry past its deadline resolves `delivered`
-    /// with a timeout, and a cancelled entry with `Cancelled`.
+    /// Expire pending APS acks: an entry past its deadline resolves `delivered` with a
+    /// timeout (`HandoffTimeout` if its handoff never resolved), and a cancelled entry
+    /// with `Cancelled`.
     fn expire_aps_acks(&self) {
         let now = self.core_now();
 
-        let due: Vec<(Arc<SendSlot>, bool)> = self
+        let due: Vec<PendingApsAck> = self
             .state
             .pending_aps_acks
             .lock()
             .extract_if(.., |entry| {
-                entry.deadline.is_some_and(|deadline| deadline <= now) || entry.slot.is_cancelled()
-            })
-            .map(|entry| {
-                let cancelled = entry.slot.is_cancelled();
-                (entry.slot, cancelled)
+                entry.deadline <= now || entry.slot.is_cancelled()
             })
             .collect();
 
-        for (slot, cancelled) in due {
-            let result = if cancelled {
+        for entry in due {
+            let result = if entry.slot.is_cancelled() {
                 Err(DeliveryError::Cancelled)
+            } else if !entry.slot.is_handed_off() {
+                tracing::warn!(
+                    "APS ack to {:?} (counter {}) expired before its handoff resolved",
+                    entry.ack_data.src,
+                    entry.ack_data.counter
+                );
+                Err(DeliveryError::HandoffTimeout)
             } else {
                 Err(DeliveryError::ApsAckTimeout)
             };
 
-            slot.resolve(TrackStage::Delivery, result);
+            entry.slot.resolve(TrackStage::Delivery, result);
         }
     }
 }
