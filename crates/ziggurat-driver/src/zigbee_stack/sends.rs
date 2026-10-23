@@ -3,8 +3,8 @@
 //! execution of the actions the table returns.
 //!
 //! The table lives in the core, so one lock covers a mutation and the core facts it
-//! reads. The lock is released before the actions are carried out, since an action
-//! (starting a route discovery) can admit a new send.
+//! reads. The lock is released before the actions are carried out, since resolving a
+//! waiter can wake a task that sends again.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -50,22 +50,35 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         confirm: Confirm,
         placement: Placement,
     ) -> Result<SendHandle, EnqueueError> {
+        self.mutate_sends(|core, actions| {
+            self.admit_unicast_locked(core, actions, frame, policy, confirm, placement)
+        })
+    }
+
+    /// [`Self::admit_unicast`] under a core lock the caller already holds.
+    pub(super) fn admit_unicast_locked(
+        &self,
+        core: &mut ZigbeeCore,
+        actions: &mut Vec<SendAction>,
+        frame: Frame,
+        policy: TxPolicy,
+        confirm: Confirm,
+        placement: Placement,
+    ) -> Result<SendHandle, EnqueueError> {
         let token = self.take_token(policy)?;
         let slot = Arc::new(SendSlot::default());
 
-        let id = self.mutate_sends(|core, actions| {
-            core.sends.admit_unicast(
-                UnicastRecord {
-                    frame: HeldFrame { frame, token },
-                    priority: policy.priority,
-                    waiter: slot.clone(),
-                    confirm,
-                    delivery: placement.delivery,
-                    deadline: placement.deadline,
-                },
-                actions,
-            )
-        });
+        let id = core.sends.admit_unicast(
+            UnicastRecord {
+                frame: HeldFrame { frame, token },
+                priority: policy.priority,
+                waiter: slot.clone(),
+                confirm,
+                delivery: placement.delivery,
+                deadline: placement.deadline,
+            },
+            actions,
+        );
 
         Ok(SendHandle::new(id, slot))
     }
@@ -77,18 +90,26 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         policy: TxPolicy,
         schedule: Schedule,
     ) -> Result<SendHandle, EnqueueError> {
+        self.mutate_sends(|core, _| self.admit_broadcast_locked(core, frame, policy, schedule))
+    }
+
+    /// [`Self::admit_broadcast`] under a core lock the caller already holds.
+    pub(super) fn admit_broadcast_locked(
+        &self,
+        core: &mut ZigbeeCore,
+        frame: Frame,
+        policy: TxPolicy,
+        schedule: Schedule,
+    ) -> Result<SendHandle, EnqueueError> {
         let token = self.take_token(policy)?;
         let slot = Arc::new(SendSlot::default());
-        let deadline = self.core_now() + self.tunables.handoff_timeout();
 
-        let id = self.mutate_sends(|core, _| {
-            core.sends.admit_broadcast(BroadcastRecord {
-                frame: HeldFrame { frame, token },
-                priority: policy.priority,
-                waiter: slot.clone(),
-                schedule,
-                deadline,
-            })
+        let id = core.sends.admit_broadcast(BroadcastRecord {
+            frame: HeldFrame { frame, token },
+            priority: policy.priority,
+            waiter: slot.clone(),
+            schedule,
+            deadline: self.core_now() + self.tunables.handoff_timeout(),
         });
 
         Ok(SendHandle::new(id, slot))
@@ -131,10 +152,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                     // Frees the frame token
                     drop(frame);
-                }
-                Action::StartDiscovery(destination) => self.send_route_discovery(destination),
-                Action::DiscoveryFailed(destination) => {
-                    self.core().nib.routing.mark_discovery_failed(destination);
                 }
                 Action::PollAddressesChanged => self.src_match_sync.notify_one(),
             }
@@ -284,12 +301,26 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// The timer task: runs the table's timed transitions whenever its next deadline is
-    /// due, or when a mutation may have moved that deadline.
+    /// due, or when a mutation may have moved that deadline. The route discoveries
+    /// parked sends wait on keep their deadlines in the routing table, so those count
+    /// too.
     pub(super) async fn send_timer_task(&self) {
         loop {
             self.drive_sends();
 
-            let next_wake = self.core().sends.next_wake();
+            let next_wake = {
+                let now = self.core_now();
+                let core = self.core();
+                let discoveries = core
+                    .sends
+                    .destinations_awaiting_route()
+                    .into_iter()
+                    .filter_map(|destination| {
+                        core.nib.routing.discovery_deadline(destination, now)
+                    });
+                core.sends.next_wake().into_iter().chain(discoveries).min()
+            };
+
             match next_wake {
                 Some(deadline) => {
                     let _ = self
@@ -302,7 +333,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, admit
-    /// the sends whose route became active, then run the table's timed transitions.
+    /// the sends whose route became active, restart or fail the discoveries that
+    /// lapsed, then run the table's timed transitions.
     fn drive_sends(&self) {
         let now = self.core_now();
         let passive_ack_interval = self.tunables.passive_ack_timeout() + self.broadcast_jitter();
@@ -321,6 +353,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         |send| self.place_unparked_unicast(&core.nib, &mut send.frame),
                         actions,
                     );
+                } else if core
+                    .nib
+                    .routing
+                    .discovery_deadline(destination, now)
+                    .is_none_or(|deadline| deadline <= now)
+                {
+                    if core.sends.discovery_lapsed(destination, actions) {
+                        self.start_route_discovery(core, destination);
+                    } else {
+                        core.nib.routing.mark_discovery_failed(destination);
+                    }
                 }
             }
 

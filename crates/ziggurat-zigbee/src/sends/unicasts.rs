@@ -57,8 +57,9 @@ enum Stage {
     /// Ready for the sender.
     Queued,
     /// The sender holds an encrypted copy and is waiting on the radio. A record in this
-    /// stage is never settled from outside: `transmitted` always finds it.
-    Transmitting,
+    /// stage is never settled from outside: `transmitted` always finds it. `acked`
+    /// records an end-to-end APS ack that arrived meanwhile.
+    Transmitting { acked: bool },
     /// A failed direct unicast waiting out its retry delay.
     Retrying { at: Instant },
     /// An indirect unicast waiting for its device to poll.
@@ -84,7 +85,7 @@ impl<F, W> Record<F, W> {
         match (self.delivery, self.stage) {
             (
                 Delivery::Indirect { address, .. },
-                Stage::AwaitingPoll | Stage::Queued | Stage::Transmitting,
+                Stage::AwaitingPoll | Stage::Queued | Stage::Transmitting { .. },
             ) => Some(address),
             _ => None,
         }
@@ -94,7 +95,7 @@ impl<F, W> Record<F, W> {
     /// the radio's own timeout bounds that stage.
     const fn deadline_failure(&self) -> Option<SendFailure> {
         match self.stage {
-            Stage::Transmitting => None,
+            Stage::Transmitting { .. } => None,
             Stage::AwaitingApsAck => Some(SendFailure::ApsAckTimeout),
             Stage::Queued | Stage::Retrying { .. } | Stage::AwaitingPoll => match self.delivery {
                 Delivery::Direct { .. } => Some(SendFailure::HandoffTimeout),
@@ -107,19 +108,11 @@ impl<F, W> Record<F, W> {
 
     fn next_wake(&self) -> Option<Instant> {
         match self.stage {
-            Stage::Transmitting => None,
+            Stage::Transmitting { .. } => None,
             Stage::Retrying { at } => Some(at.min(self.deadline)),
             Stage::Queued | Stage::AwaitingPoll | Stage::AwaitingApsAck => Some(self.deadline),
         }
     }
-}
-
-/// What `transmitted` decided for a record, applied once the record borrow ends.
-enum AfterTransmit<E> {
-    HandedOff,
-    Settle(Result<(), E>, Option<Nwk>),
-    Retry { attempts_remaining: u8 },
-    AwaitPoll,
 }
 
 #[derive(Debug)]
@@ -202,7 +195,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
         let record = self.records.get_mut(&id).unwrap();
         debug_assert_eq!(record.stage, Stage::Queued);
-        record.stage = Stage::Transmitting;
+        record.stage = Stage::Transmitting { acked: false };
 
         DequeuedSend {
             id,
@@ -224,65 +217,58 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     ) {
         let record = self
             .records
-            .get(&id)
+            .get_mut(&id)
             .expect("a transmitting send is never settled from outside");
-        debug_assert_eq!(record.stage, Stage::Transmitting);
+        let Stage::Transmitting { acked } = record.stage else {
+            unreachable!("only a transmitting send is reported on")
+        };
 
-        let acked = matches!(record.confirm, Confirm::ApsAck { acked: true, .. });
-
-        let after = match result {
-            Ok(()) => AfterTransmit::HandedOff,
+        match result {
+            Ok(()) => self.handed_off(id, now, acked, actions),
             // The destination acked end to end while the radio reported a failure: the
             // frame got through
-            Err(_) if acked => AfterTransmit::HandedOff,
+            Err(_) if acked => self.handed_off(id, now, acked, actions),
             Err(err) => match record.delivery {
                 Delivery::Direct {
                     next_hop,
                     attempts_remaining: 0,
-                } => AfterTransmit::Settle(Err(err), Some(next_hop)),
+                } => self.settle(id, Err(err), Some(next_hop), actions),
                 Delivery::Direct {
-                    attempts_remaining, ..
-                } => AfterTransmit::Retry {
-                    attempts_remaining: attempts_remaining - 1,
-                },
-                // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
-                // so a failed transmit awaits the device's next poll, keeping its deadline
-                Delivery::Indirect { .. } if now < record.deadline => AfterTransmit::AwaitPoll,
-                Delivery::Indirect { .. } => AfterTransmit::Settle(Err(err), None),
-            },
-        };
-
-        match after {
-            AfterTransmit::HandedOff => self.handed_off(id, now, actions),
-            AfterTransmit::Settle(result, failed_hop) => {
-                self.settle(id, result, failed_hop, actions);
-            }
-            AfterTransmit::Retry { attempts_remaining } => {
-                let record = self.records.get_mut(&id).unwrap();
-                let Delivery::Direct { next_hop, .. } = record.delivery else {
-                    unreachable!()
-                };
-                record.delivery = Delivery::Direct {
                     next_hop,
                     attempts_remaining,
-                };
-                record.stage = Stage::Retrying {
-                    at: now + retry_delay,
-                };
-            }
-            AfterTransmit::AwaitPoll => {
-                self.records.get_mut(&id).unwrap().stage = Stage::AwaitingPoll;
-            }
+                } => {
+                    record.delivery = Delivery::Direct {
+                        next_hop,
+                        attempts_remaining: attempts_remaining - 1,
+                    };
+                    record.stage = Stage::Retrying {
+                        at: now + retry_delay,
+                    };
+                }
+                // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
+                // so a failed transmit awaits the device's next poll, keeping its deadline
+                Delivery::Indirect { .. } if now < record.deadline => {
+                    record.stage = Stage::AwaitingPoll;
+                }
+                Delivery::Indirect { .. } => self.settle(id, Err(err), None, actions),
+            },
         }
     }
 
-    /// The frame reached its next hop: settle the send, or start waiting for its ack.
-    fn handed_off(&mut self, id: SendId, now: Instant, actions: &mut Vec<Action<F, W, E>>) {
+    /// The frame reached its next hop: settle the send, or start waiting for its ack
+    /// unless `acked` says it already arrived.
+    fn handed_off(
+        &mut self,
+        id: SendId,
+        now: Instant,
+        acked: bool,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) {
         let record = self.records.get_mut(&id).unwrap();
 
         let wait = match record.confirm {
-            Confirm::OnHandoff | Confirm::ApsAck { acked: true, .. } => None,
-            Confirm::ApsAck { wait, .. } => Some(wait),
+            Confirm::OnHandoff => None,
+            Confirm::ApsAck { wait, .. } => (!acked).then_some(wait),
         };
 
         let Some(wait) = wait else {
@@ -367,7 +353,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             }
             match record.stage {
                 Stage::AwaitingApsAck => Some((*id, true)),
-                Stage::Transmitting => Some((*id, false)),
+                Stage::Transmitting { .. } => Some((*id, false)),
                 _ => None,
             }
         });
@@ -376,11 +362,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             Some((id, true)) => self.settle(id, Ok(()), None, actions),
             // Faster than the radio's own report: `transmitted` settles it
             Some((id, false)) => {
-                if let Confirm::ApsAck { acked, .. } =
-                    &mut self.records.get_mut(&id).unwrap().confirm
-                {
-                    *acked = true;
-                }
+                self.records.get_mut(&id).unwrap().stage = Stage::Transmitting { acked: true };
             }
             None => {}
         }
@@ -420,7 +402,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     /// `false` if the send is in the radio right now, or the send is unknown.
     pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
         match self.records.get(&id) {
-            Some(record) if record.stage != Stage::Transmitting => {
+            Some(record) if !matches!(record.stage, Stage::Transmitting { .. }) => {
                 self.settle(id, Err(SendFailure::Cancelled.into()), None, actions);
                 true
             }

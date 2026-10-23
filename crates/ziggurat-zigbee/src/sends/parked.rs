@@ -1,11 +1,11 @@
 //! Unicasts with no route yet, parked on their destination's route discovery.
 //!
 //! Discovery runs once per destination and the whole bucket moves on together, so ten
-//! frames to one device ride a single discovery.
+//! frames to one device ride a single discovery. The discovery itself lives in the
+//! routing table; this table only counts the restarts it has left.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use core::time::Duration;
 
 use ziggurat_ieee_802154::types::Nwk;
 
@@ -15,7 +15,7 @@ use crate::flat_map::FlatMap;
 use super::{Action, Confirm, SendFailure, SendId, TxPriority};
 
 /// A parked unicast: what it is admitted with, and what it carries to the unicasts
-/// once its route resolves.
+/// once its route is known.
 #[derive(Debug)]
 pub struct ParkedUnicast<F, W> {
     pub frame: F,
@@ -27,18 +27,11 @@ pub struct ParkedUnicast<F, W> {
     pub deadline: Instant,
 }
 
-/// One destination's route discovery, shared by every send parked on it.
-#[derive(Debug)]
-struct Discovery {
-    attempts_remaining: u8,
-    discovery_time: Duration,
-    deadline: Instant,
-}
-
 #[derive(Debug)]
 pub(super) struct ParkedUnicasts<F, W, E> {
     records: FlatMap<SendId, ParkedUnicast<F, W>>,
-    discoveries: FlatMap<Nwk, Discovery>,
+    /// Discovery restarts left, per destination with sends parked on it.
+    retries: FlatMap<Nwk, u8>,
     _error: PhantomData<fn() -> E>,
 }
 
@@ -46,7 +39,7 @@ impl<F, W, E> Default for ParkedUnicasts<F, W, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
-            discoveries: FlatMap::new(),
+            retries: FlatMap::new(),
             _error: PhantomData,
         }
     }
@@ -59,43 +52,28 @@ impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    /// Park a send, starting its destination's discovery if none is in flight.
-    pub(super) fn admit(
-        &mut self,
-        id: SendId,
-        send: ParkedUnicast<F, W>,
-        now: Instant,
-        discovery_time: Duration,
-        attempts: u8,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
-        let destination = send.destination;
+    pub(super) fn is_awaiting_route(&self, destination: Nwk) -> bool {
+        self.retries.contains_key(&destination)
+    }
 
+    /// Park a send. The first send parked on a destination fixes how often its
+    /// discovery may be restarted.
+    pub(super) fn admit(&mut self, id: SendId, send: ParkedUnicast<F, W>, retries: u8) {
+        let destination = send.destination;
         self.records.insert(id, send);
 
-        if !self.discoveries.contains_key(&destination) {
-            self.discoveries.insert(
-                destination,
-                Discovery {
-                    attempts_remaining: attempts,
-                    discovery_time,
-                    deadline: now + discovery_time,
-                },
-            );
-            actions.push(Action::StartDiscovery(destination));
+        if !self.retries.contains_key(&destination) {
+            self.retries.insert(destination, retries);
         }
     }
 
     pub(super) fn destinations(&self) -> Vec<Nwk> {
-        self.discoveries.keys().copied().collect()
+        self.retries.keys().copied().collect()
     }
 
-    /// Take every send parked on `destination`, ending its discovery.
+    /// Take every send parked on `destination`: its route is known.
     pub(super) fn unpark(&mut self, destination: Nwk) -> Vec<(SendId, ParkedUnicast<F, W>)> {
-        if self.discoveries.remove(&destination).is_none() {
-            return Vec::new();
-        }
-
+        self.retries.remove(&destination);
         self.take(destination)
     }
 
@@ -121,14 +99,41 @@ impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
         }
     }
 
-    /// The discovery stays, so a new send to the destination does not start a second
-    /// one; it lapses on its own once nothing is parked on it.
+    /// The discovery toward `destination` lapsed. `true` if a restart is left and a
+    /// send still waits on it: the caller restarts the discovery. Otherwise every send
+    /// parked on the destination fails.
+    pub(super) fn discovery_lapsed(
+        &mut self,
+        destination: Nwk,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) -> bool {
+        let waiting = self
+            .records
+            .values()
+            .any(|send| send.destination == destination);
+
+        let retries = self.retries.get_mut(&destination).unwrap();
+        // A discovery nothing waits on any more is not restarted
+        if *retries > 0 && waiting {
+            *retries -= 1;
+            return true;
+        }
+
+        self.retries.remove(&destination);
+        for (_, send) in self.take(destination) {
+            actions.push(Self::settled(send, SendFailure::RouteDiscoveryTimeout));
+        }
+        false
+    }
+
+    /// The destination stays awaited, so a new send to it does not start a second
+    /// discovery; it lapses on its own once nothing is parked on it.
     pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) {
         let send = self.records.remove(&id).unwrap();
         actions.push(Self::settled(send, SendFailure::Cancelled));
     }
 
-    /// Fail sends past their deadline, and restart or fail lapsed discoveries.
+    /// Fail sends past their deadline.
     pub(super) fn tick(&mut self, now: Instant, actions: &mut Vec<Action<F, W, E>>) {
         let lapsed: Vec<SendId> = self
             .records
@@ -136,48 +141,14 @@ impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
             .filter(|(_, send)| send.deadline <= now)
             .map(|(id, _)| *id)
             .collect();
+
         for id in lapsed {
             let send = self.records.remove(&id).unwrap();
             actions.push(Self::settled(send, SendFailure::HandoffTimeout));
         }
-
-        let lapsed: Vec<Nwk> = self
-            .discoveries
-            .iter()
-            .filter(|(_, discovery)| discovery.deadline <= now)
-            .map(|(destination, _)| *destination)
-            .collect();
-        for destination in lapsed {
-            let waiting = self
-                .records
-                .values()
-                .any(|send| send.destination == destination);
-
-            let discovery = self.discoveries.get_mut(&destination).unwrap();
-            discovery.attempts_remaining = discovery.attempts_remaining.saturating_sub(1);
-
-            // A discovery nothing waits on any more is not retried
-            if discovery.attempts_remaining > 0 && waiting {
-                discovery.deadline = now + discovery.discovery_time;
-                actions.push(Action::StartDiscovery(destination));
-                continue;
-            }
-
-            self.discoveries.remove(&destination);
-            actions.push(Action::DiscoveryFailed(destination));
-            for (_, send) in self.take(destination) {
-                actions.push(Self::settled(send, SendFailure::RouteDiscoveryTimeout));
-            }
-        }
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {
-        let sends = self.records.values().map(|send| send.deadline);
-        let discoveries = self
-            .discoveries
-            .values()
-            .map(|discovery| discovery.deadline);
-
-        sends.chain(discoveries).min()
+        self.records.values().map(|send| send.deadline).min()
     }
 }

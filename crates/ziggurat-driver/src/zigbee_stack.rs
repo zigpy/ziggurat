@@ -1143,7 +1143,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // "respond" to empty link status broadcasts proactively, independent of the
         // link status period
         tracing::info!("Sending initial link status broadcast");
-        let _ = self.send_link_status_broadcast(true).handed_off().await;
+        if let Ok(link_status) = self.send_link_status_broadcast(true) {
+            let _ = link_status.handed_off().await;
+        }
 
         // Start the background link status broadcaster task
         self.spawn_tracked(|arc_self| async move {

@@ -28,22 +28,21 @@ struct Progress {
     handed_off: Option<Result<(), DeliveryError>>,
     delivered: Option<Result<(), DeliveryError>>,
     /// Also notified on any stage resolution, so a poller (the wire `SendTracker`) can
-    /// sweep without occupying either per-stage waiter. Set via
+    /// sweep without occupying the handle's waiter. Set via
     /// [`SendHandle::set_completion_wake`].
     completion_wake: Option<Arc<Notify>>,
 }
 
 /// The slot a send's verdicts are written into: the send table's waiter.
 ///
-/// Two write-once verdicts and a per-stage wake each (so the stages can be awaited
-/// independently). The send table's record and every awaiter/poller share one via
-/// `Arc`. The table writes each verdict exactly once; the write-once rule here only
+/// Two write-once verdicts and one wake: the handle's awaiter re-checks the verdict it
+/// wants after every wake. The send table's record and every awaiter/poller share one
+/// via `Arc`. The table writes each verdict exactly once; the write-once rule here only
 /// back-fills `handed_off` from a delivery verdict.
 #[derive(Debug, Default)]
 pub struct SendSlot {
     progress: Mutex<Progress>,
-    handed_off_wake: Notify,
-    delivered_wake: Notify,
+    wake: Notify,
 }
 
 /// A non-blocking snapshot of a slot's two verdicts, taken by the wire tracker's sweep.
@@ -83,50 +82,36 @@ impl SendSlot {
             )
         };
 
-        if woke_handed_off {
-            self.handed_off_wake.notify_one();
-        }
-        if woke_delivered {
-            self.delivered_wake.notify_one();
-        }
-        if (woke_handed_off || woke_delivered)
-            && let Some(completion) = completion
-        {
-            completion.notify_one();
+        if woke_handed_off || woke_delivered {
+            self.wake.notify_one();
+            if let Some(completion) = completion {
+                completion.notify_one();
+            }
         }
     }
 }
 
 /// An awaitable, detachable view over one send.
 ///
-/// Cloning it is deliberately not offered: each stage has a single-waiter wake (see the
-/// module docs), so a send is awaited by one task. Dropping the handle detaches — the
-/// send table keeps its own `Arc` and resolves harmlessly into the slot; nothing is
-/// cancelled (fire-and-forget is "drop the handle").
+/// Cloning it is deliberately not offered: the slot has a single-waiter wake, so a send
+/// is awaited by one task. Dropping the handle detaches — the send table keeps its own
+/// `Arc` and resolves harmlessly into the slot; nothing is cancelled (fire-and-forget
+/// is "drop the handle").
 #[derive(Debug)]
 pub struct SendHandle {
     slot: Arc<SendSlot>,
-    /// The send's id in the table, for cancellation. `None` for a handle that was
-    /// resolved without a send ever being admitted.
-    id: Option<SendId>,
+    /// The send's id in the table, for cancellation.
+    id: SendId,
 }
 
 impl SendHandle {
     /// A handle over the slot the send table holds as the waiter of `id`.
     pub(crate) const fn new(id: SendId, slot: Arc<SendSlot>) -> Self {
-        Self { slot, id: Some(id) }
-    }
-
-    /// A handle already carrying its final verdict, for a send that never entered the
-    /// table.
-    pub(crate) fn resolved(result: Result<(), DeliveryError>) -> Self {
-        let slot = Arc::new(SendSlot::default());
-        slot.resolve(TrackStage::Delivery, result);
-        Self { slot, id: None }
+        Self { slot, id }
     }
 
     /// The send's id, to cancel it through `ZigbeeStack::cancel_send`.
-    pub const fn id(&self) -> Option<SendId> {
+    pub const fn id(&self) -> SendId {
         self.id
     }
 
@@ -138,7 +123,7 @@ impl SendHandle {
             // Arm the wake before checking, so a resolution between the check and the
             // await is not lost. Bind the snapshot to a local so the guard drops before
             // the await.
-            let wait = self.slot.handed_off_wake.notified();
+            let wait = self.slot.wake.notified();
             let resolved = self.slot.progress.lock().handed_off.clone();
             if let Some(result) = resolved {
                 return result;
@@ -152,7 +137,7 @@ impl SendHandle {
     /// broadcast/groupcast.
     pub async fn delivered(&self) -> Result<(), DeliveryError> {
         loop {
-            let wait = self.slot.delivered_wake.notified();
+            let wait = self.slot.wake.notified();
             let resolved = self.slot.progress.lock().delivered.clone();
             if let Some(result) = resolved {
                 return result;
@@ -162,7 +147,7 @@ impl SendHandle {
     }
 
     /// A non-blocking snapshot of both stages, what the wire tracker sweeps with. Never
-    /// occupies either per-stage waiter.
+    /// occupies the waiter.
     pub fn status(&self) -> SendProgress {
         let progress = self.slot.progress.lock();
         SendProgress {
