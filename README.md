@@ -99,9 +99,7 @@ The adapter itself is stateless and ZHA will push all network configuration to i
 
 #### Future work
 - Ziggurat currently statically allocates most protocol-level parsing buffers, there are only
-  a few places left in the stack (e.g. `HashMap`) that rely on dynamic allocation. This is
-  in preparation for eventually trying to run Ziggurat on a microcontroller directly, probably
-  the ESP32-C6.
+  a few places left in the stack (e.g. `HashMap`) that rely on dynamic allocation.
 - For testing purposes (especially CI) it would be convenient to allow Ziggurat to have a
   dynamically configurable role on startup. Adding the ability to join a network as a router
   would allow for some useful end-to-end testing scenarios, like a synthetic Spinel layer
