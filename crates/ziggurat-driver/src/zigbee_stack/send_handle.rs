@@ -6,45 +6,31 @@
 //! decide what stage to block on (if any).
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::{Mutex, Notify};
 
-use super::DeliveryError;
+use super::{DeliveryError, SendId};
 
-/// Which of a send's two verdicts a resolution supplies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrackStage {
-    /// The mesh accepted the frame (next-hop MAC ack, or the first broadcast copy on
-    /// air).
-    HandOff,
-    /// The send's final verdict. Delivery subsumes acceptance, so it also back-fills a
-    /// still-unset `handed_off` with the same result.
-    Delivery,
-}
-
-/// The two write-once verdicts of a send, plus the tracker's aggregate wake.
+/// The two verdicts of a send, each written once, plus the tracker's aggregate wake.
 #[derive(Debug, Default)]
 struct Progress {
     handed_off: Option<Result<(), DeliveryError>>,
     delivered: Option<Result<(), DeliveryError>>,
     /// Also notified on any stage resolution, so a poller (the wire `SendTracker`) can
-    /// sweep without occupying either per-stage waiter. Set via
+    /// sweep without occupying the handle's waiter. Set via
     /// [`SendHandle::set_completion_wake`].
     completion_wake: Option<Arc<Notify>>,
 }
 
-/// The shared slot a send's outcome is written into.
+/// The slot a send's verdicts are written into: the send table's waiter.
 ///
-/// Two write-once verdicts, a per-stage wake each (so the stages can be awaited
-/// independently), and a cancellation flag the reactors honour. The producer and every
-/// awaiter/poller share one via `Arc`.
-#[derive(Debug)]
+/// Two verdicts and one wake: the handle's awaiter re-checks the verdict it wants after
+/// every wake. The send table's record and every awaiter/poller share one via `Arc`.
+/// The table writes each verdict exactly once.
+#[derive(Debug, Default)]
 pub struct SendSlot {
     progress: Mutex<Progress>,
-    handed_off_wake: Notify,
-    delivered_wake: Notify,
-    cancelled: AtomicBool,
+    wake: Notify,
 }
 
 /// A non-blocking snapshot of a slot's two verdicts, taken by the wire tracker's sweep.
@@ -55,62 +41,38 @@ pub struct SendProgress {
 }
 
 impl SendSlot {
-    fn new() -> Self {
-        Self {
-            progress: Mutex::new(Progress::default()),
-            handed_off_wake: Notify::new(),
-            delivered_wake: Notify::new(),
-            cancelled: AtomicBool::new(false),
-        }
-    }
-
-    /// Whether the send has been cancelled. Checked by each reactor before it acts on the
-    /// entry holding this slot.
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
-    }
-
-    /// Resolve one of the send's stages, applying the write rules:
-    ///
-    /// 1. **First write wins** — both fields are write-once; a later write is ignored.
-    /// 2. **`Ok` writes its own stage** — a `HandOff` `Ok` leaves `delivered` unset.
-    /// 3. **`Err` at either stage writes both** — a failed handoff is a failed delivery.
-    /// 4. **A `Delivery` write back-fills `handed_off`** if unset, with the same result,
-    ///    so `handed_off().await` can never outlive the send.
-    ///
-    /// Rules 1, 3 and 4 collapse to: any resolution establishes `handed_off` if still
-    /// unset; `delivered` is written by a `Delivery` resolution or by any failure.
-    pub(crate) fn resolve(&self, stage: TrackStage, result: Result<(), DeliveryError>) {
-        let (woke_handed_off, woke_delivered, completion) = {
+    /// The mesh accepted the frame: the next-hop MAC ack, or the first broadcast copy
+    /// on air.
+    pub(crate) fn handed_off(&self) {
+        let completion = {
             let mut progress = self.progress.lock();
-
-            let woke_handed_off = progress.handed_off.is_none();
-            if woke_handed_off {
-                progress.handed_off = Some(result.clone());
+            if progress.handed_off.is_some() {
+                return;
             }
-
-            let woke_delivered = progress.delivered.is_none()
-                && (matches!(stage, TrackStage::Delivery) || result.is_err());
-            if woke_delivered {
-                progress.delivered = Some(result);
-            }
-
-            (
-                woke_handed_off,
-                woke_delivered,
-                progress.completion_wake.clone(),
-            )
+            progress.handed_off = Some(Ok(()));
+            progress.completion_wake.clone()
         };
 
-        if woke_handed_off {
-            self.handed_off_wake.notify_one();
+        self.wake.notify_one();
+        if let Some(completion) = completion {
+            completion.notify_one();
         }
-        if woke_delivered {
-            self.delivered_wake.notify_one();
-        }
-        if (woke_handed_off || woke_delivered)
-            && let Some(completion) = completion
-        {
+    }
+
+    /// The send's final verdict. It also back-fills a still-unset `handed_off` with the
+    /// same result, so `handed_off().await` can never outlive the send.
+    pub(crate) fn settled(&self, result: Result<(), DeliveryError>) {
+        let completion = {
+            let mut progress = self.progress.lock();
+            if progress.handed_off.is_none() {
+                progress.handed_off = Some(result.clone());
+            }
+            progress.delivered = Some(result);
+            progress.completion_wake.clone()
+        };
+
+        self.wake.notify_one();
+        if let Some(completion) = completion {
             completion.notify_one();
         }
     }
@@ -118,22 +80,26 @@ impl SendSlot {
 
 /// An awaitable, detachable view over one send.
 ///
-/// Cloning it is deliberately not offered: each stage has a single-waiter wake (see the
-/// module docs), so a send is awaited by one task. Dropping the handle detaches — the
-/// producer keeps its own `Arc` and resolves harmlessly into the slot; nothing is
-/// cancelled (fire-and-forget is "drop the handle").
+/// Cloning it is deliberately not offered: the slot has a single-waiter wake, so a send
+/// is awaited by one task. Dropping the handle detaches — the send table keeps its own
+/// `Arc` and resolves harmlessly into the slot; nothing is cancelled (fire-and-forget
+/// is "drop the handle").
 #[derive(Debug)]
 pub struct SendHandle {
     slot: Arc<SendSlot>,
+    /// The send's id in the table, for cancellation.
+    id: SendId,
 }
 
 impl SendHandle {
-    /// Create a fresh slot and a handle over it. The caller passes the returned
-    /// `Arc<SendSlot>` into the send's [`TxOutcome::Track`](super::TxOutcome::Track) so
-    /// the producer and this handle share it.
-    pub(crate) fn new() -> (Self, Arc<SendSlot>) {
-        let slot = Arc::new(SendSlot::new());
-        (Self { slot: slot.clone() }, slot)
+    /// A handle over the slot the send table holds as the waiter of `id`.
+    pub(crate) const fn new(id: SendId, slot: Arc<SendSlot>) -> Self {
+        Self { slot, id }
+    }
+
+    /// The send's id, to cancel it through `ZigbeeStack::cancel_send`.
+    pub const fn id(&self) -> SendId {
+        self.id
     }
 
     /// Await the mesh accepting the (first) frame: the next-hop MAC ack of a unicast, or
@@ -144,7 +110,7 @@ impl SendHandle {
             // Arm the wake before checking, so a resolution between the check and the
             // await is not lost. Bind the snapshot to a local so the guard drops before
             // the await.
-            let wait = self.slot.handed_off_wake.notified();
+            let wait = self.slot.wake.notified();
             let resolved = self.slot.progress.lock().handed_off.clone();
             if let Some(result) = resolved {
                 return result;
@@ -158,7 +124,7 @@ impl SendHandle {
     /// broadcast/groupcast.
     pub async fn delivered(&self) -> Result<(), DeliveryError> {
         loop {
-            let wait = self.slot.delivered_wake.notified();
+            let wait = self.slot.wake.notified();
             let resolved = self.slot.progress.lock().delivered.clone();
             if let Some(result) = resolved {
                 return result;
@@ -168,21 +134,13 @@ impl SendHandle {
     }
 
     /// A non-blocking snapshot of both stages, what the wire tracker sweeps with. Never
-    /// occupies either per-stage waiter.
+    /// occupies the waiter.
     pub fn status(&self) -> SendProgress {
         let progress = self.slot.progress.lock();
         SendProgress {
             handed_off: progress.handed_off.clone(),
             delivered: progress.delivered.clone(),
         }
-    }
-
-    /// Request cancellation. Sets the flag every in-flight reactor checks before acting;
-    /// the reactor that next touches this send drops its entry and resolves both stages
-    /// `Err(Cancelled)`. Cleanup is lazy (the next reactor pass) unless the caller also
-    /// nudges the reactor wakes.
-    pub fn cancel(&self) {
-        self.slot.cancelled.store(true, Ordering::Relaxed);
     }
 
     /// Register the tracker's aggregate wake, notified on any stage resolution in

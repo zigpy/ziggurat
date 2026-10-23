@@ -435,6 +435,14 @@ impl Routing {
         })
     }
 
+    /// Whether no discovery toward `destination` is live any more.
+    pub fn discovery_lapsed(&self, destination: Nwk, now: Instant) -> bool {
+        !self
+            .discovery_table
+            .values()
+            .any(|entry| entry.destination_address == destination && entry.expiration_time > now)
+    }
+
     /// Deduplicate a received route request and track the best path back to its
     /// originator. Returns false for duplicates with a strictly worse forward cost
     /// (our own requests, seeded at cost 0, still never echo back); an equal-cost

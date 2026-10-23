@@ -21,7 +21,7 @@ use ziggurat_zigbee::nwk::frame::{
 use crate::frame_token::TrafficClass;
 
 use super::{
-    DeliveryError, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPolicy,
+    DeliveryError, Frame, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, Schedule, TxPolicy,
     TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
@@ -153,13 +153,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        self.enqueue_send(
-            SendKind::Raw {
-                frame: beacon_frame,
-            },
-            policy,
-            TxOutcome::Discard,
-        );
+        let admitted = self.enqueue_broadcast(Frame::Raw(beacon_frame), policy, Schedule::Once);
+        if let Err(err) = admitted {
+            tracing::warn!("Dropping beacon: {err}");
+        }
     }
 
     /// The beacon-spam reactor (the [`hack_beacon_spam_duration`] hack): while a spray

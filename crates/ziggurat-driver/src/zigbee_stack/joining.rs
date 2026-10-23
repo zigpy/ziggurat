@@ -1,4 +1,4 @@
-use crate::frame_token::{self, TrafficClass};
+use crate::frame_token::TrafficClass;
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::commands::{
     AssociationRequestDeviceType, Ieee802154AssociationRequestCommand,
@@ -35,10 +35,9 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, Broadcast, DeviceLeaveReason, EnqueueError, IndirectFrame, IndirectPayload,
-    JoinKind, NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode,
-    TrackStage, TxOutcome, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
-    neighbors,
+    AddrConflictSource, Broadcast, Confirm, DeviceLeaveReason, EnqueueError, Frame, JoinKind,
+    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, TxPolicy,
+    TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -206,40 +205,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // still queued from the previous attempt is stale
         self.drop_indirect_transactions(Some(eui64), short_address);
 
-        let Some(token) = frame_token::take(TrafficClass::Critical) else {
-            tracing::warn!("Frame budget exhausted; dropping association response to {eui64:?}");
-            return None;
-        };
-
         let response_frame = self.build_802154_association_response(eui64, short_address, status);
+
+        let placement = self.place_indirect_unicast(Ieee802154Address::Eui64(eui64), short_address);
 
         // A denial has no follow-up; a successful join's tasklet awaits the
         // extraction. A raw MAC frame has no later verdict: extraction is delivery.
-        let (handle, outcome) = match status {
-            Ieee802154AssociationStatus::AssociationSuccessful => {
-                let (handle, slot) = SendHandle::new();
-
-                (
-                    Some(handle),
-                    TxOutcome::Track {
-                        slot,
-                        stage: TrackStage::Delivery,
-                    },
-                )
-            }
-            _ => (None, TxOutcome::Discard),
-        };
-
-        self.enqueue_indirect_frame(
-            IndirectFrame {
-                poll_address: Ieee802154Address::Eui64(eui64),
-                payload: IndirectPayload::Final(response_frame),
-                token,
-            },
-            outcome,
+        let admitted = self.enqueue_unicast(
+            Frame::Raw(response_frame),
+            TxPolicy::STACK_CRITICAL,
+            Confirm::OnHandoff,
+            placement,
         );
 
-        handle
+        match admitted {
+            Ok(handle) => match status {
+                Ieee802154AssociationStatus::AssociationSuccessful => Some(handle),
+                _ => None,
+            },
+            Err(err) => {
+                tracing::warn!("Dropping association response to {eui64:?}: {err}");
+                None
+            }
+        }
     }
 
     /// Pick an unused random network address for a joining device, reusing the previous
@@ -397,7 +385,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     priority: TxPriority::UserNormal,
                     class: TrafficClass::Critical,
                 },
-                slot: None,
             }) {
                 tracing::warn!("Failed to broadcast address conflict report: {err}");
             }
@@ -564,25 +551,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .expect("Transport-Key command should always fit")
             .unsecured();
 
-        let (handle, slot) = SendHandle::new();
-
         // A direct one-hop unicast without an APS ack: next-hop acceptance is the
         // delivery verdict.
-        if let Err(err) = self.send_unicast(Unicast {
+        let sent = self.send_unicast(Unicast {
             frame: nwk_frame,
             security: NwkSecurityMode::Unsecured,
             mode: SendMode::Direct,
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Track {
-                slot,
-                stage: TrackStage::Delivery,
-            },
-        }) {
-            tracing::warn!("Failed to send network key transport to {destination_eui64:?}: {err}");
-            return None;
-        }
+            confirm: Confirm::OnHandoff,
+        });
 
-        Some(handle)
+        match sent {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to send network key transport to {destination_eui64:?}: {err}"
+                );
+                None
+            }
+        }
     }
 
     pub fn handle_encrypted_aps_command_frame(
@@ -693,7 +680,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         destination: Nwk,
         payload: Vec<u8>,
-    ) -> Result<(), EnqueueError> {
+    ) -> Result<SendHandle, EnqueueError> {
         // Routed delivery to a non-neighbor must be allowed to discover a route (NWK data
         // frames default to suppressing discovery).
         let nwk_frame = self
@@ -709,7 +696,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 SendMode::Route(RouteDirective::StackDecides)
             },
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Discard,
+            confirm: Confirm::OnHandoff,
         })
     }
 
@@ -1291,7 +1278,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security,
             mode: SendMode::Direct,
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Discard,
+            confirm: Confirm::OnHandoff,
         })
         .map_err(|err| tracing::warn!("Failed to send rejoin response: {err}"))
         .ok();
@@ -1409,7 +1396,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Direct,
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Discard,
+            confirm: Confirm::OnHandoff,
         };
         if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send end device timeout response: {err}");
