@@ -35,10 +35,11 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeviceLeaveReason, EnqueueError, Entry, Frame,
-    JoinKind, NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode,
+    AddrConflictSource, Broadcast, Confirm, DeviceLeaveReason, EnqueueError, Frame, JoinKind,
+    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, SendSlot,
     TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
 };
+use alloc::sync::Arc;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
@@ -207,36 +208,27 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let response_frame = self.build_802154_association_response(eui64, short_address, status);
 
-        let entry = Entry::Indirect {
-            address: Ieee802154Address::Eui64(eui64),
-            next_hop: short_address,
-            persistence_time: self.tunables.transaction_persistence_time(),
-        };
+        let placement = self.place_indirect(Ieee802154Address::Eui64(eui64), short_address);
 
         // A denial has no follow-up; a successful join's tasklet awaits the
         // extraction. A raw MAC frame has no later verdict: extraction is delivery.
-        let admitted = match status {
-            Ieee802154AssociationStatus::AssociationSuccessful => self
-                .admit_tracked(
-                    Frame::Raw(response_frame),
-                    TxPolicy::STACK_CRITICAL,
-                    Confirm::OnHandoff,
-                    entry,
-                )
-                .map(Some),
-            _ => self
-                .admit(
-                    Frame::Raw(response_frame),
-                    TxPolicy::STACK_CRITICAL,
-                    Confirm::OnHandoff,
-                    None,
-                    entry,
-                )
-                .map(|_| None),
+        let slot = match status {
+            Ieee802154AssociationStatus::AssociationSuccessful => {
+                Some(Arc::new(SendSlot::default()))
+            }
+            _ => None,
         };
 
+        let admitted = self.admit_unicast(
+            Frame::Raw(response_frame),
+            TxPolicy::STACK_CRITICAL,
+            Confirm::OnHandoff,
+            slot.clone(),
+            placement,
+        );
+
         match admitted {
-            Ok(handle) => handle,
+            Ok(id) => slot.map(|slot| SendHandle::new(id, slot)),
             Err(err) => {
                 tracing::warn!("Dropping association response to {eui64:?}: {err}");
                 None

@@ -53,7 +53,7 @@ pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
 pub use ziggurat_zigbee::sends::{
-    ApsAckData, BroadcastSchedule, Confirm, Entry, Next, SendFailure, SendId, Sends, SrcMatchTable,
+    ApsAckData, Confirm, Delivery, Placement, Schedule, SendFailure, SendId, Sends, SrcMatchTable,
     Transmit, TxPriority,
 };
 
