@@ -420,8 +420,7 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
     match result {
         Ok(()) => SendStatus::Success,
         Err(err) => match err {
-            DeliveryError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
-            DeliveryError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
+            DeliveryError::RouteDiscoveryTimeout => SendStatus::RouteDiscoveryTimeout,
             DeliveryError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
             DeliveryError::NwkNoAck { .. } => SendStatus::NwkNoAck,
             DeliveryError::CcaFailure => SendStatus::CcaFailure,
@@ -430,7 +429,6 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
             DeliveryError::HandoffTimeout => SendStatus::HandoffTimeout,
             DeliveryError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
             DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
-            DeliveryError::BudgetExhausted => SendStatus::FrameBudgetExhausted,
             DeliveryError::Cancelled => SendStatus::Cancelled,
             DeliveryError::Radio(_) => SendStatus::RadioError,
         },

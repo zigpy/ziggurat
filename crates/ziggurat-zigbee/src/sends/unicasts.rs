@@ -137,15 +137,10 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn enqueue(&mut self, id: SendId, unicast: Unicast<F, W>) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-
+    pub(super) fn enqueue(&mut self, id: SendId, unicast: Unicast<F, W>) {
         let stage = match unicast.delivery {
             Delivery::Direct { .. } => Stage::Queued,
-            Delivery::Indirect { .. } => {
-                actions.push(Action::PollAddressesChanged);
-                Stage::AwaitingPoll
-            }
+            Delivery::Indirect { .. } => Stage::AwaitingPoll,
         };
 
         self.records.insert(
@@ -160,8 +155,6 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 deadline: unicast.deadline,
             },
         );
-
-        actions
     }
 
     /// The highest-priority queued send, oldest first within a priority.
@@ -278,14 +271,10 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             return;
         };
 
-        let left_poll_set = record.poll_address().is_some();
         record.stage = Stage::AwaitingApsAck;
         record.deadline = now + wait;
 
         actions.push(Action::HandedOff(record.waiter.clone()));
-        if left_poll_set {
-            actions.push(Action::PollAddressesChanged);
-        }
     }
 
     /// Remove a record and report its verdict. The only way a record leaves the table.
@@ -297,10 +286,6 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         actions: &mut Actions<F, W, E>,
     ) {
         let record = self.records.remove(&id).unwrap();
-
-        if record.poll_address().is_some() {
-            actions.push(Action::PollAddressesChanged);
-        }
 
         actions.push(Action::Settled {
             waiter: record.waiter,

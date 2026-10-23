@@ -22,7 +22,7 @@ use super::routing::Status as RouteStatus;
 use super::{
     Confirm, CoreGuard, Delivery, DeliveryError, EnqueueError, Frame, HeldFrame, Nib,
     NwkSecurityMode, Placement, RouteDirective, Schedule, SendActions, SendHandle, SendId,
-    SendMode, SendSlot, TrackStage, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
+    SendMode, SendSlot, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -120,15 +120,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Finish a mutation of the send table: release the core, carry out the actions
-    /// the mutation returned, and wake the sender and timer tasks, whose next step may
-    /// have changed. Taking the guard is what guarantees the core is unlocked before an
-    /// action locks it again.
+    /// the mutation returned, and wake the tasks whose next step may have changed: the
+    /// sender, the timer, and the source-match sync, which diffs the poll set itself.
+    /// Taking the guard is what guarantees the core is unlocked before an action locks
+    /// it again.
     pub(super) fn commit_sends(&self, core: CoreGuard<'_>, actions: SendActions) {
         drop(core);
 
         for action in actions {
             match action {
-                Action::HandedOff(slot) => slot.resolve(TrackStage::HandOff, Ok(())),
+                Action::HandedOff(slot) => slot.handed_off(),
                 Action::Settled {
                     waiter,
                     result,
@@ -142,17 +143,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         self.handle_unicast_send_failure(nwk_frame, next_hop);
                     }
 
-                    waiter.resolve(TrackStage::Delivery, result);
+                    waiter.settled(result);
 
                     // Frees the frame token
                     drop(frame);
                 }
-                Action::PollAddressesChanged => self.src_match_sync.notify_one(),
             }
         }
 
         self.send_wake.notify_one();
         self.send_timer_wake.notify_one();
+        self.src_match_sync.notify_one();
     }
 
     /// Cancel a send. Returns whether it was still pending and is now settled with
