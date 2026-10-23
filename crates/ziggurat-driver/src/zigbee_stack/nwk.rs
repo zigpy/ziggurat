@@ -23,7 +23,7 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityLevel,
 };
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
-use ziggurat_zigbee::sends::ParkedUnicast;
+use ziggurat_zigbee::sends::UnroutedUnicast;
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, HeldFrame,
@@ -91,7 +91,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.sequence_number,
         );
 
-        let admitted = self.admit_broadcast_locked(
+        let admitted = self.enqueue_broadcast_in(
             core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -337,11 +337,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    /// Send a unicast: assign its NWK sequence number, resolve a next hop, and admit it
-    /// to the send table, parked on a route discovery if none is known. Resolution and
-    /// admission share one core lock, so the next hop cannot change in between. `Err`
-    /// rejects at admission and no handle is returned. A caller that does not await the
-    /// send drops the handle.
+    /// Send a unicast: assign its NWK sequence number, resolve a next hop, and enqueue
+    /// it, held for a route discovery if none is known. Resolution and enqueueing share
+    /// one core lock, so the next hop cannot change in between. `Err` means nothing was
+    /// enqueued and no handle is returned. A caller that does not await the send drops
+    /// the handle.
     pub(super) fn send_unicast(&self, send: Unicast) -> Result<SendHandle, EnqueueError> {
         let Unicast {
             frame: mut nwk_frame,
@@ -373,7 +373,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             match resolved {
                 NextHop::Resolved(next_hop) => {
                     let placement = self.place_unicast(&core.nib, next_hop);
-                    self.admit_unicast_locked(
+                    self.enqueue_unicast_in(
                         core,
                         actions,
                         Frame::nwk(nwk_frame, security),
@@ -383,14 +383,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     )
                 }
                 NextHop::NeedDiscovery => {
-                    tracing::debug!("Parking frame awaiting a route to {destination:?}");
+                    tracing::debug!("Holding frame until a route to {destination:?} is known");
                     let token = self.take_token(policy)?;
                     let slot = Arc::new(SendSlot::default());
 
-                    // The first send parked on a destination starts its discovery
-                    let discovering = core.sends.is_awaiting_route(destination);
-                    let id = core.sends.admit_parked_unicast(
-                        ParkedUnicast {
+                    // The first unrouted send to a destination starts its discovery
+                    let discovering = core.sends.has_unrouted(destination);
+                    let id = core.sends.enqueue_unrouted_unicast(
+                        UnroutedUnicast {
                             frame: HeldFrame {
                                 frame: Frame::nwk(nwk_frame, security),
                                 token,
@@ -615,7 +615,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (child_eui64, child_nwk) in sleepy_children {
             // Each per-child copy is its own charge: under pressure copies are skipped
             // (the child misses one broadcast) instead of exhausting the heap.
-            let admitted = self.admit_unicast(
+            let admitted = self.enqueue_unicast(
                 Frame::nwk(nwk_frame.clone(), security),
                 TxPolicy {
                     priority: TxPriority::UserNormal,
@@ -684,7 +684,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
         // is the send's handoff; the quorum is its delivery.
-        self.admit_broadcast(
+        self.enqueue_broadcast(
             Frame::nwk(nwk_frame, security),
             policy,
             Schedule::PassiveAck {
@@ -708,7 +708,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        self.admit_broadcast(Frame::nwk(nwk_frame, security), policy, Schedule::Once)
+        self.enqueue_broadcast(Frame::nwk(nwk_frame, security), policy, Schedule::Once)
     }
 
     /// Encrypt and broadcast a single copy of a frame.
@@ -889,7 +889,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // handling (route invalidation, the network status back to the originator)
         // follows the send table's verdict; nothing is awaited here.
         let placement = self.place_unicast(&self.core().nib, next_hop_address);
-        let admitted = self.admit_unicast(
+        let admitted = self.enqueue_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
@@ -995,7 +995,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The first relay waits out the jitter. The passive-ack contract was recorded
         // when we received the frame, so the timer's quorum check already covers
         // relayed broadcasts.
-        let admitted = self.admit_broadcast(
+        let admitted = self.enqueue_broadcast(
             Frame::nwk(relayed_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,

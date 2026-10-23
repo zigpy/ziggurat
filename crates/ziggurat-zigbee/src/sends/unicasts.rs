@@ -39,7 +39,7 @@ pub struct Placement {
     pub deadline: Instant,
 }
 
-/// What a unicast is admitted with.
+/// What a unicast is enqueued with.
 #[derive(Debug)]
 pub struct Unicast<F, W> {
     pub frame: F,
@@ -137,7 +137,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn admit(
+    pub(super) fn enqueue(
         &mut self,
         id: SendId,
         unicast: Unicast<F, W>,

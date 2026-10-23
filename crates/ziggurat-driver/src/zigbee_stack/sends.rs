@@ -1,4 +1,4 @@
-//! The async shell around the send table ([`Sends`]): admission, the sender task that
+//! The async shell around the send table ([`Sends`]): enqueueing, the sender task that
 //! feeds the radio, the timer task that drives everything waiting on time, and the
 //! execution of the actions the table returns.
 //!
@@ -41,9 +41,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    /// Admit a unicast with a known next hop. Every send gets a slot: dropping the
+    /// Enqueue a unicast with a known next hop. Every send gets a slot: dropping the
     /// returned handle is how a caller detaches from a send it does not await.
-    pub(super) fn admit_unicast(
+    pub(super) fn enqueue_unicast(
         &self,
         frame: Frame,
         policy: TxPolicy,
@@ -51,12 +51,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         placement: Placement,
     ) -> Result<SendHandle, EnqueueError> {
         self.mutate_sends(|core, actions| {
-            self.admit_unicast_locked(core, actions, frame, policy, confirm, placement)
+            self.enqueue_unicast_in(core, actions, frame, policy, confirm, placement)
         })
     }
 
-    /// [`Self::admit_unicast`] under a core lock the caller already holds.
-    pub(super) fn admit_unicast_locked(
+    /// [`Self::enqueue_unicast`] under a core lock the caller already holds.
+    pub(super) fn enqueue_unicast_in(
         &self,
         core: &mut ZigbeeCore,
         actions: &mut Vec<SendAction>,
@@ -68,7 +68,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let token = self.take_token(policy)?;
         let slot = Arc::new(SendSlot::default());
 
-        let id = core.sends.admit_unicast(
+        let id = core.sends.enqueue_unicast(
             UnicastRecord {
                 frame: HeldFrame { frame, token },
                 priority: policy.priority,
@@ -83,18 +83,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(SendHandle::new(id, slot))
     }
 
-    /// Admit a broadcast, or any frame transmitted on a schedule.
-    pub(super) fn admit_broadcast(
+    /// Enqueue a broadcast, or any frame transmitted on a schedule.
+    pub(super) fn enqueue_broadcast(
         &self,
         frame: Frame,
         policy: TxPolicy,
         schedule: Schedule,
     ) -> Result<SendHandle, EnqueueError> {
-        self.mutate_sends(|core, _| self.admit_broadcast_locked(core, frame, policy, schedule))
+        self.mutate_sends(|core, _| self.enqueue_broadcast_in(core, frame, policy, schedule))
     }
 
-    /// [`Self::admit_broadcast`] under a core lock the caller already holds.
-    pub(super) fn admit_broadcast_locked(
+    /// [`Self::enqueue_broadcast`] under a core lock the caller already holds.
+    pub(super) fn enqueue_broadcast_in(
         &self,
         core: &mut ZigbeeCore,
         frame: Frame,
@@ -104,7 +104,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let token = self.take_token(policy)?;
         let slot = Arc::new(SendSlot::default());
 
-        let id = core.sends.admit_broadcast(BroadcastRecord {
+        let id = core.sends.enqueue_broadcast(BroadcastRecord {
             frame: HeldFrame { frame, token },
             priority: policy.priority,
             waiter: slot.clone(),
@@ -205,9 +205,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Where a frame goes once the route it was parked on is known. The route can have
+    /// Where an unrouted frame goes once its route is known. The route can have
     /// vanished in the race, which fails the send.
-    fn place_unparked_unicast(
+    fn place_routed_unicast(
         &self,
         nib: &Nib,
         frame: &mut Frame,
@@ -302,7 +302,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// The timer task: runs the table's timed transitions whenever its next deadline is
     /// due, or when a mutation may have moved that deadline. The route discoveries
-    /// parked sends wait on keep their deadlines in the routing table, so those count
+    /// unrouted sends wait on keep their deadlines in the routing table, so those count
     /// too.
     pub(super) async fn send_timer_task(&self) {
         loop {
@@ -311,13 +311,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let next_wake = {
                 let now = self.core_now();
                 let core = self.core();
-                let discoveries = core
-                    .sends
-                    .destinations_awaiting_route()
-                    .into_iter()
-                    .filter_map(|destination| {
-                        core.nib.routing.discovery_deadline(destination, now)
-                    });
+                let discoveries =
+                    core.sends
+                        .unrouted_destinations()
+                        .into_iter()
+                        .filter_map(|destination| {
+                            core.nib.routing.discovery_deadline(destination, now)
+                        });
                 core.sends.next_wake().into_iter().chain(discoveries).min()
             };
 
@@ -332,7 +332,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, admit
+    /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, route
     /// the sends whose route became active, restart or fail the discoveries that
     /// lapsed, then run the table's timed transitions.
     fn drive_sends(&self) {
@@ -346,11 +346,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
 
-            for destination in core.sends.destinations_awaiting_route() {
+            for destination in core.sends.unrouted_destinations() {
                 if core.nib.routing.route_status(destination) == Some(RouteStatus::Active) {
-                    core.sends.unpark_unicasts(
+                    core.sends.route_unicasts(
                         destination,
-                        |send| self.place_unparked_unicast(&core.nib, &mut send.frame),
+                        |send| self.place_routed_unicast(&core.nib, &mut send.frame),
                         actions,
                     );
                 } else if core

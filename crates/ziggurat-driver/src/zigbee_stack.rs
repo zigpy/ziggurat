@@ -283,7 +283,7 @@ pub struct AddressConflict {
     pub report_at: Option<CoreInstant>,
 }
 
-/// The frame a send holds, as admitted.
+/// The frame a send holds, as enqueued.
 ///
 /// A NWK frame is kept as plaintext and secured at transmit time, so its frame counter
 /// is assigned just before it reaches the air: a frame can wait in the table for
@@ -861,7 +861,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn configure_frame_budget(tunables: &Tunables) {
         const TOKEN_BYTES: usize = SendTable::RECORD_BYTES;
 
-        // Worst-case heap held by everything that is not a parked frame
+        // Worst-case heap held by everything that is not an enqueued frame
         const NON_FRAME_HEAP_CEILING: usize = 80 * 1024;
 
         let arena = frame_token::heap_arena();
@@ -1118,7 +1118,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Drives everything in the send table that waits on time: route discoveries,
         // unicast retries, broadcast retransmissions, and every send's deadline. Must
-        // run before anything can be admitted.
+        // run before anything can be enqueued.
         self.spawn_tracked(|arc_self| async move {
             arc_self.send_timer_task().await;
         });

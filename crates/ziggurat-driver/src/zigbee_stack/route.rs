@@ -451,7 +451,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Begin or restart ad-hoc route discovery toward a destination: the routing entry
     /// enters `DiscoveryUnderway` and a route request is broadcast. The send timer
-    /// watches the discovery on behalf of the sends parked on it; this only kicks it
+    /// watches the discovery on behalf of the unrouted sends to it; this only kicks it
     /// off. Under a core lock the caller holds.
     pub(super) fn start_route_discovery(&self, core: &mut ZigbeeCore, destination: Nwk) {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
