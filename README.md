@@ -79,7 +79,8 @@ in terms of functionality exposed by consumer Zigbee devices:
 - [x] Source routing
 - [x] Device joining
 - [x] Child device message holding and management
-- [ ] Zigbee Green Power (TODO)
+- [x] Zigbee Green Power: direct reception of GPDFs, which are passed unprocessed to zigpy
+- [ ] Zigbee Green Power: transmission of GPDFs (needed for bidirectional GPDs)
 
 Zigbee R23 and R23.1 support (i.e. Zigbee 4.0) are low on the list but planned for the
 future. Keep in mind Zigbee is both forward and backward compatible and practically nothing
@@ -105,7 +106,8 @@ The adapter itself is stateless and ZHA will push all network configuration to i
   dynamically configurable role on startup. Adding the ability to join a network as a router
   would allow for some useful end-to-end testing scenarios, like a synthetic Spinel layer
   that can connect multiple Ziggurat instances together.
-- Zigbee Green Power.
+- Zigbee Green Power transmission: a GPD only listens 20-25 ms after it transmits, too
+  short for a round trip to zigpy, so Ziggurat has to queue the response and send it itself.
 - Exploring more routing algorithms.
 
 ---
