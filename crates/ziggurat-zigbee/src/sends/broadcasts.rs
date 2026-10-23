@@ -14,7 +14,7 @@ use ziggurat_ieee_802154::types::Nwk;
 use crate::Instant;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Actions, DequeuedSend, SendFailure, SendId, Transmit, TxPriority};
+use super::{Action, Actions, DequeuedSend, InFlight, SendFailure, SendId, Transmit, TxPriority};
 
 /// How a broadcast is retransmitted and when it is done.
 #[derive(Debug, Clone, Copy)]
@@ -150,7 +150,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         record.copy = CopyState::Transmitting;
 
         DequeuedSend {
-            id,
+            in_flight: InFlight(id),
             frame: &record.frame,
             transmit: Transmit::Broadcast,
         }

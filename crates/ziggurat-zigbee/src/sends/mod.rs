@@ -143,9 +143,16 @@ pub enum Transmit {
     Broadcast,
 }
 
+/// A dequeued send the sender owes a transmit report on. Only `transmitted` consumes
+/// it, and only `dequeue` issues one, so a frame handed to the radio is always
+/// reported back.
+#[must_use = "a dequeued send stays in the radio until it is reported through `transmitted`"]
+#[derive(Debug)]
+pub struct InFlight(SendId);
+
 #[derive(Debug)]
 pub struct DequeuedSend<'a, F> {
-    pub id: SendId,
+    pub in_flight: InFlight,
     pub frame: &'a F,
     pub transmit: Transmit,
 }
@@ -317,11 +324,12 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     /// unicast waits before its next attempt.
     pub fn transmitted(
         &mut self,
-        id: SendId,
+        in_flight: InFlight,
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
     ) -> Actions<F, W, E> {
+        let InFlight(id) = in_flight;
         if self.unicasts.contains(id) {
             self.unicasts.transmitted(id, result, now, retry_delay)
         } else {
