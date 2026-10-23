@@ -79,7 +79,8 @@ in terms of functionality exposed by consumer Zigbee devices:
 - [x] Source routing
 - [x] Device joining
 - [x] Child device message holding and management
-- [ ] Zigbee Green Power (TODO)
+- [x] Zigbee Green Power: direct reception of GPDFs, which are passed unprocessed to zigpy
+- [ ] Zigbee Green Power: transmission of GPDFs (needed for bidirectional GPDs)
 
 Zigbee R23 and R23.1 support (i.e. Zigbee 4.0) are low on the list but planned for the
 future. Keep in mind Zigbee is both forward and backward compatible and practically nothing
@@ -90,7 +91,7 @@ Ziggurat's public API is a simple WebSocket server, which can be run locally ins
 in a Home Assistant addon:
 
 ```bash
-cargo run --bin ziggurat /dev/cu.SLAB_USBtoUART --baudrate 460800 --host 0.0.0.0:9999
+cargo run --bin ziggurat -- --device /dev/cu.SLAB_USBtoUART --listen 0.0.0.0:9999
 ```
 
 The adapter itself is stateless and ZHA will push all network configuration to it on startup.
@@ -98,14 +99,13 @@ The adapter itself is stateless and ZHA will push all network configuration to i
 
 #### Future work
 - Ziggurat currently statically allocates most protocol-level parsing buffers, there are only
-  a few places left in the stack (e.g. `HashMap`) that rely on dynamic allocation. This is
-  in preparation for eventually trying to run Ziggurat on a microcontroller directly, probably
-  the ESP32-C6.
+  a few places left in the stack (e.g. `HashMap`) that rely on dynamic allocation.
 - For testing purposes (especially CI) it would be convenient to allow Ziggurat to have a
   dynamically configurable role on startup. Adding the ability to join a network as a router
   would allow for some useful end-to-end testing scenarios, like a synthetic Spinel layer
   that can connect multiple Ziggurat instances together.
-- Zigbee Green Power.
+- Zigbee Green Power transmission: a GPD only listens 20-25 ms after it transmits, too
+  short for a round trip to zigpy, so Ziggurat has to queue the response and send it itself.
 - Exploring more routing algorithms.
 
 ---

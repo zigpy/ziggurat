@@ -105,6 +105,7 @@ pub enum NotificationCommand {
     SendConfirm = 0x11,
     ApsAckConfirm = 0x12,
     BroadcastConfirm = 0x13,
+    ReceivedGpdf = 0x14,
     // Network membership.
     DeviceJoined = 0x20,
     DeviceLeft = 0x21,
@@ -676,6 +677,22 @@ pub struct ReceivedApsPayload {
     pub data: Vec<u8>,
 }
 
+/// A Green Power frame received directly from a GPD, unprocessed: `data` is the stub NWK
+/// header onward, including the MIC.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct ReceivedGpdfPayload {
+    pub mac_sequence_number: u8,
+    pub has_source_ieee: bool,
+    pub reserved: u7,
+    pub source_ieee: Eui64, // only for ApplicationID 0b010
+    pub lqi: u8,
+    pub rssi: i8,
+    pub data_len: u16,
+    #[abstract_bits(length_from = data_len)]
+    pub data: Vec<u8>,
+}
+
 /// A send's terminal verdict, carried in its `SendConfirm` / `ApsAckConfirm` /
 /// `BroadcastConfirm` notification. Mirrors the driver's `DeliveryError`; admission
 /// failures ride the synchronous `Error` frame's [`Status`] instead.
@@ -966,6 +983,7 @@ pub enum Notification {
     SendConfirm(RequestId, SendConfirmPayload),
     ApsAckConfirm(RequestId, ApsAckConfirmPayload),
     BroadcastConfirm(RequestId, BroadcastConfirmPayload),
+    ReceivedGpdf(ReceivedGpdfPayload),
     DeviceJoined(DeviceJoinedPayload),
     DeviceLeft(DeviceLeftPayload),
     FrameCounter(FrameCounterPayload),
@@ -986,6 +1004,7 @@ impl Notification {
             Self::BroadcastConfirm(request_id, _) => {
                 (NotificationCommand::BroadcastConfirm, *request_id)
             }
+            Self::ReceivedGpdf(_) => (NotificationCommand::ReceivedGpdf, 0),
             Self::DeviceJoined(_) => (NotificationCommand::DeviceJoined, 0),
             Self::DeviceLeft(_) => (NotificationCommand::DeviceLeft, 0),
             Self::FrameCounter(_) => (NotificationCommand::FrameCounter, 0),
@@ -1002,6 +1021,7 @@ impl Notification {
             Self::SendConfirm(_, payload) => append(&mut bytes, payload),
             Self::ApsAckConfirm(_, payload) => append(&mut bytes, payload),
             Self::BroadcastConfirm(_, payload) => append(&mut bytes, payload),
+            Self::ReceivedGpdf(payload) => append(&mut bytes, payload),
             Self::DeviceJoined(payload) => append(&mut bytes, payload),
             Self::DeviceLeft(payload) => append(&mut bytes, payload),
             Self::FrameCounter(payload) => append(&mut bytes, payload),
