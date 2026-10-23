@@ -303,14 +303,14 @@ pub enum Frame {
 /// A send's frame together with its slice of the frame budget. The token is returned
 /// when the send settles and its record drops this.
 #[derive(Debug)]
-pub struct Held {
+pub struct HeldFrame {
     pub frame: Frame,
     pub token: FrameToken,
 }
 
 /// The send table, specialised to the driver's types. See [`Sends`].
-pub type SendTable = Sends<Held, Arc<SendSlot>, DeliveryError>;
-pub type SendAction = ziggurat_zigbee::sends::Action<Held, Arc<SendSlot>, DeliveryError>;
+pub type SendTable = Sends<HeldFrame, Arc<SendSlot>, DeliveryError>;
+pub type SendAction = ziggurat_zigbee::sends::Action<HeldFrame, Arc<SendSlot>, DeliveryError>;
 
 /// A unicast handed to [`ZigbeeStack::send_unicast`].
 #[derive(Debug)]

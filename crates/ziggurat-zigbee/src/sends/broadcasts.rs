@@ -14,7 +14,7 @@ use ziggurat_ieee_802154::types::Nwk;
 use crate::Instant;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Dequeued, SendFailure, SendId, Transmit, TxPriority};
+use super::{Action, DequeuedSend, SendFailure, SendId, Transmit, TxPriority};
 
 /// How a broadcast is retransmitted and when it is done.
 #[derive(Debug, Clone, Copy)]
@@ -144,12 +144,12 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         best
     }
 
-    pub(super) fn dequeue(&mut self, id: SendId) -> Dequeued<'_, F> {
+    pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {
         let record = self.records.get_mut(&id).unwrap();
         debug_assert_eq!(record.copy, Copy::Queued);
         record.copy = Copy::Transmitting;
 
-        Dequeued {
+        DequeuedSend {
             id,
             frame: &record.frame,
             transmit: Transmit::Broadcast,
@@ -198,7 +198,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         });
     }
 
-    pub(super) fn passive_ack_keys(&self) -> Vec<(Nwk, u8)> {
+    pub(super) fn awaiting_quorum(&self) -> Vec<(Nwk, u8)> {
         self.records
             .values()
             .filter_map(|record| match record.schedule {
@@ -208,9 +208,9 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             .collect()
     }
 
-    /// The passive-ack quorum for a broadcast was heard: it is delivered. A copy in the
-    /// radio right now settles it on its report instead.
-    pub(super) fn acked(&mut self, key: (Nwk, u8), actions: &mut Vec<Action<F, W, E>>) {
+    /// The passive-ack quorum for a broadcast was heard: the send is delivered. A copy
+    /// in the radio right now settles it on its report instead.
+    pub(super) fn delivered(&mut self, key: (Nwk, u8), actions: &mut Vec<Action<F, W, E>>) {
         let found = self
             .records
             .iter()
