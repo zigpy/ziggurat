@@ -137,12 +137,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn enqueue(
-        &mut self,
-        id: SendId,
-        unicast: Unicast<F, W>,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
+    pub(super) fn enqueue(&mut self, id: SendId, unicast: Unicast<F, W>) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
+
         let stage = match unicast.delivery {
             Delivery::Direct { .. } => Stage::Queued,
             Delivery::Indirect { .. } => {
@@ -163,6 +160,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 deadline: unicast.deadline,
             },
         );
+
+        actions
     }
 
     /// The highest-priority queued send, oldest first within a priority.
@@ -213,8 +212,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
+    ) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
+
         let record = self
             .records
             .get_mut(&id)
@@ -224,15 +224,15 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         };
 
         match result {
-            Ok(()) => self.handed_off(id, now, acked, actions),
+            Ok(()) => self.handed_off(id, now, acked, &mut actions),
             // The destination acked end to end while the radio reported a failure: the
             // frame got through
-            Err(_) if acked => self.handed_off(id, now, acked, actions),
+            Err(_) if acked => self.handed_off(id, now, acked, &mut actions),
             Err(err) => match record.delivery {
                 Delivery::Direct {
                     next_hop,
                     attempts_remaining: 0,
-                } => self.settle(id, Err(err), Some(next_hop), actions),
+                } => self.settle(id, Err(err), Some(next_hop), &mut actions),
                 Delivery::Direct {
                     next_hop,
                     attempts_remaining,
@@ -250,9 +250,11 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 Delivery::Indirect { .. } if now < record.deadline => {
                     record.stage = Stage::AwaitingPoll;
                 }
-                Delivery::Indirect { .. } => self.settle(id, Err(err), None, actions),
+                Delivery::Indirect { .. } => self.settle(id, Err(err), None, &mut actions),
             },
         }
+
+        actions
     }
 
     /// The frame reached its next hop: settle the send, or start waiting for its ack
@@ -342,7 +344,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
     /// An end-to-end APS ack arrived. It settles the oldest send waiting for it; the
     /// ack carries no way to tell two frames sharing a key apart.
-    pub(super) fn ack_received(&mut self, ack: &ApsAckData, actions: &mut Vec<Action<F, W, E>>) {
+    pub(super) fn ack_received(&mut self, ack: &ApsAckData) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
+
         let matched = self.records.iter().find_map(|(id, record)| {
             let expected = match &record.confirm {
                 Confirm::ApsAck { ack: expected, .. } => expected,
@@ -359,22 +363,21 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         });
 
         match matched {
-            Some((id, true)) => self.settle(id, Ok(()), None, actions),
+            Some((id, true)) => self.settle(id, Ok(()), None, &mut actions),
             // Faster than the radio's own report: `transmitted` settles it
             Some((id, false)) => {
                 self.records.get_mut(&id).unwrap().stage = Stage::Transmitting { acked: true };
             }
             None => {}
         }
+
+        actions
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
-    pub(super) fn drop_indirect(
-        &mut self,
-        eui64: Option<Eui64>,
-        nwk: Nwk,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
+    pub(super) fn drop_indirect(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
+
         let dropped: Vec<(SendId, Ieee802154Address)> = self
             .records
             .iter()
@@ -394,24 +397,28 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 id,
                 Err(SendFailure::IndirectExpired { destination }.into()),
                 None,
-                actions,
+                &mut actions,
             );
         }
+
+        actions
     }
 
-    /// `false` if the send is in the radio right now, or the send is unknown.
-    pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
-        match self.records.get(&id) {
-            Some(record) if !matches!(record.stage, Stage::Transmitting { .. }) => {
-                self.settle(id, Err(SendFailure::Cancelled.into()), None, actions);
-                true
-            }
-            _ => false,
+    /// `None` if the send is in the radio right now, or unknown.
+    pub(super) fn cancel(&mut self, id: SendId) -> Option<Vec<Action<F, W, E>>> {
+        let record = self.records.get(&id)?;
+        if matches!(record.stage, Stage::Transmitting { .. }) {
+            return None;
         }
+
+        let mut actions = Vec::new();
+        self.settle(id, Err(SendFailure::Cancelled.into()), None, &mut actions);
+        Some(actions)
     }
 
     /// Re-queue retries that are due and fail records past their deadline.
-    pub(super) fn tick(&mut self, now: Instant, actions: &mut Vec<Action<F, W, E>>) {
+    pub(super) fn tick(&mut self, now: Instant) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
         let mut lapsed: Vec<(SendId, SendFailure)> = Vec::new();
 
         for (id, record) in self.records.iter_mut() {
@@ -429,8 +436,10 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         }
 
         for (id, failure) in lapsed {
-            self.settle(id, Err(failure.into()), None, actions);
+            self.settle(id, Err(failure.into()), None, &mut actions);
         }
+
+        actions
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {

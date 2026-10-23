@@ -262,9 +262,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             * 2;
 
         let attempts = self.tunables.rreq_retries() + 1;
-        self.mutate_sends(|core, _| {
-            self.broadcast_route_request(core, relayed_route_request_cmd, attempts, jitter);
-        });
+        self.broadcast_route_request(
+            &mut self.core(),
+            relayed_route_request_cmd,
+            attempts,
+            jitter,
+        );
+        self.wake_send_tasks();
     }
 
     /// Zigbee spec 3.6.4.5.1: advertise a many-to-one route to ourselves so that every

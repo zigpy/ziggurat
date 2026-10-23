@@ -342,6 +342,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// one core lock, so the next hop cannot change in between. `Err` means nothing was
     /// enqueued and no handle is returned. A caller that does not await the send drops
     /// the handle.
+    #[allow(clippy::significant_drop_tightening)]
     pub(super) fn send_unicast(&self, send: Unicast) -> Result<SendHandle, EnqueueError> {
         let Unicast {
             frame: mut nwk_frame,
@@ -359,7 +360,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let destination = nwk_frame.nwk_header.destination;
         let now = self.core_now();
 
-        self.mutate_sends(|core, actions| {
+        let (handle, actions) = {
+            let mut core = self.core();
             nwk_frame.nwk_header.sequence_number = core.nib.next_sequence_number();
 
             let resolved = next_hop::resolve(
@@ -374,13 +376,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NextHop::Resolved(next_hop) => {
                     let placement = self.place_unicast(&core.nib, next_hop);
                     self.enqueue_unicast_in(
-                        core,
-                        actions,
+                        &mut core,
                         Frame::nwk(nwk_frame, security),
                         policy,
                         confirm,
                         placement,
-                    )
+                    )?
                 }
                 NextHop::NeedDiscovery => {
                     tracing::debug!("Holding frame until a route to {destination:?} is known");
@@ -404,19 +405,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         self.tunables.pending_route_discovery_attempts(),
                     );
                     if !discovering {
-                        self.start_route_discovery(core, destination);
+                        self.start_route_discovery(&mut core, destination);
                     }
 
-                    Ok(SendHandle::new(id, slot))
+                    (SendHandle::new(id, slot), Vec::new())
                 }
                 NextHop::Discard => {
                     tracing::debug!(
                         "Dropping frame to {destination:?}: no route and discovery suppressed"
                     );
-                    Err(EnqueueError::RouteDiscoverySuppressed)
+                    return Err(EnqueueError::RouteDiscoverySuppressed);
                 }
             }
-        })
+        };
+
+        self.commit_sends(actions);
+        Ok(handle)
     }
 
     pub(super) fn next_nwk_sequence_number(&self) -> u8 {
