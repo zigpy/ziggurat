@@ -21,8 +21,8 @@ use ziggurat_zigbee::nwk::frame::{
 use crate::frame_token::TrafficClass;
 
 use super::{
-    Confirm, DeliveryError, Entry, Frame, Next, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE,
-    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
+    DeliveryError, Frame, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, Schedule, TxPolicy,
+    TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
@@ -153,13 +153,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        let admitted = self.admit(
-            Frame::Raw(beacon_frame),
-            policy,
-            Confirm::OnHandoff,
-            None,
-            Entry::Queue(Next::Once),
-        );
+        let admitted =
+            self.admit_broadcast(Frame::Raw(beacon_frame), policy, None, Schedule::Once, true);
         if let Err(err) = admitted {
             tracing::warn!("Dropping beacon: {err}");
         }

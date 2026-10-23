@@ -7,8 +7,7 @@ use ziggurat_phy::{RadioError, RadioPhy};
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 
 use super::{
-    Confirm, DeviceLeaveReason, Entry, Frame, NwkSecurityMode, TxPolicy, ZigbeeNotification,
-    ZigbeeStack,
+    Confirm, DeviceLeaveReason, Frame, NwkSecurityMode, TxPolicy, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -100,16 +99,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Fire-and-forget: an expiry (the stale child never polled again) is only
         // worth a log line.
-        let admitted = self.admit(
+        let admitted = self.admit_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
             None,
-            Entry::Indirect {
-                address: destination,
-                next_hop: nwk,
-                persistence_time: self.tunables.transaction_persistence_time(),
-            },
+            self.place_indirect(destination, nwk),
         );
 
         if let Err(err) = admitted {

@@ -25,9 +25,9 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, Broadcast, BroadcastSchedule, Confirm, DeliveryError, EnqueueError, Entry,
-    Frame, HostRoute, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, SendHandle,
-    SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, HostRoute,
+    MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendHandle, SendId,
+    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
@@ -100,27 +100,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.sequence_number,
         );
 
-        let admitted = self.admit(
+        let admitted = self.admit_broadcast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
                 class: TrafficClass::Critical,
             },
-            Confirm::OnHandoff,
             None,
-            Entry::Broadcast {
-                key,
-                schedule: BroadcastSchedule::FixedInterval {
-                    interval: self.tunables.rreq_retry_interval(),
-                },
-                attempts,
+            Schedule::FixedInterval {
+                interval: self.tunables.rreq_retry_interval(),
+                copies_remaining: attempts,
                 next_attempt: self.core_now() + initial_delay,
-                copy_now: false,
             },
+            false,
         );
 
         if let Err(err) = admitted {
-            tracing::warn!("Dropping route request: {err}");
+            tracing::warn!("Dropping route request {key:?}: {err}");
         }
     }
 
@@ -351,16 +347,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// admission and no handle is returned.
     pub(super) fn send_unicast(&self, send: Unicast) -> Result<SendHandle, EnqueueError> {
         let slot = Arc::new(SendSlot::default());
-        let id = self.admit_unicast(send, Some(slot.clone()))?;
+        let id = self.send_unicast_with(send, Some(slot.clone()))?;
         Ok(SendHandle::new(id, slot))
     }
 
     /// [`Self::send_unicast`] for a send nobody awaits: a failure is only logged.
     pub(super) fn send_unicast_untracked(&self, send: Unicast) -> Result<(), EnqueueError> {
-        self.admit_unicast(send, None).map(|_| ())
+        self.send_unicast_with(send, None).map(|_| ())
     }
 
-    fn admit_unicast(
+    fn send_unicast_with(
         &self,
         send: Unicast,
         waiter: Option<Arc<SendSlot>>,
@@ -380,33 +376,36 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        let entry = match self.resolve_next_hop(&mut nwk_frame, &mode) {
-            NextHop::Resolved(next_hop) => self.place_unicast(next_hop),
+        let destination = nwk_frame.nwk_header.destination;
+
+        match self.resolve_next_hop(&mut nwk_frame, &mode) {
+            NextHop::Resolved(next_hop) => {
+                let placement = self.place_unicast(next_hop);
+                self.admit_unicast(
+                    Frame::nwk(nwk_frame, security),
+                    policy,
+                    confirm,
+                    waiter,
+                    placement,
+                )
+            }
             NextHop::NeedDiscovery => {
-                let destination = nwk_frame.nwk_header.destination;
-                tracing::debug!("Queuing frame awaiting a route to {destination:?}");
-                Entry::AwaitRoute {
+                tracing::debug!("Parking frame awaiting a route to {destination:?}");
+                self.admit_parked(
+                    Frame::nwk(nwk_frame, security),
+                    policy,
+                    confirm,
+                    waiter,
                     destination,
-                    discovery_time: self.tunables.route_discovery_time(),
-                    attempts: self.tunables.pending_route_discovery_attempts(),
-                }
+                )
             }
             NextHop::Discard => {
-                let destination = nwk_frame.nwk_header.destination;
                 tracing::debug!(
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
                 );
-                return Err(EnqueueError::RouteDiscoverySuppressed);
+                Err(EnqueueError::RouteDiscoverySuppressed)
             }
-        };
-
-        self.admit(
-            Frame::nwk(nwk_frame, security),
-            policy,
-            confirm,
-            waiter,
-            entry,
-        )
+        }
     }
 
     /// Resolve the MAC next hop for a unicast without ever blocking. A source-routed
@@ -701,7 +700,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (child_eui64, child_nwk) in sleepy_children {
             // Each per-child copy is its own charge: under pressure copies are skipped
             // (the child misses one broadcast) instead of exhausting the heap.
-            let admitted = self.admit(
+            let admitted = self.admit_unicast(
                 Frame::nwk(nwk_frame.clone(), security),
                 TxPolicy {
                     priority: TxPriority::UserNormal,
@@ -709,11 +708,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 },
                 Confirm::OnHandoff,
                 None,
-                Entry::Indirect {
-                    address: Ieee802154Address::Eui64(child_eui64),
-                    next_hop: child_nwk,
-                    persistence_time: self.tunables.transaction_persistence_time(),
-                },
+                self.place_indirect(Ieee802154Address::Eui64(child_eui64), child_nwk),
             );
 
             if let Err(err) = admitted {
@@ -726,16 +721,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// attempts run out. `Err` rejects at admission and no handle is returned.
     pub(super) fn send_broadcast(&self, send: Broadcast) -> Result<SendHandle, EnqueueError> {
         let slot = Arc::new(SendSlot::default());
-        let id = self.admit_broadcast(send, Some(slot.clone()))?;
+        let id = self.send_broadcast_with(send, Some(slot.clone()))?;
         Ok(SendHandle::new(id, slot))
     }
 
     /// [`Self::send_broadcast`] for a send nobody awaits.
     pub(super) fn send_broadcast_untracked(&self, send: Broadcast) -> Result<(), EnqueueError> {
-        self.admit_broadcast(send, None).map(|_| ())
+        self.send_broadcast_with(send, None).map(|_| ())
     }
 
-    fn admit_broadcast(
+    fn send_broadcast_with(
         &self,
         send: Broadcast,
         waiter: Option<Arc<SendSlot>>,
@@ -789,20 +784,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The first copy goes out now: a lost copy is not terminal, the schedule
         // retransmits. The first copy on air is the send's handoff; the quorum is its
         // delivery.
-        self.admit(
+        self.admit_broadcast(
             Frame::nwk(nwk_frame, security),
             policy,
-            Confirm::OnHandoff,
             waiter,
-            Entry::Broadcast {
+            Schedule::PassiveAck {
                 key,
-                schedule: BroadcastSchedule::PassiveAck,
-                attempts: self.tunables.max_broadcast_retries(),
+                copies_remaining: self.tunables.max_broadcast_retries(),
                 next_attempt: self.core_now()
                     + self.tunables.passive_ack_timeout()
                     + self.broadcast_jitter(),
-                copy_now: true,
             },
+            true,
         )
     }
 
@@ -837,12 +830,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        self.admit(
+        self.admit_broadcast(
             Frame::nwk(nwk_frame, security),
             policy,
-            Confirm::OnHandoff,
             waiter,
-            Entry::Queue(super::Next::Once),
+            Schedule::Once,
+            true,
         )
     }
 
@@ -1023,7 +1016,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // retry end-to-end. The originator's sequence number is preserved. Any failure
         // handling (route invalidation, the network status back to the originator)
         // follows the send table's verdict; nothing is awaited here.
-        let admitted = self.admit(
+        let placement = self.place_unicast(next_hop_address);
+        let admitted = self.admit_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
@@ -1031,7 +1025,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             Confirm::OnHandoff,
             None,
-            self.place_unicast(next_hop_address),
+            placement,
         );
 
         if let Err(err) = admitted {
@@ -1131,21 +1125,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // rather than sent inline, so the attempt count includes it. The passive-ack
         // contract was recorded when we received the frame, so the timer's quorum check
         // already covers relayed broadcasts.
-        let admitted = self.admit(
+        let admitted = self.admit_broadcast(
             Frame::nwk(relayed_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
                 class: TrafficClass::Forwarding,
             },
-            Confirm::OnHandoff,
             None,
-            Entry::Broadcast {
+            Schedule::PassiveAck {
                 key,
-                schedule: BroadcastSchedule::PassiveAck,
-                attempts: self.tunables.max_broadcast_retries() + 1,
+                copies_remaining: self.tunables.max_broadcast_retries() + 1,
                 next_attempt: self.core_now() + self.broadcast_jitter(),
-                copy_now: false,
             },
+            false,
         );
 
         if let Err(err) = admitted {

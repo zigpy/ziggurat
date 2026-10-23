@@ -12,70 +12,116 @@ use core::time::Duration;
 use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::sends::{Action, Admission};
+use ziggurat_zigbee::sends::{
+    Action, Broadcast as BroadcastRecord, ParkedSend, Unicast as UnicastRecord,
+};
 
-use crate::frame_token;
+use crate::frame_token::{self, FrameToken};
 use crate::runtime::Runtime;
 
 use super::routing::Status as RouteStatus;
 use super::{
-    Confirm, DeliveryError, EnqueueError, Entry, Frame, Held, Next, NwkSecurityMode,
-    RouteDirective, SendAction, SendHandle, SendId, SendMode, SendSlot, SendTable, TrackStage,
+    Confirm, Delivery, DeliveryError, EnqueueError, Frame, Held, NwkSecurityMode, Placement,
+    RouteDirective, Schedule, SendAction, SendId, SendMode, SendSlot, SendTable, TrackStage,
     Transmit, TxPolicy, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    /// Admit a frame into the send table, taking its frame token from the policy's
-    /// budget tier. A refused token rejects the send at admission.
-    pub(super) fn admit(
-        &self,
-        frame: Frame,
-        policy: TxPolicy,
-        confirm: Confirm,
-        waiter: Option<Arc<SendSlot>>,
-        entry: Entry,
-    ) -> Result<SendId, EnqueueError> {
-        let Some(token) = frame_token::take(policy.class) else {
+    /// Take a frame token from the policy's budget tier. A refused token rejects the
+    /// send at admission.
+    fn take_token(&self, policy: TxPolicy) -> Result<FrameToken, EnqueueError> {
+        frame_token::take(policy.class).ok_or_else(|| {
             tracing::warn!(
                 "Frame budget exhausted ({}/{} tokens); rejecting {:?} frame",
                 frame_token::used(),
                 frame_token::total(),
                 policy.class,
             );
-            return Err(EnqueueError::BudgetExhausted);
-        };
+            EnqueueError::BudgetExhausted
+        })
+    }
 
-        let now = self.core_now();
-        let handoff_timeout = self.tunables.handoff_timeout();
+    /// Admit a unicast with a known next hop.
+    pub(super) fn admit_unicast(
+        &self,
+        frame: Frame,
+        policy: TxPolicy,
+        confirm: Confirm,
+        waiter: Option<Arc<SendSlot>>,
+        placement: Placement,
+    ) -> Result<SendId, EnqueueError> {
+        let token = self.take_token(policy)?;
 
         let id = self.mutate_sends(|sends| {
-            sends.admit(
-                Admission {
+            sends.admit_unicast(UnicastRecord {
+                frame: Held { frame, token },
+                priority: policy.priority,
+                waiter,
+                confirm,
+                delivery: placement.delivery,
+                deadline: placement.deadline,
+            })
+        });
+
+        Ok(id)
+    }
+
+    /// Admit a unicast with no route yet, parked on `destination`'s route discovery.
+    pub(super) fn admit_parked(
+        &self,
+        frame: Frame,
+        policy: TxPolicy,
+        confirm: Confirm,
+        waiter: Option<Arc<SendSlot>>,
+        destination: Nwk,
+    ) -> Result<SendId, EnqueueError> {
+        let token = self.take_token(policy)?;
+        let now = self.core_now();
+
+        let id = self.mutate_sends(|sends| {
+            sends.admit_parked(
+                ParkedSend {
                     frame: Held { frame, token },
                     priority: policy.priority,
-                    confirm,
                     waiter,
+                    confirm,
+                    destination,
+                    deadline: now + self.tunables.handoff_timeout(),
                 },
-                entry,
                 now,
-                handoff_timeout,
+                self.tunables.route_discovery_time(),
+                self.tunables.pending_route_discovery_attempts(),
             )
         });
 
         Ok(id)
     }
 
-    /// Admit a tracked send: the returned handle awaits its stages.
-    pub(super) fn admit_tracked(
+    /// Admit a broadcast, or any frame transmitted on a schedule.
+    pub(super) fn admit_broadcast(
         &self,
         frame: Frame,
         policy: TxPolicy,
-        confirm: Confirm,
-        entry: Entry,
-    ) -> Result<SendHandle, EnqueueError> {
-        let slot = Arc::new(SendSlot::default());
-        let id = self.admit(frame, policy, confirm, Some(slot.clone()), entry)?;
-        Ok(SendHandle::new(id, slot))
+        waiter: Option<Arc<SendSlot>>,
+        schedule: Schedule,
+        copy_now: bool,
+    ) -> Result<SendId, EnqueueError> {
+        let token = self.take_token(policy)?;
+        let deadline = self.core_now() + self.tunables.handoff_timeout();
+
+        let id = self.mutate_sends(|sends| {
+            let id = sends.admit_broadcast(BroadcastRecord {
+                frame: Held { frame, token },
+                priority: policy.priority,
+                waiter,
+                schedule,
+                copy_now,
+                deadline,
+            });
+            (id, Vec::new())
+        });
+
+        Ok(id)
     }
 
     /// Run one mutation of the send table, then carry out the actions it returned and
@@ -144,23 +190,33 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Where a unicast with a resolved next hop goes: a sleepy child's frame awaits its
     /// poll, everything else is queued for the sender.
     #[allow(clippy::option_if_let_else)]
-    pub(super) fn place_unicast(&self, next_hop: Nwk) -> Entry {
+    pub(super) fn place_unicast(&self, next_hop: Nwk) -> Placement {
         match self.sleepy_child_eui64(next_hop) {
-            Some(child_eui64) => Entry::Indirect {
-                address: Ieee802154Address::Eui64(child_eui64),
-                next_hop,
-                persistence_time: self.tunables.transaction_persistence_time(),
+            Some(child_eui64) => {
+                self.place_indirect(Ieee802154Address::Eui64(child_eui64), next_hop)
+            }
+            None => Placement {
+                delivery: Delivery::Direct {
+                    next_hop,
+                    attempts_remaining: self.tunables.unicast_retries(),
+                },
+                deadline: self.core_now() + self.tunables.handoff_timeout(),
             },
-            None => Entry::Queue(Next::Unicast {
-                next_hop,
-                attempts_remaining: self.tunables.unicast_retries(),
-            }),
+        }
+    }
+
+    /// A frame held for a sleepy device until it polls under `address`, then transmitted
+    /// to `next_hop`. It expires after the transaction persistence time.
+    pub(super) fn place_indirect(&self, address: Ieee802154Address, next_hop: Nwk) -> Placement {
+        Placement {
+            delivery: Delivery::Indirect { address, next_hop },
+            deadline: self.core_now() + self.tunables.transaction_persistence_time(),
         }
     }
 
     /// Re-place a frame whose route discovery resolved. The route can have vanished in
     /// the race, which fails the send.
-    fn place_released(&self, held: &mut Held) -> Result<Entry, DeliveryError> {
+    fn place_released(&self, held: &mut Held) -> Result<Placement, DeliveryError> {
         let Frame::Nwk { nwk_frame, .. } = &mut held.frame else {
             unreachable!("only NWK unicasts await a route")
         };
@@ -206,44 +262,30 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     async fn transmit(&self, frame: Frame, transmit: Transmit) -> Result<(), DeliveryError> {
         match (transmit, frame) {
             (
-                Transmit::Unicast { next_hop },
-                Frame::Nwk {
-                    nwk_frame,
-                    security,
-                },
-            ) => {
-                self.transmit_unicast(nwk_frame, next_hop, security, false)
-                    .await
-            }
-            (
-                Transmit::Indirect {
+                Transmit::Unicast {
                     next_hop,
-                    more_pending,
-                    ..
+                    frame_pending,
                 },
                 Frame::Nwk {
                     nwk_frame,
                     security,
                 },
             ) => {
-                self.transmit_unicast(nwk_frame, next_hop, security, more_pending)
+                self.transmit_unicast(nwk_frame, next_hop, security, frame_pending)
                     .await
             }
-            (Transmit::Indirect { more_pending, .. }, Frame::Raw(mut raw)) => {
-                raw.header_mut().frame_control.frame_pending = more_pending;
+            (Transmit::Unicast { frame_pending, .. }, Frame::Raw(mut raw)) => {
+                raw.header_mut().frame_control.frame_pending = frame_pending;
                 self.send_802154_frame(raw).await
             }
             (
-                Transmit::Once | Transmit::BroadcastCopy,
+                Transmit::Broadcast,
                 Frame::Nwk {
                     nwk_frame,
                     security,
                 },
             ) => self.transmit_broadcast(nwk_frame, security).await,
-            (Transmit::Once, Frame::Raw(raw)) => self.send_802154_frame(raw).await,
-            (Transmit::Unicast { .. } | Transmit::BroadcastCopy, Frame::Raw(_)) => {
-                unreachable!("a raw frame is never a unicast or a broadcast")
-            }
+            (Transmit::Broadcast, Frame::Raw(raw)) => self.send_802154_frame(raw).await,
         }
     }
 
@@ -303,9 +345,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 actions.extend(sends.broadcast_acked(key));
             }
             for destination in active {
-                actions.extend(
-                    sends.route_resolved(destination, now, |held| self.place_released(held)),
-                );
+                actions.extend(sends.route_resolved(destination, |held| self.place_released(held)));
             }
             actions.extend(sends.tick(now, retransmit_interval));
             ((), actions)
