@@ -91,7 +91,7 @@ Ziggurat's public API is a simple WebSocket server, which can be run locally ins
 in a Home Assistant addon:
 
 ```bash
-cargo run --bin ziggurat /dev/cu.SLAB_USBtoUART --baudrate 460800 --host 0.0.0.0:9999
+cargo run --bin ziggurat -- --device /dev/cu.SLAB_USBtoUART --listen 0.0.0.0:9999
 ```
 
 The adapter itself is stateless and ZHA will push all network configuration to it on startup.
