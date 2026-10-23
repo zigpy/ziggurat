@@ -17,9 +17,9 @@
 //! table holding the id.
 //!
 //! The tables never read a clock and never notify anyone: `now` is passed in, and every
-//! mutation appends the [`Action`]s the driver must carry out to the `actions` it is
-//! given. They are generic over the frame type `F`, the waiter type `W` and the driver's
-//! error type `E`, which they only ever need to build from a [`SendFailure`].
+//! mutation returns the [`Action`]s the driver must carry out. They are generic over the
+//! frame type `F`, the waiter type `W` and the driver's error type `E`, which they only
+//! ever need to build from a [`SendFailure`].
 //!
 //! Every record carries a deadline, so no send can be stranded: a record past its
 //! deadline fails with the error its state implies.
@@ -226,14 +226,10 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// Enqueue a unicast with a known next hop.
-    pub fn enqueue_unicast(
-        &mut self,
-        unicast: Unicast<F, W>,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) -> SendId {
+    pub fn enqueue_unicast(&mut self, unicast: Unicast<F, W>) -> (SendId, Vec<Action<F, W, E>>) {
         let id = self.next_id();
-        self.unicasts.enqueue(id, unicast, actions);
-        id
+        let actions = self.unicasts.enqueue(id, unicast);
+        (id, actions)
     }
 
     /// Enqueue a unicast with no route yet, held until its destination's discovery
@@ -286,13 +282,11 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
+    ) -> Vec<Action<F, W, E>> {
         if self.unicasts.contains(id) {
-            self.unicasts
-                .transmitted(id, result, now, retry_delay, actions);
+            self.unicasts.transmitted(id, result, now, retry_delay)
         } else {
-            self.broadcasts.transmitted(id, result, actions);
+            self.broadcasts.transmitted(id, result)
         }
     }
 
@@ -303,8 +297,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// An end-to-end APS ack arrived.
-    pub fn aps_ack_received(&mut self, ack: &ApsAckData, actions: &mut Vec<Action<F, W, E>>) {
-        self.unicasts.ack_received(ack, actions);
+    pub fn aps_ack_received(&mut self, ack: &ApsAckData) -> Vec<Action<F, W, E>> {
+        self.unicasts.ack_received(ack)
     }
 
     /// Every destination with unrouted sends.
@@ -317,15 +311,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unrouted_unicasts.has_unrouted(destination)
     }
 
-    /// The route discovery toward `destination` lapsed. `true` if the caller must
-    /// restart it; otherwise every unrouted send to it has failed.
-    pub fn discovery_lapsed(
-        &mut self,
-        destination: Nwk,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) -> bool {
-        self.unrouted_unicasts
-            .discovery_lapsed(destination, actions)
+    /// `destination`'s discovery lapsed: consume a restart of it, if one is left and
+    /// an unrouted send still waits on it. The caller restarts the discovery.
+    pub fn retry_discovery(&mut self, destination: Nwk) -> bool {
+        self.unrouted_unicasts.retry_discovery(destination)
+    }
+
+    /// Fail every unrouted send to `destination`: its discovery is over without a
+    /// route.
+    pub fn fail_unrouted(&mut self, destination: Nwk) -> Vec<Action<F, W, E>> {
+        self.unrouted_unicasts.fail(destination)
     }
 
     /// A route to `destination` is known: move every unrouted send to it to the unicasts.
@@ -335,11 +330,12 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         &mut self,
         destination: Nwk,
         mut place: impl FnMut(&mut F) -> Result<Placement, E>,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
+    ) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
+
         for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
             match place(&mut unrouted.frame) {
-                Ok(placement) => self.unicasts.enqueue(
+                Ok(placement) => actions.extend(self.unicasts.enqueue(
                     id,
                     Unicast {
                         frame: unrouted.frame,
@@ -349,8 +345,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                         delivery: placement.delivery,
                         deadline: placement.deadline,
                     },
-                    actions,
-                ),
+                )),
                 Err(err) => actions.push(Action::Settled {
                     waiter: unrouted.waiter,
                     result: Err(err),
@@ -359,6 +354,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                 }),
             }
         }
+
+        actions
     }
 
     /// The key of every broadcast awaiting its passive-ack quorum.
@@ -367,8 +364,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// The passive-ack quorum for a broadcast was heard: the send is delivered.
-    pub fn broadcast_delivered(&mut self, key: (Nwk, u8), actions: &mut Vec<Action<F, W, E>>) {
-        self.broadcasts.delivered(key, actions);
+    pub fn broadcast_delivered(&mut self, key: (Nwk, u8)) -> Vec<Action<F, W, E>> {
+        self.broadcasts.delivered(key)
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
@@ -376,35 +373,29 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         &mut self,
         eui64: Option<Eui64>,
         nwk: Nwk,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
-        self.unicasts.drop_indirect(eui64, nwk, actions);
+    ) -> Vec<Action<F, W, E>> {
+        self.unicasts.drop_indirect(eui64, nwk)
     }
 
-    /// Cancel a send. `false` if it is unknown, already over, or in the radio right now
+    /// Cancel a send. `None` if it is unknown, already over, or in the radio right now
     /// (its own report settles it within the radio's timeout).
-    pub fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
+    pub fn cancel(&mut self, id: SendId) -> Option<Vec<Action<F, W, E>>> {
         if self.unicasts.contains(id) {
-            self.unicasts.cancel(id, actions)
+            self.unicasts.cancel(id)
         } else if self.unrouted_unicasts.contains(id) {
-            self.unrouted_unicasts.cancel(id, actions);
-            true
+            Some(alloc::vec![self.unrouted_unicasts.cancel(id)])
         } else {
-            self.broadcasts.cancel(id, actions)
+            self.broadcasts.cancel(id)
         }
     }
 
     /// The timer pass: re-queue what is due and fail what is past its deadline.
     /// `passive_ack_interval` spaces passive-ack broadcast copies.
-    pub fn tick(
-        &mut self,
-        now: Instant,
-        passive_ack_interval: Duration,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
-        self.unicasts.tick(now, actions);
-        self.unrouted_unicasts.tick(now, actions);
-        self.broadcasts.tick(now, passive_ack_interval, actions);
+    pub fn tick(&mut self, now: Instant, passive_ack_interval: Duration) -> Vec<Action<F, W, E>> {
+        let mut actions = self.unicasts.tick(now);
+        actions.extend(self.unrouted_unicasts.tick(now));
+        actions.extend(self.broadcasts.tick(now, passive_ack_interval));
+        actions
     }
 
     /// When the timer must next run, or `None` when nothing is waiting on time.

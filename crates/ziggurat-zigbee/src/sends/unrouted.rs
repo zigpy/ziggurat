@@ -99,14 +99,9 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         }
     }
 
-    /// The discovery toward `destination` lapsed. `true` if a restart is left and a
-    /// send still waits on it: the caller restarts the discovery. Otherwise every send
-    /// to the destination fails.
-    pub(super) fn discovery_lapsed(
-        &mut self,
-        destination: Nwk,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) -> bool {
+    /// Consume a restart of `destination`'s discovery, if one is left and a send still
+    /// waits on it.
+    pub(super) fn retry_discovery(&mut self, destination: Nwk) -> bool {
         let waiting = self
             .records
             .values()
@@ -114,27 +109,32 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
 
         let retries = self.retries.get_mut(&destination).unwrap();
         // A discovery nothing waits on any more is not restarted
-        if *retries > 0 && waiting {
-            *retries -= 1;
-            return true;
+        if *retries == 0 || !waiting {
+            return false;
         }
 
+        *retries -= 1;
+        true
+    }
+
+    /// Fail every send to `destination`: its discovery is over without a route.
+    pub(super) fn fail(&mut self, destination: Nwk) -> Vec<Action<F, W, E>> {
         self.retries.remove(&destination);
-        for (_, send) in self.take(destination) {
-            actions.push(Self::settled(send, SendFailure::RouteDiscoveryTimeout));
-        }
-        false
+        self.take(destination)
+            .into_iter()
+            .map(|(_, send)| Self::settled(send, SendFailure::RouteDiscoveryTimeout))
+            .collect()
     }
 
     /// The destination stays awaited, so a new send to it does not start a second
     /// discovery; it lapses on its own once nothing waits on it.
-    pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) {
+    pub(super) fn cancel(&mut self, id: SendId) -> Action<F, W, E> {
         let send = self.records.remove(&id).unwrap();
-        actions.push(Self::settled(send, SendFailure::Cancelled));
+        Self::settled(send, SendFailure::Cancelled)
     }
 
     /// Fail sends past their deadline.
-    pub(super) fn tick(&mut self, now: Instant, actions: &mut Vec<Action<F, W, E>>) {
+    pub(super) fn tick(&mut self, now: Instant) -> Vec<Action<F, W, E>> {
         let lapsed: Vec<SendId> = self
             .records
             .iter()
@@ -142,10 +142,13 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .map(|(id, _)| *id)
             .collect();
 
-        for id in lapsed {
-            let send = self.records.remove(&id).unwrap();
-            actions.push(Self::settled(send, SendFailure::HandoffTimeout));
-        }
+        lapsed
+            .into_iter()
+            .map(|id| {
+                let send = self.records.remove(&id).unwrap();
+                Self::settled(send, SendFailure::HandoffTimeout)
+            })
+            .collect()
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {

@@ -160,8 +160,9 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         &mut self,
         id: SendId,
         result: Result<(), E>,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
+    ) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
+
         let record = self
             .records
             .get_mut(&id)
@@ -170,8 +171,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         record.copy = Copy::Idle;
 
         if matches!(record.schedule, Schedule::Once) {
-            self.settle(id, result, actions);
-            return;
+            self.settle(id, result, &mut actions);
+            return actions;
         }
 
         // A lost copy is not terminal: the schedule retransmits. The first copy on air
@@ -182,8 +183,10 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
 
         if record.quorum_heard {
-            self.settle(id, Ok(()), actions);
+            self.settle(id, Ok(()), &mut actions);
         }
+
+        actions
     }
 
     /// Remove a record and report its verdict. The only way a record leaves the table.
@@ -210,7 +213,9 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
     /// The passive-ack quorum for a broadcast was heard: the send is delivered. A copy
     /// in the radio right now settles it on its report instead.
-    pub(super) fn delivered(&mut self, key: (Nwk, u8), actions: &mut Vec<Action<F, W, E>>) {
+    pub(super) fn delivered(&mut self, key: (Nwk, u8)) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
+
         let found = self
             .records
             .iter()
@@ -220,26 +225,28 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             });
 
         let Some(id) = found else {
-            return;
+            return actions;
         };
 
         let record = self.records.get_mut(&id).unwrap();
         if record.copy == Copy::Transmitting {
             record.quorum_heard = true;
         } else {
-            self.settle(id, Ok(()), actions);
+            self.settle(id, Ok(()), &mut actions);
         }
+
+        actions
     }
 
-    /// `false` if a copy is in the radio right now, or the send is unknown.
-    pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
-        match self.records.get(&id) {
-            Some(record) if record.copy != Copy::Transmitting => {
-                self.settle(id, Err(SendFailure::Cancelled.into()), actions);
-                true
-            }
-            _ => false,
+    /// `None` if a copy is in the radio right now, or the send is unknown.
+    pub(super) fn cancel(&mut self, id: SendId) -> Option<Vec<Action<F, W, E>>> {
+        if self.records.get(&id)?.copy == Copy::Transmitting {
+            return None;
         }
+
+        let mut actions = Vec::new();
+        self.settle(id, Err(SendFailure::Cancelled.into()), &mut actions);
+        Some(actions)
     }
 
     /// Queue copies that are due, complete or fail schedules that ran out, and fail
@@ -248,8 +255,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         &mut self,
         now: Instant,
         passive_ack_interval: Duration,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) {
+    ) -> Vec<Action<F, W, E>> {
+        let mut actions = Vec::new();
         let mut settle: Vec<(SendId, Result<(), E>)> = Vec::new();
 
         for (id, record) in self.records.iter_mut() {
@@ -281,8 +288,10 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
 
         for (id, result) in settle {
-            self.settle(id, result, actions);
+            self.settle(id, result, &mut actions);
         }
+
+        actions
     }
 
     /// Advance a schedule whose next copy is due: `Some(Ok)` queues a copy, `Some(Err)`

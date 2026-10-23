@@ -48,11 +48,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             poll_source.is_some_and(|address| self.src_match_written.lock().contains(address));
 
         let now = self.core_now();
-        let delivered = fp_advertised
-            && self.mutate_sends(|core, _| core.sends.poll(source_eui64, source_nwk, now));
+        let delivered = fp_advertised && self.core().sends.poll(source_eui64, source_nwk, now);
 
         if delivered {
             tracing::debug!("Delivering queued indirect frame to {poll_source:?}");
+            self.send_wake.notify_one();
         }
 
         // Spec 3.6.10.4: polls from devices without a neighbor table entry are
@@ -68,7 +68,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
-        self.mutate_sends(|core, actions| core.sends.drop_indirect_unicasts(eui64, nwk, actions));
+        let actions = self.core().sends.drop_indirect_unicasts(eui64, nwk);
+        self.commit_sends(actions);
     }
 
     /// Spec 3.6.10.4: a poll from a device with no neighbor table entry is answered
