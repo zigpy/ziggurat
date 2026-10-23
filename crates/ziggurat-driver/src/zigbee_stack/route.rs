@@ -15,8 +15,8 @@ use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, EnqueueError, NwkSecurityMode, SendHandle, SendMode,
-    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, EnqueueError, NwkSecurityMode, SendActions, SendHandle,
+    SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -262,13 +262,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             * 2;
 
         let attempts = self.tunables.rreq_retries() + 1;
-        self.broadcast_route_request(
-            &mut self.core(),
-            relayed_route_request_cmd,
-            attempts,
-            jitter,
-        );
-        self.wake_send_tasks();
+        let mut core = self.core();
+        let actions =
+            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        self.commit_sends(core, actions);
     }
 
     /// Zigbee spec 3.6.4.5.1: advertise a many-to-one route to ourselves so that every
@@ -456,8 +453,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Begin or restart ad-hoc route discovery toward a destination: the routing entry
     /// enters `DiscoveryUnderway` and a route request is broadcast. The send timer
     /// watches the discovery on behalf of the unrouted sends to it; this only kicks it
-    /// off. Under a core lock the caller holds.
-    pub(super) fn start_route_discovery(&self, core: &mut ZigbeeCore, destination: Nwk) {
+    /// off. Under a core lock the caller holds and commits.
+    pub(super) fn start_route_discovery(
+        &self,
+        core: &mut ZigbeeCore,
+        destination: Nwk,
+    ) -> SendActions {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
 
         let route_request_identifier = core.nib.routing.begin_discovery(
@@ -492,6 +493,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             route_request_frame,
             self.tunables.initial_rreq_retries() + 1,
             Duration::ZERO,
-        );
+        )
     }
 }

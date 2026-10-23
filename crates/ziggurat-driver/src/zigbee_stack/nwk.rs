@@ -27,8 +27,9 @@ use ziggurat_zigbee::sends::UnroutedUnicast;
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, HeldFrame,
-    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendHandle,
-    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
+    SendHandle, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification,
+    ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -78,20 +79,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Spec 3.6.4.5.1: broadcast a route request `attempts` times, the first after
-    /// `initial_delay`, at the retry interval. Under a core lock the caller holds.
+    /// `initial_delay`, at the retry interval. Under a core lock the caller holds and
+    /// commits.
     pub(super) fn broadcast_route_request(
         &self,
         core: &mut ZigbeeCore,
         nwk_frame: NwkFrame,
         attempts: u8,
         initial_delay: Duration,
-    ) {
+    ) -> SendActions {
         let key = (
             nwk_frame.nwk_header.source,
             nwk_frame.nwk_header.sequence_number,
         );
 
-        let admitted = self.enqueue_broadcast_in(
+        let enqueued = self.enqueue_broadcast_in(
             core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -105,8 +107,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
         );
 
-        if let Err(err) = admitted {
-            tracing::warn!("Dropping route request {key:?}: {err}");
+        match enqueued {
+            Ok((_, actions)) => actions,
+            Err(err) => {
+                tracing::warn!("Dropping route request {key:?}: {err}");
+                SendActions::new()
+            }
         }
     }
 
@@ -342,6 +348,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// one core lock, so the next hop cannot change in between. `Err` means nothing was
     /// enqueued and no handle is returned. A caller that does not await the send drops
     /// the handle.
+    // The guard is moved into `commit_sends`; the lint misreads the `?` return path
     #[allow(clippy::significant_drop_tightening)]
     pub(super) fn send_unicast(&self, send: Unicast) -> Result<SendHandle, EnqueueError> {
         let Unicast {
@@ -360,66 +367,64 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let destination = nwk_frame.nwk_header.destination;
         let now = self.core_now();
 
-        let (handle, actions) = {
-            let mut core = self.core();
-            nwk_frame.nwk_header.sequence_number = core.nib.next_sequence_number();
+        let mut core = self.core();
+        nwk_frame.nwk_header.sequence_number = core.nib.next_sequence_number();
 
-            let resolved = next_hop::resolve(
-                &core.nib.routing,
-                &core.nib.neighbors,
-                &mut nwk_frame,
-                &mode,
-                self.next_hop_policy(),
-            );
+        let resolved = next_hop::resolve(
+            &core.nib.routing,
+            &core.nib.neighbors,
+            &mut nwk_frame,
+            &mode,
+            self.next_hop_policy(),
+        );
 
-            match resolved {
-                NextHop::Resolved(next_hop) => {
-                    let placement = self.place_unicast(&core.nib, next_hop);
-                    self.enqueue_unicast_in(
-                        &mut core,
-                        Frame::nwk(nwk_frame, security),
-                        policy,
-                        confirm,
-                        placement,
-                    )?
-                }
-                NextHop::NeedDiscovery => {
-                    tracing::debug!("Holding frame until a route to {destination:?} is known");
-                    let token = self.take_token(policy)?;
-                    let slot = Arc::new(SendSlot::default());
+        let (handle, actions) = match resolved {
+            NextHop::Resolved(next_hop) => {
+                let placement = self.place_unicast(&core.nib, next_hop);
+                self.enqueue_unicast_in(
+                    &mut core,
+                    Frame::nwk(nwk_frame, security),
+                    policy,
+                    confirm,
+                    placement,
+                )?
+            }
+            NextHop::NeedDiscovery => {
+                tracing::debug!("Holding frame until a route to {destination:?} is known");
+                let token = self.take_token(policy)?;
+                let slot = Arc::new(SendSlot::default());
 
-                    // The first unrouted send to a destination starts its discovery
-                    let discovering = core.sends.has_unrouted(destination);
-                    let id = core.sends.enqueue_unrouted_unicast(
-                        UnroutedUnicast {
-                            frame: HeldFrame {
-                                frame: Frame::nwk(nwk_frame, security),
-                                token,
-                            },
-                            priority: policy.priority,
-                            waiter: slot.clone(),
-                            confirm,
-                            destination,
-                            deadline: now + self.tunables.handoff_timeout(),
+                // The first unrouted send to a destination starts its discovery
+                let discovering = core.sends.has_unrouted(destination);
+                let (id, mut actions) = core.sends.enqueue_unrouted_unicast(
+                    UnroutedUnicast {
+                        frame: HeldFrame {
+                            frame: Frame::nwk(nwk_frame, security),
+                            token,
                         },
-                        self.tunables.pending_route_discovery_attempts(),
-                    );
-                    if !discovering {
-                        self.start_route_discovery(&mut core, destination);
-                    }
+                        priority: policy.priority,
+                        waiter: slot.clone(),
+                        confirm,
+                        destination,
+                        deadline: now + self.tunables.handoff_timeout(),
+                    },
+                    self.tunables.pending_route_discovery_attempts(),
+                );
+                if !discovering {
+                    actions.extend(self.start_route_discovery(&mut core, destination));
+                }
 
-                    (SendHandle::new(id, slot), Vec::new())
-                }
-                NextHop::Discard => {
-                    tracing::debug!(
-                        "Dropping frame to {destination:?}: no route and discovery suppressed"
-                    );
-                    return Err(EnqueueError::RouteDiscoverySuppressed);
-                }
+                (SendHandle::new(id, slot), actions)
+            }
+            NextHop::Discard => {
+                tracing::debug!(
+                    "Dropping frame to {destination:?}: no route and discovery suppressed"
+                );
+                return Err(EnqueueError::RouteDiscoverySuppressed);
             }
         };
 
-        self.commit_sends(actions);
+        self.commit_sends(core, actions);
         Ok(handle)
     }
 

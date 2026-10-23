@@ -14,7 +14,7 @@ use ziggurat_ieee_802154::types::Nwk;
 use crate::Instant;
 use crate::flat_map::FlatMap;
 
-use super::{Action, DequeuedSend, SendFailure, SendId, Transmit, TxPriority};
+use super::{Action, Actions, DequeuedSend, SendFailure, SendId, Transmit, TxPriority};
 
 /// How a broadcast is retransmitted and when it is done.
 #[derive(Debug, Clone, Copy)]
@@ -49,7 +49,7 @@ pub struct Broadcast<F, W> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Copy {
+enum CopyState {
     Idle,
     Queued,
     /// The sender holds an encrypted copy and is waiting on the radio. A record in this
@@ -63,7 +63,7 @@ struct Record<F, W> {
     priority: TxPriority,
     waiter: W,
     schedule: Schedule,
-    copy: Copy,
+    copy: CopyState,
     handed_off: bool,
     /// The quorum was heard while a copy was in the radio; that copy's report settles
     /// the send.
@@ -82,9 +82,9 @@ impl<F, W> Record<F, W> {
 
     fn next_wake(&self) -> Option<Instant> {
         match self.copy {
-            Copy::Transmitting => None,
-            Copy::Queued => Some(self.deadline),
-            Copy::Idle => {
+            CopyState::Transmitting => None,
+            CopyState::Queued => Some(self.deadline),
+            CopyState::Idle => {
                 let next_attempt = self.next_attempt().unwrap_or(self.deadline);
                 Some(next_attempt.min(self.deadline))
             }
@@ -119,8 +119,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 waiter: broadcast.waiter,
                 schedule: broadcast.schedule,
                 copy: match broadcast.schedule {
-                    Schedule::Once => Copy::Queued,
-                    Schedule::PassiveAck { .. } | Schedule::FixedInterval { .. } => Copy::Idle,
+                    Schedule::Once => CopyState::Queued,
+                    Schedule::PassiveAck { .. } | Schedule::FixedInterval { .. } => CopyState::Idle,
                 },
                 handed_off: false,
                 quorum_heard: false,
@@ -134,7 +134,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         let mut best: Option<(SendId, TxPriority)> = None;
 
         for (id, record) in self.records.iter() {
-            if record.copy == Copy::Queued
+            if record.copy == CopyState::Queued
                 && best.is_none_or(|(_, priority)| record.priority > priority)
             {
                 best = Some((*id, record.priority));
@@ -146,8 +146,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
     pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {
         let record = self.records.get_mut(&id).unwrap();
-        debug_assert_eq!(record.copy, Copy::Queued);
-        record.copy = Copy::Transmitting;
+        debug_assert_eq!(record.copy, CopyState::Queued);
+        record.copy = CopyState::Transmitting;
 
         DequeuedSend {
             id,
@@ -156,19 +156,15 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
     }
 
-    pub(super) fn transmitted(
-        &mut self,
-        id: SendId,
-        result: Result<(), E>,
-    ) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    pub(super) fn transmitted(&mut self, id: SendId, result: Result<(), E>) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
 
         let record = self
             .records
             .get_mut(&id)
             .expect("a transmitting send is never settled from outside");
-        debug_assert_eq!(record.copy, Copy::Transmitting);
-        record.copy = Copy::Idle;
+        debug_assert_eq!(record.copy, CopyState::Transmitting);
+        record.copy = CopyState::Idle;
 
         if matches!(record.schedule, Schedule::Once) {
             self.settle(id, result, &mut actions);
@@ -190,7 +186,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     }
 
     /// Remove a record and report its verdict. The only way a record leaves the table.
-    fn settle(&mut self, id: SendId, result: Result<(), E>, actions: &mut Vec<Action<F, W, E>>) {
+    fn settle(&mut self, id: SendId, result: Result<(), E>, actions: &mut Actions<F, W, E>) {
         let record = self.records.remove(&id).unwrap();
 
         actions.push(Action::Settled {
@@ -213,8 +209,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
     /// The passive-ack quorum for a broadcast was heard: the send is delivered. A copy
     /// in the radio right now settles it on its report instead.
-    pub(super) fn delivered(&mut self, key: (Nwk, u8)) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    pub(super) fn delivered(&mut self, key: (Nwk, u8)) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
 
         let found = self
             .records
@@ -229,7 +225,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         };
 
         let record = self.records.get_mut(&id).unwrap();
-        if record.copy == Copy::Transmitting {
+        if record.copy == CopyState::Transmitting {
             record.quorum_heard = true;
         } else {
             self.settle(id, Ok(()), &mut actions);
@@ -239,12 +235,12 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     }
 
     /// `None` if a copy is in the radio right now, or the send is unknown.
-    pub(super) fn cancel(&mut self, id: SendId) -> Option<Vec<Action<F, W, E>>> {
-        if self.records.get(&id)?.copy == Copy::Transmitting {
+    pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
+        if self.records.get(&id)?.copy == CopyState::Transmitting {
             return None;
         }
 
-        let mut actions = Vec::new();
+        let mut actions = Actions::new();
         self.settle(id, Err(SendFailure::Cancelled.into()), &mut actions);
         Some(actions)
     }
@@ -255,21 +251,21 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         &mut self,
         now: Instant,
         passive_ack_interval: Duration,
-    ) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    ) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
         let mut settle: Vec<(SendId, Result<(), E>)> = Vec::new();
 
         for (id, record) in self.records.iter_mut() {
-            if record.copy == Copy::Transmitting {
+            if record.copy == CopyState::Transmitting {
                 continue;
             }
 
-            if record.copy == Copy::Idle
+            if record.copy == CopyState::Idle
                 && let Some(result) =
                     Self::schedule_due(&mut record.schedule, now, passive_ack_interval)
             {
                 match result {
-                    Ok(()) => record.copy = Copy::Queued,
+                    Ok(()) => record.copy = CopyState::Queued,
                     Err(verdict) => {
                         settle.push((*id, verdict));
                         continue;

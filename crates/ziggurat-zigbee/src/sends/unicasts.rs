@@ -12,8 +12,8 @@ use crate::Instant;
 use crate::flat_map::FlatMap;
 
 use super::{
-    Action, ApsAckData, Confirm, DequeuedSend, SendFailure, SendId, SrcMatchTable, Transmit,
-    TxPriority,
+    Action, Actions, ApsAckData, Confirm, DequeuedSend, SendFailure, SendId, SrcMatchTable,
+    Transmit, TxPriority,
 };
 
 /// How a unicast reaches its next hop. Fixed at admission.
@@ -137,8 +137,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn enqueue(&mut self, id: SendId, unicast: Unicast<F, W>) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    pub(super) fn enqueue(&mut self, id: SendId, unicast: Unicast<F, W>) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
 
         let stage = match unicast.delivery {
             Delivery::Direct { .. } => Stage::Queued,
@@ -212,8 +212,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
-    ) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    ) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
 
         let record = self
             .records
@@ -264,7 +264,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         id: SendId,
         now: Instant,
         acked: bool,
-        actions: &mut Vec<Action<F, W, E>>,
+        actions: &mut Actions<F, W, E>,
     ) {
         let record = self.records.get_mut(&id).unwrap();
 
@@ -294,7 +294,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         id: SendId,
         result: Result<(), E>,
         failed_hop: Option<Nwk>,
-        actions: &mut Vec<Action<F, W, E>>,
+        actions: &mut Actions<F, W, E>,
     ) {
         let record = self.records.remove(&id).unwrap();
 
@@ -344,8 +344,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
     /// An end-to-end APS ack arrived. It settles the oldest send waiting for it; the
     /// ack carries no way to tell two frames sharing a key apart.
-    pub(super) fn ack_received(&mut self, ack: &ApsAckData) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    pub(super) fn ack_received(&mut self, ack: &ApsAckData) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
 
         let matched = self.records.iter().find_map(|(id, record)| {
             let expected = match &record.confirm {
@@ -375,8 +375,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
-    pub(super) fn drop_indirect(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    pub(super) fn drop_indirect(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
 
         let dropped: Vec<(SendId, Ieee802154Address)> = self
             .records
@@ -405,20 +405,20 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     /// `None` if the send is in the radio right now, or unknown.
-    pub(super) fn cancel(&mut self, id: SendId) -> Option<Vec<Action<F, W, E>>> {
+    pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
         let record = self.records.get(&id)?;
         if matches!(record.stage, Stage::Transmitting { .. }) {
             return None;
         }
 
-        let mut actions = Vec::new();
+        let mut actions = Actions::new();
         self.settle(id, Err(SendFailure::Cancelled.into()), None, &mut actions);
         Some(actions)
     }
 
     /// Re-queue retries that are due and fail records past their deadline.
-    pub(super) fn tick(&mut self, now: Instant) -> Vec<Action<F, W, E>> {
-        let mut actions = Vec::new();
+    pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
         let mut lapsed: Vec<(SendId, SendFailure)> = Vec::new();
 
         for (id, record) in self.records.iter_mut() {
