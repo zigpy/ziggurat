@@ -214,6 +214,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn sender_task(&self) {
         loop {
             loop {
+                // The frame is cloned out so the core is unlocked across the transmit
                 let dequeued =
                     self.core().sends.dequeue().map(|dequeued| {
                         (dequeued.id, dequeued.frame.frame.clone(), dequeued.transmit)
@@ -292,23 +293,30 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// One timer pass. The table asks back for the facts only the core holds: whether
-    /// a broadcast's passive-ack quorum was heard, whether a route became active, and
-    /// where a released frame goes.
+    /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, admit
+    /// the sends whose route became active, then run the table's timed transitions.
     fn drive_sends(&self) {
         let now = self.core_now();
-        let retransmit_interval = self.tunables.passive_ack_timeout() + self.broadcast_jitter();
+        let passive_ack_interval = self.tunables.passive_ack_timeout() + self.broadcast_jitter();
 
         self.mutate_sends(|core, actions| {
-            let ZigbeeCore { sends, nib, .. } = core;
-            sends.tick(
-                now,
-                retransmit_interval,
-                |key| self.broadcast_passively_acked(nib, key),
-                |destination| nib.routing.route_status(destination) == Some(RouteStatus::Active),
-                |held| self.place_released(nib, held),
-                actions,
-            );
+            for key in core.sends.passive_ack_keys() {
+                if self.broadcast_passively_acked(&core.nib, key) {
+                    core.sends.broadcast_acked(key, actions);
+                }
+            }
+
+            for destination in core.sends.awaiting_route_destinations() {
+                if core.nib.routing.route_status(destination) == Some(RouteStatus::Active) {
+                    core.sends.route_resolved(
+                        destination,
+                        |held| self.place_released(&core.nib, held),
+                        actions,
+                    );
+                }
+            }
+
+            core.sends.tick(now, passive_ack_interval, actions);
         });
     }
 }
