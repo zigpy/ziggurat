@@ -173,7 +173,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             enum Next {
                 Idle,
                 Retransmit(NwkFrame, NwkSecurityMode, TxPolicy, Option<Arc<SendSlot>>),
-                Cancelled(Option<Arc<SendSlot>>),
+                Settled,
                 Exhausted(Option<Arc<SendSlot>>),
             }
 
@@ -187,9 +187,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 if broadcast
                     .slot
                     .as_ref()
-                    .is_some_and(|slot| slot.is_cancelled())
+                    .is_some_and(|slot| slot.is_settled())
                 {
-                    Next::Cancelled(pending.remove(&key).unwrap().slot)
+                    pending.remove(&key);
+                    Next::Settled
                 } else if broadcast.next_attempt > now {
                     Next::Idle
                 } else if broadcast.attempts_remaining == 0 {
@@ -221,12 +222,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         Self::broadcast_copy_outcome(slot),
                     );
                 }
-                Next::Cancelled(slot) => {
-                    tracing::debug!("Broadcast {key:?} cancelled");
-                    if let Some(slot) = slot {
-                        slot.resolve(TrackStage::Delivery, Err(DeliveryError::Cancelled));
-                    }
-                }
+                Next::Settled => tracing::debug!("Broadcast {key:?} settled, dropping"),
                 Next::Exhausted(slot) => {
                     tracing::debug!("Broadcast {key:?} out of retransmit attempts");
                     // A fixed-interval broadcast (a route request) completes by running
@@ -969,8 +965,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .min()
     }
 
-    /// One reactor pass: classify each queued destination and act on it.
+    /// One reactor pass: drop settled frames, then classify each queued destination and
+    /// act on it.
     fn drive_pending_routes(&self) {
+        self.drop_settled_parked_frames();
+
         let destinations: Vec<Nwk> = self.state.pending_routes.lock().keys().copied().collect();
 
         for destination in destinations {
@@ -979,6 +978,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 DiscoveryState::Lapsed => self.retry_or_fail_discovery(destination),
                 DiscoveryState::InFlight => {}
             }
+        }
+    }
+
+    /// Drop parked frames whose send is already settled, instead of holding them until
+    /// their discovery resolves. Their buckets stay, so a new frame for the same
+    /// destination does not start a second discovery.
+    fn drop_settled_parked_frames(&self) {
+        let mut settled = Vec::new();
+        for bucket in self.state.pending_routes.lock().values_mut() {
+            settled.extend(
+                bucket
+                    .frames
+                    .extract_if(.., |frame| Self::outcome_settled(&frame.outcome)),
+            );
+        }
+
+        for frame in settled {
+            self.drop_settled_outcome(frame.outcome);
         }
     }
 
@@ -1057,7 +1074,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             bucket.attempts_remaining = bucket.attempts_remaining.saturating_sub(1);
 
-            if bucket.attempts_remaining > 0 {
+            // A bucket emptied by dropped settled frames has nothing left to discover for
+            if bucket.attempts_remaining > 0 && !bucket.frames.is_empty() {
                 None
             } else {
                 Some(pending.remove(&destination).unwrap().frames)
@@ -1109,10 +1127,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     ..
                 } = request;
 
-                // A send cancelled while queued never reaches the air; its token frees
-                // as `token` drops here.
-                if Self::outcome_cancelled(&outcome) {
-                    self.resolve_outcome(outcome, Err(DeliveryError::Cancelled));
+                // All transmits pass through here. A settled send's frame is dropped
+                // instead of sent, and its token is freed when `token` drops.
+                if Self::outcome_settled(&outcome) {
+                    self.drop_settled_outcome(outcome);
                     continue;
                 }
 
@@ -1163,7 +1181,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     tracing::warn!("Background send failed: {err}");
                 }
             }
-            TxOutcome::Track { slot, stage } => slot.resolve(stage, result),
+            TxOutcome::Track { slot, stage } => {
+                slot.resolve(stage, result);
+            }
             TxOutcome::ApsAck { slot } => self.resolve_aps_ack_handoff(slot, result),
             TxOutcome::IndirectDelivery {
                 destination,
@@ -1172,7 +1192,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 // 802.15.4 spec 6.7.3: a transaction is only extracted once
                 // acknowledged, so a failed transmit goes back to the head of the
                 // queue for the next poll
-                Err(err) if self.core_now() < transaction.expires_at => {
+                Err(err)
+                    if self.core_now() < transaction.expires_at
+                        && !Self::outcome_settled(&transaction.completion) =>
+                {
                     tracing::warn!(
                         "Indirect transmit to {destination:?} failed ({err}), requeueing"
                     );
@@ -1340,9 +1363,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let mut due = Vec::new();
             let mut i = 0;
             while i < pending.len() {
-                // A retry that is due, or cancelled, is pulled: due ones re-enqueue,
-                // cancelled ones resolve below (freeing their token early).
-                if pending[i].next_attempt <= now || Self::outcome_cancelled(&pending[i].outcome) {
+                // Pull retries that are due or settled. Below, due ones are re-enqueued
+                // and settled ones are dropped, which frees their token early.
+                if pending[i].next_attempt <= now || Self::outcome_settled(&pending[i].outcome) {
                     // Order does not matter (the priority queue reorders anyway), so an
                     // O(1) swap-remove is fine.
                     due.push(pending.swap_remove(i));
@@ -1356,8 +1379,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         for retry in due {
-            if Self::outcome_cancelled(&retry.outcome) {
-                self.resolve_outcome(retry.outcome, Err(DeliveryError::Cancelled));
+            if Self::outcome_settled(&retry.outcome) {
+                self.drop_settled_outcome(retry.outcome);
                 continue;
             }
             self.enqueue_send_with_token(
@@ -1374,18 +1397,28 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Whether this outcome belongs to a cancelled send. Only a tracked send carries a
-    /// slot, and only a tracked send can be cancelled; every reactor checks this before
-    /// acting on the entry it holds, dropping it and resolving `Err(Cancelled)` if set.
-    fn outcome_cancelled(outcome: &TxOutcome) -> bool {
-        matches!(
-            outcome,
-            TxOutcome::Track { slot, .. } | TxOutcome::ApsAck { slot } if slot.is_cancelled()
-        )
+    /// Whether this outcome's send is settled, so its frame must not be sent. `Discard`
+    /// has no slot and is never settled. An indirect delivery is settled when its
+    /// transaction's completion is.
+    pub(super) fn outcome_settled(outcome: &TxOutcome) -> bool {
+        match outcome {
+            TxOutcome::Discard => false,
+            TxOutcome::Track { slot, .. } | TxOutcome::ApsAck { slot } => slot.is_settled(),
+            TxOutcome::IndirectDelivery { transaction, .. } => {
+                Self::outcome_settled(&transaction.completion)
+            }
+        }
     }
 
-    /// Nudge every reactor that parks a cancellable send, so a just-set cancel flag is
-    /// acted on this pass rather than at the reactor's next scheduled wake. Called after a
+    /// Drop a settled send's frame and run its outcome's clean-up: remove the pending
+    /// APS ack, or tidy the indirect queue. The slot is already settled, so the
+    /// `Cancelled` passed here is never recorded.
+    pub(super) fn drop_settled_outcome(&self, outcome: TxOutcome) {
+        self.resolve_outcome(outcome, Err(DeliveryError::Cancelled));
+    }
+
+    /// Wake every reactor that holds sends, so a cancelled send's entries are removed
+    /// now instead of at each reactor's next scheduled wake. Called after a
     /// [`SendHandle::cancel`](super::SendHandle::cancel).
     pub fn nudge_cancellation(&self) {
         self.send_wake.notify_one();
@@ -1393,6 +1426,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.broadcast_retransmit_wake.notify_one();
         self.pending_route_wake.notify_one();
         self.aps_ack_wake.notify_one();
+        self.maintenance_wake.notify_one();
     }
 
     /// A unicast exhausted its retries at the sender. The next hop is dead: invalidate

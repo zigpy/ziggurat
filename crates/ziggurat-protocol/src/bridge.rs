@@ -384,9 +384,8 @@ fn route_directive(
 
 /// Cancel an in-flight send by the `request_id` it was issued under.
 ///
-/// Best-effort: the reply reports whether the tracker held it and it was still
-/// unresolved. Setting the slot's flag is lazy, so the driver's reactors are nudged to
-/// act on it this pass.
+/// The reply is true if the tracker held the send and it was not yet settled. The
+/// driver's reactors are then woken to remove its entries.
 pub fn cancel_request<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     tracker: &mut SendTracker,

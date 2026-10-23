@@ -497,9 +497,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .min()
     }
 
-    /// Expire pending APS acks: an entry past its deadline resolves `delivered` with a
-    /// timeout (`HandoffTimeout` if its handoff never resolved), and a cancelled entry
-    /// with `Cancelled`.
+    /// Expire pending APS acks. An entry past its deadline fails with `ApsAckTimeout`, or
+    /// `HandoffTimeout` if its frame was never handed off. An entry whose send is already
+    /// settled (for example, cancelled) is removed.
     fn expire_aps_acks(&self) {
         let now = self.core_now();
 
@@ -507,15 +507,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .state
             .pending_aps_acks
             .lock()
-            .extract_if(.., |entry| {
-                entry.deadline <= now || entry.slot.is_cancelled()
-            })
+            .extract_if(.., |entry| entry.deadline <= now || entry.slot.is_settled())
             .collect();
 
         for entry in due {
-            let result = if entry.slot.is_cancelled() {
-                Err(DeliveryError::Cancelled)
-            } else if !entry.slot.is_handed_off() {
+            if entry.slot.is_settled() {
+                continue;
+            }
+
+            let result = if !entry.slot.is_handed_off() {
                 tracing::warn!(
                     "APS ack to {:?} (counter {}) expired before its handoff resolved",
                     entry.ack_data.src,

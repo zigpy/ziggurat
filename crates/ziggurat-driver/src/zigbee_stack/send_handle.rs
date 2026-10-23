@@ -6,7 +6,6 @@
 //! decide what stage to block on (if any).
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::{Mutex, Notify};
 
@@ -36,15 +35,17 @@ struct Progress {
 
 /// The shared slot a send's outcome is written into.
 ///
-/// Two write-once verdicts, a per-stage wake each (so the stages can be awaited
-/// independently), and a cancellation flag the reactors honour. The producer and every
-/// awaiter/poller share one via `Arc`.
+/// Two write-once verdicts and a per-stage wake each (so the stages can be awaited
+/// independently). The producer and every awaiter/poller share one via `Arc`.
+///
+/// A send is settled once `delivered` is written. A settled send's frame is never
+/// transmitted: whichever queue holds it drops it. Cancelling a send settles it with
+/// `Cancelled`.
 #[derive(Debug)]
 pub struct SendSlot {
     progress: Mutex<Progress>,
     handed_off_wake: Notify,
     delivered_wake: Notify,
-    cancelled: AtomicBool,
 }
 
 /// A non-blocking snapshot of a slot's two verdicts, taken by the wire tracker's sweep.
@@ -60,14 +61,12 @@ impl SendSlot {
             progress: Mutex::new(Progress::default()),
             handed_off_wake: Notify::new(),
             delivered_wake: Notify::new(),
-            cancelled: AtomicBool::new(false),
         }
     }
 
-    /// Whether the send has been cancelled. Checked by each reactor before it acts on the
-    /// entry holding this slot.
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+    /// Whether `delivered` is written. A settled send's frame must not be transmitted.
+    pub fn is_settled(&self) -> bool {
+        self.progress.lock().delivered.is_some()
     }
 
     /// Whether the send's handoff has resolved, successfully or not.
@@ -85,7 +84,9 @@ impl SendSlot {
     ///
     /// Rules 1, 3 and 4 collapse to: any resolution establishes `handed_off` if still
     /// unset; `delivered` is written by a `Delivery` resolution or by any failure.
-    pub(crate) fn resolve(&self, stage: TrackStage, result: Result<(), DeliveryError>) {
+    ///
+    /// Returns whether this call settled the send.
+    pub(crate) fn resolve(&self, stage: TrackStage, result: Result<(), DeliveryError>) -> bool {
         let (woke_handed_off, woke_delivered, completion) = {
             let mut progress = self.progress.lock();
 
@@ -118,6 +119,8 @@ impl SendSlot {
         {
             completion.notify_one();
         }
+
+        woke_delivered
     }
 }
 
@@ -182,12 +185,12 @@ impl SendHandle {
         }
     }
 
-    /// Request cancellation. Sets the flag every in-flight reactor checks before acting;
-    /// the reactor that next touches this send drops its entry and resolves both stages
-    /// `Err(Cancelled)`. Cleanup is lazy (the next reactor pass) unless the caller also
-    /// nudges the reactor wakes.
-    pub fn cancel(&self) {
-        self.slot.cancelled.store(true, Ordering::Relaxed);
+    /// Settle the send with `Err(Cancelled)`, so its frame is never transmitted. Returns
+    /// false if it was already settled. Reactors remove its entries on their next pass;
+    /// call `ZigbeeStack::nudge_cancellation` to make that happen now.
+    pub fn cancel(&self) -> bool {
+        self.slot
+            .resolve(TrackStage::Delivery, Err(DeliveryError::Cancelled))
     }
 
     /// Register the tracker's aggregate wake, notified on any stage resolution in
