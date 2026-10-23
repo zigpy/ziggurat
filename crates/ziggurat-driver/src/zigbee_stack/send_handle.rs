@@ -11,18 +11,7 @@ use crate::sync::{Mutex, Notify};
 
 use super::{DeliveryError, SendId};
 
-/// Which of a send's two verdicts a resolution supplies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrackStage {
-    /// The mesh accepted the frame (next-hop MAC ack, or the first broadcast copy on
-    /// air).
-    HandOff,
-    /// The send's final verdict. Delivery subsumes acceptance, so it also back-fills a
-    /// still-unset `handed_off` with the same result.
-    Delivery,
-}
-
-/// The two write-once verdicts of a send, plus the tracker's aggregate wake.
+/// The two verdicts of a send, each written once, plus the tracker's aggregate wake.
 #[derive(Debug, Default)]
 struct Progress {
     handed_off: Option<Result<(), DeliveryError>>,
@@ -35,10 +24,9 @@ struct Progress {
 
 /// The slot a send's verdicts are written into: the send table's waiter.
 ///
-/// Two write-once verdicts and one wake: the handle's awaiter re-checks the verdict it
-/// wants after every wake. The send table's record and every awaiter/poller share one
-/// via `Arc`. The table writes each verdict exactly once; the write-once rule here only
-/// back-fills `handed_off` from a delivery verdict.
+/// Two verdicts and one wake: the handle's awaiter re-checks the verdict it wants after
+/// every wake. The send table's record and every awaiter/poller share one via `Arc`.
+/// The table writes each verdict exactly once.
 #[derive(Debug, Default)]
 pub struct SendSlot {
     progress: Mutex<Progress>,
@@ -53,40 +41,39 @@ pub struct SendProgress {
 }
 
 impl SendSlot {
-    /// Resolve one of the send's stages, applying the write rules:
-    ///
-    /// 1. **First write wins** — both fields are write-once; a later write is ignored.
-    /// 2. **`Ok` writes its own stage** — a `HandOff` `Ok` leaves `delivered` unset.
-    /// 3. **`Err` at either stage writes both** — a failed handoff is a failed delivery.
-    /// 4. **A `Delivery` write back-fills `handed_off`** if unset, with the same result,
-    ///    so `handed_off().await` can never outlive the send.
-    pub(crate) fn resolve(&self, stage: TrackStage, result: Result<(), DeliveryError>) {
-        let (woke_handed_off, woke_delivered, completion) = {
+    /// The mesh accepted the frame: the next-hop MAC ack, or the first broadcast copy
+    /// on air.
+    pub(crate) fn handed_off(&self) {
+        let completion = {
             let mut progress = self.progress.lock();
-
-            let woke_handed_off = progress.handed_off.is_none();
-            if woke_handed_off {
-                progress.handed_off = Some(result.clone());
+            if progress.handed_off.is_some() {
+                return;
             }
-
-            let woke_delivered = progress.delivered.is_none()
-                && (matches!(stage, TrackStage::Delivery) || result.is_err());
-            if woke_delivered {
-                progress.delivered = Some(result);
-            }
-
-            (
-                woke_handed_off,
-                woke_delivered,
-                progress.completion_wake.clone(),
-            )
+            progress.handed_off = Some(Ok(()));
+            progress.completion_wake.clone()
         };
 
-        if woke_handed_off || woke_delivered {
-            self.wake.notify_one();
-            if let Some(completion) = completion {
-                completion.notify_one();
+        self.wake.notify_one();
+        if let Some(completion) = completion {
+            completion.notify_one();
+        }
+    }
+
+    /// The send's final verdict. It also back-fills a still-unset `handed_off` with the
+    /// same result, so `handed_off().await` can never outlive the send.
+    pub(crate) fn settled(&self, result: Result<(), DeliveryError>) {
+        let completion = {
+            let mut progress = self.progress.lock();
+            if progress.handed_off.is_none() {
+                progress.handed_off = Some(result.clone());
             }
+            progress.delivered = Some(result);
+            progress.completion_wake.clone()
+        };
+
+        self.wake.notify_one();
+        if let Some(completion) = completion {
+            completion.notify_one();
         }
     }
 }

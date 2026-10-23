@@ -38,7 +38,7 @@ mod sends;
 mod tasklets;
 mod zdp;
 
-pub use send_handle::{SendHandle, SendProgress, SendSlot, TrackStage};
+pub use send_handle::{SendHandle, SendProgress, SendSlot};
 
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
@@ -101,9 +101,7 @@ pub enum EnqueueError {
 #[derive(Error, Debug, Clone)]
 pub enum DeliveryError {
     #[error("route discovery timed out")]
-    RouteDiscoveryTimeout(#[from] Elapsed),
-    #[error("no route discovery entry found for the destination")]
-    RouteDiscoveryNoEntry,
+    RouteDiscoveryTimeout,
     #[error("route not active after discovery completed")]
     RouteInactiveAfterDiscovery,
     #[error("next hop {next_hop:?} did not ACK")]
@@ -122,10 +120,6 @@ pub enum DeliveryError {
     BroadcastQuorumNotReached,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
-    /// A frame reached a mid-pipeline enqueue (an indirect delivery, a retry re-enqueue)
-    /// with the budget exhausted, so it could never be handed to the radio.
-    #[error("frame memory budget exhausted")]
-    BudgetExhausted,
     #[error("send cancelled")]
     Cancelled,
     #[error("radio error: {0}")]
@@ -138,7 +132,7 @@ impl From<SendFailure> for DeliveryError {
             SendFailure::HandoffTimeout => Self::HandoffTimeout,
             SendFailure::ApsAckTimeout => Self::ApsAckTimeout,
             SendFailure::IndirectExpired { destination } => Self::IndirectExpired { destination },
-            SendFailure::RouteDiscoveryTimeout => Self::RouteDiscoveryTimeout(Elapsed),
+            SendFailure::RouteDiscoveryTimeout => Self::RouteDiscoveryTimeout,
             SendFailure::BroadcastQuorumNotReached => Self::BroadcastQuorumNotReached,
             SendFailure::Cancelled => Self::Cancelled,
         }

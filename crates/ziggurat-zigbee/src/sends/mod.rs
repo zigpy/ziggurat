@@ -151,7 +151,6 @@ pub struct DequeuedSend<'a, F> {
 }
 
 /// What the driver must do after a mutation.
-#[must_use = "actions resolve waiters; dropping them loses sends"]
 #[derive(Debug)]
 pub enum Action<F, W, E> {
     /// The mesh accepted the send's frame; its waiter learns so.
@@ -165,8 +164,6 @@ pub enum Action<F, W, E> {
         frame: F,
         failed_hop: Option<Nwk>,
     },
-    /// The set of devices with frames awaiting their poll changed.
-    PollAddressesChanged,
 }
 
 /// What the driver must do after a mutation, in order. Every mutating verb returns one,
@@ -266,8 +263,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     /// Enqueue a unicast with a known next hop.
     pub fn enqueue_unicast(&mut self, unicast: Unicast<F, W>) -> (SendId, Actions<F, W, E>) {
         let id = self.next_id();
-        let actions = self.unicasts.enqueue(id, unicast);
-        (id, actions)
+        self.unicasts.enqueue(id, unicast);
+        (id, Actions::new())
     }
 
     /// Enqueue a unicast with no route yet, held until its destination's discovery
@@ -382,7 +379,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
 
         for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
             match place(&mut unrouted.frame) {
-                Ok(placement) => actions.extend(self.unicasts.enqueue(
+                Ok(placement) => self.unicasts.enqueue(
                     id,
                     Unicast {
                         frame: unrouted.frame,
@@ -392,7 +389,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                         delivery: placement.delivery,
                         deadline: placement.deadline,
                     },
-                )),
+                ),
                 Err(err) => actions.push(Action::Settled {
                     waiter: unrouted.waiter,
                     result: Err(err),
