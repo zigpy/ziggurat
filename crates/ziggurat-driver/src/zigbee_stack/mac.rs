@@ -6,11 +6,13 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Frame, Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType,
     Ieee802154FrameVersion,
 };
-use abstract_bits::AbstractBits;
+use abstract_bits::{AbstractBits, BitReader};
 use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
 use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
+use ziggurat_zigbee::constants::GP_PROTOCOL_VERSION;
+use ziggurat_zigbee::gp::GpNwkFrameControl;
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
@@ -20,7 +22,7 @@ use crate::frame_token::TrafficClass;
 
 use super::{
     DeliveryError, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPolicy,
-    TxPriority, ZigbeeStack,
+    TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
@@ -232,9 +234,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return None;
         }
 
-        // Only process packets destined for our PAN ID
         let pan_id = self.core().mac.pan_id;
 
+        // A GPDF carries a stub NWK header instead (GP A.1.4.1), for the client to process
+        if GpNwkFrameControl::read_abstract_bits(&mut BitReader::from(&data_frame.payload[..]))
+            .is_ok_and(|control| control.protocol_version == GP_PROTOCOL_VERSION)
+        {
+            self.process_gpdf(data_frame, pan_id, lqi, rssi);
+            return None;
+        }
+
+        // Only process packets destined for our PAN ID
         match data_frame.header.dest_pan_id {
             None => {
                 tracing::debug!("Ignoring frame, destination PAN ID is not present");
@@ -365,6 +375,37 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, lqi, rssi);
 
         Some(decrypted_nwk_frame)
+    }
+
+    fn process_gpdf(&self, data_frame: &Ieee802154DataFrame, pan_id: PanId, lqi: u8, rssi: i8) {
+        // A GPD is not part of the PAN and usually sends to the broadcast PAN ID
+        // (GP A.1.4.1.1)
+        match data_frame.header.dest_pan_id {
+            Some(dest_pan_id) if dest_pan_id == pan_id || dest_pan_id == PanId(0xFFFF) => (),
+            dest_pan_id => {
+                tracing::debug!("Ignoring GPDF, destination PAN ID {dest_pan_id:?} is not ours");
+                return;
+            }
+        }
+
+        let Some(mac_sequence_number) = data_frame.header.sequence_number else {
+            tracing::debug!("Ignoring GPDF, MAC sequence number is suppressed");
+            return;
+        };
+
+        // Only an IEEE source identifies the GPD, for ApplicationID 0b010 (GP A.1.4.1.1)
+        let source_ieee = match data_frame.header.src_address {
+            Some(Ieee802154Address::Eui64(eui64)) => Some(eui64),
+            _ => None,
+        };
+
+        self.push_notification(ZigbeeNotification::ReceivedGpdf {
+            mac_sequence_number,
+            source_ieee,
+            lqi,
+            rssi,
+            data: data_frame.payload.to_vec(),
+        });
     }
 
     pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
