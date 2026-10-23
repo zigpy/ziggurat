@@ -320,13 +320,18 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unicasts.ack_received(ack, actions);
     }
 
+    /// Every destination with sends parked on its route discovery.
+    pub fn awaiting_route_destinations(&self) -> Vec<Nwk> {
+        self.parked.destinations()
+    }
+
     /// A route to `destination` is active: move every send parked on it to the unicasts.
     /// `place` resolves each frame's next hop (rewriting the frame for a source route),
     /// or fails the send.
-    fn route_resolved(
+    pub fn route_resolved(
         &mut self,
         destination: Nwk,
-        place: &mut impl FnMut(&mut F) -> Result<Placement, E>,
+        mut place: impl FnMut(&mut F) -> Result<Placement, E>,
         actions: &mut Vec<Action<F, W, E>>,
     ) {
         for (id, mut parked) in self.parked.resolved(destination) {
@@ -353,6 +358,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         }
     }
 
+    /// The keys of every broadcast awaiting its passive-ack quorum.
+    pub fn passive_ack_keys(&self) -> Vec<(Nwk, u8)> {
+        self.broadcasts.passive_ack_keys()
+    }
+
+    /// The passive-ack quorum for a broadcast was heard: it is delivered.
+    pub fn broadcast_acked(&mut self, key: (Nwk, u8), actions: &mut Vec<Action<F, W, E>>) {
+        self.broadcasts.acked(key, actions);
+    }
+
     /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub fn drop_indirect(
         &mut self,
@@ -376,33 +391,15 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         }
     }
 
-    /// The timer pass. First the facts the tables cannot see for themselves: a
-    /// broadcast whose passive-ack quorum `quorum_heard` confirms is delivered, and
-    /// the sends parked on a destination `route_active` confirms are admitted as
-    /// unicasts through `place`. Then the timed transitions: re-queue what is due,
-    /// fail what is past its deadline, and retry or fail lapsed route discoveries.
-    /// `passive_ack_interval` spaces passive-ack broadcast copies.
+    /// The timer pass: re-queue what is due, fail what is past its deadline, and retry
+    /// or fail lapsed route discoveries. `passive_ack_interval` spaces passive-ack
+    /// broadcast copies.
     pub fn tick(
         &mut self,
         now: Instant,
         passive_ack_interval: Duration,
-        mut quorum_heard: impl FnMut((Nwk, u8)) -> bool,
-        mut route_active: impl FnMut(Nwk) -> bool,
-        mut place: impl FnMut(&mut F) -> Result<Placement, E>,
         actions: &mut Vec<Action<F, W, E>>,
     ) {
-        for key in self.broadcasts.passive_ack_keys() {
-            if quorum_heard(key) {
-                self.broadcasts.acked(key, actions);
-            }
-        }
-
-        for destination in self.parked.destinations() {
-            if route_active(destination) {
-                self.route_resolved(destination, &mut place, actions);
-            }
-        }
-
         self.unicasts.tick(now, actions);
         self.parked.tick(now, actions);
         self.broadcasts.tick(now, passive_ack_interval, actions);
