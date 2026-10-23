@@ -37,7 +37,7 @@ pub enum Schedule {
     },
 }
 
-/// What a broadcast is admitted with.
+/// What a broadcast is enqueued with.
 #[derive(Debug)]
 pub struct Broadcast<F, W> {
     pub frame: F,
@@ -110,7 +110,7 @@ impl<F, W, E> Default for Broadcasts<F, W, E> {
 impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, Record<F, W>)>();
 
-    pub(super) fn admit(&mut self, id: SendId, broadcast: Broadcast<F, W>) {
+    pub(super) fn enqueue(&mut self, id: SendId, broadcast: Broadcast<F, W>) {
         self.records.insert(
             id,
             Record {

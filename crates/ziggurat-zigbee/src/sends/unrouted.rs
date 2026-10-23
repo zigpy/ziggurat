@@ -1,4 +1,4 @@
-//! Unicasts with no route yet, parked on their destination's route discovery.
+//! Unicasts with no route yet, held until their destination's route discovery ends.
 //!
 //! Discovery runs once per destination and the whole bucket moves on together, so ten
 //! frames to one device ride a single discovery. The discovery itself lives in the
@@ -14,28 +14,28 @@ use crate::flat_map::FlatMap;
 
 use super::{Action, Confirm, SendFailure, SendId, TxPriority};
 
-/// A parked unicast: what it is admitted with, and what it carries to the unicasts
+/// An unrouted unicast: what it is enqueued with, and what it carries to the unicasts
 /// once its route is known.
 #[derive(Debug)]
-pub struct ParkedUnicast<F, W> {
+pub struct UnroutedUnicast<F, W> {
     pub frame: F,
     pub priority: TxPriority,
     pub waiter: W,
     pub confirm: Confirm,
     pub destination: Nwk,
-    /// When the send fails if still parked.
+    /// When the send fails if still unrouted.
     pub deadline: Instant,
 }
 
 #[derive(Debug)]
-pub(super) struct ParkedUnicasts<F, W, E> {
-    records: FlatMap<SendId, ParkedUnicast<F, W>>,
-    /// Discovery restarts left, per destination with sends parked on it.
+pub(super) struct UnroutedUnicasts<F, W, E> {
+    records: FlatMap<SendId, UnroutedUnicast<F, W>>,
+    /// Discovery restarts left, per destination with unrouted sends.
     retries: FlatMap<Nwk, u8>,
     _error: PhantomData<fn() -> E>,
 }
 
-impl<F, W, E> Default for ParkedUnicasts<F, W, E> {
+impl<F, W, E> Default for UnroutedUnicasts<F, W, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
@@ -45,20 +45,20 @@ impl<F, W, E> Default for ParkedUnicasts<F, W, E> {
     }
 }
 
-impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
-    pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, ParkedUnicast<F, W>)>();
+impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
+    pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, UnroutedUnicast<F, W>)>();
 
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn is_awaiting_route(&self, destination: Nwk) -> bool {
+    pub(super) fn has_unrouted(&self, destination: Nwk) -> bool {
         self.retries.contains_key(&destination)
     }
 
-    /// Park a send. The first send parked on a destination fixes how often its
+    /// Hold a send. The first unrouted send to a destination fixes how often its
     /// discovery may be restarted.
-    pub(super) fn admit(&mut self, id: SendId, send: ParkedUnicast<F, W>, retries: u8) {
+    pub(super) fn enqueue(&mut self, id: SendId, send: UnroutedUnicast<F, W>, retries: u8) {
         let destination = send.destination;
         self.records.insert(id, send);
 
@@ -71,13 +71,13 @@ impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
         self.retries.keys().copied().collect()
     }
 
-    /// Take every send parked on `destination`: its route is known.
-    pub(super) fn unpark(&mut self, destination: Nwk) -> Vec<(SendId, ParkedUnicast<F, W>)> {
+    /// Take every send to `destination`: its route is known.
+    pub(super) fn route(&mut self, destination: Nwk) -> Vec<(SendId, UnroutedUnicast<F, W>)> {
         self.retries.remove(&destination);
         self.take(destination)
     }
 
-    fn take(&mut self, destination: Nwk) -> Vec<(SendId, ParkedUnicast<F, W>)> {
+    fn take(&mut self, destination: Nwk) -> Vec<(SendId, UnroutedUnicast<F, W>)> {
         let ids: Vec<SendId> = self
             .records
             .iter()
@@ -90,7 +90,7 @@ impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
             .collect()
     }
 
-    fn settled(send: ParkedUnicast<F, W>, failure: SendFailure) -> Action<F, W, E> {
+    fn settled(send: UnroutedUnicast<F, W>, failure: SendFailure) -> Action<F, W, E> {
         Action::Settled {
             waiter: send.waiter,
             result: Err(failure.into()),
@@ -101,7 +101,7 @@ impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
 
     /// The discovery toward `destination` lapsed. `true` if a restart is left and a
     /// send still waits on it: the caller restarts the discovery. Otherwise every send
-    /// parked on the destination fails.
+    /// to the destination fails.
     pub(super) fn discovery_lapsed(
         &mut self,
         destination: Nwk,
@@ -127,7 +127,7 @@ impl<F, W, E: From<SendFailure>> ParkedUnicasts<F, W, E> {
     }
 
     /// The destination stays awaited, so a new send to it does not start a second
-    /// discovery; it lapses on its own once nothing is parked on it.
+    /// discovery; it lapses on its own once nothing waits on it.
     pub(super) fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) {
         let send = self.records.remove(&id).unwrap();
         actions.push(Self::settled(send, SendFailure::Cancelled));

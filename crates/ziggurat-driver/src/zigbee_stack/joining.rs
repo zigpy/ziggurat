@@ -211,7 +211,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A denial has no follow-up; a successful join's tasklet awaits the
         // extraction. A raw MAC frame has no later verdict: extraction is delivery.
-        let admitted = self.admit_unicast(
+        let admitted = self.enqueue_unicast(
             Frame::Raw(response_frame),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,

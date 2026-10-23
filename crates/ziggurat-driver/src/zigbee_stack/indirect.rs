@@ -99,7 +99,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Fire-and-forget: an expiry (the stale child never polled again) is only
         // worth a log line.
-        let admitted = self.admit_unicast(
+        let admitted = self.enqueue_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,

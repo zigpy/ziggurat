@@ -5,8 +5,8 @@
 //!
 //! - [`Unicasts`](unicasts::Unicasts): a frame with a known next hop, delivered directly
 //!   (with retries) or to a sleepy child when it polls.
-//! - [`ParkedUnicasts`](parked::ParkedUnicasts): a unicast with no route yet, waiting on
-//!   its destination's route discovery. The driver runs the discovery against its
+//! - [`UnroutedUnicasts`](unrouted::UnroutedUnicasts): a unicast with no route yet, held
+//!   until its destination's route discovery ends. The driver runs the discovery against its
 //!   routing table and reports when the route is known or the discovery lapsed; the
 //!   send then moves to the unicasts or fails.
 //! - [`Broadcasts`](broadcasts::Broadcasts): a frame sent once, or rebroadcast on a
@@ -25,8 +25,8 @@
 //! deadline fails with the error its state implies.
 
 mod broadcasts;
-mod parked;
 mod unicasts;
+mod unrouted;
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -39,12 +39,12 @@ use crate::aps::frame::ApsAckFrame;
 use crate::flat_map::{FlatMap, FlatSet};
 
 pub use broadcasts::{Broadcast, Schedule};
-pub use parked::ParkedUnicast;
 pub use unicasts::{Delivery, Placement, Unicast};
+pub use unrouted::UnroutedUnicast;
 
 use broadcasts::Broadcasts;
-use parked::ParkedUnicasts;
 use unicasts::Unicasts;
+use unrouted::UnroutedUnicasts;
 
 /// Identifies a send for its whole life. Allocated in admission order and never reused,
 /// so a lower id is always an older send.
@@ -191,7 +191,7 @@ impl SrcMatchTable {
 pub struct Sends<F, W, E> {
     next_id: u32,
     unicasts: Unicasts<F, W, E>,
-    parked_unicasts: ParkedUnicasts<F, W, E>,
+    unrouted_unicasts: UnroutedUnicasts<F, W, E>,
     broadcasts: Broadcasts<F, W, E>,
 }
 
@@ -200,7 +200,7 @@ impl<F, W, E> Default for Sends<F, W, E> {
         Self {
             next_id: 0,
             unicasts: Unicasts::default(),
-            parked_unicasts: ParkedUnicasts::default(),
+            unrouted_unicasts: UnroutedUnicasts::default(),
             broadcasts: Broadcasts::default(),
         }
     }
@@ -215,7 +215,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     /// What the fattest record costs, for pricing the frame budget.
     pub const RECORD_BYTES: usize = max3(
         Unicasts::<F, W, E>::RECORD_BYTES,
-        ParkedUnicasts::<F, W, E>::RECORD_BYTES,
+        UnroutedUnicasts::<F, W, E>::RECORD_BYTES,
         Broadcasts::<F, W, E>::RECORD_BYTES,
     );
 
@@ -225,31 +225,32 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         id
     }
 
-    /// Admit a unicast with a known next hop.
-    pub fn admit_unicast(
+    /// Enqueue a unicast with a known next hop.
+    pub fn enqueue_unicast(
         &mut self,
         unicast: Unicast<F, W>,
         actions: &mut Vec<Action<F, W, E>>,
     ) -> SendId {
         let id = self.next_id();
-        self.unicasts.admit(id, unicast, actions);
+        self.unicasts.enqueue(id, unicast, actions);
         id
     }
 
-    /// Admit a unicast with no route yet, parked on its destination's discovery. The
-    /// caller starts that discovery if the destination was not already awaited; the
-    /// first send parked on a destination fixes `retries`, how often it is restarted.
-    pub fn admit_parked_unicast(&mut self, send: ParkedUnicast<F, W>, retries: u8) -> SendId {
+    /// Enqueue a unicast with no route yet, held until its destination's discovery
+    /// ends. The caller starts that discovery if the destination was not already
+    /// awaited; the first unrouted send to a destination fixes `retries`, how often it
+    /// is restarted.
+    pub fn enqueue_unrouted_unicast(&mut self, send: UnroutedUnicast<F, W>, retries: u8) -> SendId {
         let id = self.next_id();
-        self.parked_unicasts.admit(id, send, retries);
+        self.unrouted_unicasts.enqueue(id, send, retries);
         id
     }
 
-    /// Admit a broadcast. Its first copy goes out on the next tick its schedule says
+    /// Enqueue a broadcast. Its first copy goes out on the next tick its schedule says
     /// it is due (a `Once` schedule queues it right away).
-    pub fn admit_broadcast(&mut self, broadcast: Broadcast<F, W>) -> SendId {
+    pub fn enqueue_broadcast(&mut self, broadcast: Broadcast<F, W>) -> SendId {
         let id = self.next_id();
-        self.broadcasts.admit(id, broadcast);
+        self.broadcasts.enqueue(id, broadcast);
         id
     }
 
@@ -306,53 +307,54 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unicasts.ack_received(ack, actions);
     }
 
-    /// Every destination with sends parked on its route discovery.
-    pub fn destinations_awaiting_route(&self) -> Vec<Nwk> {
-        self.parked_unicasts.destinations()
+    /// Every destination with unrouted sends.
+    pub fn unrouted_destinations(&self) -> Vec<Nwk> {
+        self.unrouted_unicasts.destinations()
     }
 
-    /// Whether any send is parked on `destination`'s route discovery.
-    pub fn is_awaiting_route(&self, destination: Nwk) -> bool {
-        self.parked_unicasts.is_awaiting_route(destination)
+    /// Whether any unrouted send waits on `destination`'s route discovery.
+    pub fn has_unrouted(&self, destination: Nwk) -> bool {
+        self.unrouted_unicasts.has_unrouted(destination)
     }
 
     /// The route discovery toward `destination` lapsed. `true` if the caller must
-    /// restart it; otherwise every send parked on it has failed.
+    /// restart it; otherwise every unrouted send to it has failed.
     pub fn discovery_lapsed(
         &mut self,
         destination: Nwk,
         actions: &mut Vec<Action<F, W, E>>,
     ) -> bool {
-        self.parked_unicasts.discovery_lapsed(destination, actions)
+        self.unrouted_unicasts
+            .discovery_lapsed(destination, actions)
     }
 
-    /// A route to `destination` is known: move every send parked on it to the unicasts.
+    /// A route to `destination` is known: move every unrouted send to it to the unicasts.
     /// `place` resolves each frame's next hop (rewriting the frame for a source route),
     /// or fails the send.
-    pub fn unpark_unicasts(
+    pub fn route_unicasts(
         &mut self,
         destination: Nwk,
         mut place: impl FnMut(&mut F) -> Result<Placement, E>,
         actions: &mut Vec<Action<F, W, E>>,
     ) {
-        for (id, mut parked) in self.parked_unicasts.unpark(destination) {
-            match place(&mut parked.frame) {
-                Ok(placement) => self.unicasts.admit(
+        for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
+            match place(&mut unrouted.frame) {
+                Ok(placement) => self.unicasts.enqueue(
                     id,
                     Unicast {
-                        frame: parked.frame,
-                        priority: parked.priority,
-                        waiter: parked.waiter,
-                        confirm: parked.confirm,
+                        frame: unrouted.frame,
+                        priority: unrouted.priority,
+                        waiter: unrouted.waiter,
+                        confirm: unrouted.confirm,
                         delivery: placement.delivery,
                         deadline: placement.deadline,
                     },
                     actions,
                 ),
                 Err(err) => actions.push(Action::Settled {
-                    waiter: parked.waiter,
+                    waiter: unrouted.waiter,
                     result: Err(err),
-                    frame: parked.frame,
+                    frame: unrouted.frame,
                     failed_hop: None,
                 }),
             }
@@ -384,8 +386,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     pub fn cancel(&mut self, id: SendId, actions: &mut Vec<Action<F, W, E>>) -> bool {
         if self.unicasts.contains(id) {
             self.unicasts.cancel(id, actions)
-        } else if self.parked_unicasts.contains(id) {
-            self.parked_unicasts.cancel(id, actions);
+        } else if self.unrouted_unicasts.contains(id) {
+            self.unrouted_unicasts.cancel(id, actions);
             true
         } else {
             self.broadcasts.cancel(id, actions)
@@ -401,7 +403,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         actions: &mut Vec<Action<F, W, E>>,
     ) {
         self.unicasts.tick(now, actions);
-        self.parked_unicasts.tick(now, actions);
+        self.unrouted_unicasts.tick(now, actions);
         self.broadcasts.tick(now, passive_ack_interval, actions);
     }
 
@@ -409,7 +411,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     pub fn next_wake(&self) -> Option<Instant> {
         [
             self.unicasts.next_wake(),
-            self.parked_unicasts.next_wake(),
+            self.unrouted_unicasts.next_wake(),
             self.broadcasts.next_wake(),
         ]
         .into_iter()
