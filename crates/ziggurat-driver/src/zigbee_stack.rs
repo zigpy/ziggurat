@@ -110,6 +110,10 @@ pub enum DeliveryError {
     TransmitFailed(TxResult),
     #[error("aps ack timeout")]
     ApsAckTimeout,
+    /// An APS-ack send's handoff never resolved within `aps_ack_handoff_timeout`: a
+    /// stalled sender, or a path that dropped its outcome.
+    #[error("handoff timeout")]
+    HandoffTimeout,
     #[error("broadcast passive-ack quorum not reached")]
     BroadcastQuorumNotReached,
     #[error("indirect transaction expired before {destination:?} polled")]
@@ -365,6 +369,9 @@ pub enum TxOutcome {
         slot: Arc<SendSlot>,
         stage: TrackStage,
     },
+    /// The handoff of an APS-ack unicast. Success resolves `HandOff` and resets the
+    /// pending ack's deadline; failure resolves both stages and drops the pending ack.
+    ApsAck { slot: Arc<SendSlot> },
     /// An extracted indirect transaction in flight to the radio. Success resolves the
     /// transaction's own completion; a failed transmit puts it back at the head of its
     /// queue for the device's next poll (802.15.4 spec 6.7.3), unless it has expired.
@@ -403,6 +410,10 @@ pub struct Broadcast {
 pub struct PendingApsAck {
     pub(crate) ack_data: ApsAckData,
     pub(crate) slot: Arc<SendSlot>,
+    /// How long to wait for the ack once the frame is handed off.
+    pub(crate) wait: Duration,
+    /// When the entry expires. Set to `aps_ack_handoff_timeout` at registration, then
+    /// reset to `wait` at handoff.
     pub(crate) deadline: CoreInstant,
 }
 

@@ -70,6 +70,11 @@ impl SendSlot {
         self.cancelled.load(Ordering::Relaxed)
     }
 
+    /// Whether the send's handoff has resolved, successfully or not.
+    pub(crate) fn is_handed_off(&self) -> bool {
+        self.progress.lock().handed_off.is_some()
+    }
+
     /// Resolve one of the send's stages, applying the write rules:
     ///
     /// 1. **First write wins** — both fields are write-once; a later write is ignored.
