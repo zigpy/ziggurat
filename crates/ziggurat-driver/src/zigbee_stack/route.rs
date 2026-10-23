@@ -15,7 +15,7 @@ use super::routing::RouteReplyDisposition;
 use crate::frame_token::TrafficClass;
 
 use super::{
-    AddrConflictSource, Broadcast, NwkSecurityMode, SendHandle, SendMode, TxOutcome, TxPolicy,
+    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
     TxPriority, Unicast, ZigbeeStack,
 };
 
@@ -59,7 +59,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let (next_hop_nwk, path_cost) = match outcome.disposition {
             RouteReplyDisposition::Drop => return,
             RouteReplyDisposition::Established => {
-                self.pending_route_wake.notify_one();
+                self.send_timer_wake.notify_one();
                 return;
             }
             RouteReplyDisposition::Relay {
@@ -68,7 +68,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             } => (next_hop, path_cost),
         };
 
-        self.pending_route_wake.notify_one();
+        self.send_timer_wake.notify_one();
 
         let next_hop_link = self.core().nib.neighbors.link(next_hop_nwk);
 
@@ -99,12 +99,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_destination_ieee(Some(next_hop_link.eui64));
 
         // The next hop toward the originator is a direct radio neighbor
-        self.send_unicast(Unicast {
+        self.send_unicast_untracked(Unicast {
             frame: relayed_route_reply_frame,
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Direct,
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Discard,
+            confirm: Confirm::OnHandoff,
         })
         .map_err(|err| tracing::warn!("Failed to relay route reply: {err}"))
         .ok();
@@ -165,7 +165,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        self.pending_route_wake.notify_one();
+        self.send_timer_wake.notify_one();
 
         // TODO: what do we do if the address and the EUI64 don't agree? This would be
         // an error, some device on the network is storing invalid information about
@@ -202,12 +202,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .with_destination_ieee(Some(sender_ieee));
 
             // The next hop toward the originator is a direct radio neighbor
-            self.send_unicast(Unicast {
+            self.send_unicast_untracked(Unicast {
                 frame: route_reply_frame,
                 security: NwkSecurityMode::NetworkKey,
                 mode: SendMode::Direct,
                 policy: TxPolicy::STACK_CRITICAL,
-                outcome: TxOutcome::Discard,
+                confirm: Confirm::OnHandoff,
             })
             .map_err(|err| tracing::warn!("Failed to send route reply: {err}"))
             .ok();
@@ -294,8 +294,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             )
             .with_radius(self.tunables.concentrator_radius());
 
-        let (handle, slot) = SendHandle::new();
-
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
         self.send_oneshot_broadcast(Broadcast {
             frame: many_to_one_request_frame,
@@ -304,10 +302,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority: TxPriority::Background,
                 class: TrafficClass::Critical,
             },
-            slot: Some(slot),
-        });
-
-        handle
+        })
     }
 
     pub async fn periodic_many_to_one_route_request_task(&self) {

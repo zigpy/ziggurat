@@ -359,9 +359,10 @@ tunables! {
     /// back.
     aps_ack_timeout_indirect: Duration = Duration::from_millis(10000),
 
-    /// How long an APS-ack send may wait for handoff before it fails. Should be longer
-    /// than route discovery plus indirect persistence.
-    aps_ack_handoff_timeout: Duration = Duration::from_secs(30),
+    /// How long any send may wait to reach the mesh before it fails with
+    /// `HandoffTimeout`. Should be longer than route discovery plus indirect
+    /// persistence.
+    handoff_timeout: Duration = Duration::from_secs(30),
 
     /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel
     /// before declaring a transmit failed.

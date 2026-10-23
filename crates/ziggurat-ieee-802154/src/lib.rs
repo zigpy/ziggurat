@@ -585,6 +585,15 @@ impl<P: FramePayload> Ieee802154Frame<P> {
         }
     }
 
+    pub const fn header_mut(&mut self) -> &mut Ieee802154FrameHeader {
+        match self {
+            Self::Beacon(frame) => &mut frame.header,
+            Self::Data(frame) => &mut frame.header,
+            Self::Ack(frame) => &mut frame.header,
+            Self::Command(frame) => &mut frame.header,
+        }
+    }
+
     pub const fn fcs(&self) -> u16 {
         match self {
             Self::Beacon(frame) => frame.fcs,

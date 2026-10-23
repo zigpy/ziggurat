@@ -1,14 +1,12 @@
 use crate::broadcast_budget::BroadcastAdmission;
-use crate::frame_token::{self, FrameToken, TrafficClass};
-use crate::runtime::{Elapsed, Runtime};
+use crate::frame_token::TrafficClass;
+use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering as AtomicOrdering;
 use core::time::Duration;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
@@ -27,33 +25,20 @@ use ziggurat_zigbee::nwk::frame::{
 
 use super::routing::{Route, Status as RouteStatus};
 use super::{
-    AddrConflictSource, Broadcast, BroadcastSchedule, DeliveryError, EnqueueError, HostRoute,
-    IndirectFrame, IndirectPayload, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, PendingBroadcast,
-    PendingFrame, PendingRoute, PendingUnicastRetry, RouteDirective, SendKind, SendMode,
-    SendRequest, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority, Unicast,
-    ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, BroadcastSchedule, Confirm, DeliveryError, EnqueueError, Entry,
+    Frame, HostRoute, MAX_DEPTH, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, SendHandle,
+    SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
 };
 
 /// The outcome of resolving a unicast's MAC next hop without blocking (see
 /// [`ZigbeeStack::resolve_next_hop`]).
-enum NextHop {
+pub(super) enum NextHop {
     /// Transmit to this next hop now.
     Resolved(Nwk),
     /// No route known; the frame must wait for route discovery.
     NeedDiscovery,
     /// No route known and the frame's `discover_route` flag forbids discovering one.
     Discard,
-}
-
-/// Where a queued destination's route discovery stands when the reactor inspects it (see
-/// [`ZigbeeStack::discovery_state`]).
-enum DiscoveryState {
-    /// A route is active; the queued frames can be sent.
-    Resolved,
-    /// Discovery is not progressing: its window elapsed, it failed, or no entry exists.
-    Lapsed,
-    /// Discovery is still in flight with time remaining.
-    InFlight,
 }
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -94,233 +79,49 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         drop(core);
 
         if duplicate {
-            // A duplicate is its sender's passive ack: wake the retransmit reactor so it
-            // re-evaluates completeness and can drop a now-acknowledged broadcast early
-            self.broadcast_retransmit_wake.notify_one();
+            // A duplicate is its sender's passive ack: wake the send timer so it
+            // re-evaluates completeness and can settle a now-acknowledged broadcast early
+            self.send_timer_wake.notify_one();
         }
 
         duplicate
     }
 
-    /// The broadcast-retransmit reactor: a single long-lived task that owns every
-    /// in-flight broadcast's retransmission.
-    pub(super) async fn broadcast_retransmit_task(&self) {
-        loop {
-            match self.earliest_broadcast_retransmit() {
-                Some(deadline) => {
-                    let _ = self
-                        .timeout_at_core(deadline, self.broadcast_retransmit_wake.notified())
-                        .await;
-                }
-                None => self.broadcast_retransmit_wake.notified().await,
-            }
-
-            self.drive_broadcast_retransmits();
-        }
-    }
-
-    /// The soonest retransmit deadline across all pending broadcasts, or `None` when none
-    /// are pending (the reactor then sleeps on its wake signal).
-    fn earliest_broadcast_retransmit(&self) -> Option<CoreInstant> {
-        self.state
-            .pending_broadcasts
-            .lock()
-            .values()
-            .map(|pending| pending.next_attempt)
-            .min()
-    }
-
-    /// One reactor pass: for each pending broadcast, drop it if its quorum is now heard,
-    /// otherwise retransmit a copy if it is due (and not out of attempts).
-    #[allow(clippy::significant_drop_tightening)]
-    fn drive_broadcast_retransmits(&self) {
-        let keys: Vec<((Nwk, u8), BroadcastSchedule)> = self
-            .state
-            .pending_broadcasts
-            .lock()
-            .iter()
-            .map(|(key, broadcast)| (*key, broadcast.schedule))
-            .collect();
-
-        let now = self.core_now();
-
-        for (key, schedule) in keys {
-            // Route requests have no passive ack; only a data broadcast is retired early.
-            if matches!(schedule, BroadcastSchedule::PassiveAck)
-                && self.broadcast_passively_acked(key)
-            {
-                tracing::debug!("Broadcast {key:?} passively acknowledged");
-                let removed = self.state.pending_broadcasts.lock().remove(&key);
-                if let Some(PendingBroadcast {
-                    slot: Some(slot), ..
-                }) = removed
-                {
-                    slot.resolve(TrackStage::Delivery, Ok(()));
-                }
-                continue;
-            }
-
-            let next_attempt = match schedule {
-                BroadcastSchedule::PassiveAck => {
-                    now + self.tunables.passive_ack_timeout() + self.broadcast_jitter()
-                }
-                BroadcastSchedule::FixedInterval { interval } => now + interval,
-            };
-
-            // A single stack local, matched immediately after the lock is released, so the
-            // size-amplification the lint warns about does not apply.
-            #[allow(clippy::large_enum_variant)]
-            enum Next {
-                Idle,
-                Retransmit(NwkFrame, NwkSecurityMode, TxPolicy, Option<Arc<SendSlot>>),
-                Settled,
-                Exhausted(Option<Arc<SendSlot>>),
-            }
-
-            // Decide under the lock; if a copy is due, extract it to transmit after release.
-            let action = {
-                let mut pending = self.state.pending_broadcasts.lock();
-                let Some(broadcast) = pending.get_mut(&key) else {
-                    continue;
-                };
-
-                if broadcast
-                    .slot
-                    .as_ref()
-                    .is_some_and(|slot| slot.is_settled())
-                {
-                    pending.remove(&key);
-                    Next::Settled
-                } else if broadcast.next_attempt > now {
-                    Next::Idle
-                } else if broadcast.attempts_remaining == 0 {
-                    Next::Exhausted(pending.remove(&key).unwrap().slot)
-                } else {
-                    broadcast.attempts_remaining -= 1;
-                    broadcast.next_attempt = next_attempt;
-                    Next::Retransmit(
-                        broadcast.nwk_frame.clone(),
-                        broadcast.security,
-                        broadcast.policy,
-                        broadcast.slot.clone(),
-                    )
-                }
-            };
-
-            match action {
-                Next::Idle => {}
-                Next::Retransmit(nwk_frame, security, policy, slot) => {
-                    tracing::debug!("Retransmitting broadcast {key:?}");
-                    // Each on-air copy resolves the send's handoff; write-once means only
-                    // the first successful one takes.
-                    self.enqueue_send(
-                        SendKind::Broadcast {
-                            nwk_frame,
-                            security,
-                        },
-                        policy,
-                        Self::broadcast_copy_outcome(slot),
-                    );
-                }
-                Next::Settled => tracing::debug!("Broadcast {key:?} settled, dropping"),
-                Next::Exhausted(slot) => {
-                    tracing::debug!("Broadcast {key:?} out of retransmit attempts");
-                    // A fixed-interval broadcast (a route request) completes by running
-                    // out of attempts; a data broadcast fails its quorum.
-                    if let Some(slot) = slot {
-                        let result = match schedule {
-                            BroadcastSchedule::PassiveAck => {
-                                Err(DeliveryError::BroadcastQuorumNotReached)
-                            }
-                            BroadcastSchedule::FixedInterval { .. } => Ok(()),
-                        };
-                        slot.resolve(TrackStage::Delivery, result);
-                    }
-                }
-            }
-        }
-    }
-
-    /// The outcome for one on-air broadcast copy: a tracked broadcast resolves its
-    /// `HandOff` stage (write-once, so only the first successful copy takes), an internal
-    /// one is fire-and-forget.
-    fn broadcast_copy_outcome(slot: Option<Arc<SendSlot>>) -> TxOutcome {
-        slot.map_or(TxOutcome::Discard, |slot| TxOutcome::Track {
-            slot,
-            stage: TrackStage::HandOff,
-        })
-    }
-
-    /// Insert a broadcast into the pending-retransmit map and wake the reactor.
-    #[allow(clippy::too_many_arguments)]
-    fn schedule_broadcast(
-        &self,
-        key: (Nwk, u8),
-        nwk_frame: NwkFrame,
-        security: NwkSecurityMode,
-        policy: TxPolicy,
-        schedule: BroadcastSchedule,
-        first_delay: Duration,
-        attempts: u8,
-        slot: Option<Arc<SendSlot>>,
-        // Caller-taken, held by the retained copy for the whole retransmit schedule
-        token: FrameToken,
-    ) {
-        // A tracked broadcast is scheduled even at zero retransmits, so the reactor can
-        // resolve its quorum (or fail it); an untracked one with nothing to retransmit is
-        // a no-op.
-        if attempts == 0 && slot.is_none() {
-            return;
-        }
-
-        self.state.pending_broadcasts.lock().insert(
-            key,
-            PendingBroadcast {
-                nwk_frame,
-                security,
-                policy,
-                schedule,
-                attempts_remaining: attempts,
-                next_attempt: self.core_now() + first_delay,
-                slot,
-                _token: token,
-            },
-        );
-        self.broadcast_retransmit_wake.notify_one();
-    }
-
+    /// Spec 3.6.4.5.1: broadcast a route request `attempts` times, the first after
+    /// `initial_delay`, at the retry interval.
     pub(super) fn broadcast_route_request(
         &self,
         nwk_frame: NwkFrame,
         attempts: u8,
         initial_delay: Duration,
     ) {
-        let Some(token) = frame_token::take(TrafficClass::Critical) else {
-            tracing::warn!("Frame budget exhausted; dropping route request retransmissions");
-            return;
-        };
-
         let key = (
             nwk_frame.nwk_header.source,
             nwk_frame.nwk_header.sequence_number,
         );
 
-        self.schedule_broadcast(
-            key,
-            nwk_frame,
-            NwkSecurityMode::NetworkKey,
+        let admitted = self.admit(
+            Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
                 class: TrafficClass::Critical,
             },
-            BroadcastSchedule::FixedInterval {
-                interval: self.tunables.rreq_retry_interval(),
-            },
-            initial_delay,
-            attempts,
+            Confirm::OnHandoff,
             None,
-            token,
+            Entry::Broadcast {
+                key,
+                schedule: BroadcastSchedule::FixedInterval {
+                    interval: self.tunables.rreq_retry_interval(),
+                },
+                attempts,
+                next_attempt: self.core_now() + initial_delay,
+                copy_now: false,
+            },
         );
+
+        if let Err(err) = admitted {
+            tracing::warn!("Dropping route request: {err}");
+        }
     }
 
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
@@ -332,7 +133,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience
     /// members that are still live neighbors.
-    fn broadcast_passively_acked(&self, key: (Nwk, u8)) -> bool {
+    pub(super) fn broadcast_passively_acked(&self, key: (Nwk, u8)) -> bool {
         let core = self.core();
         let live_relayers = core.nib.neighbors.expected_broadcast_relayers();
 
@@ -545,18 +346,31 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    /// Send a unicast: assign its NWK sequence number, resolve a next hop, and
-    /// either enqueue it, queue it awaiting route discovery, or drop it
-    /// (discovery suppressed).
-    /// `Err` rejects at enqueue without consuming `outcome`; on `Ok` the outcome
-    /// resolves with the delivery result.
-    pub(super) fn send_unicast(&self, send: Unicast) -> Result<(), EnqueueError> {
+    /// Send a unicast: assign its NWK sequence number, resolve a next hop, and admit it
+    /// to the send table, parked on a route discovery if none is known. `Err` rejects at
+    /// admission and no handle is returned.
+    pub(super) fn send_unicast(&self, send: Unicast) -> Result<SendHandle, EnqueueError> {
+        let slot = Arc::new(SendSlot::default());
+        let id = self.admit_unicast(send, Some(slot.clone()))?;
+        Ok(SendHandle::new(id, slot))
+    }
+
+    /// [`Self::send_unicast`] for a send nobody awaits: a failure is only logged.
+    pub(super) fn send_unicast_untracked(&self, send: Unicast) -> Result<(), EnqueueError> {
+        self.admit_unicast(send, None).map(|_| ())
+    }
+
+    fn admit_unicast(
+        &self,
+        send: Unicast,
+        waiter: Option<Arc<SendSlot>>,
+    ) -> Result<SendId, EnqueueError> {
         let Unicast {
             frame: mut nwk_frame,
             security,
             mode,
             policy,
-            outcome,
+            confirm,
         } = send;
         debug_assert!(
             nwk_frame.nwk_header.destination.as_u16() < BROADCAST_LOW_POWER_ROUTERS.as_u16(),
@@ -564,51 +378,41 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.destination
         );
 
-        // The token is taken here, at the frame's entry into the stack's ownership, so
-        // that route-discovery parking is covered by the budget too. It travels with
-        // the frame through every queue until its terminal outcome.
-        let Some(token) = frame_token::take(policy.class) else {
-            tracing::warn!(
-                "Frame budget exhausted ({}/{} tokens); rejecting {:?} unicast",
-                frame_token::used(),
-                frame_token::total(),
-                policy.class,
-            );
-            return Err(EnqueueError::BudgetExhausted);
-        };
-
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        match self.resolve_next_hop(&mut nwk_frame, &mode) {
-            NextHop::Resolved(next_hop) => {
-                self.enqueue_unicast(
-                    nwk_frame,
-                    next_hop,
-                    security,
-                    policy.priority,
-                    outcome,
-                    token,
-                );
-                Ok(())
-            }
+        let entry = match self.resolve_next_hop(&mut nwk_frame, &mode) {
+            NextHop::Resolved(next_hop) => self.place_unicast(next_hop),
             NextHop::NeedDiscovery => {
-                self.enqueue_awaiting_route(nwk_frame, security, policy.priority, outcome, token);
-                Ok(())
+                let destination = nwk_frame.nwk_header.destination;
+                tracing::debug!("Queuing frame awaiting a route to {destination:?}");
+                Entry::AwaitRoute {
+                    destination,
+                    discovery_time: self.tunables.route_discovery_time(),
+                    attempts: self.tunables.pending_route_discovery_attempts(),
+                }
             }
             NextHop::Discard => {
                 let destination = nwk_frame.nwk_header.destination;
                 tracing::debug!(
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
                 );
-                Err(EnqueueError::RouteDiscoverySuppressed)
+                return Err(EnqueueError::RouteDiscoverySuppressed);
             }
-        }
+        };
+
+        self.admit(
+            Frame::nwk(nwk_frame, security),
+            policy,
+            confirm,
+            waiter,
+            entry,
+        )
     }
 
     /// Resolve the MAC next hop for a unicast without ever blocking. A source-routed
     /// result rewrites `nwk_frame`'s header in place (spec 3.6.4.3.1). When no route is
     /// known the frame's `discover_route` flag decides between discovery and discard.
-    fn resolve_next_hop(&self, nwk_frame: &mut NwkFrame, mode: &SendMode) -> NextHop {
+    pub(super) fn resolve_next_hop(&self, nwk_frame: &mut NwkFrame, mode: &SendMode) -> NextHop {
         let destination = nwk_frame.nwk_header.destination;
 
         let directive = match mode {
@@ -756,11 +560,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Wrap an encrypted NWK payload in a unicast 802.15.4 data frame. The sequence
-    /// number is assigned at transmit time.
+    /// number is assigned at transmit time. `frame_pending` tells a polling device that
+    /// more frames await it (802.15.4 spec 6.7.3).
     fn build_unicast_802154_data_frame<Payload>(
         &self,
         next_hop_address: Nwk,
         payload: Payload,
+        frame_pending: bool,
     ) -> Ieee802154Frame<Payload> {
         let (ieee802154_sequence_number, pan_id) = {
             let core = self.core();
@@ -771,7 +577,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 frame_control: Ieee802154FrameControl {
                     frame_type: Ieee802154FrameType::Data,
                     security_enabled: false,
-                    frame_pending: false,
+                    frame_pending,
                     ack_request: true,
                     pan_id_compression: true,
                     reserved1: false,
@@ -792,446 +598,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    /// Secure, encrypt and wrap a fully-formed NWK frame into a transmittable
-    /// 802.15.4 unicast, without sending it.
-    pub(super) fn finish_unicast_nwk_frame(
+    /// One transmit attempt for a unicast: assign the frame counter, encrypt, and send
+    /// once. The send table decides what a failure means (a retry, or the verdict).
+    pub(super) async fn transmit_unicast(
         &self,
         mut nwk_frame: NwkFrame,
         next_hop_address: Nwk,
         security: NwkSecurityMode,
-    ) -> Ieee802154Frame<EncryptedNwkFrame> {
+        frame_pending: bool,
+    ) -> Result<(), DeliveryError> {
         self.apply_nwk_aux_header(&mut nwk_frame, security);
         let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
-
-        self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame)
-    }
-
-    /// Enqueue a send into the priority queue and wake the sender task, taking a frame
-    /// token from the policy's budget tier. A refused token resolves the outcome with
-    /// an error instead.
-    pub(super) fn enqueue_send(&self, kind: SendKind, policy: TxPolicy, outcome: TxOutcome) {
-        let Some(token) = frame_token::take(policy.class) else {
-            tracing::warn!(
-                "Frame budget exhausted ({}/{} tokens); rejecting {:?} frame",
-                frame_token::used(),
-                frame_token::total(),
-                policy.class,
-            );
-            self.resolve_outcome(outcome, Err(DeliveryError::BudgetExhausted));
-            return;
-        };
-
-        self.enqueue_send_with_token(kind, policy.priority, outcome, token);
-    }
-
-    /// Enqueue a send whose frame already holds a budget token (a retry, or a frame
-    /// released from route-discovery parking).
-    fn enqueue_send_with_token(
-        &self,
-        kind: SendKind,
-        priority: TxPriority,
-        outcome: TxOutcome,
-        token: FrameToken,
-    ) {
-        let seq = self.send_seq.fetch_add(1, AtomicOrdering::Relaxed);
-
-        self.send_queue.lock().push(SendRequest {
-            seq,
-            priority,
-            kind: Box::new(kind),
-            outcome,
-            token,
-        });
-        self.send_wake.notify_one();
-    }
-
-    /// Enqueue a unicast whose next hop is already resolved. A sleepy child goes to the
-    /// indirect queue. Everything else goes to the sender, which encrypts and retries
-    /// at dequeue so frame-counter order matches on-air order. The NWK sequence number
-    /// is left untouched: relayed frames keep the originator's (spec 3.6.4.3). A
-    /// `completion`, if supplied, is resolved by whichever queue takes the frame: the
-    /// sender on transmit, or the indirect queue on the child's poll or expiry.
-    pub(super) fn enqueue_unicast(
-        &self,
-        nwk_frame: NwkFrame,
-        next_hop: Nwk,
-        security: NwkSecurityMode,
-        priority: TxPriority,
-        outcome: TxOutcome,
-        token: FrameToken,
-    ) {
-        if let Some(child_eui64) = self.sleepy_child_eui64(next_hop) {
-            // The frame is left as plaintext and finished (encrypted, counter assigned)
-            // only when the child polls. See `IndirectFrame`. The NWK sequence number
-            // is already assigned.
-            let frame = IndirectFrame {
-                poll_address: Ieee802154Address::Eui64(child_eui64),
-                payload: IndirectPayload::Deferred {
-                    nwk_frame,
-                    next_hop,
-                    security,
-                },
-                token,
-            };
-            self.increment_tx_total();
-
-            self.enqueue_indirect_frame(frame, outcome);
-            return;
-        }
-
-        self.enqueue_send_with_token(
-            SendKind::Unicast {
-                nwk_frame,
-                next_hop,
-                security,
-                attempts_remaining: self.tunables.unicast_retries(),
-            },
-            priority,
-            outcome,
-            token,
+        let ieee802154_frame = self.build_unicast_802154_data_frame(
+            next_hop_address,
+            encrypted_nwk_frame,
+            frame_pending,
         );
-    }
-
-    /// Enqueue a unicast awaiting a route and start discovery if necessary.
-    fn enqueue_awaiting_route(
-        &self,
-        nwk_frame: NwkFrame,
-        security: NwkSecurityMode,
-        priority: TxPriority,
-        outcome: TxOutcome,
-        token: FrameToken,
-    ) {
-        let destination = nwk_frame.nwk_header.destination;
-
-        let start_discovery = {
-            let mut pending = self.state.pending_routes.lock();
-            let is_new = !pending.contains_key(&destination);
-            pending
-                .entry(destination)
-                .or_insert_with(|| PendingRoute {
-                    frames: Vec::new(),
-                    attempts_remaining: self.tunables.pending_route_discovery_attempts(),
-                })
-                .frames
-                .push(PendingFrame {
-                    nwk_frame,
-                    security,
-                    priority,
-                    outcome,
-                    token,
-                });
-            is_new
-        };
-
-        if start_discovery {
-            tracing::debug!("Queuing frame and starting route discovery for {destination:?}");
-            self.send_route_discovery(destination);
-        }
-        self.pending_route_wake.notify_one();
-    }
-
-    /// The pending-route reactor: a single long-lived task that owns every in-flight
-    /// route discovery. It sleeps until the nearest discovery deadline (or a wake
-    /// signal), then sends the frames whose route resolved and retries or discards
-    /// those whose discovery lapsed.
-    pub(super) async fn pending_route_task(&self) {
-        loop {
-            let next_deadline = self.earliest_discovery_deadline();
-
-            match next_deadline {
-                Some(deadline) => {
-                    let _ = self
-                        .timeout_at_core(deadline, self.pending_route_wake.notified())
-                        .await;
-                }
-                None => self.pending_route_wake.notified().await,
-            }
-
-            self.drive_pending_routes();
-        }
-    }
-
-    /// The soonest live discovery deadline across all queued destinations, or `None`
-    /// when nothing is waiting on a deadline (the reactor then sleeps on its wake
-    /// signal).
-    fn earliest_discovery_deadline(&self) -> Option<CoreInstant> {
-        let destinations: Vec<Nwk> = self.state.pending_routes.lock().keys().copied().collect();
-
-        let now = self.core_now();
-        let core = self.core();
-        destinations
-            .iter()
-            .filter_map(|destination| core.nib.routing.discovery_deadline(*destination, now))
-            .min()
-    }
-
-    /// One reactor pass: drop settled frames, then classify each queued destination and
-    /// act on it.
-    fn drive_pending_routes(&self) {
-        self.drop_settled_parked_frames();
-
-        let destinations: Vec<Nwk> = self.state.pending_routes.lock().keys().copied().collect();
-
-        for destination in destinations {
-            match self.discovery_state(destination) {
-                DiscoveryState::Resolved => self.release_queued_frames(destination),
-                DiscoveryState::Lapsed => self.retry_or_fail_discovery(destination),
-                DiscoveryState::InFlight => {}
-            }
-        }
-    }
-
-    /// Drop parked frames whose send is already settled, instead of holding them until
-    /// their discovery resolves. Their buckets stay, so a new frame for the same
-    /// destination does not start a second discovery.
-    fn drop_settled_parked_frames(&self) {
-        let mut settled = Vec::new();
-        for bucket in self.state.pending_routes.lock().values_mut() {
-            settled.extend(
-                bucket
-                    .frames
-                    .extract_if(.., |frame| Self::outcome_settled(&frame.outcome)),
-            );
-        }
-
-        for frame in settled {
-            self.drop_settled_outcome(frame.outcome);
-        }
-    }
-
-    /// Where `destination`'s route discovery currently stands, read from the routing
-    /// table.
-    fn discovery_state(&self, destination: Nwk) -> DiscoveryState {
-        let now = self.core_now();
-        let core = self.core();
-        match core.nib.routing.route_status(destination) {
-            Some(RouteStatus::Active) => DiscoveryState::Resolved,
-            Some(RouteStatus::DiscoveryUnderway) => {
-                // `discovery_deadline` only returns a live (future) deadline, so its
-                // absence means the discovery window has elapsed.
-                if core
-                    .nib
-                    .routing
-                    .discovery_deadline(destination, now)
-                    .is_some()
-                {
-                    DiscoveryState::InFlight
-                } else {
-                    DiscoveryState::Lapsed
-                }
-            }
-            // DiscoveryFailed / Inactive / no entry: nothing in flight.
-            _ => DiscoveryState::Lapsed,
-        }
-    }
-
-    /// A route exists: re-resolve each queued frame and enqueue it. A frame whose route
-    /// vanished in the race is dropped with an error.
-    fn release_queued_frames(&self, destination: Nwk) {
-        let bucket = self.state.pending_routes.lock().remove(&destination);
-
-        let Some(bucket) = bucket else {
-            return;
-        };
-
-        tracing::debug!(
-            "Releasing {} queued frame(s) to {destination:?}",
-            bucket.frames.len()
-        );
-
-        for queued in bucket.frames {
-            let PendingFrame {
-                mut nwk_frame,
-                security,
-                priority,
-                outcome,
-                token,
-            } = queued;
-
-            match self.resolve_next_hop(
-                &mut nwk_frame,
-                &SendMode::Route(RouteDirective::StackDecides),
-            ) {
-                NextHop::Resolved(next_hop) => {
-                    self.enqueue_unicast(nwk_frame, next_hop, security, priority, outcome, token);
-                }
-                NextHop::NeedDiscovery | NextHop::Discard => {
-                    self.resolve_outcome(outcome, Err(DeliveryError::RouteInactiveAfterDiscovery));
-                }
-            }
-        }
-    }
-
-    /// A discovery window lapsed: retry the discovery if the destination has attempts
-    /// left, otherwise mark it failed and discard every frame waiting on it.
-    fn retry_or_fail_discovery(&self, destination: Nwk) {
-        let discarded = {
-            let mut pending = self.state.pending_routes.lock();
-
-            let Some(bucket) = pending.get_mut(&destination) else {
-                return;
-            };
-
-            bucket.attempts_remaining = bucket.attempts_remaining.saturating_sub(1);
-
-            // A bucket emptied by dropped settled frames has nothing left to discover for
-            if bucket.attempts_remaining > 0 && !bucket.frames.is_empty() {
-                None
-            } else {
-                Some(pending.remove(&destination).unwrap().frames)
-            }
-        };
-
-        match discarded {
-            None => {
-                tracing::debug!("Route discovery to {destination:?} timed out, retrying");
-                self.send_route_discovery(destination);
-                self.pending_route_wake.notify_one();
-            }
-            Some(frames) => {
-                self.core().nib.routing.mark_discovery_failed(destination);
-                tracing::debug!(
-                    "Route discovery to {destination:?} failed, dropping {} frame(s)",
-                    frames.len()
-                );
-                for PendingFrame { outcome, .. } in frames {
-                    self.resolve_outcome(
-                        outcome,
-                        Err(DeliveryError::RouteDiscoveryTimeout(Elapsed)),
-                    );
-                }
-            }
-        }
-    }
-
-    /// The single transmit task: drains [`send_queue`](ZigbeeStack::send_queue) highest
-    /// priority first, encrypting each frame as it is sent so frame-counter order
-    /// always matches on-air order. Serializing all transmits here is what keeps the
-    /// counter monotonic; concurrent senders would race it and risk replay rejection.
-    pub(super) async fn sender_task(&self) {
-        loop {
-            loop {
-                let request = self.send_queue.lock().pop();
-
-                let Some(request) = request else {
-                    break;
-                };
-
-                // The budget token stays charged for the duration of the transmit and
-                // follows a failed unicast into the retry reactor.
-                let SendRequest {
-                    priority,
-                    kind,
-                    outcome,
-                    token,
-                    ..
-                } = request;
-
-                // All transmits pass through here. A settled send's frame is dropped
-                // instead of sent, and its token is freed when `token` drops.
-                if Self::outcome_settled(&outcome) {
-                    self.drop_settled_outcome(outcome);
-                    continue;
-                }
-
-                match *kind {
-                    SendKind::Unicast {
-                        nwk_frame,
-                        next_hop,
-                        security,
-                        attempts_remaining,
-                    } => {
-                        // Owns the outcome: reports it on success or terminal failure, or
-                        // hands it to the retry reactor.
-                        self.attempt_unicast_send(
-                            nwk_frame,
-                            next_hop,
-                            security,
-                            priority,
-                            attempts_remaining,
-                            outcome,
-                            token,
-                        )
-                        .await;
-                    }
-                    SendKind::Broadcast {
-                        nwk_frame,
-                        security,
-                    } => {
-                        let result = self.process_broadcast_send(nwk_frame, security).await;
-                        self.resolve_outcome(outcome, result);
-                    }
-                    SendKind::Raw { frame } => {
-                        let result = self.send_802154_frame(frame).await;
-                        self.resolve_outcome(outcome, result);
-                    }
-                }
-            }
-
-            self.send_wake.notified().await;
-        }
-    }
-
-    /// Deliver a transmit's terminal outcome to wherever it is owed: log a dropped
-    /// background failure, wake an awaiting caller, or confirm an application send.
-    pub(super) fn resolve_outcome(&self, outcome: TxOutcome, result: Result<(), DeliveryError>) {
-        match outcome {
-            TxOutcome::Discard => {
-                if let Err(err) = result {
-                    tracing::warn!("Background send failed: {err}");
-                }
-            }
-            TxOutcome::Track { slot, stage } => {
-                slot.resolve(stage, result);
-            }
-            TxOutcome::ApsAck { slot } => self.resolve_aps_ack_handoff(slot, result),
-            TxOutcome::IndirectDelivery {
-                destination,
-                transaction,
-            } => match result {
-                // 802.15.4 spec 6.7.3: a transaction is only extracted once
-                // acknowledged, so a failed transmit goes back to the head of the
-                // queue for the next poll
-                Err(err)
-                    if self.core_now() < transaction.expires_at
-                        && !Self::outcome_settled(&transaction.completion) =>
-                {
-                    tracing::warn!(
-                        "Indirect transmit to {destination:?} failed ({err}), requeueing"
-                    );
-                    self.core()
-                        .mac
-                        .indirect_queue
-                        .requeue(destination, *transaction);
-                }
-                _ => {
-                    let transaction = *transaction;
-                    self.resolve_outcome(transaction.completion, result);
-                    self.remove_indirect_queue_if_empty(destination);
-                }
-            },
-        }
-    }
-
-    /// One transmit attempt for a dequeued unicast: assign the frame counter, encrypt,
-    /// and send once. On success (or terminal failure) the completion resolves here;
-    /// on a failed attempt with retries left, the plaintext frame is parked with the
-    /// unicast-retry reactor instead of being slept on, so the sender stays free.
-    #[allow(clippy::too_many_arguments)]
-    async fn attempt_unicast_send(
-        &self,
-        mut nwk_frame: NwkFrame,
-        next_hop_address: Nwk,
-        security: NwkSecurityMode,
-        priority: TxPriority,
-        attempts_remaining: u8,
-        outcome: TxOutcome,
-        token: FrameToken,
-    ) {
-        self.apply_nwk_aux_header(&mut nwk_frame, security);
-        let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
-        let ieee802154_frame =
-            self.build_unicast_802154_data_frame(next_hop_address, encrypted_nwk_frame);
 
         // When forwarding packets to another node, update the counters for the neighbor
         {
@@ -1250,190 +632,30 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.increment_tx_total();
 
-        let Err(e) = self.send_802154_frame(ieee802154_frame).await else {
-            self.resolve_outcome(outcome, Ok(()));
-            return;
-        };
+        let result = self.send_802154_frame(ieee802154_frame).await;
 
-        // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
-        // against the next hop. Counted per MCPS-DATA.request, like `nwkTxTotal` above,
-        // so the two stay on the same denominator.
-        if let DeliveryError::NwkNoAck { .. } = e {
-            let mut core = self.core();
-            if let Some(next_hop_eui64) = core.nib.address_map.eui64_for(next_hop_address) {
-                core.nib.neighbors.record_transmit_failure(next_hop_eui64);
-            }
-        }
-
-        tracing::warn!("Failed to send unicast frame: {e}");
-
-        if attempts_remaining == 0 {
-            tracing::error!("Failed to send unicast frame after all attempts");
-            self.handle_unicast_send_failure(&nwk_frame, next_hop_address);
-            self.resolve_outcome(outcome, Err(e));
-            return;
-        }
-
-        // Park the frame for re-transmission after the retry delay. The plaintext frame
-        // is re-enqueued (not the ciphertext), so the next attempt earns a fresh counter
-        // at dequeue and on-air order stays equal to counter order.
-        tracing::debug!("Scheduling unicast retry, {attempts_remaining} attempt(s) remaining");
-        self.schedule_unicast_retry(
-            nwk_frame,
-            next_hop_address,
-            security,
-            priority,
-            attempts_remaining - 1,
-            outcome,
-            token,
-        );
-    }
-
-    /// Park a failed unicast for re-enqueue after [`unicast_retry_delay`] and wake the
-    /// retry reactor.
-    #[allow(clippy::too_many_arguments)]
-    fn schedule_unicast_retry(
-        &self,
-        nwk_frame: NwkFrame,
-        next_hop: Nwk,
-        security: NwkSecurityMode,
-        priority: TxPriority,
-        attempts_remaining: u8,
-        outcome: TxOutcome,
-        token: FrameToken,
-    ) {
-        let delay = self.tunables.unicast_retry_delay();
-
-        // The frame has a random jitter of up to one retry delay period
-        let jitter = delay.mul_f32(crate::rng::random_f32());
-        let next_attempt = self.core_now() + delay + jitter;
-
-        self.state
-            .pending_unicast_retries
-            .lock()
-            .push(PendingUnicastRetry {
-                nwk_frame,
-                next_hop,
-                security,
-                priority,
-                attempts_remaining,
-                next_attempt,
-                outcome,
-                token,
-            });
-        self.unicast_retry_wake.notify_one();
-    }
-
-    /// The unicast-retry reactor: a single long-lived task that re-enqueues failed
-    /// unicasts once their retry delay elapses, mirroring the broadcast-retransmit
-    /// reactor.
-    pub(super) async fn unicast_retry_task(&self) {
-        loop {
-            match self.earliest_unicast_retry() {
-                Some(deadline) => {
-                    let _ = self
-                        .timeout_at_core(deadline, self.unicast_retry_wake.notified())
-                        .await;
-                }
-                None => self.unicast_retry_wake.notified().await,
-            }
-
-            self.drive_unicast_retries();
-        }
-    }
-
-    /// The soonest re-enqueue deadline across all parked retries, or `None` when none are
-    /// parked (the reactor then sleeps on its wake signal).
-    fn earliest_unicast_retry(&self) -> Option<CoreInstant> {
-        self.state
-            .pending_unicast_retries
-            .lock()
-            .iter()
-            .map(|retry| retry.next_attempt)
-            .min()
-    }
-
-    /// One reactor pass: re-enqueue every parked retry whose delay has elapsed. The
-    /// re-enqueued frame competes by its priority and earns a fresh counter at dequeue.
-    fn drive_unicast_retries(&self) {
-        let now = self.core_now();
-
-        let due: Vec<PendingUnicastRetry> = {
-            let mut pending = self.state.pending_unicast_retries.lock();
-            let mut due = Vec::new();
-            let mut i = 0;
-            while i < pending.len() {
-                // Pull retries that are due or settled. Below, due ones are re-enqueued
-                // and settled ones are dropped, which frees their token early.
-                if pending[i].next_attempt <= now || Self::outcome_settled(&pending[i].outcome) {
-                    // Order does not matter (the priority queue reorders anyway), so an
-                    // O(1) swap-remove is fine.
-                    due.push(pending.swap_remove(i));
-                } else {
-                    i += 1;
+        if let Err(e) = &result {
+            // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
+            // against the next hop. Counted per MCPS-DATA.request, like `nwkTxTotal`
+            // above, so the two stay on the same denominator.
+            if let DeliveryError::NwkNoAck { .. } = e {
+                let mut core = self.core();
+                if let Some(next_hop_eui64) = core.nib.address_map.eui64_for(next_hop_address) {
+                    core.nib.neighbors.record_transmit_failure(next_hop_eui64);
                 }
             }
-            drop(pending);
 
-            due
-        };
-
-        for retry in due {
-            if Self::outcome_settled(&retry.outcome) {
-                self.drop_settled_outcome(retry.outcome);
-                continue;
-            }
-            self.enqueue_send_with_token(
-                SendKind::Unicast {
-                    nwk_frame: retry.nwk_frame,
-                    next_hop: retry.next_hop,
-                    security: retry.security,
-                    attempts_remaining: retry.attempts_remaining,
-                },
-                retry.priority,
-                retry.outcome,
-                retry.token,
-            );
+            tracing::warn!("Failed to send unicast frame: {e}");
         }
-    }
 
-    /// Whether this outcome's send is settled, so its frame must not be sent. `Discard`
-    /// has no slot and is never settled. An indirect delivery is settled when its
-    /// transaction's completion is.
-    pub(super) fn outcome_settled(outcome: &TxOutcome) -> bool {
-        match outcome {
-            TxOutcome::Discard => false,
-            TxOutcome::Track { slot, .. } | TxOutcome::ApsAck { slot } => slot.is_settled(),
-            TxOutcome::IndirectDelivery { transaction, .. } => {
-                Self::outcome_settled(&transaction.completion)
-            }
-        }
-    }
-
-    /// Drop a settled send's frame and run its outcome's clean-up: remove the pending
-    /// APS ack, or tidy the indirect queue. The slot is already settled, so the
-    /// `Cancelled` passed here is never recorded.
-    pub(super) fn drop_settled_outcome(&self, outcome: TxOutcome) {
-        self.resolve_outcome(outcome, Err(DeliveryError::Cancelled));
-    }
-
-    /// Wake every reactor that holds sends, so a cancelled send's entries are removed
-    /// now instead of at each reactor's next scheduled wake. Called after a
-    /// [`SendHandle::cancel`](super::SendHandle::cancel).
-    pub fn nudge_cancellation(&self) {
-        self.send_wake.notify_one();
-        self.unicast_retry_wake.notify_one();
-        self.broadcast_retransmit_wake.notify_one();
-        self.pending_route_wake.notify_one();
-        self.aps_ack_wake.notify_one();
-        self.maintenance_wake.notify_one();
+        result
     }
 
     /// A unicast exhausted its retries at the sender. The next hop is dead: invalidate
     /// routes through it. A frame we originated also drops any stored source route and
     /// pushes the MTORR scheduler; a frame we were relaying reports the failure back
     /// to its originator (spec 3.6.4.8.1).
-    fn handle_unicast_send_failure(&self, nwk_frame: &NwkFrame, next_hop: Nwk) {
+    pub(super) fn handle_unicast_send_failure(&self, nwk_frame: &NwkFrame, next_hop: Nwk) {
         if nwk_frame.nwk_header.source != self.state.network_address {
             self.handle_relay_failure(nwk_frame, next_hop);
             return;
@@ -1454,10 +676,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Spec 3.6.6: a coordinator/router with rx-off end-device children must re-deliver
-    /// every 0xFFFF broadcast to each of them as a MAC unicast through the indirect
-    /// queue, since a sleeping radio never hears the broadcast itself. The NWK source is
-    /// skipped (it already has the frame). Each copy is queued without waiting: it is only
-    /// handed to the radio when the child polls, or dropped when it expires.
+    /// every 0xFFFF broadcast to each of them as a MAC unicast, since a sleeping radio
+    /// never hears the broadcast itself. The NWK source is skipped (it already has the
+    /// frame). Each copy awaits its child's poll, or expires.
     fn maybe_fan_out_broadcast_to_sleepy_children(
         &self,
         nwk_frame: &NwkFrame,
@@ -1480,37 +701,49 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         for (child_eui64, child_nwk) in sleepy_children {
             // Each per-child copy is its own charge: under pressure copies are skipped
             // (the child misses one broadcast) instead of exhausting the heap.
-            let Some(token) = frame_token::take(class) else {
-                tracing::warn!(
-                    "Frame budget exhausted; skipping broadcast copy to sleepy child {child_nwk:?}"
-                );
-                continue;
-            };
-
-            // Finished only when the child polls (see `IndirectFrame`).
-            let frame = IndirectFrame {
-                poll_address: Ieee802154Address::Eui64(child_eui64),
-                payload: IndirectPayload::Deferred {
-                    nwk_frame: nwk_frame.clone(),
-                    next_hop: child_nwk,
-                    security,
+            let admitted = self.admit(
+                Frame::nwk(nwk_frame.clone(), security),
+                TxPolicy {
+                    priority: TxPriority::UserNormal,
+                    class,
                 },
-                token,
-            };
-            self.increment_tx_total();
+                Confirm::OnHandoff,
+                None,
+                Entry::Indirect {
+                    address: Ieee802154Address::Eui64(child_eui64),
+                    next_hop: child_nwk,
+                    persistence_time: self.tunables.transaction_persistence_time(),
+                },
+            );
 
-            // Fire-and-forget: a broadcast copy has no end-to-end result to await.
-            self.enqueue_indirect_frame(frame, TxOutcome::Discard);
+            if let Err(err) = admitted {
+                tracing::warn!("Skipping broadcast copy to sleepy child {child_nwk:?}: {err}");
+            }
         }
     }
 
-    /// Send a broadcast.
-    pub(super) fn send_broadcast(&self, send: Broadcast) -> Result<(), EnqueueError> {
+    /// Send a broadcast, retransmitted until its passive-ack quorum is heard or its
+    /// attempts run out. `Err` rejects at admission and no handle is returned.
+    pub(super) fn send_broadcast(&self, send: Broadcast) -> Result<SendHandle, EnqueueError> {
+        let slot = Arc::new(SendSlot::default());
+        let id = self.admit_broadcast(send, Some(slot.clone()))?;
+        Ok(SendHandle::new(id, slot))
+    }
+
+    /// [`Self::send_broadcast`] for a send nobody awaits.
+    pub(super) fn send_broadcast_untracked(&self, send: Broadcast) -> Result<(), EnqueueError> {
+        self.admit_broadcast(send, None).map(|_| ())
+    }
+
+    fn admit_broadcast(
+        &self,
+        send: Broadcast,
+        waiter: Option<Arc<SendSlot>>,
+    ) -> Result<SendId, EnqueueError> {
         let Broadcast {
             frame: mut nwk_frame,
             security,
             policy,
-            slot,
         } = send;
         // Stack-critical broadcasts always pass; host- and forwarding-class broadcasts
         // yield to the reserves when the bucket is drained.
@@ -1526,17 +759,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if let BroadcastAdmission::Defer { retry_in } = admission {
             return Err(EnqueueError::RateLimited { retry_in });
         }
-
-        // The retained copy's token, held for the whole retransmit schedule.
-        let Some(token) = frame_token::take(policy.class) else {
-            tracing::warn!(
-                "Frame budget exhausted ({}/{} tokens); rejecting {:?} broadcast",
-                frame_token::used(),
-                frame_token::total(),
-                policy.class,
-            );
-            return Err(EnqueueError::BudgetExhausted);
-        };
 
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
@@ -1564,64 +786,68 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
-        // Transmit the first copy immediately: a lost copy is not terminal, the reactor
-        // retransmits. The copy resolves the send's handoff (the first on-air copy wins);
-        // the reactor holds the slot and resolves the end-to-end quorum result.
-        self.enqueue_send(
-            SendKind::Broadcast {
-                nwk_frame: nwk_frame.clone(),
-                security,
+        // The first copy goes out now: a lost copy is not terminal, the schedule
+        // retransmits. The first copy on air is the send's handoff; the quorum is its
+        // delivery.
+        self.admit(
+            Frame::nwk(nwk_frame, security),
+            policy,
+            Confirm::OnHandoff,
+            waiter,
+            Entry::Broadcast {
+                key,
+                schedule: BroadcastSchedule::PassiveAck,
+                attempts: self.tunables.max_broadcast_retries(),
+                next_attempt: self.core_now()
+                    + self.tunables.passive_ack_timeout()
+                    + self.broadcast_jitter(),
+                copy_now: true,
             },
-            policy,
-            Self::broadcast_copy_outcome(slot.clone()),
-        );
-
-        self.schedule_broadcast(
-            key,
-            nwk_frame,
-            security,
-            policy,
-            BroadcastSchedule::PassiveAck,
-            self.tunables.passive_ack_timeout() + self.broadcast_jitter(),
-            self.tunables.max_broadcast_retries(),
-            slot,
-            token,
-        );
-        Ok(())
+        )
     }
 
-    /// Send a single-copy broadcast: assign its sequence number and queue one copy
-    /// for the sender task.
-    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) {
+    /// Send a single-copy broadcast: assign its sequence number and queue one copy for
+    /// the sender. The transmit result is the verdict. A budget rejection resolves the
+    /// returned handle with `BudgetExhausted`.
+    #[allow(clippy::option_if_let_else)]
+    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) -> SendHandle {
+        let slot = Arc::new(SendSlot::default());
+        match self.admit_oneshot_broadcast(send, Some(slot.clone())) {
+            Ok(id) => SendHandle::new(id, slot),
+            Err(_) => SendHandle::resolved(Err(DeliveryError::BudgetExhausted)),
+        }
+    }
+
+    /// [`Self::send_oneshot_broadcast`] for a send nobody awaits.
+    pub(super) fn send_oneshot_broadcast_untracked(&self, send: Broadcast) {
+        if let Err(err) = self.admit_oneshot_broadcast(send, None) {
+            tracing::warn!("Dropping broadcast: {err}");
+        }
+    }
+
+    fn admit_oneshot_broadcast(
+        &self,
+        send: Broadcast,
+        waiter: Option<Arc<SendSlot>>,
+    ) -> Result<SendId, EnqueueError> {
         let Broadcast {
             frame: mut nwk_frame,
             security,
             policy,
-            slot,
         } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        #[allow(clippy::option_if_let_else)]
-        let outcome = match slot {
-            Some(slot) => TxOutcome::Track {
-                slot,
-                stage: TrackStage::Delivery,
-            },
-            None => TxOutcome::Discard,
-        };
-
-        self.enqueue_send(
-            SendKind::Broadcast {
-                nwk_frame,
-                security,
-            },
+        self.admit(
+            Frame::nwk(nwk_frame, security),
             policy,
-            outcome,
-        );
+            Confirm::OnHandoff,
+            waiter,
+            Entry::Queue(super::Next::Once),
+        )
     }
 
-    /// Encrypt and broadcast a single dequeued copy of a frame.
-    async fn process_broadcast_send(
+    /// Encrypt and broadcast a single copy of a frame.
+    pub(super) async fn transmit_broadcast(
         &self,
         mut nwk_frame: NwkFrame,
         security: NwkSecurityMode,
@@ -1794,23 +1020,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Transit traffic draws from the forwarding tier: under a best-effort flood we
         // keep relaying, and under true exhaustion the drop is the originator's to
-        // retry end-to-end.
-        let Some(token) = frame_token::take(TrafficClass::Forwarding) else {
-            tracing::warn!("Frame budget exhausted; dropping relay to {destination:?}");
-            return;
-        };
-
-        // The originator's sequence number is preserved when relaying. The transmit and
-        // any failure handling (route invalidation, the network status back to the
-        // originator) happen in the sender; nothing is awaited here.
-        self.enqueue_unicast(
-            nwk_frame,
-            next_hop_address,
-            NwkSecurityMode::NetworkKey,
-            TxPriority::UserNormal,
-            TxOutcome::Discard,
-            token,
+        // retry end-to-end. The originator's sequence number is preserved. Any failure
+        // handling (route invalidation, the network status back to the originator)
+        // follows the send table's verdict; nothing is awaited here.
+        let admitted = self.admit(
+            Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
+            TxPolicy {
+                priority: TxPriority::UserNormal,
+                class: TrafficClass::Forwarding,
+            },
+            Confirm::OnHandoff,
+            None,
+            self.place_unicast(next_hop_address),
         );
+
+        if let Err(err) = admitted {
+            tracing::warn!("Dropping relay to {destination:?}: {err}");
+        }
     }
 
     /// Zigbee spec 3.6.4.8.1: when relaying fails, the routes through the dead link are
@@ -1848,9 +1074,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Route(RouteDirective::StackDecides),
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Discard,
+            confirm: Confirm::OnHandoff,
         };
-        if let Err(err) = self.send_unicast(send) {
+        if let Err(err) = self.send_unicast_untracked(send) {
             tracing::warn!("Failed to send network status report: {err}");
         }
     }
@@ -1901,28 +1127,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             relayed_frame.nwk_header.sequence_number,
         );
 
-        let Some(token) = frame_token::take(TrafficClass::Forwarding) else {
-            tracing::warn!("Frame budget exhausted; not relaying broadcast {key:?}");
-            return;
-        };
-
         // Unlike an originated broadcast, the first relay is also scheduled (after jitter)
         // rather than sent inline, so the attempt count includes it. The passive-ack
-        // contract was recorded when we received the frame, so the reactor's quorum check
+        // contract was recorded when we received the frame, so the timer's quorum check
         // already covers relayed broadcasts.
-        self.schedule_broadcast(
-            key,
-            relayed_frame,
-            NwkSecurityMode::NetworkKey,
+        let admitted = self.admit(
+            Frame::nwk(relayed_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
                 class: TrafficClass::Forwarding,
             },
-            BroadcastSchedule::PassiveAck,
-            self.broadcast_jitter(),
-            self.tunables.max_broadcast_retries() + 1,
+            Confirm::OnHandoff,
             None,
-            token,
+            Entry::Broadcast {
+                key,
+                schedule: BroadcastSchedule::PassiveAck,
+                attempts: self.tunables.max_broadcast_retries() + 1,
+                next_attempt: self.core_now() + self.broadcast_jitter(),
+                copy_now: false,
+            },
         );
+
+        if let Err(err) = admitted {
+            tracing::warn!("Not relaying broadcast {key:?}: {err}");
+        }
     }
 }

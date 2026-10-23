@@ -8,9 +8,9 @@ pub mod constants;
 pub mod crypto;
 pub mod flat_map;
 pub mod gp;
-pub mod indirect;
 pub mod nwk;
 pub mod ring_buffer;
+pub mod sends;
 pub mod time;
 pub mod zdp;
 

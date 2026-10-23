@@ -527,8 +527,8 @@ pub struct SendGroupcastPayload {
 }
 
 /// Cancels an in-flight send by the `request_id` it was issued under. If the send has no
-/// final status yet, it fails with `Cancelled`, and its frame is not transmitted unless
-/// it already was. The reply reports whether the send still had no final status.
+/// final status yet and is not in the radio at that moment, it fails with `Cancelled`
+/// and its frame is never transmitted again. The reply reports whether that happened.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct CancelRequestPayload {
