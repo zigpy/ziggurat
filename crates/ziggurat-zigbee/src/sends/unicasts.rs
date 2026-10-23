@@ -12,8 +12,8 @@ use crate::Instant;
 use crate::flat_map::FlatMap;
 
 use super::{
-    Action, Actions, ApsAckData, Confirm, DequeuedSend, SendFailure, SendId, SrcMatchTable,
-    Transmit, TxPriority,
+    Action, Actions, ApsAckData, Confirm, DequeuedSend, InFlight, SendFailure, SendId,
+    SrcMatchTable, Transmit, TxPriority,
 };
 
 /// How a unicast reaches its next hop. Fixed at admission.
@@ -190,7 +190,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         record.stage = Stage::Transmitting { acked: false };
 
         DequeuedSend {
-            id,
+            in_flight: InFlight(id),
             frame: &record.frame,
             transmit: Transmit::Unicast {
                 next_hop,

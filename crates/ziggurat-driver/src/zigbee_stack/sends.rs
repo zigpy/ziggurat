@@ -246,12 +246,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         loop {
             loop {
                 // The frame is cloned out so the core is unlocked across the transmit
-                let dequeued =
-                    self.core().sends.dequeue().map(|dequeued| {
-                        (dequeued.id, dequeued.frame.frame.clone(), dequeued.transmit)
-                    });
+                let dequeued = self.core().sends.dequeue().map(|dequeued| {
+                    (
+                        dequeued.in_flight,
+                        dequeued.frame.frame.clone(),
+                        dequeued.transmit,
+                    )
+                });
 
-                let Some((id, frame, transmit)) = dequeued else {
+                let Some((in_flight, frame, transmit)) = dequeued else {
                     break;
                 };
 
@@ -260,7 +263,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 let now = self.core_now();
                 let retry_delay = self.unicast_retry_delay();
                 let mut core = self.core();
-                let actions = core.sends.transmitted(id, result, now, retry_delay);
+                let actions = core.sends.transmitted(in_flight, result, now, retry_delay);
                 self.commit_sends(core, actions);
             }
 
