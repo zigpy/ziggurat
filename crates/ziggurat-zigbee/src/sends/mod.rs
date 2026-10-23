@@ -5,8 +5,10 @@
 //!
 //! - [`Unicasts`](unicasts::Unicasts): a frame with a known next hop, delivered directly
 //!   (with retries) or to a sleepy child when it polls.
-//! - [`ParkedUnicasts`](parked::ParkedUnicasts): a unicast with no route yet, waiting on its
-//!   destination's route discovery. It moves to the unicasts once the route resolves.
+//! - [`ParkedUnicasts`](parked::ParkedUnicasts): a unicast with no route yet, waiting on
+//!   its destination's route discovery. The driver runs the discovery against its
+//!   routing table and reports when the route is known or the discovery lapsed; the
+//!   send then moves to the unicasts or fails.
 //! - [`Broadcasts`](broadcasts::Broadcasts): a frame sent once, or rebroadcast on a
 //!   schedule until its passive-ack quorum is heard.
 //!
@@ -125,13 +127,8 @@ pub enum SendFailure {
 pub enum Confirm {
     /// Next-hop acceptance is the whole verdict.
     OnHandoff,
-    /// The end-to-end APS ack matching `ack`, waited for `wait` after handoff. `acked`
-    /// records an ack that arrived while the frame was still in the radio.
-    ApsAck {
-        ack: ApsAckData,
-        wait: Duration,
-        acked: bool,
-    },
+    /// The end-to-end APS ack matching `ack`, waited for `wait` after handoff.
+    ApsAck { ack: ApsAckData, wait: Duration },
 }
 
 /// How the sender transmits a dequeued frame.
@@ -154,7 +151,7 @@ pub struct DequeuedSend<'a, F> {
 }
 
 /// What the driver must do after a mutation.
-#[must_use = "actions resolve waiters and start discoveries; dropping them loses sends"]
+#[must_use = "actions resolve waiters; dropping them loses sends"]
 #[derive(Debug)]
 pub enum Action<F, W, E> {
     /// The mesh accepted the send's frame; its waiter learns so.
@@ -168,8 +165,6 @@ pub enum Action<F, W, E> {
         frame: F,
         failed_hop: Option<Nwk>,
     },
-    StartDiscovery(Nwk),
-    DiscoveryFailed(Nwk),
     /// The set of devices with frames awaiting their poll changed.
     PollAddressesChanged,
 }
@@ -241,19 +236,12 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         id
     }
 
-    /// Admit a unicast with no route yet, parked on its destination's discovery. One
-    /// discovery runs per destination; `attempts` bounds how often it is restarted.
-    pub fn admit_parked_unicast(
-        &mut self,
-        send: ParkedUnicast<F, W>,
-        now: Instant,
-        discovery_time: Duration,
-        attempts: u8,
-        actions: &mut Vec<Action<F, W, E>>,
-    ) -> SendId {
+    /// Admit a unicast with no route yet, parked on its destination's discovery. The
+    /// caller starts that discovery if the destination was not already awaited; the
+    /// first send parked on a destination fixes `retries`, how often it is restarted.
+    pub fn admit_parked_unicast(&mut self, send: ParkedUnicast<F, W>, retries: u8) -> SendId {
         let id = self.next_id();
-        self.parked_unicasts
-            .admit(id, send, now, discovery_time, attempts, actions);
+        self.parked_unicasts.admit(id, send, retries);
         id
     }
 
@@ -275,12 +263,10 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
             (None, None) => return None,
             (Some((id, _)), None) => (id, true),
             (None, Some((id, _))) => (id, false),
+            // Higher priority first; between equal priorities the older send (lower id)
             (Some((u, up)), Some((b, bp))) => {
-                if (up, b) > (bp, u) {
-                    (u, true)
-                } else {
-                    (b, false)
-                }
+                let unicast_first = up > bp || (up == bp && u < b);
+                if unicast_first { (u, true) } else { (b, false) }
             }
         };
 
@@ -323,6 +309,21 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     /// Every destination with sends parked on its route discovery.
     pub fn destinations_awaiting_route(&self) -> Vec<Nwk> {
         self.parked_unicasts.destinations()
+    }
+
+    /// Whether any send is parked on `destination`'s route discovery.
+    pub fn is_awaiting_route(&self, destination: Nwk) -> bool {
+        self.parked_unicasts.is_awaiting_route(destination)
+    }
+
+    /// The route discovery toward `destination` lapsed. `true` if the caller must
+    /// restart it; otherwise every send parked on it has failed.
+    pub fn discovery_lapsed(
+        &mut self,
+        destination: Nwk,
+        actions: &mut Vec<Action<F, W, E>>,
+    ) -> bool {
+        self.parked_unicasts.discovery_lapsed(destination, actions)
     }
 
     /// A route to `destination` is known: move every send parked on it to the unicasts.
@@ -391,9 +392,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         }
     }
 
-    /// The timer pass: re-queue what is due, fail what is past its deadline, and retry
-    /// or fail lapsed route discoveries. `passive_ack_interval` spaces passive-ack
-    /// broadcast copies.
+    /// The timer pass: re-queue what is due and fail what is past its deadline.
+    /// `passive_ack_interval` spaces passive-ack broadcast copies.
     pub fn tick(
         &mut self,
         now: Instant,

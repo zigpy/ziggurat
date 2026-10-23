@@ -270,7 +270,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     counter: aps_seq,
                 },
                 wait: self.aps_ack_timeout(destination, sleepy_destination),
-                acked: false,
             },
             ApsAck::None => Confirm::OnHandoff,
         };

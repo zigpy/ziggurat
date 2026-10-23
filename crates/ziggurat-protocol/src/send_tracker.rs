@@ -86,7 +86,7 @@ impl SendTracker {
     /// The driver's id of the send tracked under `id`, to cancel it with
     /// `ZigbeeStack::cancel_send`. `None` if nothing is tracked under `id`.
     pub fn send_id(&self, id: RequestId) -> Option<SendId> {
-        self.entries.get(&id).and_then(|entry| entry.handle.id())
+        self.entries.get(&id).map(|entry| entry.handle.id())
     }
 
     /// One reactor pass: emit every confirm frame now owed and drop entries that have

@@ -23,12 +23,12 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityLevel,
 };
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
-use ziggurat_zigbee::sends::{ParkedUnicast, Unicast as UnicastRecord};
+use ziggurat_zigbee::sends::ParkedUnicast;
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, HeldFrame,
     MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendHandle,
-    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
+    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -78,9 +78,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Spec 3.6.4.5.1: broadcast a route request `attempts` times, the first after
-    /// `initial_delay`, at the retry interval.
+    /// `initial_delay`, at the retry interval. Under a core lock the caller holds.
     pub(super) fn broadcast_route_request(
         &self,
+        core: &mut ZigbeeCore,
         nwk_frame: NwkFrame,
         attempts: u8,
         initial_delay: Duration,
@@ -90,7 +91,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.sequence_number,
         );
 
-        let admitted = self.admit_broadcast(
+        let admitted = self.admit_broadcast_locked(
+            core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
@@ -355,11 +357,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         let destination = nwk_frame.nwk_header.destination;
-        let token = self.take_token(policy)?;
-        let slot = Arc::new(SendSlot::default());
         let now = self.core_now();
 
-        let id = self.mutate_sends(|core, actions| {
+        self.mutate_sends(|core, actions| {
             nwk_frame.nwk_header.sequence_number = core.nib.next_sequence_number();
 
             let resolved = next_hop::resolve(
@@ -373,24 +373,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             match resolved {
                 NextHop::Resolved(next_hop) => {
                     let placement = self.place_unicast(&core.nib, next_hop);
-                    Ok(core.sends.admit_unicast(
-                        UnicastRecord {
-                            frame: HeldFrame {
-                                frame: Frame::nwk(nwk_frame, security),
-                                token,
-                            },
-                            priority: policy.priority,
-                            waiter: slot.clone(),
-                            confirm,
-                            delivery: placement.delivery,
-                            deadline: placement.deadline,
-                        },
+                    self.admit_unicast_locked(
+                        core,
                         actions,
-                    ))
+                        Frame::nwk(nwk_frame, security),
+                        policy,
+                        confirm,
+                        placement,
+                    )
                 }
                 NextHop::NeedDiscovery => {
                     tracing::debug!("Parking frame awaiting a route to {destination:?}");
-                    Ok(core.sends.admit_parked_unicast(
+                    let token = self.take_token(policy)?;
+                    let slot = Arc::new(SendSlot::default());
+
+                    // The first send parked on a destination starts its discovery
+                    let discovering = core.sends.is_awaiting_route(destination);
+                    let id = core.sends.admit_parked_unicast(
                         ParkedUnicast {
                             frame: HeldFrame {
                                 frame: Frame::nwk(nwk_frame, security),
@@ -402,11 +401,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                             destination,
                             deadline: now + self.tunables.handoff_timeout(),
                         },
-                        now,
-                        self.tunables.route_discovery_time(),
                         self.tunables.pending_route_discovery_attempts(),
-                        actions,
-                    ))
+                    );
+                    if !discovering {
+                        self.start_route_discovery(core, destination);
+                    }
+
+                    Ok(SendHandle::new(id, slot))
                 }
                 NextHop::Discard => {
                     tracing::debug!(
@@ -415,9 +416,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     Err(EnqueueError::RouteDiscoverySuppressed)
                 }
             }
-        })?;
-
-        Ok(SendHandle::new(id, slot))
+        })
     }
 
     pub(super) fn next_nwk_sequence_number(&self) -> u8 {
@@ -697,10 +696,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Send a single-copy broadcast: assign its sequence number and queue one copy for
-    /// the sender. The transmit result is the verdict. A budget rejection resolves the
-    /// returned handle with `BudgetExhausted`.
-    #[allow(clippy::option_if_let_else)]
-    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) -> SendHandle {
+    /// the sender. The transmit result is the verdict.
+    pub(super) fn send_oneshot_broadcast(
+        &self,
+        send: Broadcast,
+    ) -> Result<SendHandle, EnqueueError> {
         let Broadcast {
             frame: mut nwk_frame,
             security,
@@ -708,10 +708,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        match self.admit_broadcast(Frame::nwk(nwk_frame, security), policy, Schedule::Once) {
-            Ok(handle) => handle,
-            Err(_) => SendHandle::resolved(Err(DeliveryError::BudgetExhausted)),
-        }
+        self.admit_broadcast(Frame::nwk(nwk_frame, security), policy, Schedule::Once)
     }
 
     /// Encrypt and broadcast a single copy of a frame.
