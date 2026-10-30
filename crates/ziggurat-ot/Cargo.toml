@@ -23,8 +23,6 @@ embassy-time = "0.5"
 embassy-time-driver = "0.2"
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-16"] }
 critical-section = "1"
-embedded-alloc = { version = "0.7", optional = true }
-
 # inline-asm: without it cortex-m injects prebuilt path-named archive members
 # (bin/thumbv8m...o) that arm-none-eabi-objcopy --strip-debug chokes on.
 cortex-m = { version = "0.7.9", features = ["critical-section-single-core", "inline-asm"], optional = true }
@@ -34,8 +32,8 @@ riscv = { version = "0.16", features = ["critical-section-single-hart"], optiona
 # Exactly one platform feature must be enabled for a firmware build; lib.rs rejects
 # none or both at compile time.
 [features]
-# Silabs EFR32 (firmwares/efr32mg24): no firmware heap, so a fixed .bss arena.
-efr32 = ["dep:cortex-m", "dep:embedded-alloc"]
+# Silabs EFR32 (firmwares/efr32mg24): allocate from the SDK memory manager's heap.
+efr32 = ["dep:cortex-m"]
 # ESP-IDF (firmwares/esp32-c6): allocate from the IDF heap.
 esp-idf = ["dep:riscv"]
 
