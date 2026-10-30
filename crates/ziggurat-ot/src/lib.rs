@@ -14,11 +14,16 @@
 
 extern crate alloc;
 
+#[cfg(all(target_os = "none", not(any(feature = "efr32", feature = "esp-idf"))))]
+compile_error!("ziggurat-ot needs a platform feature: `efr32` or `esp-idf`");
+#[cfg(all(feature = "efr32", feature = "esp-idf"))]
+compile_error!("the `efr32` and `esp-idf` features are mutually exclusive");
+
 // Provides the critical-section implementation (PRIMASK, single-core).
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[cfg(feature = "efr32")]
 use cortex_m as _;
 // Provides the critical-section implementation (mstatus.MIE, single-hart).
-#[cfg(all(target_arch = "riscv32", target_os = "none"))]
+#[cfg(feature = "esp-idf")]
 use riscv as _;
 
 mod crypto;
@@ -51,8 +56,8 @@ static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Chann
 /// NCP buffer space became available; retry a failed `ziggurat_platform_host_send`.
 static HOST_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-// Bare metal without a firmware heap (EFR32): carve a fixed arena out of .bss.
-#[cfg(all(target_os = "none", not(feature = "esp-idf")))]
+// Bare metal without a firmware heap: carve a fixed arena out of .bss.
+#[cfg(feature = "efr32")]
 mod heap {
     use embedded_alloc::LlffHeap;
 
