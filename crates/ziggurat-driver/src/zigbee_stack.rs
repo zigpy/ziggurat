@@ -230,6 +230,9 @@ pub enum ApsAck {
     None,
 }
 
+/// The APS counter of a frame we originate.
+pub type ApsCounter = u8;
+
 /// Whether a device is attaching fresh or rejoining.
 ///
 /// Selects the link key that protects the transported network key: a fresh joiner only

@@ -16,9 +16,9 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::flat_map::Entry;
 
 use super::{
-    ApsAck, ApsAckData, Broadcast, DeliveryError, EnqueueError, NwkSecurityMode, PendingApsAck,
-    RouteDirective, SendHandle, SendMode, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority,
-    Unicast, ZigbeeStack,
+    ApsAck, ApsAckData, ApsCounter, Broadcast, DeliveryError, EnqueueError, NwkSecurityMode,
+    PendingApsAck, RouteDirective, SendHandle, SendMode, SendSlot, TrackStage, TxOutcome, TxPolicy,
+    TxPriority, Unicast, ZigbeeStack,
 };
 use crate::frame_token::TrafficClass;
 
@@ -189,21 +189,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// How long to wait for a device's APS ack: longer for a sleepy destination, which
-    /// only sees (and acks) the frame after polling.
+    /// How long to wait for a device's APS ack once the next hop accepts the frame. Our
+    /// own sleepy child accepts it at its poll, after the indirect hold. A sleepy device
+    /// behind a router is still ahead of that router's hold.
     fn aps_ack_timeout(&self, destination: Nwk, sleepy_destination: bool) -> Duration {
-        if sleepy_destination || self.sleepy_child_eui64(destination).is_some() {
-            self.tunables.aps_ack_timeout_indirect()
+        if sleepy_destination && self.sleepy_child_eui64(destination).is_none() {
+            self.tunables.aps_ack_timeout() + self.tunables.transaction_persistence_time()
         } else {
             self.tunables.aps_ack_timeout()
         }
     }
 
-    /// Send a unicast APS data frame, returning a [`SendHandle`] over its two stages.
+    /// Send a unicast APS data frame, returning a [`SendHandle`] over its two stages and
+    /// its APS counter.
     /// `Err` rejects at admission (malformed, rate limited, frame budget) and no handle is
     /// returned. On `Ok`, `handed_off` resolves on next-hop acceptance and `delivered` on
     /// the end-to-end APS ack (for an ack send) or on that same acceptance (rule 4, for a
     /// no-ack send).
+    ///
+    /// `aps_counter` reuses an earlier send's counter, so a retry is dropped as a duplicate.
     ///
     /// `aps_security` requests APS encryption of the ASDU with the link key shared with
     /// that device (link keys are pairwise, so this is unicast-only).
@@ -216,15 +220,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         src_ep: u8,
         dst_ep: u8,
         aps_ack: ApsAck,
+        aps_counter: Option<ApsCounter>,
         radius: u8,
         data: Vec<u8>,
         aps_security: Option<Eui64>,
         sleepy_destination: bool,
         priority: TxPriority,
         route: RouteDirective,
-    ) -> Result<SendHandle, EnqueueError> {
+    ) -> Result<(SendHandle, ApsCounter), EnqueueError> {
         let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
-        let aps_seq = self.next_aps_counter();
+        let aps_seq = aps_counter.unwrap_or_else(|| self.next_aps_counter());
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
@@ -327,7 +332,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return Err(err);
         }
 
-        Ok(handle)
+        Ok((handle, aps_seq))
     }
 
     /// Send a broadcast APS data frame to a broadcast sink, returning a [`SendHandle`].

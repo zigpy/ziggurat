@@ -415,7 +415,9 @@ pub struct SendUnicastFlags {
     /// The destination is a sleepy device. It only sees frames by polling its parent,
     /// so the APS ack wait must cover a poll cycle.
     pub sleepy_destination: bool,
-    pub reserved: u4,
+    /// Send with `aps_seq` instead of a fresh APS counter, to retry an earlier send.
+    pub force_aps_seq: bool,
+    pub reserved: u3,
 }
 
 /// How the host wants a unicast routed.
@@ -456,9 +458,10 @@ pub struct SendUnicastPayload {
     pub cluster_id: u16,
     pub src_ep: u8,
     pub dst_ep: u8,
-    /// Ignored: the stack owns the APS counter space so that host sends cannot collide
-    /// with stack-originated frames (ZDP, APS commands). Kept for wire stability.
-    pub _aps_seq: u8,
+    /// The APS counter to send with, used only with `force_aps_seq`. Otherwise the stack
+    /// assigns one, so host sends cannot collide with stack-originated frames (ZDP, APS
+    /// commands).
+    pub aps_seq: u8,
     pub radius: u8,
     pub priority: i8,
     pub route: RouteControl,
@@ -473,6 +476,13 @@ pub struct SendUnicastPayload {
     pub asdu_len: u16,
     #[abstract_bits(length_from = asdu_len)]
     pub asdu: Vec<u8>,
+}
+
+/// The APS counter an accepted unicast was sent with.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SendUnicastResultPayload {
+    pub aps_seq: u8,
 }
 
 #[abstract_bits]
@@ -492,7 +502,7 @@ pub struct SendBroadcastPayload {
     pub cluster_id: u16,
     pub src_ep: u8,
     pub dst_ep: u8,
-    /// Ignored, as in [`SendUnicastPayload::_aps_seq`].
+    /// Ignored: the stack owns the APS counter space.
     pub _aps_seq: u8,
     pub radius: u8,
     pub priority: i8,
@@ -517,7 +527,7 @@ pub struct SendGroupcastPayload {
     pub profile_id: u16,
     pub cluster_id: u16,
     pub src_ep: u8,
-    /// Ignored, as in [`SendUnicastPayload::_aps_seq`].
+    /// Ignored: the stack owns the APS counter space.
     pub _aps_seq: u8,
     pub radius: u8,
     pub priority: i8,
@@ -873,6 +883,7 @@ pub enum Response {
     NetworkInfo(NetworkInfoPayload),
     ScanCount(ScanCountPayload),
     CancelResult(CancelResultPayload),
+    SendUnicastResult(SendUnicastResultPayload),
 }
 
 impl Response {
@@ -886,6 +897,7 @@ impl Response {
             Self::NetworkInfo(payload) => append(&mut bytes, payload),
             Self::ScanCount(payload) => append(&mut bytes, payload),
             Self::CancelResult(payload) => append(&mut bytes, payload),
+            Self::SendUnicastResult(payload) => append(&mut bytes, payload),
         };
         if !fits {
             return Error::Status(Status::ResponseTooLarge).frame(command, request_id);
