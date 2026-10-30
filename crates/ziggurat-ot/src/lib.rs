@@ -130,7 +130,7 @@ impl Platform for OtPlatform {
     fn hw_eui64(&self) -> Eui64 {
         let mut bytes = [0u8; 8];
         unsafe { platform::ziggurat_platform_hw_eui64(bytes.as_mut_ptr()) };
-        Eui64(bytes)
+        Eui64::from_be_bytes(bytes)
     }
 
     fn hard_reset(&self) -> ! {

@@ -28,7 +28,7 @@ impl LinkOps for PlatformLinkOps {
             tx_power_dbm: config.tx_power,
             short_address: config.short_address.as_u16(),
             pan_id: config.pan_id.0,
-            extended_address: config.extended_address.to_bytes(),
+            extended_address: config.extended_address.to_be_bytes(),
             promiscuous: config.promiscuous,
             rx_on_when_idle: config.rx_on_when_idle,
         };
@@ -62,7 +62,7 @@ impl LinkOps for PlatformLinkOps {
                 )?;
             }
             for eui in extended {
-                let bytes = eui.to_bytes();
+                let bytes = eui.to_be_bytes();
                 check(
                     platform::ziggurat_platform_radio_src_match_add_ext(bytes.as_ptr()),
                     "radio_src_match_add_ext failed",

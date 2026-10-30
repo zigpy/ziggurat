@@ -526,7 +526,7 @@ impl SpinelClient {
             .try_into()
             .map_err(|rsp: Vec<u8>| SpinelError::InvalidHardwareAddress { got: rsp })?;
 
-        Ok(crate::eui64_from_spinel_bytes(bytes))
+        Ok(Eui64::from_be_bytes(bytes))
     }
 
     pub async fn transmit_frame(

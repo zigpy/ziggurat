@@ -5,7 +5,6 @@ use num_enum::TryFromPrimitive;
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use ziggurat_ieee_802154::types::Eui64;
 
 const CRC_KERMIT: CrcAlgo<u16> = CrcAlgo::<u16>::new(0x1021, 16, 0xFFFF, 0xFFFF, true);
 const U21_MAX: u32 = 1 << 21;
@@ -16,23 +15,6 @@ const MAX_HDLC_BUFFER_SIZE: usize = 4096;
 
 /// OpenThread's `SPINEL_FRAME_MAX_SIZE`: no spinel frame exceeds this unescaped.
 pub const SPINEL_FRAME_MAX_SIZE: usize = 1300;
-
-/// Convert an [`Eui64`] into Spinel's byte order.
-///
-/// Spinel EUI64 fields are byte-reversed relative to the 802.15.4 over-the-air order
-/// that [`Eui64`] stores: OpenThread parses addresses out of frames with
-/// `kReverseByteOrder` and spinel carries that internal representation verbatim.
-pub const fn eui64_to_spinel_bytes(eui64: Eui64) -> [u8; 8] {
-    let mut bytes = eui64.to_bytes();
-    bytes.reverse();
-    bytes
-}
-
-/// The inverse of [`eui64_to_spinel_bytes`].
-pub const fn eui64_from_spinel_bytes(mut bytes: [u8; 8]) -> Eui64 {
-    bytes.reverse();
-    Eui64(bytes)
-}
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]

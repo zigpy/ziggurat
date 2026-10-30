@@ -35,14 +35,16 @@ typedef uint8_t ziggurat_tx_status;
 
 /*
  Radio programming, mirrored from `ziggurat_phy::RadioConfig` plus the derived
- PAN-coordinator flag. Extended address in little-endian (OT/over-the-air) byte
- order.
+ PAN-coordinator flag.
  */
 typedef struct ziggurat_radio_config_t {
   uint8_t channel;
   int8_t tx_power_dbm;
   uint16_t short_address;
   uint16_t pan_id;
+  /*
+   In `otExtAddress` byte order, ready for `otLinkSetExtendedAddress`.
+   */
   uint8_t extended_address[8];
   bool promiscuous;
   bool rx_on_when_idle;
@@ -189,8 +191,9 @@ extern void ziggurat_platform_radio_src_match_clear(void);
 extern int32_t ziggurat_platform_radio_src_match_add_short(uint16_t address);
 
 /*
- Add an 8-byte extended address (little-endian) to the source-address match
- table. Nonzero = failure.
+ Add an extended address to the source-address match table. `address` is
+ 8 bytes in `otExtAddress` order, ready for `otLinkRawSrcMatchAddExtEntry`.
+ Nonzero = failure.
  */
 extern int32_t ziggurat_platform_radio_src_match_add_ext(const uint8_t *address);
 
@@ -214,8 +217,8 @@ extern int32_t ziggurat_platform_radio_energy_scan(uint8_t channel,
                                                    uint16_t duration_ms);
 
 /*
- The factory EUI-64 (otPlatRadioGetIeeeEui64), written to the 8-byte `out`
- in little-endian byte order.
+ The factory EUI-64, written to the 8-byte `out` exactly as
+ `otPlatRadioGetIeeeEui64` reports it.
  */
 extern void ziggurat_platform_hw_eui64(uint8_t *out);
 
