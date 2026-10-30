@@ -90,10 +90,10 @@ void handleTimer(ot::Timer &aTimer);
 
 #if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
 typedef ot::TimerMicro ZigguratTimer;
-constexpr uint64_t kTicksPerUs = 1;
+constexpr uint64_t     kTicksPerUs = 1;
 #else
 typedef ot::TimerMilli ZigguratTimer;
-constexpr uint64_t kTicksPerUs = 1000;
+constexpr uint64_t     kTicksPerUs = 1000;
 #endif
 
 OT_DEFINE_ALIGNED_VAR(sTimerRaw, sizeof(ZigguratTimer), uint64_t);
@@ -117,12 +117,8 @@ void handleRxDone(otInstance *aInstance, otRadioFrame *aFrame, otError aError)
     }
 
     // OT frames include the 2-byte FCS; ziggurat PSDUs never do.
-    ziggurat_radio_rx(aFrame->mPsdu,
-                      aFrame->mLength - 2,
-                      aFrame->mChannel,
-                      aFrame->mInfo.mRxInfo.mRssi,
-                      aFrame->mInfo.mRxInfo.mLqi,
-                      aFrame->mInfo.mRxInfo.mTimestamp);
+    ziggurat_radio_rx(aFrame->mPsdu, aFrame->mLength - 2, aFrame->mChannel, aFrame->mInfo.mRxInfo.mRssi,
+                      aFrame->mInfo.mRxInfo.mLqi, aFrame->mInfo.mRxInfo.mTimestamp);
 }
 
 void handleTxDone(otInstance *aInstance, otRadioFrame *aFrame, otRadioFrame *aAckFrame, otError aError)
@@ -328,34 +324,22 @@ extern "C" size_t ziggurat_platform_last_reset(uint8_t *buf, size_t cap)
         }
         else
         {
-            len = snprintf(out,
-                           cap,
-                           "assert %s:%lu",
-                           assertInfo->file,
-                           static_cast<unsigned long>(assertInfo->line));
+            len = snprintf(out, cap, "assert %s:%lu", assertInfo->file, static_cast<unsigned long>(assertInfo->line));
         }
     }
     else if (halGetResetInfo() == RESET_FAULT)
     {
         const HalCrashInfoType *c = &halCrashInfo;
 
-        len = snprintf(out,
-                       cap,
+        len = snprintf(out, cap,
                        "%s reset (ext 0x%04x): PC=%08lx LR=%08lx CFSR=%08lx HFSR=%08lx "
                        "FAR=%08lx stack used=%lu ret=[%08lx %08lx %08lx %08lx %08lx %08lx]",
-                       halGetResetString(),
-                       halGetExtendedResetInfo(),
-                       static_cast<unsigned long>(c->PC),
-                       static_cast<unsigned long>(c->LR),
-                       static_cast<unsigned long>(c->cfsr.word),
-                       static_cast<unsigned long>(c->hfsr.word),
-                       static_cast<unsigned long>(c->faultAddress),
-                       static_cast<unsigned long>(c->mainSPUsed),
-                       static_cast<unsigned long>(c->returns[0]),
-                       static_cast<unsigned long>(c->returns[1]),
-                       static_cast<unsigned long>(c->returns[2]),
-                       static_cast<unsigned long>(c->returns[3]),
-                       static_cast<unsigned long>(c->returns[4]),
+                       halGetResetString(), halGetExtendedResetInfo(), static_cast<unsigned long>(c->PC),
+                       static_cast<unsigned long>(c->LR), static_cast<unsigned long>(c->cfsr.word),
+                       static_cast<unsigned long>(c->hfsr.word), static_cast<unsigned long>(c->faultAddress),
+                       static_cast<unsigned long>(c->mainSPUsed), static_cast<unsigned long>(c->returns[0]),
+                       static_cast<unsigned long>(c->returns[1]), static_cast<unsigned long>(c->returns[2]),
+                       static_cast<unsigned long>(c->returns[3]), static_cast<unsigned long>(c->returns[4]),
                        static_cast<unsigned long>(c->returns[5]));
     }
     else
@@ -545,13 +529,13 @@ extern "C" int32_t ziggurat_platform_radio_transmit(const uint8_t *psdu,
     }
 
     memcpy(frame->mPsdu, psdu, len);
-    frame->mLength                        = static_cast<uint16_t>(len + 2); // radio appends the FCS
-    frame->mChannel                       = channel;
-    frame->mInfo.mTxInfo.mCsmaCaEnabled   = csma_ca;
-    frame->mInfo.mTxInfo.mMaxFrameRetries = max_frame_retries;
-    frame->mInfo.mTxInfo.mMaxCsmaBackoffs = max_csma_backoffs;
-    frame->mInfo.mTxInfo.mTxDelay         = 0;
-    frame->mInfo.mTxInfo.mTxDelayBaseTime = 0;
+    frame->mLength                             = static_cast<uint16_t>(len + 2); // radio appends the FCS
+    frame->mChannel                            = channel;
+    frame->mInfo.mTxInfo.mCsmaCaEnabled        = csma_ca;
+    frame->mInfo.mTxInfo.mMaxFrameRetries      = max_frame_retries;
+    frame->mInfo.mTxInfo.mMaxCsmaBackoffs      = max_csma_backoffs;
+    frame->mInfo.mTxInfo.mTxDelay              = 0;
+    frame->mInfo.mTxInfo.mTxDelayBaseTime      = 0;
     frame->mInfo.mTxInfo.mRxChannelAfterTxDone = channel;
     frame->mInfo.mTxInfo.mIsSecurityProcessed  = true; // ziggurat frames arrive encrypted
     frame->mInfo.mTxInfo.mIsHeaderUpdated      = true;
