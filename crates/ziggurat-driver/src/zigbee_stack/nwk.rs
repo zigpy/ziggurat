@@ -1164,6 +1164,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
             TxOutcome::Track { slot, stage } => slot.resolve(stage, result),
+            TxOutcome::ApsAck { slot } => self.resolve_aps_ack_handoff(slot, result),
             TxOutcome::IndirectDelivery {
                 destination,
                 transaction,
@@ -1377,7 +1378,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// slot, and only a tracked send can be cancelled; every reactor checks this before
     /// acting on the entry it holds, dropping it and resolving `Err(Cancelled)` if set.
     fn outcome_cancelled(outcome: &TxOutcome) -> bool {
-        matches!(outcome, TxOutcome::Track { slot, .. } if slot.is_cancelled())
+        matches!(
+            outcome,
+            TxOutcome::Track { slot, .. } | TxOutcome::ApsAck { slot } if slot.is_cancelled()
+        )
     }
 
     /// Nudge every reactor that parks a cancellable send, so a just-set cancel flag is
