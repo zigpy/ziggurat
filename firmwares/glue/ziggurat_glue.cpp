@@ -200,15 +200,7 @@ extern "C" void ziggurat_platform_entropy(uint8_t *buf, size_t len)
 
 extern "C" void ziggurat_platform_hw_eui64(uint8_t *out)
 {
-    otExtAddress eui64;
-
-    otPlatRadioGetIeeeEui64(instance(), eui64.m8);
-    // The platform reports the factory EUI-64 big-endian; ziggurat stores
-    // little-endian (over-the-air) byte order.
-    for (size_t i = 0; i < sizeof(eui64.m8); i++)
-    {
-        out[i] = eui64.m8[sizeof(eui64.m8) - 1 - i];
-    }
+    otPlatRadioGetIeeeEui64(instance(), out);
 }
 
 extern "C" void ziggurat_platform_hard_reset(void)

@@ -100,8 +100,21 @@ impl Eui64 {
         Ok((Self(eui), &bytes[8..]))
     }
 
+    /// Over-the-air (little-endian) order, as the address appears in a frame.
     pub const fn to_bytes(&self) -> [u8; 8] {
         self.0
+    }
+
+    /// Display (big-endian) order.
+    pub const fn to_be_bytes(&self) -> [u8; 8] {
+        let mut bytes = self.0;
+        bytes.reverse();
+        bytes
+    }
+
+    pub const fn from_be_bytes(mut bytes: [u8; 8]) -> Self {
+        bytes.reverse();
+        Self(bytes)
     }
 }
 

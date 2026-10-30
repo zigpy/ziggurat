@@ -184,7 +184,7 @@ async fn write_frame_pending(
 
     let extended_bytes: Vec<u8> = extended
         .iter()
-        .flat_map(|eui64| ziggurat_spinel::eui64_to_spinel_bytes(*eui64))
+        .flat_map(|eui64| eui64.to_be_bytes())
         .collect();
     set_spinel_prop(
         client,
@@ -220,7 +220,7 @@ async fn apply_config(client: &SpinelClient, config: &RadioConfig) -> Result<(),
     set_spinel_prop(
         client,
         SpinelPropertyId::Mac154Laddr,
-        ziggurat_spinel::eui64_to_spinel_bytes(config.extended_address).to_vec(),
+        config.extended_address.to_be_bytes().to_vec(),
     )
     .await?;
     set_spinel_prop(
