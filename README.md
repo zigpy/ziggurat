@@ -42,8 +42,8 @@ with any radio that supports OpenThread RCP.
 #### Rust
 Rust is memory safe and fast. It's also fun to write. Ziggurat is written in fairly performant
 Rust to reduce the round trip latency when communicating with the radio hardware and to allow
-it to run on even the most basic of hosts. Future development may get it running on
-larger microcontrollers directly, like the ESP32.
+it to run on even the most basic of hosts, and the same code runs embedded in the radio
+firmware itself (see below).
 
 ### Setup
 Ziggurat is in early alpha testing. Keep this in mind!
@@ -55,18 +55,16 @@ Ziggurat can be set up as a regular ZHA radio in **Home Assistant 2026.7.0** or 
 4. When ZHA asks for the radio type, pick **Ziggurat** and migrate your existing network (or set a new one up).
 5. Done.
 
-### ESP32-C6 firmware
-Ziggurat can also run on-chip on an ESP32-C6, using its built-in 802.15.4 radio and
-exposing the same JSON API over USB-Serial-JTAG: no separate RCP radio or host.
+### Embedded firmware
+Ziggurat can also run inside the OpenThread RCP firmware itself, on the EFR32MG24, and the
+ESP32-C6. The firmware stays a normal RCP for Thread; the Zigbee stack is reached through a
+vendor Spinel property, so no host server is needed: point ZHA at the serial port instead
+of a `ws://` URL.
 
-```bash
-cd crates/ziggurat-esp
-cargo build --release
-espflash flash --no-stub --chip esp32c6 --port <PORT> \
-  target/riscv32imac-unknown-none-elf/release/ziggurat-esp
-```
-
-- USB-Serial-JTAG carries the JSON API; UART0 on GPIO16 @ 460800 carries logs, the debug heartbeat, and panic backtraces.
+- `firmwares/esp32-c6/build.sh` builds the ESP-IDF firmware.
+- `firmwares/efr32mg24/` holds the manifests and SLC extension for the
+  [Silicon Labs firmware builder](https://github.com/NabuCasa/silabs-firmware-builder).
+- `firmwares/glue/` is the platform layer shared by both, written against OpenThread only.
 
 ### Development
 Ziggurat aims to implement the portions of a Zigbee stack used by normal Home Assistant

@@ -14,11 +14,16 @@
 
 extern crate alloc;
 
+#[cfg(all(target_os = "none", not(any(feature = "efr32", feature = "esp-idf"))))]
+compile_error!("ziggurat-ot needs a platform feature: `efr32` or `esp-idf`");
+#[cfg(all(feature = "efr32", feature = "esp-idf"))]
+compile_error!("the `efr32` and `esp-idf` features are mutually exclusive");
+
 // Provides the critical-section implementation (PRIMASK, single-core).
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[cfg(feature = "efr32")]
 use cortex_m as _;
 // Provides the critical-section implementation (mstatus.MIE, single-hart).
-#[cfg(all(target_arch = "riscv32", target_os = "none"))]
+#[cfg(feature = "esp-idf")]
 use riscv as _;
 
 mod crypto;
@@ -51,19 +56,141 @@ static INBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, INBOUND_DEPTH> = Chann
 /// NCP buffer space became available; retry a failed `ziggurat_platform_host_send`.
 static HOST_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-#[cfg(target_os = "none")]
+// Silabs: the SDK memory manager owns all RAM left after .bss and the stack, and
+// `sl_main_init` sets it up before the application runs. Allocating from it instead
+// of a fixed arena lets the stack use whatever the firmware does not.
+//
+/// cbindgen:ignore
+#[cfg(feature = "efr32")]
 mod heap {
-    use embedded_alloc::LlffHeap;
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::ffi::c_void;
+    use core::ptr;
+
+    const BLOCK_TYPE_LONG_TERM: u8 = 0;
+    const SL_STATUS_OK: u32 = 0;
+    // `SLI_BLOCK_ALLOC_MIN_ALIGN`: what a block gets when it is moved by realloc.
+    const DEFAULT_ALIGN: usize = 8;
+
+    unsafe extern "C" {
+        fn sl_memory_alloc_advanced(
+            size: usize,
+            align: usize,
+            block_type: u8,
+            block: *mut *mut c_void,
+        ) -> u32;
+        fn sl_memory_realloc(ptr: *mut c_void, size: usize, block: *mut *mut c_void) -> u32;
+        fn sl_memory_free(block: *mut c_void) -> u32;
+    }
+
+    struct SilabsHeap;
+
+    unsafe impl GlobalAlloc for SilabsHeap {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let mut block: *mut c_void = ptr::null_mut();
+            let status = unsafe {
+                sl_memory_alloc_advanced(
+                    layout.size(),
+                    layout.align(),
+                    BLOCK_TYPE_LONG_TERM,
+                    &mut block,
+                )
+            };
+            if status != SL_STATUS_OK {
+                return ptr::null_mut();
+            }
+            block.cast()
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+            unsafe { sl_memory_free(ptr.cast()) };
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // The SDK grows a block in place when its neighbour is free, but a moved
+            // block only gets the default alignment, so over-aligned layouts copy.
+            if layout.align() > DEFAULT_ALIGN {
+                let new_layout =
+                    unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+                let out = unsafe { self.alloc(new_layout) };
+                if !out.is_null() {
+                    unsafe {
+                        ptr::copy_nonoverlapping(ptr, out, layout.size().min(new_size));
+                        self.dealloc(ptr, layout);
+                    }
+                }
+                return out;
+            }
+            let mut block: *mut c_void = ptr::null_mut();
+            let status = unsafe { sl_memory_realloc(ptr.cast(), new_size, &mut block) };
+            if status != SL_STATUS_OK {
+                return ptr::null_mut();
+            }
+            block.cast()
+        }
+    }
 
     #[global_allocator]
-    static HEAP: LlffHeap = LlffHeap::empty();
+    static HEAP: SilabsHeap = SilabsHeap;
 
-    const HEAP_BYTES: usize = 128 * 1024;
-    static mut ARENA: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
+    pub fn init() {}
+}
 
-    pub fn init() {
-        unsafe { HEAP.init(core::ptr::addr_of_mut!(ARENA) as usize, HEAP_BYTES) }
+// ESP-IDF: the staticlib links into the IDF app, so allocate from its capability-aware
+// heap instead of a fixed arena. Pinned to internal RAM; PSRAM (MALLOC_CAP_SPIRAM) is
+// reserved for an explicitly tagged slow heap.
+//
+/// cbindgen:ignore
+#[cfg(feature = "esp-idf")]
+mod heap {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::ffi::c_void;
+    use core::ptr;
+
+    const MALLOC_CAP_8BIT: u32 = 1 << 2;
+    const MALLOC_CAP_INTERNAL: u32 = 1 << 11;
+    const CAPS: u32 = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+
+    unsafe extern "C" {
+        fn heap_caps_aligned_alloc(alignment: usize, size: usize, caps: u32) -> *mut c_void;
+        fn heap_caps_realloc(ptr: *mut c_void, size: usize, caps: u32) -> *mut c_void;
+        fn heap_caps_free(ptr: *mut c_void);
     }
+
+    struct IdfHeap;
+
+    unsafe impl GlobalAlloc for IdfHeap {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { heap_caps_aligned_alloc(layout.align(), layout.size(), CAPS).cast() }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+            unsafe { heap_caps_free(ptr.cast()) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // TLSF can grow a block in place, but a moved block only gets the heap's
+            // default (word) alignment, so over-aligned layouts take the copying path.
+            if layout.align() > core::mem::align_of::<usize>() {
+                let new_layout =
+                    unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+                let out = unsafe { self.alloc(new_layout) };
+                if !out.is_null() {
+                    unsafe {
+                        ptr::copy_nonoverlapping(ptr, out, layout.size().min(new_size));
+                        self.dealloc(ptr, layout);
+                    }
+                }
+                return out;
+            }
+            unsafe { heap_caps_realloc(ptr.cast(), new_size, CAPS).cast() }
+        }
+    }
+
+    #[global_allocator]
+    static HEAP: IdfHeap = IdfHeap;
+
+    pub fn init() {}
 }
 
 #[cfg(target_os = "none")]
