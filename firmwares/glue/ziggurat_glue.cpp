@@ -33,8 +33,15 @@
 
 #if defined(ESP_PLATFORM)
 
+#include "esp_idf_version.h"
 #include "esp_openthread.h"
 #include "esp_system.h"
+
+#if ESP_IDF_VERSION_MAJOR >= 6
+#include <openthread/platform/crypto.h>
+
+#include "aes/esp_aes.h"
+#endif
 
 #else // Silabs EFR32
 
@@ -368,6 +375,47 @@ extern "C" size_t ziggurat_platform_last_reset(uint8_t *buf, size_t cap)
 #endif // platform-specific
 
 // -- crypto ---------------------------------------------------------------------------
+
+#if defined(ESP_PLATFORM) && ESP_IDF_VERSION_MAJOR >= 6
+
+// IDF 6 builds OpenThread's radio with the PSA crypto backend but without key
+// references, so its weak otPlatCryptoAes* only accept PSA key handles and fail
+// on the raw-byte keys ot::Crypto::Key carries here. These strong definitions run
+// AES on the hardware engine with raw keys instead. The RCP itself never calls
+// them (the radio encrypts MAC frames), only the crypto below does.
+//
+// OpenThread sizes the per-object context for a PSA key id, too small for an
+// esp_aes_context, so a single static one is used: everything runs on the OT task
+// and at most one AesEcb is alive at a time.
+static esp_aes_context sAesContext;
+
+extern "C" otError otPlatCryptoAesInit(otCryptoContext *aContext)
+{
+    OT_UNUSED_VARIABLE(aContext);
+    esp_aes_init(&sAesContext);
+    return OT_ERROR_NONE;
+}
+
+extern "C" otError otPlatCryptoAesSetKey(otCryptoContext *aContext, const otCryptoKey *aKey)
+{
+    OT_UNUSED_VARIABLE(aContext);
+    return esp_aes_setkey(&sAesContext, aKey->mKey, aKey->mKeyLength * 8) == 0 ? OT_ERROR_NONE : OT_ERROR_FAILED;
+}
+
+extern "C" otError otPlatCryptoAesEncrypt(otCryptoContext *aContext, const uint8_t *aInput, uint8_t *aOutput)
+{
+    OT_UNUSED_VARIABLE(aContext);
+    return esp_aes_crypt_ecb(&sAesContext, ESP_AES_ENCRYPT, aInput, aOutput) == 0 ? OT_ERROR_NONE : OT_ERROR_FAILED;
+}
+
+extern "C" otError otPlatCryptoAesFree(otCryptoContext *aContext)
+{
+    OT_UNUSED_VARIABLE(aContext);
+    esp_aes_free(&sAesContext);
+    return OT_ERROR_NONE;
+}
+
+#endif
 
 extern "C" void ziggurat_platform_aes128_encrypt_block(const uint8_t *key, uint8_t *block)
 {
