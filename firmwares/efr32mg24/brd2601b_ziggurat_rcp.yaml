@@ -28,6 +28,11 @@ c_defines:
   # The SDK default 4 KiB main stack overflows during energy scans and broadcasts
   SL_STACK_SIZE: 16384
 
+  # The 2 KiB default drops acked RX frames under load (OT-RCP RX drop)
+  OPENTHREAD_CONFIG_NCP_TX_BUFFER_SIZE:
+    type: c_flag
+    value: 4096
+
   SL_CLOCK_MANAGER_HFXO_FREQ: 39000000
   SL_CLOCK_MANAGER_HFXO_PRECISION: 50
   SL_CLOCK_MANAGER_HFXO_CTUNE: 140
