@@ -12,6 +12,7 @@ use core::time::Duration;
 use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as UnicastRecord};
 
@@ -299,27 +300,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// The timer task: runs the table's timed transitions whenever its next deadline is
-    /// due, or when a mutation may have moved that deadline. The route discoveries
-    /// unrouted sends wait on keep their deadlines in the routing table, so those count
-    /// too.
+    /// due, or when a mutation may have moved that deadline.
     pub(super) async fn send_timer_task(&self) {
         loop {
-            self.drive_sends();
-
-            let next_wake = {
-                let now = self.core_now();
-                let core = self.core();
-                let discoveries =
-                    core.sends
-                        .unrouted_destinations()
-                        .into_iter()
-                        .filter_map(|destination| {
-                            core.nib.routing.discovery_deadline(destination, now)
-                        });
-                core.sends.next_wake().into_iter().chain(discoveries).min()
-            };
-
-            match next_wake {
+            match self.drive_sends() {
                 Some(deadline) => {
                     let _ = self
                         .timeout_at_core(deadline, self.send_timer_wake.notified())
@@ -332,8 +316,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, route
     /// the sends whose route became active, restart or fail the discoveries that
-    /// lapsed, then run the table's timed transitions.
-    fn drive_sends(&self) {
+    /// lapsed, then run the table's timed transitions. Returns when the next pass is
+    /// due: the table's next deadline, or that of a route discovery unrouted sends wait
+    /// on, which lives in the routing table.
+    fn drive_sends(&self) -> Option<CoreInstant> {
         let now = self.core_now();
         let passive_ack_interval = self.tunables.passive_ack_timeout() + self.broadcast_jitter();
 
@@ -372,7 +358,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         actions.extend(core.sends.tick(now, passive_ack_interval));
+
+        let discoveries = core
+            .sends
+            .unrouted_destinations()
+            .into_iter()
+            .filter_map(|destination| core.nib.routing.discovery_deadline(destination, now));
+        let next_wake = core.sends.next_wake().into_iter().chain(discoveries).min();
+
         self.commit_sends(guard, actions);
+        next_wake
     }
 }
 
