@@ -42,3 +42,73 @@ jobs:
 
       - name: Lint and static analysis
         run: prek run --show-diff-on-failure --color=always --all-files
+
+  zbt2-firmware:
+    name: Build ZBT-2 firmware
+    runs-on: ubuntu-latest
+    env:
+      BUILDER_IMAGE: ghcr.io/nabucasa/silabs-firmware-builder:f5127febf449e9b5
+      EXT: silabs-firmware-builder/src/openthread_rcp/extension/ziggurat_extension
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the firmware builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NabuCasa/silabs-firmware-builder
+          ref: 37697c56a562c54dd9faac23ec0f3e3af4e7aa25
+          path: silabs-firmware-builder
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup default stable
+          rustup update stable
+          rustup target add thumbv8m.main-none-eabihf
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: crates/ziggurat-ot
+
+      - name: Install ARM binutils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-arm-none-eabi
+
+      - name: Build the Ziggurat static library
+        working-directory: crates/ziggurat-ot
+        run: cargo build --locked --release --features efr32
+
+      # Rust's precompiled core/alloc carry debug info with absolute paths, which the
+      # builder's reproducibility check rejects.
+      - name: Add the Ziggurat extension to the firmware builder
+        run: |
+          mkdir -p "$EXT/lib" "$EXT/inc" "$EXT/src"
+          cp crates/ziggurat-ot/target/thumbv8m.main-none-eabihf/release/libziggurat_ot.a "$EXT/lib/"
+          arm-none-eabi-objcopy --strip-debug "$EXT/lib/libziggurat_ot.a"
+          cp crates/ziggurat-ot/include/ziggurat.h firmwares/glue/ziggurat_glue.h "$EXT/inc/"
+          cp firmwares/glue/ziggurat_glue.cpp firmwares/glue/ziggurat_ncp.cpp "$EXT/src/"
+          cp firmwares/efr32mg24/ziggurat_extension/* "$EXT/"
+          cp firmwares/efr32mg24/zbt2_ziggurat_rcp.yaml silabs-firmware-builder/manifests/nabucasa/zbt2/
+
+      - name: Build firmware
+        run: |
+          docker run --rm -v "$PWD/silabs-firmware-builder:/repo" "$BUILDER_IMAGE" \
+            --manifest manifests/nabucasa/zbt2/zbt2_ziggurat_rcp.yaml \
+            --build-dir build \
+            --output-dir outputs \
+            --output gbl \
+            --output hex \
+            --output out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zbt2-ziggurat-rcp
+          path: silabs-firmware-builder/outputs/*
+          compression-level: 9
+          if-no-files-found: error
