@@ -21,7 +21,7 @@ and maybe a megabyte of flash. Their Zigbee firmware is written with this resour
 environment in mind: limited packet buffers, simpler routing algorithms, fewer concurrent
 requests.
 
-Ziggurat moves all of logic out of the microcontroller and onto the host, which has way
+Ziggurat moves all of the logic out of the microcontroller and onto the host, which has way
 more than a few hundred kilobytes of RAM. Routing, discovery, and neighbor tables don't
 need size limits. We can buffer an unlimited number of requests. We can keep track of
 multiple concurrent routes to a single device and pick intelligently, reducing latency.
@@ -46,25 +46,48 @@ it to run on even the most basic of hosts, and the same code runs embedded in th
 firmware itself (see below).
 
 ### Setup
-Ziggurat is in early alpha testing. Keep this in mind!
+Ziggurat is in beta testing and can be set up as a regular ZHA radio in **Home Assistant
+2026.7.0** or newer. There are two ways to run it:
 
-Ziggurat can be set up as a regular ZHA radio in **Home Assistant 2026.7.0** or newer.
-1. Flash your Zigbee radio with OpenThread RCP firmware, the same firmware you use for Thread. Radios with Silicon Labs chips (e.g. EFR32MG21, EFR32MG24) are recommended but others should work too.
+#### Ziggurat on host
+The most performant way to run Ziggurat is straight on your host machine, hooked up to
+an OpenThread RCP radio:
+1. Flash your Zigbee radio with OpenThread RCP firmware, the same firmware you use for
+   Thread. Radios with Silicon Labs chips (e.g. EFR32MG21, EFR32MG24) are recommended
+   but others work too.
 2. Install the Ziggurat server app from the [Zigpy app repo for Home Assistant](https://github.com/zigpy/addons).
-3. Set up ZHA (or start a migration) and select "manual" as the serial port path. Type in `ws://local-ziggurat:9999` as the URL.
-4. When ZHA asks for the radio type, pick **Ziggurat** and migrate your existing network (or set a new one up).
+3. Set up ZHA (or start a migration) and select "manual" as the serial port path. Type
+   in `ws://local-ziggurat:9999` as the URL.
+4. When ZHA asks for the radio type, pick **Ziggurat** and migrate your existing network
+   (or set a new one up).
 5. Done.
 
-### Embedded firmware
-Ziggurat can also run inside the OpenThread RCP firmware itself, on the EFR32MG24, and the
-ESP32-C6. The firmware stays a normal RCP for Thread; the Zigbee stack is reached through a
-vendor Spinel property, so no host server is needed: point ZHA at the serial port instead
-of a `ws://` URL.
+### Ziggurat on device
+Ziggurat is small enough to fit on larger microcontrollers, there are example firmwares
+for the Silicon Labs EFR32MG24 or Espressif ESP32-C6. The architecture for this
+firmware is a little special: we embed Ziggurat _inside_ of OpenThread RCP and tunnel
+its protocol through a vendor Spinel property (0x3D5A). This special build of OpenThread
+RCP can be used for a OpenThread border router, Ziggurat on host, and Ziggurat on device.
 
-- `firmwares/esp32-c6/build.sh` builds the ESP-IDF firmware.
-- `firmwares/efr32mg24/` holds the manifests and SLC extension for the
-  [Silicon Labs firmware builder](https://github.com/NabuCasa/silabs-firmware-builder).
-- `firmwares/glue/` is the platform layer shared by both, written against OpenThread only.
+ZHA can communicate directly with Ziggurat running on a microcontroller via serial. Set
+it up as you would any other radio in ZHA.
+
+1. Flash your Zigbee radio with Ziggurat + OpenThread RCP firmware
+  - Home Assistant Connect ZBT-2 firmwares are built as part of CI. Find the latest one
+    from [GitHub Actions](https://github.com/zigpy/ziggurat/actions?query=branch%3Adev)
+    and flash the `.gbl` file to your ZBT-2 with the [OHF Device Toolbox](https://toolbox.openhomefoundation.org/home-assistant-connect-zbt-2/install/)
+    or [`universal-silabs-flasher`](https://github.com/NabuCasa/universal-silabs-flasher)
+2. Plug it into your Home Assistant OS box.
+3. Set up ZHA and pick the Ziggurat serial port.
+4. ZHA will try to probe the protocol spoken by your radio. This will take a minute and
+   is expected to fail.
+5. Select `Ziggurat` as the radio type and then fill in the serial port details. The
+   default baudrate is 460800 and hardware flow control should be enabled.
+6. Done.
+
+Keep in mind the host stack is the recommended way to run Ziggurat, as running it on a
+microcontroller is slightly less performant than on host and may have fewer features as
+Ziggurat continues development.
 
 ### Development
 Ziggurat aims to implement the portions of a Zigbee stack used by normal Home Assistant
@@ -85,19 +108,18 @@ future. Keep in mind Zigbee is both forward and backward compatible and practica
 user-visible has changed in these revisions.
 
 #### Testing
-Ziggurat's public API is a simple WebSocket server, which can be run locally instead of
-in a Home Assistant addon:
+Ziggurat's public API is a simple WebSocket server. You can run it locally instead of in
+the Home Assistant app:
 
 ```bash
 cargo run --bin ziggurat -- --device /dev/cu.SLAB_USBtoUART --listen 0.0.0.0:9999
 ```
 
-The adapter itself is stateless and ZHA will push all network configuration to it on startup.
-
+The adapter itself is stateless. ZHA pushes all network configuration to it on startup.
 
 #### Future work
-- Ziggurat currently statically allocates most protocol-level parsing buffers, there are only
-  a few places left in the stack (e.g. `HashMap`) that rely on dynamic allocation.
+- Ziggurat statically allocates most protocol-level parsing buffers. Only a few places in
+  the stack (e.g. `HashMap`) still rely on dynamic allocation.
 - For testing purposes (especially CI) it would be convenient to allow Ziggurat to have a
   dynamically configurable role on startup. Adding the ability to join a network as a router
   would allow for some useful end-to-end testing scenarios, like a synthetic Spinel layer
