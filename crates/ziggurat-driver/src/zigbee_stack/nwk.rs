@@ -5,7 +5,6 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::FrameBytes;
@@ -26,10 +25,9 @@ use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::UnroutedUnicast;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, HeldFrame,
-    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
-    SendHandle, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification,
-    ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
+    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendMode,
+    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -391,17 +389,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
             NextHop::NeedDiscovery => {
                 tracing::debug!("Holding frame until a route to {destination:?} is known");
-                let token = self.take_token(policy)?;
-                let slot = Arc::new(SendSlot::default());
+                let (frame, slot) = self.hold_frame(Frame::nwk(nwk_frame, security), policy)?;
 
                 // The first unrouted send to a destination starts its discovery
                 let discovering = core.sends.has_unrouted(destination);
                 let (id, mut actions) = core.sends.enqueue_unrouted_unicast(
                     UnroutedUnicast {
-                        frame: HeldFrame {
-                            frame: Frame::nwk(nwk_frame, security),
-                            token,
-                        },
+                        frame,
                         priority: policy.priority,
                         waiter: slot.clone(),
                         confirm,

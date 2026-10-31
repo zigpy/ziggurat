@@ -15,7 +15,7 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as UnicastRecord};
 
-use crate::frame_token::{self, FrameToken};
+use crate::frame_token;
 use crate::runtime::Runtime;
 
 use super::routing::Status as RouteStatus;
@@ -26,10 +26,14 @@ use super::{
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    /// Take a frame token from the policy's budget tier. A refused token rejects the
-    /// send at admission.
-    pub(super) fn take_token(&self, policy: TxPolicy) -> Result<FrameToken, EnqueueError> {
-        frame_token::take(policy.class).ok_or_else(|| {
+    /// Take a frame token from the policy's budget tier and the slot the send's verdicts
+    /// go to. A refused token rejects the send.
+    pub(super) fn hold_frame(
+        &self,
+        frame: Frame,
+        policy: TxPolicy,
+    ) -> Result<(HeldFrame, Arc<SendSlot>), EnqueueError> {
+        let token = frame_token::take(policy.class).ok_or_else(|| {
             tracing::warn!(
                 "Frame budget exhausted ({}/{} tokens); rejecting {:?} frame",
                 frame_token::used(),
@@ -37,7 +41,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 policy.class,
             );
             EnqueueError::BudgetExhausted
-        })
+        })?;
+
+        Ok((HeldFrame { frame, token }, Arc::new(SendSlot::default())))
     }
 
     /// Enqueue a unicast with a known next hop. Every send gets a slot: dropping the
@@ -67,11 +73,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         confirm: Confirm,
         placement: Placement,
     ) -> Result<(SendHandle, SendActions), EnqueueError> {
-        let token = self.take_token(policy)?;
-        let slot = Arc::new(SendSlot::default());
-
+        let (frame, slot) = self.hold_frame(frame, policy)?;
         let (id, actions) = core.sends.enqueue_unicast(UnicastRecord {
-            frame: HeldFrame { frame, token },
+            frame,
             priority: policy.priority,
             waiter: slot.clone(),
             confirm,
@@ -105,11 +109,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         policy: TxPolicy,
         schedule: Schedule,
     ) -> Result<(SendHandle, SendActions), EnqueueError> {
-        let token = self.take_token(policy)?;
-        let slot = Arc::new(SendSlot::default());
-
+        let (frame, slot) = self.hold_frame(frame, policy)?;
         let (id, actions) = core.sends.enqueue_broadcast(BroadcastRecord {
-            frame: HeldFrame { frame, token },
+            frame,
             priority: policy.priority,
             waiter: slot.clone(),
             schedule,
