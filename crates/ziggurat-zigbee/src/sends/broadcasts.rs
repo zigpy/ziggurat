@@ -48,6 +48,14 @@ pub struct Broadcast<F, W> {
     pub deadline: Instant,
 }
 
+/// What a tick finds a schedule's next copy to be.
+enum Due<E> {
+    /// A copy is due: queue it.
+    Copy,
+    /// The schedule ran out, with the verdict that means.
+    Over(Result<(), E>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopyState {
     Idle,
@@ -261,12 +269,12 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             }
 
             if record.copy == CopyState::Idle
-                && let Some(result) =
+                && let Some(due) =
                     Self::schedule_due(&mut record.schedule, now, passive_ack_interval)
             {
-                match result {
-                    Ok(()) => record.copy = CopyState::Queued,
-                    Err(verdict) => {
+                match due {
+                    Due::Copy => record.copy = CopyState::Queued,
+                    Due::Over(verdict) => {
                         settle.push((*id, verdict));
                         continue;
                     }
@@ -290,13 +298,12 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         actions
     }
 
-    /// Advance a schedule whose next copy is due: `Some(Ok)` queues a copy, `Some(Err)`
-    /// carries the verdict of a schedule that ran out, `None` means nothing is due.
+    /// Advance a schedule whose next copy is due. `None` means nothing is due.
     fn schedule_due(
         schedule: &mut Schedule,
         now: Instant,
         passive_ack_interval: Duration,
-    ) -> Option<Result<(), Result<(), E>>> {
+    ) -> Option<Due<E>> {
         match schedule {
             Schedule::Once => None,
             Schedule::PassiveAck {
@@ -308,11 +315,13 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                     return None;
                 }
                 if *copies_remaining == 0 {
-                    return Some(Err(Err(SendFailure::BroadcastQuorumNotReached.into())));
+                    return Some(Due::Over(
+                        Err(SendFailure::BroadcastQuorumNotReached.into()),
+                    ));
                 }
                 *copies_remaining -= 1;
                 *next_attempt = now + passive_ack_interval;
-                Some(Ok(()))
+                Some(Due::Copy)
             }
             Schedule::FixedInterval {
                 interval,
@@ -324,11 +333,11 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 }
                 // A fixed-interval broadcast completes by running out of copies
                 if *copies_remaining == 0 {
-                    return Some(Err(Ok(())));
+                    return Some(Due::Over(Ok(())));
                 }
                 *copies_remaining -= 1;
                 *next_attempt = now + *interval;
-                Some(Ok(()))
+                Some(Due::Copy)
             }
         }
     }
