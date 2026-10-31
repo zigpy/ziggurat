@@ -706,6 +706,7 @@ impl Neighbors {
         if neighbor_entry.device_type == NwkDeviceType::EndDevice {
             tracing::info!("Neighbor {source_ieee:?} sent a link status, marking it as a router");
             neighbor_entry.device_type = NwkDeviceType::Router;
+            neighbor_entry.rx_on_when_idle = true;
         }
 
         let previous_outgoing_cost = neighbor_entry.outgoing_cost;
