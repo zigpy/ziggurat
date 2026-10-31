@@ -17,9 +17,8 @@ RUST_TARGET=riscv32imac-unknown-none-elf
 rustup target add "$RUST_TARGET" 2>/dev/null
 (cd "$ZIGGURAT/crates/ziggurat-ot" && cargo build --release --target "$RUST_TARGET" --features esp-idf)
 
-# 2. Project-local override of the IDF openthread component: identical except the
-#    NCP vendor hook is ours (Espressif's SPINEL_PROP_VENDOR_ESP_* handlers and
-#    plain-NcpHdlc otNcpHdlcInit give way to the ziggurat tunnel). The openthread
+# 2. Project-local override of the IDF openthread component: a copy with patches/
+#    applied and the ziggurat NCP hook and glue dropped in. The openthread
 #    submodule and prebuilt libs are symlinked, not copied.
 OT_SRC="$IDF_PATH/components/openthread"
 OT_DST="$HERE/components/openthread"
@@ -33,37 +32,16 @@ for entry in "$OT_SRC"/*; do
     esac
 done
 
-# Espressif's NcpBase vendor handlers are the ot:: namespace tail of this file;
-# compile them out (ziggurat_ncp.cpp provides ours).
-python3 - "$OT_DST/src/ncp/esp_openthread_ncp.cpp" <<'EOF'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-src = path.read_text()
-marker = "\nnamespace ot {"
-assert src.count(marker) == 1, "esp_openthread_ncp.cpp changed shape; fix build.sh"
-src = src.replace(marker, "\n#if 0 // ziggurat owns the NCP vendor hook (ziggurat_ncp.cpp)" + marker)
-src += "\n#endif // ziggurat owns the NCP vendor hook\n"
-path.write_text(src)
-EOF
+# Deliberate edits to the copied component live in patches/ (unified diffs rooted
+# at the component). A rejected hunk means ESP-IDF changed shape: fix the patch.
+for patch_file in "$HERE"/patches/*.patch; do
+    patch -p1 -d "$OT_DST" --no-backup-if-mismatch < "$patch_file"
+done
 
 cp "$ZIGGURAT/firmwares/glue/ziggurat_ncp.cpp" "$OT_DST/src/ncp/esp_openthread_ncp_hdlc.cpp"
-
 # The platform glue (shared with the EFR32 build) compiles inside the component:
 # it uses OT core C++ headers (ot::Timer, ot::Tasklet, ot::Crypto).
 cp "$ZIGGURAT/firmwares/glue/ziggurat_glue.cpp" "$OT_DST/src/ncp/ziggurat_glue.cpp"
-python3 - "$OT_DST/srcs_radio.cmake" <<'EOF'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-src = path.read_text()
-marker = "src/ncp/esp_openthread_ncp.cpp"
-assert src.count(marker) == 1, "srcs_radio.cmake changed shape; fix build.sh"
-src = src.replace(marker, marker + "\n    src/ncp/ziggurat_glue.cpp")
-path.write_text(src)
-EOF
 
 # 3. The IDF build.
 . "$IDF_PATH/export.sh" >/dev/null
