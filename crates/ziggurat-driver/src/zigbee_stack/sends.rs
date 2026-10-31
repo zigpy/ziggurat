@@ -79,8 +79,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             priority: policy.priority,
             waiter: slot.clone(),
             confirm,
-            delivery: placement.delivery,
-            deadline: placement.deadline,
+            placement,
         });
 
         Ok((SendHandle::new(id, slot), actions))

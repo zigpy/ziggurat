@@ -394,8 +394,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                         priority: unrouted.priority,
                         waiter: unrouted.waiter,
                         confirm: unrouted.confirm,
-                        delivery: placement.delivery,
-                        deadline: placement.deadline,
+                        placement,
                     },
                 ),
                 Err(err) => actions.push(Action::Settled {

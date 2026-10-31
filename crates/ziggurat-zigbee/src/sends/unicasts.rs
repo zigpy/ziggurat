@@ -36,6 +36,8 @@ pub enum Delivery {
 #[derive(Debug, Clone, Copy)]
 pub struct Placement {
     pub delivery: Delivery,
+    /// When the send fails if still not handed off (for an indirect delivery, if still
+    /// not polled for).
     pub deadline: Instant,
 }
 
@@ -46,10 +48,7 @@ pub struct Unicast<F, W> {
     pub priority: TxPriority,
     pub waiter: W,
     pub confirm: Confirm,
-    pub delivery: Delivery,
-    /// When the send fails if still not handed off (for an indirect delivery, if still
-    /// not polled for).
-    pub deadline: Instant,
+    pub placement: Placement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +137,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     pub(super) fn enqueue(&mut self, id: SendId, unicast: Unicast<F, W>) {
-        let stage = match unicast.delivery {
+        let stage = match unicast.placement.delivery {
             Delivery::Direct { .. } => Stage::Queued,
             Delivery::Indirect { .. } => Stage::AwaitingPoll,
         };
@@ -150,9 +149,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 priority: unicast.priority,
                 waiter: unicast.waiter,
                 confirm: unicast.confirm,
-                delivery: unicast.delivery,
+                delivery: unicast.placement.delivery,
                 stage,
-                deadline: unicast.deadline,
+                deadline: unicast.placement.deadline,
             },
         );
     }
