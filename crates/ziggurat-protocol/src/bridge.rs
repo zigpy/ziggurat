@@ -266,7 +266,7 @@ impl From<&NetworkBeacon> for BeaconPayload {
 pub fn send_unicast<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: SendUnicastPayload,
-) -> Result<(SendHandle, ConfirmKind), Error> {
+) -> Result<((SendHandle, ConfirmKind), SendUnicastResultPayload), Error> {
     let aps_security = (payload.flags.aps_encryption && payload.flags.has_eui64)
         .then_some(payload.destination_eui64);
     let aps_ack = if payload.flags.aps_ack {
@@ -274,6 +274,7 @@ pub fn send_unicast<P: RadioPhy, R: Runtime>(
     } else {
         ApsAck::None
     };
+    let aps_counter = payload.flags.force_aps_seq.then_some(payload.aps_seq);
     let route = route_directive(payload.route, payload.next_hop, payload.relays)?;
 
     let confirm_kind = if payload.flags.aps_ack {
@@ -290,6 +291,7 @@ pub fn send_unicast<P: RadioPhy, R: Runtime>(
             payload.src_ep,
             payload.dst_ep,
             aps_ack,
+            aps_counter,
             payload.radius,
             payload.asdu,
             aps_security,
@@ -297,7 +299,7 @@ pub fn send_unicast<P: RadioPhy, R: Runtime>(
             TxPriority::from_host(payload.priority),
             route,
         )
-        .map(|handle| (handle, confirm_kind))
+        .map(|(handle, aps_seq)| ((handle, confirm_kind), SendUnicastResultPayload { aps_seq }))
         .map_err(|e| enqueue_error(&e))
 }
 
