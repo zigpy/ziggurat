@@ -427,6 +427,7 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
             DeliveryError::CcaFailure => SendStatus::CcaFailure,
             DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
             DeliveryError::ApsAckTimeout => SendStatus::ApsAckTimeout,
+            DeliveryError::HandoffTimeout => SendStatus::HandoffTimeout,
             DeliveryError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
             DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
             DeliveryError::BudgetExhausted => SendStatus::FrameBudgetExhausted,
