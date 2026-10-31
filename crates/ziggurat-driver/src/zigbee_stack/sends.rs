@@ -364,7 +364,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 actions.extend(core.sends.route_unicasts(destination, |send| {
                     self.place_routed_unicast(&core.nib, &mut send.frame)
                 }));
-            } else if core.nib.routing.discovery_lapsed(destination, now) {
+            } else if core
+                .nib
+                .routing
+                .discovery_deadline(destination, now)
+                .is_none()
+            {
                 if core.sends.retry_discovery(destination) {
                     actions.extend(self.start_route_discovery(core, destination));
                 } else {

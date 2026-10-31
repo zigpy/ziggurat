@@ -427,20 +427,12 @@ impl Routing {
     /// The expiration time of the live discovery toward a destination, if any.
     pub fn discovery_deadline(&self, destination: Nwk, now: Instant) -> Option<Instant> {
         self.discovery_table.values().find_map(|entry| {
-            if entry.expiration_time >= now && entry.destination_address == destination {
+            if entry.expiration_time > now && entry.destination_address == destination {
                 Some(entry.expiration_time)
             } else {
                 None
             }
         })
-    }
-
-    /// Whether no discovery toward `destination` is live any more.
-    pub fn discovery_lapsed(&self, destination: Nwk, now: Instant) -> bool {
-        !self
-            .discovery_table
-            .values()
-            .any(|entry| entry.destination_address == destination && entry.expiration_time > now)
     }
 
     /// Deduplicate a received route request and track the best path back to its
