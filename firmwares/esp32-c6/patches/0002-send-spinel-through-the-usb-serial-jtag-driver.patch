@@ -1,0 +1,38 @@
+Send Spinel through the USB-Serial-JTAG driver, not the console VFS
+
+Espressif's RCP writes each HDLC chunk with write() on /dev/usbserjtag. That is
+the console device: its write() returns -1 for the whole buffer whenever
+usb_serial_jtag_is_connected() is false, and that monitor polls the SOF bit at
+1 kHz, the same rate SOFs arrive, with a miss tolerance that is only reset on
+reconnect. Every fourth isolated miss declares the host gone for one tick and the
+chunk written in that window is discarded. otPlatUartSend ignores the result and
+calls otPlatUartSendDone() regardless, so the frames vanish without a trace.
+
+Queue the chunk in the driver's TX ring buffer directly instead. The ring is
+sized for whole chunks in main/esp_ot_config.h.
+
+--- a/src/port/esp_openthread_uart.c
++++ b/src/port/esp_openthread_uart.c
+@@ -25,6 +25,7 @@
+ #include "utils/uart.h"
+ #include "driver/usb_serial_jtag_vfs.h"
+ #include "driver/usb_serial_jtag.h"
++#include "freertos/FreeRTOS.h"
+ #if CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
+ #include "hal/usb_serial_jtag_ll.h"
+ #endif
+@@ -53,7 +54,14 @@
+ 
+ otError otPlatUartSend(const uint8_t *buf, uint16_t buf_length)
+ {
++#if CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
++    // Straight into the driver's ring buffer. The console VFS write() rejects the
++    // whole buffer whenever its SOF-polling connection heuristic flaps, and the
++    // SendDone below would then drop the chunk silently.
++    int rval = usb_serial_jtag_write_bytes(buf, buf_length, pdMS_TO_TICKS(100));
++#else
+     int rval = write(s_uart_fd, buf, buf_length);
++#endif
+ 
+     // DIG-727
+ #if CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
