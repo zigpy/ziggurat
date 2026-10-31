@@ -54,8 +54,7 @@ pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
 pub use ziggurat_zigbee::sends::{
-    ApsAckData, Confirm, Delivery, Schedule, SendFailure, SendId, Sends, SrcMatchTable, Transmit,
-    TxPriority,
+    ApsAckData, Confirm, Schedule, SendFailure, SendId, Sends, SrcMatchTable, Transmit, TxPriority,
 };
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.

@@ -25,10 +25,9 @@ use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::UnroutedUnicast;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, Delivery, DeliveryError, EnqueueError, Frame,
-    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
-    SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification,
-    ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
+    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendMode,
+    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -379,13 +378,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let (handle, actions) = match resolved {
             NextHop::Resolved(next_hop) => {
-                let delivery = self.place_unicast(&core.nib, next_hop);
+                let poll_address = Self::poll_address(&core.nib, next_hop);
                 self.enqueue_unicast_in(
                     &mut core,
                     Frame::nwk(nwk_frame, security),
                     policy,
                     confirm,
-                    delivery,
+                    next_hop,
+                    poll_address,
                 )?
             }
             NextHop::NeedDiscovery => {
@@ -626,10 +626,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     class,
                 },
                 Confirm::OnHandoff,
-                Delivery::Indirect {
-                    address: Ieee802154Address::Eui64(child_eui64),
-                    next_hop: child_nwk,
-                },
+                child_nwk,
+                Some(Ieee802154Address::Eui64(child_eui64)),
             );
 
             if let Err(err) = admitted {
@@ -895,7 +893,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // retry end-to-end. The originator's sequence number is preserved. Any failure
         // handling (route invalidation, the network status back to the originator)
         // follows the send table's verdict; nothing is awaited here.
-        let delivery = self.place_unicast(&self.core().nib, next_hop_address);
+        let poll_address = Self::poll_address(&self.core().nib, next_hop_address);
         let admitted = self.enqueue_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -903,7 +901,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 class: TrafficClass::Forwarding,
             },
             Confirm::OnHandoff,
-            delivery,
+            next_hop_address,
+            poll_address,
         );
 
         if let Err(err) = admitted {

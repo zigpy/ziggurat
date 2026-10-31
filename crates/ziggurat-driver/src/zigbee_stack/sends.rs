@@ -20,9 +20,9 @@ use crate::runtime::Runtime;
 
 use super::routing::Status as RouteStatus;
 use super::{
-    Confirm, CoreGuard, Delivery, DeliveryError, EnqueueError, Frame, HeldFrame, Nib,
-    NwkSecurityMode, RouteDirective, Schedule, SendActions, SendHandle, SendId, SendMode, SendSlot,
-    Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
+    Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, HeldFrame, Nib, NwkSecurityMode,
+    RouteDirective, Schedule, SendActions, SendHandle, SendId, SendMode, SendSlot, Transmit,
+    TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -46,8 +46,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok((HeldFrame { frame, token }, Arc::new(SendSlot::default())))
     }
 
-    /// Enqueue a unicast with a known next hop. Every send gets a slot: dropping the
-    /// returned handle is how a caller detaches from a send it does not await.
+    /// Enqueue a unicast to `next_hop`, held until the device polls under
+    /// `poll_address` if it is given. Every send gets a slot: dropping the returned
+    /// handle is how a caller detaches from a send it does not await.
     // The guard is moved into `commit_sends`; the lint misreads the `?` return path
     #[allow(clippy::significant_drop_tightening)]
     pub(super) fn enqueue_unicast(
@@ -55,11 +56,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         frame: Frame,
         policy: TxPolicy,
         confirm: Confirm,
-        delivery: Delivery,
+        next_hop: Nwk,
+        poll_address: Option<Ieee802154Address>,
     ) -> Result<SendHandle, EnqueueError> {
         let mut core = self.core();
         let (handle, actions) =
-            self.enqueue_unicast_in(&mut core, frame, policy, confirm, delivery)?;
+            self.enqueue_unicast_in(&mut core, frame, policy, confirm, next_hop, poll_address)?;
         self.commit_sends(core, actions);
         Ok(handle)
     }
@@ -71,7 +73,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         frame: Frame,
         policy: TxPolicy,
         confirm: Confirm,
-        delivery: Delivery,
+        next_hop: Nwk,
+        poll_address: Option<Ieee802154Address>,
     ) -> Result<(SendHandle, SendActions), EnqueueError> {
         let (frame, slot) = self.hold_frame(frame, policy)?;
         let (id, actions) = core.sends.enqueue_unicast(
@@ -80,7 +83,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority: policy.priority,
                 waiter: slot.clone(),
                 confirm,
-                delivery,
+                next_hop,
+                poll_address,
             },
             self.core_now(),
             &self.tunables,
@@ -188,29 +192,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// How a unicast with a resolved next hop reaches it: a sleepy child's frame awaits
-    /// its poll, everything else is transmitted directly.
-    #[allow(clippy::option_if_let_else)]
-    pub(super) fn place_unicast(&self, nib: &Nib, next_hop: Nwk) -> Delivery {
-        match nib.neighbors.sleepy_child_eui64(next_hop) {
-            Some(child_eui64) => Delivery::Indirect {
-                address: Ieee802154Address::Eui64(child_eui64),
-                next_hop,
-            },
-            None => Delivery::Direct {
-                next_hop,
-                attempts_remaining: self.tunables.unicast_retries(),
-            },
-        }
+    /// The address a next hop polls under, if it is a sleepy child whose frames await
+    /// its poll.
+    pub(super) fn poll_address(nib: &Nib, next_hop: Nwk) -> Option<Ieee802154Address> {
+        nib.neighbors
+            .sleepy_child_eui64(next_hop)
+            .map(Ieee802154Address::Eui64)
     }
 
-    /// How an unrouted frame reaches its next hop once its route is known. The route
-    /// can have vanished in the race, which fails the send.
-    fn place_routed_unicast(
+    /// The next hop of an unrouted frame once its route is known, and the address it
+    /// polls under if it is a sleepy child. The route can have vanished in the race,
+    /// which fails the send.
+    fn resolve_routed_unicast(
         &self,
         nib: &Nib,
         frame: &mut Frame,
-    ) -> Result<Delivery, DeliveryError> {
+    ) -> Result<(Nwk, Option<Ieee802154Address>), DeliveryError> {
         let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
         };
@@ -224,7 +221,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         match resolved {
-            NextHop::Resolved(next_hop) => Ok(self.place_unicast(nib, next_hop)),
+            NextHop::Resolved(next_hop) => Ok((next_hop, Self::poll_address(nib, next_hop))),
             NextHop::NeedDiscovery | NextHop::Discard => {
                 Err(DeliveryError::RouteInactiveAfterDiscovery)
             }
@@ -357,7 +354,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     destination,
                     now,
                     &self.tunables,
-                    |send| self.place_routed_unicast(&core.nib, &mut send.frame),
+                    |send| self.resolve_routed_unicast(&core.nib, &mut send.frame),
                 ));
             } else if core
                 .nib

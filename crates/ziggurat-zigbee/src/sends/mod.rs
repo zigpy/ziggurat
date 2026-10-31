@@ -41,7 +41,7 @@ use crate::constants::Tunables;
 use crate::flat_map::{FlatMap, FlatSet};
 
 pub use broadcasts::{Broadcast, Schedule};
-pub use unicasts::{Delivery, Unicast};
+pub use unicasts::Unicast;
 pub use unrouted::UnroutedUnicast;
 
 use broadcasts::Broadcasts;
@@ -390,27 +390,29 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// A route to `destination` is known: move every unrouted send to it to the unicasts.
-    /// `place` resolves each frame's next hop (rewriting the frame for a source route),
-    /// or fails the send.
+    /// `resolve` finds each frame's next hop (rewriting the frame for a source route)
+    /// and the address the device polls under if the frame must wait for its poll, or
+    /// fails the send.
     pub fn route_unicasts(
         &mut self,
         destination: Nwk,
         now: Instant,
         tunables: &Tunables,
-        mut place: impl FnMut(&mut F) -> Result<Delivery, E>,
+        mut resolve: impl FnMut(&mut F) -> Result<(Nwk, Option<Ieee802154Address>), E>,
     ) -> Actions<F, W, E> {
         let mut actions = Actions::new();
 
         for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
-            match place(&mut unrouted.frame) {
-                Ok(delivery) => self.unicasts.enqueue(
+            match resolve(&mut unrouted.frame) {
+                Ok((next_hop, poll_address)) => self.unicasts.enqueue(
                     id,
                     Unicast {
                         frame: unrouted.frame,
                         priority: unrouted.priority,
                         waiter: unrouted.waiter,
                         confirm: unrouted.confirm,
-                        delivery,
+                        next_hop,
+                        poll_address,
                     },
                     now,
                     tunables,

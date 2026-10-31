@@ -35,9 +35,9 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, Delivery, DeviceLeaveReason, EnqueueError, Frame,
-    JoinKind, NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode,
-    TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
+    AddrConflictSource, Broadcast, Confirm, DeviceLeaveReason, EnqueueError, Frame, JoinKind,
+    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, TxPolicy,
+    TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -213,10 +213,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Frame::Raw(response_frame),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
-            Delivery::Indirect {
-                address: Ieee802154Address::Eui64(eui64),
-                next_hop: short_address,
-            },
+            short_address,
+            Some(Ieee802154Address::Eui64(eui64)),
         );
 
         match admitted {

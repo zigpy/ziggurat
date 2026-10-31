@@ -18,22 +18,6 @@ use super::{
     SrcMatchTable, Transmit, TxPriority,
 };
 
-/// How a unicast reaches its next hop. Fixed at admission.
-#[derive(Debug, Clone, Copy)]
-pub enum Delivery {
-    /// Transmitted to `next_hop` now, retried `attempts_remaining` more times on failure.
-    Direct {
-        next_hop: Nwk,
-        attempts_remaining: u8,
-    },
-    /// HeldFrame until the device polls under `address`, then transmitted to `next_hop`. A
-    /// failed transmit waits for the next poll until the frame expires.
-    Indirect {
-        address: Ieee802154Address,
-        next_hop: Nwk,
-    },
-}
-
 /// What a unicast is enqueued with.
 #[derive(Debug)]
 pub struct Unicast<F, W> {
@@ -41,7 +25,10 @@ pub struct Unicast<F, W> {
     pub priority: TxPriority,
     pub waiter: W,
     pub confirm: Confirm,
-    pub delivery: Delivery,
+    pub next_hop: Nwk,
+    /// The address the device polls under, for a frame held until it polls (802.15.4
+    /// spec 6.7.3). `None`: transmitted as soon as it is dequeued, with NWK retries.
+    pub poll_address: Option<Ieee802154Address>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,9 +39,9 @@ enum Stage {
     /// stage is never settled from outside: `transmitted` always finds it. `acked`
     /// records an end-to-end APS ack that arrived meanwhile.
     Transmitting { acked: bool },
-    /// A failed direct unicast waiting out its retry delay.
+    /// A failed transmit waiting out its retry delay.
     Retrying { at: Instant },
-    /// An indirect unicast waiting for its device to poll.
+    /// A held frame waiting for its device to poll.
     AwaitingPoll,
     /// Handed off; waiting for the end-to-end APS ack.
     AwaitingApsAck,
@@ -66,19 +53,22 @@ struct Record<F, W> {
     priority: TxPriority,
     waiter: W,
     confirm: Confirm,
-    delivery: Delivery,
+    next_hop: Nwk,
+    poll_address: Option<Ieee802154Address>,
+    /// Transmit attempts left after the current one. A failed transmit of a held frame
+    /// waits for the next poll instead, until the frame expires.
+    attempts_remaining: u8,
     stage: Stage,
     deadline: Instant,
 }
 
 impl<F, W> Record<F, W> {
     /// The address this send keeps a frame-pending bit set for, if any.
-    const fn poll_address(&self) -> Option<Ieee802154Address> {
-        match (self.delivery, self.stage) {
-            (
-                Delivery::Indirect { address, .. },
-                Stage::AwaitingPoll | Stage::Queued | Stage::Transmitting { .. },
-            ) => Some(address),
+    const fn pending_for(&self) -> Option<Ieee802154Address> {
+        match (self.poll_address, self.stage) {
+            (Some(address), Stage::AwaitingPoll | Stage::Queued | Stage::Transmitting { .. }) => {
+                Some(address)
+            }
             _ => None,
         }
     }
@@ -89,12 +79,12 @@ impl<F, W> Record<F, W> {
         match self.stage {
             Stage::Transmitting { .. } => None,
             Stage::AwaitingApsAck => Some(SendFailure::ApsAckTimeout),
-            Stage::Queued | Stage::Retrying { .. } | Stage::AwaitingPoll => match self.delivery {
-                Delivery::Direct { .. } => Some(SendFailure::HandoffTimeout),
-                Delivery::Indirect { address, .. } => Some(SendFailure::IndirectExpired {
-                    destination: address,
-                }),
-            },
+            Stage::Queued | Stage::Retrying { .. } | Stage::AwaitingPoll => {
+                match self.poll_address {
+                    None => Some(SendFailure::HandoffTimeout),
+                    Some(destination) => Some(SendFailure::IndirectExpired { destination }),
+                }
+            }
         }
     }
 
@@ -129,8 +119,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    /// A direct unicast fails if not handed off within the handoff timeout; an indirect
-    /// one if not polled for within the transaction persistence time.
+    /// A unicast fails if not handed off within the handoff timeout; a held frame if
+    /// not polled for within the transaction persistence time.
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
@@ -138,9 +128,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         now: Instant,
         tunables: &Tunables,
     ) {
-        let (stage, deadline) = match unicast.delivery {
-            Delivery::Direct { .. } => (Stage::Queued, now + tunables.handoff_timeout()),
-            Delivery::Indirect { .. } => (
+        let (stage, deadline) = match unicast.poll_address {
+            None => (Stage::Queued, now + tunables.handoff_timeout()),
+            Some(_) => (
                 Stage::AwaitingPoll,
                 now + tunables.transaction_persistence_time(),
             ),
@@ -153,7 +143,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 priority: unicast.priority,
                 waiter: unicast.waiter,
                 confirm: unicast.confirm,
-                delivery: unicast.delivery,
+                next_hop: unicast.next_hop,
+                poll_address: unicast.poll_address,
+                attempts_remaining: tunables.unicast_retries(),
                 stage,
                 deadline,
             },
@@ -170,17 +162,17 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {
-        let (next_hop, frame_pending) = match self.records.get(&id).unwrap().delivery {
-            Delivery::Direct { next_hop, .. } => (next_hop, false),
-            // More frames await the same device: it keeps polling
-            Delivery::Indirect { address, next_hop } => {
-                let more_pending = self
-                    .records
+        // More frames await the same device: it keeps polling
+        let frame_pending = self
+            .records
+            .get(&id)
+            .unwrap()
+            .poll_address
+            .is_some_and(|address| {
+                self.records
                     .iter()
-                    .any(|(other, record)| *other != id && record.poll_address() == Some(address));
-                (next_hop, more_pending)
-            }
-        };
+                    .any(|(other, record)| *other != id && record.pending_for() == Some(address))
+            });
 
         let record = self.records.get_mut(&id).unwrap();
         debug_assert_eq!(record.stage, Stage::Queued);
@@ -190,7 +182,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             in_flight: InFlight(id),
             frame: &record.frame,
             transmit: Transmit::Unicast {
-                next_hop,
+                next_hop: record.next_hop,
                 frame_pending,
             },
         }
@@ -218,29 +210,21 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             // The destination acked end to end while the radio reported a failure: the
             // frame got through
             Err(_) if acked => self.handed_off(id, now, acked, &mut actions),
-            Err(err) => match record.delivery {
-                Delivery::Direct {
-                    next_hop,
-                    attempts_remaining: 0,
-                } => self.settle(id, Err(err), Some(next_hop), &mut actions),
-                Delivery::Direct {
-                    next_hop,
-                    attempts_remaining,
-                } => {
-                    record.delivery = Delivery::Direct {
-                        next_hop,
-                        attempts_remaining: attempts_remaining - 1,
-                    };
+            Err(err) => match record.poll_address {
+                // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
+                // so a failed transmit awaits the device's next poll, keeping its deadline
+                Some(_) if now < record.deadline => record.stage = Stage::AwaitingPoll,
+                Some(_) => self.settle(id, Err(err), None, &mut actions),
+                None if record.attempts_remaining == 0 => {
+                    let next_hop = record.next_hop;
+                    self.settle(id, Err(err), Some(next_hop), &mut actions);
+                }
+                None => {
+                    record.attempts_remaining -= 1;
                     record.stage = Stage::Retrying {
                         at: now + retry_delay,
                     };
                 }
-                // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
-                // so a failed transmit awaits the device's next poll, keeping its deadline
-                Delivery::Indirect { .. } if now < record.deadline => {
-                    record.stage = Stage::AwaitingPoll;
-                }
-                Delivery::Indirect { .. } => self.settle(id, Err(err), None, &mut actions),
             },
         }
 
@@ -300,17 +284,16 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             Ieee802154Address::Nwk(n) => nwk == Some(n),
         };
 
-        let oldest =
-            self.records
-                .iter()
-                .find_map(|(id, record)| match (record.delivery, record.stage) {
-                    (Delivery::Indirect { address, .. }, Stage::AwaitingPoll)
-                        if matches(address) && now < record.deadline =>
-                    {
-                        Some(*id)
-                    }
-                    _ => None,
-                });
+        let oldest = self.records.iter().find_map(|(id, record)| {
+            match (record.poll_address, record.stage) {
+                (Some(address), Stage::AwaitingPoll)
+                    if matches(address) && now < record.deadline =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            }
+        });
 
         let Some(id) = oldest else {
             return false;
@@ -359,8 +342,8 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         let dropped: Vec<(SendId, Ieee802154Address)> = self
             .records
             .iter()
-            .filter_map(|(id, record)| match (record.delivery, record.stage) {
-                (Delivery::Indirect { address, .. }, Stage::AwaitingPoll)
+            .filter_map(|(id, record)| match (record.poll_address, record.stage) {
+                (Some(address), Stage::AwaitingPoll)
                     if address == Ieee802154Address::Nwk(nwk)
                         || eui64.is_some_and(|e| address == Ieee802154Address::Eui64(e)) =>
                 {
@@ -427,7 +410,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     pub(super) fn poll_addresses(&self, address_map: &FlatMap<Eui64, Nwk>) -> SrcMatchTable {
         let mut table = SrcMatchTable::default();
 
-        for address in self.records.values().filter_map(Record::poll_address) {
+        for address in self.records.values().filter_map(Record::pending_for) {
             match address {
                 Ieee802154Address::Eui64(eui64) => {
                     table.extended_addresses.insert(eui64);
@@ -448,6 +431,6 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     pub(super) fn has_awaiting_poll(&self, address: Ieee802154Address) -> bool {
         self.records
             .values()
-            .any(|record| record.poll_address() == Some(address))
+            .any(|record| record.pending_for() == Some(address))
     }
 }
