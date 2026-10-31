@@ -454,15 +454,20 @@ impl Neighbors {
         (claimed, removed)
     }
 
-    /// Remove children whose keepalive deadline has passed (spec 3.6.10.1), returning
-    /// their addresses for cleanup.
+    /// Remove end device children whose keepalive deadline has passed (spec 3.6.10.1),
+    /// returning their addresses for cleanup. Router children do not send keepalives;
+    /// link status aging covers them instead.
     #[must_use = "evicted children must be cleaned up and announced; dropping them \
         leaves stale entries and silent losses"]
     pub fn evict_timed_out_children(&mut self, now: Instant) -> Vec<(Eui64, Nwk)> {
         let evicted: Vec<(Eui64, Nwk)> = self
             .table
             .values()
-            .filter(|entry| entry.is_child() && entry.timeout_at <= now)
+            .filter(|entry| {
+                entry.is_child()
+                    && entry.device_type == NwkDeviceType::EndDevice
+                    && entry.timeout_at <= now
+            })
             .map(|entry| (entry.extended_address, entry.network_address))
             .collect();
 
@@ -525,11 +530,12 @@ impl Neighbors {
             .any(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
     }
 
-    /// The earliest child keepalive deadline, for scheduling the eviction sweep.
+    /// The earliest end device child keepalive deadline, for scheduling the eviction
+    /// sweep.
     pub fn next_child_timeout(&self) -> Option<Instant> {
         self.table
             .values()
-            .filter(|entry| entry.is_child())
+            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
             .map(|entry| entry.timeout_at)
             .min()
     }
@@ -694,6 +700,13 @@ impl Neighbors {
 
             entry
         });
+
+        // End devices do not send link status (spec 3.6.4.4). An entry restored without
+        // its device type is loaded as an end device, so correct it here.
+        if neighbor_entry.device_type == NwkDeviceType::EndDevice {
+            tracing::info!("Neighbor {source_ieee:?} sent a link status, marking it as a router");
+            neighbor_entry.device_type = NwkDeviceType::Router;
+        }
 
         let previous_outgoing_cost = neighbor_entry.outgoing_cost;
 
