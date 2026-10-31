@@ -6,6 +6,7 @@
 //! makes it due on; only a `Once` schedule queues its copy at admission.
 
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 use core::marker::PhantomData;
 use core::time::Duration;
 
@@ -139,17 +140,11 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
     /// The highest-priority queued copy, oldest first within a priority.
     pub(super) fn best_queued(&self) -> Option<(SendId, TxPriority)> {
-        let mut best: Option<(SendId, TxPriority)> = None;
-
-        for (id, record) in self.records.iter() {
-            if record.copy == CopyState::Queued
-                && best.is_none_or(|(_, priority)| record.priority > priority)
-            {
-                best = Some((*id, record.priority));
-            }
-        }
-
-        best
+        self.records
+            .iter()
+            .filter(|(_, record)| record.copy == CopyState::Queued)
+            .max_by_key(|(id, record)| (record.priority, Reverse(**id)))
+            .map(|(id, record)| (*id, record.priority))
     }
 
     pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {

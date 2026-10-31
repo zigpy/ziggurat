@@ -29,6 +29,7 @@ mod unicasts;
 mod unrouted;
 
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 use core::time::Duration;
 
 use ziggurat_ieee_802154::Ieee802154Address;
@@ -299,19 +300,20 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     /// Hand the highest-priority queued frame (oldest first within a priority) to the
     /// sender, which must report back through `transmitted`.
     pub fn dequeue(&mut self) -> Option<DequeuedSend<'_, F>> {
-        let unicast = self.unicasts.best_queued();
-        let broadcast = self.broadcasts.best_queued();
+        let unicast = self
+            .unicasts
+            .best_queued()
+            .map(|(id, priority)| (id, priority, true));
+        let broadcast = self
+            .broadcasts
+            .best_queued()
+            .map(|(id, priority)| (id, priority, false));
 
-        let (id, from_unicasts) = match (unicast, broadcast) {
-            (None, None) => return None,
-            (Some((id, _)), None) => (id, true),
-            (None, Some((id, _))) => (id, false),
-            // Higher priority first; between equal priorities the older send (lower id)
-            (Some((u, up)), Some((b, bp))) => {
-                let unicast_first = up > bp || (up == bp && u < b);
-                if unicast_first { (u, true) } else { (b, false) }
-            }
-        };
+        // Higher priority first; between equal priorities the older send (lower id)
+        let (id, _, from_unicasts) = [unicast, broadcast]
+            .into_iter()
+            .flatten()
+            .max_by_key(|(id, priority, _)| (*priority, Reverse(*id)))?;
 
         Some(if from_unicasts {
             self.unicasts.dequeue(id)

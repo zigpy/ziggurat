@@ -2,6 +2,7 @@
 //! child when it polls (802.15.4 spec 6.7.3).
 
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 use core::marker::PhantomData;
 use core::time::Duration;
 
@@ -158,17 +159,11 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
     /// The highest-priority queued send, oldest first within a priority.
     pub(super) fn best_queued(&self) -> Option<(SendId, TxPriority)> {
-        let mut best: Option<(SendId, TxPriority)> = None;
-
-        for (id, record) in self.records.iter() {
-            if record.stage == Stage::Queued
-                && best.is_none_or(|(_, priority)| record.priority > priority)
-            {
-                best = Some((*id, record.priority));
-            }
-        }
-
-        best
+        self.records
+            .iter()
+            .filter(|(_, record)| record.stage == Stage::Queued)
+            .max_by_key(|(id, record)| (record.priority, Reverse(**id)))
+            .map(|(id, record)| (*id, record.priority))
     }
 
     pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {
