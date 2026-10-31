@@ -332,28 +332,24 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     pub(super) fn ack_received(&mut self, ack: &ApsAckData) -> Actions<F, W, E> {
         let mut actions = Actions::new();
 
-        let matched = self.records.iter().find_map(|(id, record)| {
-            let expected = match &record.confirm {
-                Confirm::ApsAck { ack: expected, .. } => expected,
-                Confirm::OnHandoff => return None,
-            };
-            if expected != ack {
-                return None;
-            }
-            match record.stage {
-                Stage::AwaitingApsAck => Some((*id, true)),
-                Stage::Transmitting { .. } => Some((*id, false)),
+        let matched = self
+            .records
+            .iter()
+            .find_map(|(id, record)| match &record.confirm {
+                Confirm::ApsAck { ack: expected, .. } if expected == ack => Some(*id),
                 _ => None,
-            }
-        });
+            });
 
-        match matched {
-            Some((id, true)) => self.settle(id, Ok(()), None, &mut actions),
+        let Some(id) = matched else {
+            return actions;
+        };
+
+        let record = self.records.get_mut(&id).unwrap();
+        if matches!(record.stage, Stage::Transmitting { .. }) {
             // Faster than the radio's own report: `transmitted` settles it
-            Some((id, false)) => {
-                self.records.get_mut(&id).unwrap().stage = Stage::Transmitting { acked: true };
-            }
-            None => {}
+            record.stage = Stage::Transmitting { acked: true };
+        } else {
+            self.settle(id, Ok(()), None, &mut actions);
         }
 
         actions
