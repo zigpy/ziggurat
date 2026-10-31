@@ -21,8 +21,8 @@ use crate::runtime::Runtime;
 use super::routing::Status as RouteStatus;
 use super::{
     Confirm, CoreGuard, Delivery, DeliveryError, EnqueueError, Frame, HeldFrame, Nib,
-    NwkSecurityMode, Placement, RouteDirective, Schedule, SendActions, SendHandle, SendId,
-    SendMode, SendSlot, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
+    NwkSecurityMode, RouteDirective, Schedule, SendActions, SendHandle, SendId, SendMode, SendSlot,
+    Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -55,11 +55,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         frame: Frame,
         policy: TxPolicy,
         confirm: Confirm,
-        placement: Placement,
+        delivery: Delivery,
     ) -> Result<SendHandle, EnqueueError> {
         let mut core = self.core();
         let (handle, actions) =
-            self.enqueue_unicast_in(&mut core, frame, policy, confirm, placement)?;
+            self.enqueue_unicast_in(&mut core, frame, policy, confirm, delivery)?;
         self.commit_sends(core, actions);
         Ok(handle)
     }
@@ -71,16 +71,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         frame: Frame,
         policy: TxPolicy,
         confirm: Confirm,
-        placement: Placement,
+        delivery: Delivery,
     ) -> Result<(SendHandle, SendActions), EnqueueError> {
         let (frame, slot) = self.hold_frame(frame, policy)?;
-        let (id, actions) = core.sends.enqueue_unicast(UnicastRecord {
-            frame,
-            priority: policy.priority,
-            waiter: slot.clone(),
-            confirm,
-            placement,
-        });
+        let (id, actions) = core.sends.enqueue_unicast(
+            UnicastRecord {
+                frame,
+                priority: policy.priority,
+                waiter: slot.clone(),
+                confirm,
+                delivery,
+            },
+            self.core_now(),
+            &self.tunables,
+        );
 
         Ok((SendHandle::new(id, slot), actions))
     }
@@ -109,13 +113,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         schedule: Schedule,
     ) -> Result<(SendHandle, SendActions), EnqueueError> {
         let (frame, slot) = self.hold_frame(frame, policy)?;
-        let (id, actions) = core.sends.enqueue_broadcast(BroadcastRecord {
-            frame,
-            priority: policy.priority,
-            waiter: slot.clone(),
-            schedule,
-            deadline: self.core_now() + self.tunables.handoff_timeout(),
-        });
+        let (id, actions) = core.sends.enqueue_broadcast(
+            BroadcastRecord {
+                frame,
+                priority: policy.priority,
+                waiter: slot.clone(),
+                schedule,
+            },
+            self.core_now(),
+            &self.tunables,
+        );
 
         Ok((SendHandle::new(id, slot), actions))
     }
@@ -181,44 +188,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Where a unicast with a resolved next hop goes: a sleepy child's frame awaits its
-    /// poll, everything else is queued for the sender.
+    /// How a unicast with a resolved next hop reaches it: a sleepy child's frame awaits
+    /// its poll, everything else is transmitted directly.
     #[allow(clippy::option_if_let_else)]
-    pub(super) fn place_unicast(&self, nib: &Nib, next_hop: Nwk) -> Placement {
+    pub(super) fn place_unicast(&self, nib: &Nib, next_hop: Nwk) -> Delivery {
         match nib.neighbors.sleepy_child_eui64(next_hop) {
-            Some(child_eui64) => {
-                self.place_indirect_unicast(Ieee802154Address::Eui64(child_eui64), next_hop)
-            }
-            None => Placement {
-                delivery: Delivery::Direct {
-                    next_hop,
-                    attempts_remaining: self.tunables.unicast_retries(),
-                },
-                deadline: self.core_now() + self.tunables.handoff_timeout(),
+            Some(child_eui64) => Delivery::Indirect {
+                address: Ieee802154Address::Eui64(child_eui64),
+                next_hop,
+            },
+            None => Delivery::Direct {
+                next_hop,
+                attempts_remaining: self.tunables.unicast_retries(),
             },
         }
     }
 
-    /// A frame held for a sleepy device until it polls under `address`, then transmitted
-    /// to `next_hop`. It expires after the transaction persistence time.
-    pub(super) fn place_indirect_unicast(
-        &self,
-        address: Ieee802154Address,
-        next_hop: Nwk,
-    ) -> Placement {
-        Placement {
-            delivery: Delivery::Indirect { address, next_hop },
-            deadline: self.core_now() + self.tunables.transaction_persistence_time(),
-        }
-    }
-
-    /// Where an unrouted frame goes once its route is known. The route can have
-    /// vanished in the race, which fails the send.
+    /// How an unrouted frame reaches its next hop once its route is known. The route
+    /// can have vanished in the race, which fails the send.
     fn place_routed_unicast(
         &self,
         nib: &Nib,
         frame: &mut Frame,
-    ) -> Result<Placement, DeliveryError> {
+    ) -> Result<Delivery, DeliveryError> {
         let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
         };
@@ -361,9 +353,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         for destination in core.sends.unrouted_destinations() {
             if core.nib.routing.route_status(destination) == Some(RouteStatus::Active) {
-                actions.extend(core.sends.route_unicasts(destination, |send| {
-                    self.place_routed_unicast(&core.nib, &mut send.frame)
-                }));
+                actions.extend(core.sends.route_unicasts(
+                    destination,
+                    now,
+                    &self.tunables,
+                    |send| self.place_routed_unicast(&core.nib, &mut send.frame),
+                ));
             } else if core
                 .nib
                 .routing

@@ -35,9 +35,9 @@ use ziggurat_zigbee::nwk::commands::{
 };
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeviceLeaveReason, EnqueueError, Frame, JoinKind,
-    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, TxPolicy,
-    TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
+    AddrConflictSource, Broadcast, Confirm, Delivery, DeviceLeaveReason, EnqueueError, Frame,
+    JoinKind, NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode,
+    TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -207,15 +207,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let response_frame = self.build_802154_association_response(eui64, short_address, status);
 
-        let placement = self.place_indirect_unicast(Ieee802154Address::Eui64(eui64), short_address);
-
         // A denial has no follow-up; a successful join's tasklet awaits the
         // extraction. A raw MAC frame has no later verdict: extraction is delivery.
         let admitted = self.enqueue_unicast(
             Frame::Raw(response_frame),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
-            placement,
+            Delivery::Indirect {
+                address: Ieee802154Address::Eui64(eui64),
+                next_hop: short_address,
+            },
         );
 
         match admitted {

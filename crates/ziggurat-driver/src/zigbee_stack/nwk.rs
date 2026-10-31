@@ -25,9 +25,10 @@ use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::UnroutedUnicast;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
-    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendMode,
-    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, Delivery, DeliveryError, EnqueueError, Frame,
+    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
+    SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification,
+    ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -378,13 +379,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let (handle, actions) = match resolved {
             NextHop::Resolved(next_hop) => {
-                let placement = self.place_unicast(&core.nib, next_hop);
+                let delivery = self.place_unicast(&core.nib, next_hop);
                 self.enqueue_unicast_in(
                     &mut core,
                     Frame::nwk(nwk_frame, security),
                     policy,
                     confirm,
-                    placement,
+                    delivery,
                 )?
             }
             NextHop::NeedDiscovery => {
@@ -400,9 +401,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         waiter: slot.clone(),
                         confirm,
                         destination,
-                        deadline: now + self.tunables.handoff_timeout(),
                     },
-                    self.tunables.pending_route_discovery_attempts(),
+                    now,
+                    &self.tunables,
                 );
                 if !discovering {
                     actions.extend(self.start_route_discovery(&mut core, destination));
@@ -625,7 +626,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     class,
                 },
                 Confirm::OnHandoff,
-                self.place_indirect_unicast(Ieee802154Address::Eui64(child_eui64), child_nwk),
+                Delivery::Indirect {
+                    address: Ieee802154Address::Eui64(child_eui64),
+                    next_hop: child_nwk,
+                },
             );
 
             if let Err(err) = admitted {
@@ -891,7 +895,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // retry end-to-end. The originator's sequence number is preserved. Any failure
         // handling (route invalidation, the network status back to the originator)
         // follows the send table's verdict; nothing is awaited here.
-        let placement = self.place_unicast(&self.core().nib, next_hop_address);
+        let delivery = self.place_unicast(&self.core().nib, next_hop_address);
         let admitted = self.enqueue_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -899,7 +903,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 class: TrafficClass::Forwarding,
             },
             Confirm::OnHandoff,
-            placement,
+            delivery,
         );
 
         if let Err(err) = admitted {

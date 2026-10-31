@@ -10,6 +10,7 @@ use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 
 use crate::Instant;
+use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
 use super::{
@@ -33,15 +34,6 @@ pub enum Delivery {
     },
 }
 
-/// Where a unicast goes once its next hop is known, with the deadline that fits.
-#[derive(Debug, Clone, Copy)]
-pub struct Placement {
-    pub delivery: Delivery,
-    /// When the send fails if still not handed off (for an indirect delivery, if still
-    /// not polled for).
-    pub deadline: Instant,
-}
-
 /// What a unicast is enqueued with.
 #[derive(Debug)]
 pub struct Unicast<F, W> {
@@ -49,7 +41,7 @@ pub struct Unicast<F, W> {
     pub priority: TxPriority,
     pub waiter: W,
     pub confirm: Confirm,
-    pub placement: Placement,
+    pub delivery: Delivery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,10 +129,21 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn enqueue(&mut self, id: SendId, unicast: Unicast<F, W>) {
-        let stage = match unicast.placement.delivery {
-            Delivery::Direct { .. } => Stage::Queued,
-            Delivery::Indirect { .. } => Stage::AwaitingPoll,
+    /// A direct unicast fails if not handed off within the handoff timeout; an indirect
+    /// one if not polled for within the transaction persistence time.
+    pub(super) fn enqueue(
+        &mut self,
+        id: SendId,
+        unicast: Unicast<F, W>,
+        now: Instant,
+        tunables: &Tunables,
+    ) {
+        let (stage, deadline) = match unicast.delivery {
+            Delivery::Direct { .. } => (Stage::Queued, now + tunables.handoff_timeout()),
+            Delivery::Indirect { .. } => (
+                Stage::AwaitingPoll,
+                now + tunables.transaction_persistence_time(),
+            ),
         };
 
         self.records.insert(
@@ -150,9 +153,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 priority: unicast.priority,
                 waiter: unicast.waiter,
                 confirm: unicast.confirm,
-                delivery: unicast.placement.delivery,
+                delivery: unicast.delivery,
                 stage,
-                deadline: unicast.placement.deadline,
+                deadline,
             },
         );
     }

@@ -37,10 +37,11 @@ use ziggurat_ieee_802154::types::{Eui64, Nwk};
 
 use crate::Instant;
 use crate::aps::frame::ApsAckFrame;
+use crate::constants::Tunables;
 use crate::flat_map::{FlatMap, FlatSet};
 
 pub use broadcasts::{Broadcast, Schedule};
-pub use unicasts::{Delivery, Placement, Unicast};
+pub use unicasts::{Delivery, Unicast};
 pub use unrouted::UnroutedUnicast;
 
 use broadcasts::Broadcasts;
@@ -269,31 +270,42 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// Enqueue a unicast with a known next hop.
-    pub fn enqueue_unicast(&mut self, unicast: Unicast<F, W>) -> (SendId, Actions<F, W, E>) {
+    pub fn enqueue_unicast(
+        &mut self,
+        unicast: Unicast<F, W>,
+        now: Instant,
+        tunables: &Tunables,
+    ) -> (SendId, Actions<F, W, E>) {
         let id = self.next_id();
-        self.unicasts.enqueue(id, unicast);
+        self.unicasts.enqueue(id, unicast, now, tunables);
         (id, Actions::new())
     }
 
     /// Enqueue a unicast with no route yet, held until its destination's discovery
     /// ends. The caller starts that discovery if the destination was not already
-    /// awaited; the first unrouted send to a destination fixes `retries`, how often it
-    /// is restarted.
+    /// awaited; the first unrouted send to a destination fixes how often it is
+    /// restarted.
     pub fn enqueue_unrouted_unicast(
         &mut self,
         send: UnroutedUnicast<F, W>,
-        retries: u8,
+        now: Instant,
+        tunables: &Tunables,
     ) -> (SendId, Actions<F, W, E>) {
         let id = self.next_id();
-        self.unrouted_unicasts.enqueue(id, send, retries);
+        self.unrouted_unicasts.enqueue(id, send, now, tunables);
         (id, Actions::new())
     }
 
     /// Enqueue a broadcast. Its first copy goes out on the next tick its schedule says
     /// it is due (a `Once` schedule queues it right away).
-    pub fn enqueue_broadcast(&mut self, broadcast: Broadcast<F, W>) -> (SendId, Actions<F, W, E>) {
+    pub fn enqueue_broadcast(
+        &mut self,
+        broadcast: Broadcast<F, W>,
+        now: Instant,
+        tunables: &Tunables,
+    ) -> (SendId, Actions<F, W, E>) {
         let id = self.next_id();
-        self.broadcasts.enqueue(id, broadcast);
+        self.broadcasts.enqueue(id, broadcast, now, tunables);
         (id, Actions::new())
     }
 
@@ -383,21 +395,25 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     pub fn route_unicasts(
         &mut self,
         destination: Nwk,
-        mut place: impl FnMut(&mut F) -> Result<Placement, E>,
+        now: Instant,
+        tunables: &Tunables,
+        mut place: impl FnMut(&mut F) -> Result<Delivery, E>,
     ) -> Actions<F, W, E> {
         let mut actions = Actions::new();
 
         for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
             match place(&mut unrouted.frame) {
-                Ok(placement) => self.unicasts.enqueue(
+                Ok(delivery) => self.unicasts.enqueue(
                     id,
                     Unicast {
                         frame: unrouted.frame,
                         priority: unrouted.priority,
                         waiter: unrouted.waiter,
                         confirm: unrouted.confirm,
-                        placement,
+                        delivery,
                     },
+                    now,
+                    tunables,
                 ),
                 Err(err) => actions.push(Action::Settled {
                     waiter: unrouted.waiter,

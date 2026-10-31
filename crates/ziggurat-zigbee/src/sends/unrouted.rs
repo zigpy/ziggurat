@@ -10,12 +10,12 @@ use core::marker::PhantomData;
 use ziggurat_ieee_802154::types::Nwk;
 
 use crate::Instant;
+use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
 use super::{Action, Actions, Confirm, SendFailure, SendId, TxPriority};
 
-/// An unrouted unicast: what it is enqueued with, and what it carries to the unicasts
-/// once its route is known.
+/// What an unrouted unicast is enqueued with.
 #[derive(Debug)]
 pub struct UnroutedUnicast<F, W> {
     pub frame: F,
@@ -23,13 +23,23 @@ pub struct UnroutedUnicast<F, W> {
     pub waiter: W,
     pub confirm: Confirm,
     pub destination: Nwk,
+}
+
+/// A held send: what it carries to the unicasts once its route is known.
+#[derive(Debug)]
+pub(super) struct Record<F, W> {
+    pub(super) frame: F,
+    pub(super) priority: TxPriority,
+    pub(super) waiter: W,
+    pub(super) confirm: Confirm,
+    pub(super) destination: Nwk,
     /// When the send fails if still unrouted.
-    pub deadline: Instant,
+    pub(super) deadline: Instant,
 }
 
 #[derive(Debug)]
 pub(super) struct UnroutedUnicasts<F, W, E> {
-    records: FlatMap<SendId, UnroutedUnicast<F, W>>,
+    records: FlatMap<SendId, Record<F, W>>,
     /// Discovery restarts left, per destination with unrouted sends.
     retries: FlatMap<Nwk, u8>,
     _error: PhantomData<fn() -> E>,
@@ -56,14 +66,31 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         self.retries.contains_key(&destination)
     }
 
-    /// Hold a send. The first unrouted send to a destination fixes how often its
-    /// discovery may be restarted.
-    pub(super) fn enqueue(&mut self, id: SendId, send: UnroutedUnicast<F, W>, retries: u8) {
+    /// Hold a send. It fails if still unrouted within the handoff timeout. The first
+    /// unrouted send to a destination fixes how often its discovery may be restarted.
+    pub(super) fn enqueue(
+        &mut self,
+        id: SendId,
+        send: UnroutedUnicast<F, W>,
+        now: Instant,
+        tunables: &Tunables,
+    ) {
         let destination = send.destination;
-        self.records.insert(id, send);
+        self.records.insert(
+            id,
+            Record {
+                frame: send.frame,
+                priority: send.priority,
+                waiter: send.waiter,
+                confirm: send.confirm,
+                destination,
+                deadline: now + tunables.handoff_timeout(),
+            },
+        );
 
         if !self.retries.contains_key(&destination) {
-            self.retries.insert(destination, retries);
+            self.retries
+                .insert(destination, tunables.pending_route_discovery_attempts());
         }
     }
 
@@ -72,12 +99,12 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
     }
 
     /// Take every send to `destination`: its route is known.
-    pub(super) fn route(&mut self, destination: Nwk) -> Vec<(SendId, UnroutedUnicast<F, W>)> {
+    pub(super) fn route(&mut self, destination: Nwk) -> Vec<(SendId, Record<F, W>)> {
         self.retries.remove(&destination);
         self.take(destination)
     }
 
-    fn take(&mut self, destination: Nwk) -> Vec<(SendId, UnroutedUnicast<F, W>)> {
+    fn take(&mut self, destination: Nwk) -> Vec<(SendId, Record<F, W>)> {
         let ids: Vec<SendId> = self
             .records
             .iter()
@@ -90,7 +117,7 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .collect()
     }
 
-    fn settled(send: UnroutedUnicast<F, W>, failure: SendFailure) -> Action<F, W, E> {
+    fn settled(send: Record<F, W>, failure: SendFailure) -> Action<F, W, E> {
         Action::Settled {
             waiter: send.waiter,
             result: Err(failure.into()),

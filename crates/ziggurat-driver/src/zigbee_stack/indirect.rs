@@ -7,7 +7,8 @@ use ziggurat_phy::{RadioError, RadioPhy};
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 
 use super::{
-    Confirm, DeviceLeaveReason, Frame, NwkSecurityMode, TxPolicy, ZigbeeNotification, ZigbeeStack,
+    Confirm, Delivery, DeviceLeaveReason, Frame, NwkSecurityMode, TxPolicy, ZigbeeNotification,
+    ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -109,7 +110,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
-            self.place_indirect_unicast(destination, nwk),
+            Delivery::Indirect {
+                address: destination,
+                next_hop: nwk,
+            },
         );
 
         if let Err(err) = admitted {

@@ -13,6 +13,7 @@ use core::time::Duration;
 use ziggurat_ieee_802154::types::Nwk;
 
 use crate::Instant;
+use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
 use super::{Action, Actions, DequeuedSend, InFlight, SendFailure, SendId, Transmit, TxPriority};
@@ -45,8 +46,6 @@ pub struct Broadcast<F, W> {
     pub priority: TxPriority,
     pub waiter: W,
     pub schedule: Schedule,
-    /// When the send fails if still not over.
-    pub deadline: Instant,
 }
 
 /// What a tick finds a schedule's next copy to be.
@@ -119,7 +118,14 @@ impl<F, W, E> Default for Broadcasts<F, W, E> {
 impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, Record<F, W>)>();
 
-    pub(super) fn enqueue(&mut self, id: SendId, broadcast: Broadcast<F, W>) {
+    /// The send fails if still not over within the handoff timeout.
+    pub(super) fn enqueue(
+        &mut self,
+        id: SendId,
+        broadcast: Broadcast<F, W>,
+        now: Instant,
+        tunables: &Tunables,
+    ) {
         self.records.insert(
             id,
             Record {
@@ -133,7 +139,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 },
                 handed_off: false,
                 quorum_heard: false,
-                deadline: broadcast.deadline,
+                deadline: now + tunables.handoff_timeout(),
             },
         );
     }
