@@ -132,12 +132,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok((SendHandle::new(id, slot), actions))
     }
 
-    /// Finish a mutation of the send table: release the core, carry out the actions
-    /// the mutation returned, and wake the tasks whose next step may have changed: the
-    /// sender, the timer, and the source-match sync, which diffs the poll set itself.
-    /// Taking the guard is what guarantees the core is unlocked before an action locks
-    /// it again.
+    /// Finish a mutation of the send table from any task but the timer: carry out the
+    /// actions and wake the timer, whose next deadline may have moved.
     pub(super) fn commit_sends(&self, core: CoreGuard<'_>, actions: SendActions) {
+        self.run_send_actions(core, actions);
+        self.send_timer_wake.notify_one();
+    }
+
+    /// Release the core, carry out the actions a mutation returned, and wake the sender
+    /// and the source-match sync, which diffs the poll set itself. Taking the guard is
+    /// what guarantees the core is unlocked before an action locks it again.
+    fn run_send_actions(&self, core: CoreGuard<'_>, actions: SendActions) {
         drop(core);
 
         for action in actions {
@@ -165,7 +170,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         self.send_wake.notify_one();
-        self.send_timer_wake.notify_one();
         self.src_match_sync.notify_one();
     }
 
@@ -364,7 +368,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .filter_map(|destination| core.nib.routing.discovery_deadline(destination, now));
         let next_wake = core.sends.next_wake().into_iter().chain(discoveries).min();
 
-        self.commit_sends(guard, actions);
+        // This pass is the timer task's own: waking the timer here would make it spin
+        self.run_send_actions(guard, actions);
         next_wake
     }
 }
