@@ -150,7 +150,10 @@ pub enum Transmit {
 /// reported back.
 #[must_use = "a dequeued send stays in the radio until it is reported through `transmitted`"]
 #[derive(Debug)]
-pub struct InFlight(SendId);
+pub enum InFlight {
+    Unicast(SendId),
+    Broadcast(SendId),
+}
 
 #[derive(Debug)]
 pub struct DequeuedSend<'a, F> {
@@ -343,11 +346,9 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         now: Instant,
         retry_delay: Duration,
     ) -> Actions<F, W, E> {
-        let InFlight(id) = in_flight;
-        if self.unicasts.contains(id) {
-            self.unicasts.transmitted(id, result, now, retry_delay)
-        } else {
-            self.broadcasts.transmitted(id, result)
+        match in_flight {
+            InFlight::Unicast(id) => self.unicasts.transmitted(id, result, now, retry_delay),
+            InFlight::Broadcast(id) => self.broadcasts.transmitted(id, result),
         }
     }
 

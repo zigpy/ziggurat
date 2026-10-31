@@ -159,7 +159,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         record.copy = CopyState::Transmitting;
 
         DequeuedSend {
-            in_flight: InFlight(id),
+            in_flight: InFlight::Broadcast(id),
             frame: &record.frame,
             transmit: Transmit::Broadcast,
         }

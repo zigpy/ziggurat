@@ -179,7 +179,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         record.stage = Stage::Transmitting { acked: false };
 
         DequeuedSend {
-            in_flight: InFlight(id),
+            in_flight: InFlight::Unicast(id),
             frame: &record.frame,
             transmit: Transmit::Unicast {
                 next_hop: record.next_hop,
