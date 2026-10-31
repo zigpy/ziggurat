@@ -526,9 +526,9 @@ pub struct SendGroupcastPayload {
     pub asdu: Vec<u8>,
 }
 
-/// Cancels an in-flight send by the `request_id` it was issued under. Best-effort:
-/// the send is torn down only if it is still in a pre-delivery state (queued, awaiting
-/// route discovery, or between retries). The reply reports whether anything was caught.
+/// Cancels an in-flight send by the `request_id` it was issued under. If the send has no
+/// final status yet and is not in the radio at that moment, it fails with `Cancelled`
+/// and its frame is never transmitted again. The reply reports whether that happened.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct CancelRequestPayload {
@@ -713,6 +713,7 @@ pub enum SendStatus {
     FrameBudgetExhausted = 10,
     Cancelled = 11,
     RadioError = 12,
+    HandoffTimeout = 13,
 }
 
 #[abstract_bits]

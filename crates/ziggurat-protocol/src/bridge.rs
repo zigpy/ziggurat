@@ -384,18 +384,16 @@ fn route_directive(
 
 /// Cancel an in-flight send by the `request_id` it was issued under.
 ///
-/// Best-effort: the reply reports whether the tracker held it and it was still
-/// unresolved. Setting the slot's flag is lazy, so the driver's reactors are nudged to
-/// act on it this pass.
+/// The reply is true if the tracker held the send and the driver settled it with
+/// `Cancelled`. A send in the radio at that moment is refused: its own result follows.
 pub fn cancel_request<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     tracker: &mut SendTracker,
     payload: &CancelRequestPayload,
 ) -> CancelResultPayload {
-    let cancelled = tracker.cancel(payload.request_id);
-    if cancelled {
-        stack.nudge_cancellation();
-    }
+    let cancelled = tracker
+        .send_id(payload.request_id)
+        .is_some_and(|send_id| stack.cancel_send(send_id));
     CancelResultPayload { cancelled }
 }
 
@@ -422,16 +420,15 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
     match result {
         Ok(()) => SendStatus::Success,
         Err(err) => match err {
-            DeliveryError::RouteDiscoveryTimeout(_) => SendStatus::RouteDiscoveryTimeout,
-            DeliveryError::RouteDiscoveryNoEntry => SendStatus::RouteDiscoveryNoEntry,
+            DeliveryError::RouteDiscoveryTimeout => SendStatus::RouteDiscoveryTimeout,
             DeliveryError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
             DeliveryError::NwkNoAck { .. } => SendStatus::NwkNoAck,
             DeliveryError::CcaFailure => SendStatus::CcaFailure,
             DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
             DeliveryError::ApsAckTimeout => SendStatus::ApsAckTimeout,
+            DeliveryError::HandoffTimeout => SendStatus::HandoffTimeout,
             DeliveryError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
             DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
-            DeliveryError::BudgetExhausted => SendStatus::FrameBudgetExhausted,
             DeliveryError::Cancelled => SendStatus::Cancelled,
             DeliveryError::Radio(_) => SendStatus::RadioError,
         },

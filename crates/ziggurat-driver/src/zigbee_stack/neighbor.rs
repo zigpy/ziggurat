@@ -9,7 +9,7 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFram
 use crate::frame_token::TrafficClass;
 
 use super::{
-    Broadcast, NwkSecurityMode, SendHandle, TrackStage, TxPolicy, TxPriority, ZigbeeStack,
+    Broadcast, EnqueueError, NwkSecurityMode, SendHandle, TxPolicy, TxPriority, ZigbeeStack,
 };
 
 /// Maximum number of link status entries that can be carried in a single frame.
@@ -93,16 +93,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.link_status_received.notify_one();
     }
 
-    /// Broadcast the link status notification.
-    pub fn send_link_status_broadcast(&self, empty: bool) -> SendHandle {
+    /// Broadcast the link status notification. The returned handle tracks the last
+    /// frame of the batch.
+    pub fn send_link_status_broadcast(&self, empty: bool) -> Result<SendHandle, EnqueueError> {
         tracing::debug!("Sending periodic link status broadcast");
-
-        let (handle, slot) = SendHandle::new();
 
         if self.state.network_address == Nwk(0xFFFF) {
             tracing::debug!("Skipping, stack has not been initialized yet");
-            slot.resolve(TrackStage::Delivery, Ok(()));
-            return handle;
+            return Err(EnqueueError::NotStarted);
         }
 
         // Decrement the `recent_activity` field of every active routing table entry
@@ -146,15 +144,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 )
                 .with_radius(1);
 
-            // The last frame carries the tracking slot; earlier chunks are
-            // fire-and-forget. They drain the single sender in enqueue order, so the
-            // last frame's handoff implies the whole batch was transmitted.
+            // The last frame is the tracked one; earlier chunks are fire-and-forget.
+            // They drain the single sender in admission order, so the last frame's
+            // handoff implies the whole batch was transmitted.
             let is_last = end == total;
 
             // Spec 3.6.4.4.1: link statuses are one-hop broadcasts sent without
             // retries. Nobody relays a radius-1 frame, so the passive ack machinery
             // of the regular broadcast path could never complete for them anyway.
-            self.send_oneshot_broadcast(Broadcast {
+            let send = Broadcast {
                 frame: link_status_frame,
                 security: NwkSecurityMode::NetworkKey,
                 // Housekeeping the mesh depends on: last to transmit, but never
@@ -163,18 +161,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     priority: TxPriority::Background,
                     class: TrafficClass::Critical,
                 },
-                slot: is_last.then(|| slot.clone()),
-            });
+            };
 
+            let sent = self.send_oneshot_broadcast(send);
             if is_last {
-                break;
+                return sent;
+            }
+            if let Err(err) = sent {
+                tracing::warn!("Dropping link status frame: {err}");
             }
 
             // Repeat the boundary entry as the first of the next frame
             start = end - 1;
         }
-
-        handle
     }
 
     pub async fn periodic_link_status_broadcast_task(&self) {
@@ -185,7 +184,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             // The link status broadcast has a radius of 1 so delivery does not wait for
             // a relay quorum.
-            let _ = self.send_link_status_broadcast(false).delivered().await;
+            if let Ok(link_status) = self.send_link_status_broadcast(false) {
+                let _ = link_status.delivered().await;
+            }
 
             next = next + self.tunables.link_status_period();
         }
