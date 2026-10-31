@@ -756,6 +756,7 @@ impl Neighbors {
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::vec;
     use hex_literal::hex;
 
     const CHILD_NWK: Nwk = Nwk(0x1234);
@@ -819,5 +820,34 @@ mod test {
 
         assert!(!neighbors.clear_end_device_initiator_for_relay(&mut header));
         assert_eq!(header, expected);
+    }
+
+    #[test]
+    fn test_only_end_device_children_time_out() {
+        let mut neighbors = neighbors_with(NwkDeviceType::EndDevice);
+        neighbors.upsert_child(
+            ChildDescriptor {
+                eui64: Eui64::from_hex("88:99:aa:bb:cc:dd:ee:ff"),
+                network_address: Nwk(0x5678),
+                device_type: NwkDeviceType::Router,
+                rx_on_when_idle: true,
+                device_timeout: Duration::from_secs(30),
+                relationship: Relationship::Child,
+            },
+            Instant::from_micros(0),
+        );
+
+        assert_eq!(
+            neighbors.next_child_timeout(),
+            Some(Instant::from_micros(0) + Duration::from_secs(60))
+        );
+
+        let evicted =
+            neighbors.evict_timed_out_children(Instant::from_micros(0) + Duration::from_secs(120));
+        assert_eq!(
+            evicted,
+            vec![(Eui64::from_hex("00:11:22:33:44:55:66:77"), CHILD_NWK)]
+        );
+        assert_eq!(neighbors.next_child_timeout(), None);
     }
 }
