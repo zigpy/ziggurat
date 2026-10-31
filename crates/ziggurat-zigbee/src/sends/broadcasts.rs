@@ -16,7 +16,7 @@ use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Actions, DequeuedSend, InFlight, SendFailure, SendId, Transmit, TxPriority};
+use super::{Action, Actions, InFlight, SendFailure, SendId, Transmit, TxPriority};
 
 /// How a broadcast is retransmitted and when it is done.
 #[derive(Debug, Clone, Copy)]
@@ -67,7 +67,8 @@ enum CopyState {
 
 #[derive(Debug)]
 struct Record<F, W> {
-    frame: F,
+    /// `None` exactly while a copy is on loan to the radio (`CopyState::Transmitting`).
+    frame: Option<F>,
     priority: TxPriority,
     waiter: W,
     schedule: Schedule,
@@ -129,7 +130,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         self.records.insert(
             id,
             Record {
-                frame: broadcast.frame,
+                frame: Some(broadcast.frame),
                 priority: broadcast.priority,
                 waiter: broadcast.waiter,
                 schedule: broadcast.schedule,
@@ -153,19 +154,24 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             .map(|(id, record)| (*id, record.priority))
     }
 
-    pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {
+    pub(super) fn dequeue(&mut self, id: SendId) -> InFlight<F> {
         let record = self.records.get_mut(&id).unwrap();
         debug_assert_eq!(record.copy, CopyState::Queued);
         record.copy = CopyState::Transmitting;
 
-        DequeuedSend {
-            in_flight: InFlight::Broadcast(id),
-            frame: &record.frame,
+        InFlight {
+            id,
+            frame: record.frame.take().unwrap(),
             transmit: Transmit::Broadcast,
         }
     }
 
-    pub(super) fn transmitted(&mut self, id: SendId, result: Result<(), E>) -> Actions<F, W, E> {
+    pub(super) fn transmitted(
+        &mut self,
+        id: SendId,
+        frame: F,
+        result: Result<(), E>,
+    ) -> Actions<F, W, E> {
         let mut actions = Actions::new();
 
         let record = self
@@ -174,6 +180,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             .expect("a transmitting send is never settled from outside");
         debug_assert_eq!(record.copy, CopyState::Transmitting);
         record.copy = CopyState::Idle;
+        record.frame = Some(frame);
 
         if matches!(record.schedule, Schedule::Once) {
             self.settle(id, result, &mut actions);
@@ -201,7 +208,9 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         actions.push(Action::Settled {
             waiter: record.waiter,
             result,
-            frame: record.frame,
+            frame: record
+                .frame
+                .expect("a transmitting send is never settled from outside"),
             failed_hop: None,
         });
     }

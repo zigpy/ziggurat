@@ -236,20 +236,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn sender_task(&self) {
         loop {
             loop {
-                // The frame is cloned out so the core is unlocked across the transmit
-                let dequeued = self.core().sends.dequeue().map(|dequeued| {
-                    (
-                        dequeued.in_flight,
-                        dequeued.frame.frame.clone(),
-                        dequeued.transmit,
-                    )
-                });
-
-                let Some((in_flight, frame, transmit)) = dequeued else {
+                // The frame leaves the table on loan, so the core is unlocked across the
+                // transmit
+                let Some(mut in_flight) = self.core().sends.dequeue() else {
                     break;
                 };
 
-                let result = self.transmit(frame, transmit).await;
+                let transmit = in_flight.transmit();
+                let result = self
+                    .transmit(&mut in_flight.frame_mut().frame, transmit)
+                    .await;
 
                 let now = self.core_now();
                 let retry_delay = self.unicast_retry_delay();
@@ -262,8 +258,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Build the 802.15.4 frame for one transmit and hand it to the radio.
-    async fn transmit(&self, frame: Frame, transmit: Transmit) -> Result<(), DeliveryError> {
+    /// Build the 802.15.4 frame for one transmit and hand it to the radio. The frame is
+    /// finished in place (aux header, frame-pending bit) and keeps that state between
+    /// attempts; every attempt overwrites it.
+    async fn transmit(&self, frame: &mut Frame, transmit: Transmit) -> Result<(), DeliveryError> {
         match (transmit, frame) {
             (
                 Transmit::Unicast {
@@ -275,10 +273,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     security,
                 },
             ) => {
-                self.transmit_unicast(nwk_frame, next_hop, security, frame_pending)
+                self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending)
                     .await
             }
-            (Transmit::Unicast { frame_pending, .. }, Frame::Raw(mut raw)) => {
+            (Transmit::Unicast { frame_pending, .. }, Frame::Raw(raw)) => {
                 raw.header_mut().frame_control.frame_pending = frame_pending;
                 self.send_802154_frame(raw).await
             }
@@ -288,7 +286,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     nwk_frame,
                     security,
                 },
-            ) => self.transmit_broadcast(nwk_frame, security).await,
+            ) => self.transmit_broadcast(nwk_frame, *security).await,
             (Transmit::Broadcast, Frame::Raw(raw)) => self.send_802154_frame(raw).await,
         }
     }

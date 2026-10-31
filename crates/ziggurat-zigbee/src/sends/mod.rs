@@ -1,7 +1,8 @@
 //! The send tables: every outgoing frame the stack holds, from admission to its verdict.
 //!
 //! A send is one record in exactly one of three tables, and its frame lives only in
-//! that record. Once the record is settled (removed) there is nothing left to transmit.
+//! that record, or on loan to the radio while it is transmitted. Once the record is
+//! settled (removed) there is nothing left to transmit.
 //!
 //! - [`Unicasts`](unicasts::Unicasts): a frame with a known next hop, delivered directly
 //!   (with retries) or to a sleepy child when it polls.
@@ -145,21 +146,28 @@ pub enum Transmit {
     Broadcast,
 }
 
-/// A dequeued send the sender owes a transmit report on. Only `transmitted` consumes
-/// it, and only `dequeue` issues one, so a frame handed to the radio is always
-/// reported back.
+/// A send on loan to the radio.
+///
+/// Its frame left the record with the sender, which transmits it and hands it back,
+/// with the result, through `transmitted`. Only `dequeue` issues one and only
+/// `transmitted` consumes one, so a frame handed to the radio always comes back,
+/// reported on.
 #[must_use = "a dequeued send stays in the radio until it is reported through `transmitted`"]
 #[derive(Debug)]
-pub enum InFlight {
-    Unicast(SendId),
-    Broadcast(SendId),
+pub struct InFlight<F> {
+    id: SendId,
+    frame: F,
+    transmit: Transmit,
 }
 
-#[derive(Debug)]
-pub struct DequeuedSend<'a, F> {
-    pub in_flight: InFlight,
-    pub frame: &'a F,
-    pub transmit: Transmit,
+impl<F> InFlight<F> {
+    pub const fn frame_mut(&mut self) -> &mut F {
+        &mut self.frame
+    }
+
+    pub const fn transmit(&self) -> Transmit {
+        self.transmit
+    }
 }
 
 /// What the driver must do after a mutation.
@@ -312,9 +320,9 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         (id, Actions::new())
     }
 
-    /// Hand the highest-priority queued frame (oldest first within a priority) to the
-    /// sender, which must report back through `transmitted`.
-    pub fn dequeue(&mut self) -> Option<DequeuedSend<'_, F>> {
+    /// Lend the highest-priority queued frame (oldest first within a priority) to the
+    /// sender, which must hand it back through `transmitted`.
+    pub fn dequeue(&mut self) -> Option<InFlight<F>> {
         let unicast = self
             .unicasts
             .best_queued()
@@ -337,18 +345,28 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         })
     }
 
-    /// The sender's report for a dequeued frame. `retry_delay` is how long a failed
-    /// unicast waits before its next attempt.
+    /// The sender's report for a lent frame, which comes back with it. `retry_delay`
+    /// is how long a failed unicast waits before its next attempt.
     pub fn transmitted(
         &mut self,
-        in_flight: InFlight,
+        in_flight: InFlight<F>,
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
     ) -> Actions<F, W, E> {
-        match in_flight {
-            InFlight::Unicast(id) => self.unicasts.transmitted(id, result, now, retry_delay),
-            InFlight::Broadcast(id) => self.broadcasts.transmitted(id, result),
+        let InFlight {
+            id,
+            frame,
+            transmit,
+        } = in_flight;
+
+        // A MAC unicast only ever comes from the unicasts, a broadcast from the broadcasts
+        match transmit {
+            Transmit::Unicast { .. } => {
+                self.unicasts
+                    .transmitted(id, frame, result, now, retry_delay)
+            }
+            Transmit::Broadcast => self.broadcasts.transmitted(id, frame, result),
         }
     }
 

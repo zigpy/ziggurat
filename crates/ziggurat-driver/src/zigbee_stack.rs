@@ -282,7 +282,7 @@ pub struct AddressConflict {
 /// is assigned just before it reaches the air: a frame can wait in the table for
 /// seconds, and assigning the counter at admission would let later sends reach the air
 /// with higher counters first, which the destination's replay window rejects.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Frame {
     Nwk {
         nwk_frame: NwkFrame,

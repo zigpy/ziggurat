@@ -14,8 +14,8 @@ use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
 use super::{
-    Action, Actions, ApsAckData, Confirm, DequeuedSend, InFlight, SendFailure, SendId,
-    SrcMatchTable, Transmit, TxPriority,
+    Action, Actions, ApsAckData, Confirm, InFlight, SendFailure, SendId, SrcMatchTable, Transmit,
+    TxPriority,
 };
 
 /// What a unicast is enqueued with.
@@ -49,7 +49,8 @@ enum Stage {
 
 #[derive(Debug)]
 struct Record<F, W> {
-    frame: F,
+    /// `None` exactly while the frame is on loan to the radio (`Stage::Transmitting`).
+    frame: Option<F>,
     priority: TxPriority,
     waiter: W,
     confirm: Confirm,
@@ -139,7 +140,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         self.records.insert(
             id,
             Record {
-                frame: unicast.frame,
+                frame: Some(unicast.frame),
                 priority: unicast.priority,
                 waiter: unicast.waiter,
                 confirm: unicast.confirm,
@@ -161,7 +162,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             .map(|(id, record)| (*id, record.priority))
     }
 
-    pub(super) fn dequeue(&mut self, id: SendId) -> DequeuedSend<'_, F> {
+    pub(super) fn dequeue(&mut self, id: SendId) -> InFlight<F> {
         // More frames await the same device: it keeps polling
         let frame_pending = self
             .records
@@ -178,9 +179,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         debug_assert_eq!(record.stage, Stage::Queued);
         record.stage = Stage::Transmitting { acked: false };
 
-        DequeuedSend {
-            in_flight: InFlight::Unicast(id),
-            frame: &record.frame,
+        InFlight {
+            id,
+            frame: record.frame.take().unwrap(),
             transmit: Transmit::Unicast {
                 next_hop: record.next_hop,
                 frame_pending,
@@ -191,6 +192,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     pub(super) fn transmitted(
         &mut self,
         id: SendId,
+        frame: F,
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
@@ -204,6 +206,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         let Stage::Transmitting { acked } = record.stage else {
             unreachable!("only a transmitting send is reported on")
         };
+        record.frame = Some(frame);
 
         match result {
             Ok(()) => self.handed_off(id, now, acked, &mut actions),
@@ -271,7 +274,9 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         actions.push(Action::Settled {
             waiter: record.waiter,
             result,
-            frame: record.frame,
+            frame: record
+                .frame
+                .expect("a transmitting send is never settled from outside"),
             failed_hop,
         });
     }

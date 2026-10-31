@@ -520,14 +520,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// once. The send table decides what a failure means (a retry, or the verdict).
     pub(super) async fn transmit_unicast(
         &self,
-        mut nwk_frame: NwkFrame,
+        nwk_frame: &mut NwkFrame,
         next_hop_address: Nwk,
         security: NwkSecurityMode,
         frame_pending: bool,
     ) -> Result<(), DeliveryError> {
-        self.apply_nwk_aux_header(&mut nwk_frame, security);
-        let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
-        let ieee802154_frame = self.build_unicast_802154_data_frame(
+        self.apply_nwk_aux_header(nwk_frame, security);
+        let encrypted_nwk_frame = self.encrypt_nwk_frame(nwk_frame, security);
+        let mut ieee802154_frame = self.build_unicast_802154_data_frame(
             next_hop_address,
             encrypted_nwk_frame,
             frame_pending,
@@ -550,7 +550,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.increment_tx_total();
 
-        let result = self.send_802154_frame(ieee802154_frame).await;
+        let result = self.send_802154_frame(&mut ieee802154_frame).await;
 
         if let Err(e) = &result {
             // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
@@ -719,19 +719,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Encrypt and broadcast a single copy of a frame.
     pub(super) async fn transmit_broadcast(
         &self,
-        mut nwk_frame: NwkFrame,
+        nwk_frame: &mut NwkFrame,
         security: NwkSecurityMode,
     ) -> Result<(), DeliveryError> {
-        self.apply_nwk_aux_header(&mut nwk_frame, security);
+        self.apply_nwk_aux_header(nwk_frame, security);
 
-        let encrypted_nwk_frame = self.encrypt_nwk_frame(&mut nwk_frame, security);
+        let encrypted_nwk_frame = self.encrypt_nwk_frame(nwk_frame, security);
 
         let (ieee802154_sequence_number, pan_id) = {
             let core = self.core();
             (core.mac.ieee802154_sequence_number, core.mac.pan_id)
         };
 
-        let ieee802154_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
+        let mut ieee802154_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
             header: Ieee802154FrameHeader {
                 frame_control: Ieee802154FrameControl {
                     frame_type: Ieee802154FrameType::Data,
@@ -760,7 +760,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.increment_tx_total();
 
-        self.send_802154_frame(ieee802154_frame).await
+        self.send_802154_frame(&mut ieee802154_frame).await
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.
