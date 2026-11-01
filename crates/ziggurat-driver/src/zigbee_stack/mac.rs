@@ -18,10 +18,10 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
-use crate::frame_token::TrafficClass;
+use super::TrafficClass;
 
 use super::{
-    DeliveryError, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, SendKind, TxOutcome, TxPolicy,
+    DeliveryError, Frame, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, Schedule, TxPolicy,
     TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
@@ -153,13 +153,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        self.enqueue_send(
-            SendKind::Raw {
-                frame: beacon_frame,
-            },
-            policy,
-            TxOutcome::Discard,
-        );
+        self.enqueue_broadcast(Frame::Raw(beacon_frame), policy, Schedule::Once);
     }
 
     /// The beacon-spam reactor (the [`hack_beacon_spam_duration`] hack): while a spray
@@ -408,12 +402,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         });
     }
 
+    /// Assign the frame its MAC sequence number and hand it to the radio.
     pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
-        frame: Ieee802154Frame<Payload>,
+        frame: &mut Ieee802154Frame<Payload>,
     ) -> Result<(), DeliveryError> {
-        // Increment the 802.15.4 sequence number
-        let final_frame = if !frame.header().frame_control.sequence_number_suppression {
+        if !frame.header().frame_control.sequence_number_suppression {
             // Hold the lock for the shortest time possible
             let ieee802154_sequence_number = {
                 let mut core = self.core();
@@ -423,32 +417,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 core.mac.ieee802154_sequence_number
             };
 
-            match frame {
-                Ieee802154Frame::Data(mut data_frame) => {
-                    data_frame.header.sequence_number = Some(ieee802154_sequence_number);
-                    Ieee802154Frame::Data(data_frame)
-                }
-                Ieee802154Frame::Beacon(mut beacon_frame) => {
-                    beacon_frame.header.sequence_number = Some(ieee802154_sequence_number);
-                    Ieee802154Frame::Beacon(beacon_frame)
-                }
-                Ieee802154Frame::Ack(mut ack_frame) => {
-                    ack_frame.header.sequence_number = Some(ieee802154_sequence_number);
-                    Ieee802154Frame::Ack(ack_frame)
-                }
-                Ieee802154Frame::Command(mut command_frame) => {
-                    command_frame.header.sequence_number = Some(ieee802154_sequence_number);
-                    Ieee802154Frame::Command(command_frame)
-                }
-            }
-        } else {
-            frame
-        };
+            frame.header_mut().sequence_number = Some(ieee802154_sequence_number);
+        }
 
-        tracing::trace!("Sending 802.15.4 frame: {final_frame:?}");
+        tracing::trace!("Sending 802.15.4 frame: {frame:?}");
         tracing::trace!(
             "Sending 802.15.4 frame bytes: {:02X?}",
-            final_frame.to_bytes_without_fcs()
+            frame.to_bytes_without_fcs()
         );
 
         if self.state.hack_disable_tx {
@@ -460,7 +435,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let result = self
             .radio
             .transmit(TxFrame {
-                psdu: final_frame.to_bytes_without_fcs(),
+                psdu: frame.to_bytes_without_fcs(),
                 channel: Some(channel),
                 csma_ca: true,
                 max_frame_retries: self.tunables.mac_max_frame_retries(),
@@ -473,7 +448,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             TxResult::Acked => Ok(()),
             // A frame with no destination (e.g. a beacon) never requested an ACK, so
             // "no ACK" is the expected outcome, not a failure.
-            TxResult::NoAck => final_frame
+            TxResult::NoAck => frame
                 .header()
                 .dest_address
                 .map_or(Ok(()), |next_hop| Err(DeliveryError::NwkNoAck { next_hop })),

@@ -7,20 +7,17 @@ use ziggurat_zigbee::aps::frame::{
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp;
 use core::time::Duration;
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::flat_map::Entry;
 
+use super::TrafficClass;
 use super::{
-    ApsAck, ApsAckData, Broadcast, DeliveryError, EnqueueError, NwkSecurityMode, PendingApsAck,
-    RouteDirective, SendHandle, SendMode, SendSlot, TrackStage, TxOutcome, TxPolicy, TxPriority,
-    Unicast, ZigbeeStack,
+    ApsAck, ApsAckData, Broadcast, Confirm, EnqueueError, NwkSecurityMode, RouteDirective,
+    SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeStack,
 };
-use crate::frame_token::TrafficClass;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// The EUI64 an inbound secured APS frame was encrypted by: the auxiliary header's
@@ -79,23 +76,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .decrypt_ack(source, frame, &network_key)
     }
 
-    /// Resolve an inbound APS ACK against the pending transmissions waiting for it: wake an
-    /// awaiting caller, or push the delivery outcome for a fire-and-forget send.
+    /// Resolve an inbound APS ACK against the send waiting for it.
     pub(super) fn handle_aps_ack(&self, nwk_frame: &NwkFrame, ack: &ApsAckFrame) {
         let ack_data = ApsAckData::from_aps_ack(nwk_frame.nwk_header.source, ack);
         tracing::trace!("Received APS ack: {ack_data:?}");
 
-        // The oldest match: the ack carries no way to tell two frames sharing a key apart
-        let mut pending = self.state.pending_aps_acks.lock();
-        let matched = pending
-            .iter()
-            .position(|entry| entry.ack_data == ack_data)
-            .map(|index| pending.remove(index));
-        drop(pending);
-
-        if let Some(PendingApsAck { slot, .. }) = matched {
-            slot.resolve(TrackStage::Delivery, Ok(()));
-        }
+        let mut core = self.core();
+        let actions = core.sends.aps_ack_received(&ack_data);
+        self.commit_sends(core, actions);
     }
 
     /// Spec 2.2.8.4.2: record an inbound APS data frame and report whether it duplicates
@@ -182,7 +170,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Route(RouteDirective::StackDecides),
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Discard,
+            confirm: Confirm::OnHandoff,
         };
         if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send APS ack: {err}");
@@ -200,8 +188,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Send a unicast APS data frame, returning a [`SendHandle`] over its two stages.
-    /// `Err` rejects at admission (malformed, rate limited, frame budget) and no handle is
-    /// returned. On `Ok`, `handed_off` resolves on next-hop acceptance and `delivered` on
+    /// `Err` rejects at admission (malformed, rate limited) and no handle is returned. On `Ok`, `handed_off` resolves on next-hop acceptance and `delivered` on
     /// the end-to-end APS ack (for an ack send) or on that same acceptance (rule 4, for a
     /// no-ack send).
     ///
@@ -268,43 +255,27 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 
-        // The end-to-end ack correlates on the swapped endpoints (our destination is the
-        // acker's source, and vice-versa).
-        let ack_data = (aps_ack == ApsAck::Request).then_some(ApsAckData {
-            src: destination,
-            destination_endpoint: Some(src_ep),
-            cluster_id: Some(cluster_id),
-            profile_id: Some(profile_id),
-            source_endpoint: Some(dst_ep),
-            counter: aps_seq,
-        });
-
-        let (handle, slot) = SendHandle::new();
-
-        // With an APS ack, the sender resolves only `handed_off` (next-hop acceptance);
-        // the ack arrival/timeout resolves `delivered` through the slot held here. Without
-        // one, next-hop acceptance is the whole verdict, so the sender resolves
-        // `Delivery` directly (rule 4 back-fills `handed_off`).
-        let stage = if ack_data.is_some() {
-            TrackStage::HandOff
-        } else {
-            TrackStage::Delivery
+        // With an APS ack, next-hop acceptance is the handoff and the ack arrival (or
+        // its timeout, counted from the handoff) is the delivery. Without one, next-hop
+        // acceptance is the whole verdict.
+        let confirm = match aps_ack {
+            ApsAck::Request => Confirm::ApsAck {
+                // The end-to-end ack correlates on the swapped endpoints (our
+                // destination is the acker's source, and vice-versa).
+                ack: ApsAckData {
+                    src: destination,
+                    destination_endpoint: Some(src_ep),
+                    cluster_id: Some(cluster_id),
+                    profile_id: Some(profile_id),
+                    source_endpoint: Some(dst_ep),
+                    counter: aps_seq,
+                },
+                wait: self.aps_ack_timeout(destination, sleepy_destination),
+            },
+            ApsAck::None => Confirm::OnHandoff,
         };
 
-        // An APS-ack send registers its pending ack (with the deadline the timeout
-        // reactor uses) before enqueueing so a fast reply is caught.
-        let registered_slot = ack_data.is_some().then(|| slot.clone());
-        if let Some(ack_data) = ack_data {
-            let deadline = self.core_now() + self.aps_ack_timeout(destination, sleepy_destination);
-            self.state.pending_aps_acks.lock().push(PendingApsAck {
-                ack_data,
-                slot: slot.clone(),
-                deadline,
-            });
-            self.aps_ack_wake.notify_one();
-        }
-
-        let accepted = self.send_unicast(Unicast {
+        self.send_unicast(Unicast {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Route(route),
@@ -312,22 +283,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority,
                 class: TrafficClass::Host,
             },
-            outcome: TxOutcome::Track { slot, stage },
-        });
-
-        // A rejected frame gets no confirmation: unregister its pending ack and drop the
-        // handle by returning the admission error.
-        if let Err(err) = accepted {
-            if let Some(registered_slot) = registered_slot {
-                self.state
-                    .pending_aps_acks
-                    .lock()
-                    .retain(|entry| !Arc::ptr_eq(&entry.slot, &registered_slot));
-            }
-            return Err(err);
-        }
-
-        Ok(handle)
+            confirm,
+        })
     }
 
     /// Send a broadcast APS data frame to a broadcast sink, returning a [`SendHandle`].
@@ -374,7 +331,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 
-        let (handle, slot) = SendHandle::new();
         self.send_broadcast(Broadcast {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
@@ -382,9 +338,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority,
                 class: TrafficClass::Host,
             },
-            slot: Some(slot),
-        })?;
-        Ok(handle)
+        })
     }
 
     /// Send a groupcast (APS multicast) data frame, returning a [`SendHandle`]. The group
@@ -431,7 +385,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 
-        let (handle, slot) = SendHandle::new();
         self.send_broadcast(Broadcast {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
@@ -439,65 +392,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority,
                 class: TrafficClass::Host,
             },
-            slot: Some(slot),
-        })?;
-        Ok(handle)
-    }
-
-    /// The APS-ack timeout reactor: sleeps to the earliest pending send's deadline, then
-    /// fails any whose ack never arrived.
-    pub(super) async fn aps_ack_timeout_task(&self) {
-        loop {
-            match self.earliest_aps_ack_deadline() {
-                Some(deadline) => {
-                    let _ = self
-                        .timeout_at_core(deadline, self.aps_ack_wake.notified())
-                        .await;
-                }
-                None => self.aps_ack_wake.notified().await,
-            }
-
-            self.expire_aps_acks();
-        }
-    }
-
-    fn earliest_aps_ack_deadline(&self) -> Option<CoreInstant> {
-        self.state
-            .pending_aps_acks
-            .lock()
-            .iter()
-            .map(|pending| pending.deadline)
-            .min()
-    }
-
-    /// Expire pending APS acks: an entry past its deadline resolves `delivered` with a
-    /// timeout, and a cancelled entry with `Cancelled`. A stale entry whose send already
-    /// failed at handoff still expires here; its slot is already resolved, so the late
-    /// write is ignored (write-once, rule 1).
-    fn expire_aps_acks(&self) {
-        let now = self.core_now();
-
-        let due: Vec<(Arc<SendSlot>, bool)> = self
-            .state
-            .pending_aps_acks
-            .lock()
-            .extract_if(.., |entry| {
-                entry.deadline <= now || entry.slot.is_cancelled()
-            })
-            .map(|entry| {
-                let cancelled = entry.slot.is_cancelled();
-                (entry.slot, cancelled)
-            })
-            .collect();
-
-        for (slot, cancelled) in due {
-            let result = if cancelled {
-                Err(DeliveryError::Cancelled)
-            } else {
-                Err(DeliveryError::ApsAckTimeout)
-            };
-
-            slot.resolve(TrackStage::Delivery, result);
-        }
+        })
     }
 }
