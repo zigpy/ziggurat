@@ -13,11 +13,11 @@ use core::time::Duration;
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::flat_map::Entry;
 
+use super::TrafficClass;
 use super::{
     ApsAck, ApsAckData, Broadcast, Confirm, EnqueueError, NwkSecurityMode, RouteDirective,
     SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeStack,
 };
-use crate::frame_token::TrafficClass;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// The EUI64 an inbound secured APS frame was encrypted by: the auxiliary header's
@@ -188,8 +188,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Send a unicast APS data frame, returning a [`SendHandle`] over its two stages.
-    /// `Err` rejects at admission (malformed, rate limited, frame budget) and no handle is
-    /// returned. On `Ok`, `handed_off` resolves on next-hop acceptance and `delivered` on
+    /// `Err` rejects at admission (malformed, rate limited) and no handle is returned. On `Ok`, `handed_off` resolves on next-hop acceptance and `delivered` on
     /// the end-to-end APS ack (for an ack send) or on that same acceptance (rule 4, for a
     /// no-ack send).
     ///

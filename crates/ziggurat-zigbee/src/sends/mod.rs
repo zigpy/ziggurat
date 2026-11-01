@@ -267,13 +267,6 @@ impl<F, W, E> Default for Sends<F, W, E> {
 }
 
 impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
-    /// What the fattest record, a unicast's, costs, for pricing the frame budget.
-    pub const RECORD_BYTES: usize = {
-        assert!(Unicasts::<F, W, E>::RECORD_BYTES >= UnroutedUnicasts::<F, W, E>::RECORD_BYTES);
-        assert!(Unicasts::<F, W, E>::RECORD_BYTES >= Broadcasts::<F, W, E>::RECORD_BYTES);
-        Unicasts::<F, W, E>::RECORD_BYTES
-    };
-
     const fn next_id(&mut self) -> SendId {
         let id = SendId(self.next_id);
         self.next_id += 1;

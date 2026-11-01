@@ -15,11 +15,11 @@ use ziggurat_zigbee::zdp::{
     ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus,
 };
 
+use super::TrafficClass;
 use super::{
     Broadcast, Confirm, EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective,
     SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeStack, neighbors, routing,
 };
-use crate::frame_token::TrafficClass;
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;

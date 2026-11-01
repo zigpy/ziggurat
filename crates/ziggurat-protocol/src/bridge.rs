@@ -348,7 +348,6 @@ pub fn send_groupcast<P: RadioPhy, R: Runtime>(
 fn enqueue_error(e: &EnqueueError) -> Error {
     match e {
         EnqueueError::RateLimited { retry_in } => Error::rate_limited(*retry_in),
-        EnqueueError::BudgetExhausted => Status::BudgetExhausted.into(),
         EnqueueError::NotStarted => Status::NotStarted.into(),
         EnqueueError::PayloadTooLong => Status::PayloadTooLong.into(),
         EnqueueError::SecurityUnavailable => Status::SecurityUnavailable.into(),

@@ -105,17 +105,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Fire-and-forget: an expiry (the stale child never polled again) is only
         // worth a log line.
-        let admitted = self.enqueue_unicast(
+        self.enqueue_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
             nwk,
             Some(destination),
         );
-
-        if let Err(err) = admitted {
-            tracing::warn!("Not queueing a leave for {nwk:?}: {err}");
-        }
     }
 
     /// Mirrors the devices with frames awaiting their poll into the RCP source address

@@ -122,8 +122,6 @@ impl<F, W, E> Default for Broadcasts<F, W, E> {
 }
 
 impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
-    pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, Record<F, W>)>();
-
     /// The send fails if still not over within the handoff timeout.
     pub(super) fn enqueue(
         &mut self,

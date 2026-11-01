@@ -1,10 +1,11 @@
+use super::TrafficClass;
 use crate::broadcast_budget::BroadcastAdmission;
-use crate::frame_token::TrafficClass;
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::FrameBytes;
@@ -27,7 +28,7 @@ use ziggurat_zigbee::sends::UnroutedUnicast;
 use super::{
     AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
     NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendMode,
-    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -86,12 +87,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         attempts: u8,
         initial_delay: Duration,
     ) -> SendActions {
-        let key = (
-            nwk_frame.nwk_header.source,
-            nwk_frame.nwk_header.sequence_number,
-        );
-
-        let enqueued = self.enqueue_broadcast_in(
+        let (_, actions) = self.enqueue_broadcast_in(
             core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -105,13 +101,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
         );
 
-        match enqueued {
-            Ok((_, actions)) => actions,
-            Err(err) => {
-                tracing::warn!("Dropping route request {key:?}: {err}");
-                SendActions::new()
-            }
-        }
+        actions
     }
 
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
@@ -386,17 +376,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     confirm,
                     next_hop,
                     poll_address,
-                )?
+                )
             }
             NextHop::NeedDiscovery => {
                 tracing::debug!("Holding frame until a route to {destination:?} is known");
-                let (frame, slot) = self.hold_frame(Frame::nwk(nwk_frame, security), policy)?;
+                let slot = Arc::new(SendSlot::default());
 
                 // The first unrouted send to a destination starts its discovery
                 let discovering = core.sends.has_unrouted(destination);
                 let (id, mut actions) = core.sends.enqueue_unrouted_unicast(
                     UnroutedUnicast {
-                        frame,
+                        frame: Frame::nwk(nwk_frame, security),
                         priority: policy.priority,
                         waiter: slot.clone(),
                         confirm,
@@ -617,9 +607,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .collect();
 
         for (child_eui64, child_nwk) in sleepy_children {
-            // Each per-child copy is its own charge: under pressure copies are skipped
-            // (the child misses one broadcast) instead of exhausting the heap.
-            let admitted = self.enqueue_unicast(
+            self.enqueue_unicast(
                 Frame::nwk(nwk_frame.clone(), security),
                 TxPolicy {
                     priority: TxPriority::UserNormal,
@@ -629,17 +617,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 child_nwk,
                 Some(Ieee802154Address::Eui64(child_eui64)),
             );
-
-            if let Err(err) = admitted {
-                tracing::warn!("Skipping broadcast copy to sleepy child {child_nwk:?}: {err}");
-            }
         }
     }
 
     /// Send a broadcast, retransmitted until its passive-ack quorum is heard or its
     /// attempts run out. `Err` rejects at admission and no handle is returned. A caller
     /// that does not await the send drops the handle.
-    // The guard is moved into `commit_sends`; the lint misreads the `?` return path
+    // The guard is moved into `commit_sends`; the lint misses the move
     #[allow(clippy::significant_drop_tightening)]
     pub(super) fn send_broadcast(&self, send: Broadcast) -> Result<SendHandle, EnqueueError> {
         let Broadcast {
@@ -668,16 +652,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.sequence_number,
         );
 
-        // The broadcast itself is admitted first: a refused budget rejects the whole
-        // send before any copy of it is queued
-        let (frame, slot) = self.hold_frame(Frame::nwk(nwk_frame, security), policy)?;
-        let Frame::Nwk { nwk_frame, .. } = &frame.frame else {
-            unreachable!("the frame was built as a NWK frame above")
-        };
-
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
         // for each (spec 3.6.6).
-        self.maybe_fan_out_broadcast_to_sleepy_children(nwk_frame, security, policy.class);
+        self.maybe_fan_out_broadcast_to_sleepy_children(&nwk_frame, security, policy.class);
 
         // The passive ack contract is formed at transmission time: only routers that
         // are neighbors right now are expected to relay
@@ -694,11 +671,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
         // is the send's handoff; the quorum is its delivery.
-        let (handle, actions) = self.enqueue_held_broadcast(
+        let (handle, actions) = self.enqueue_broadcast_in(
             &mut core,
-            frame,
-            slot,
-            policy.priority,
+            Frame::nwk(nwk_frame, security),
+            policy,
             Schedule::PassiveAck {
                 key,
                 copies_remaining: self.tunables.max_broadcast_retries() + 1,
@@ -711,10 +687,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Send a single-copy broadcast: assign its sequence number and queue one copy for
     /// the sender. The transmit result is the verdict.
-    pub(super) fn send_oneshot_broadcast(
-        &self,
-        send: Broadcast,
-    ) -> Result<SendHandle, EnqueueError> {
+    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) -> SendHandle {
         let Broadcast {
             frame: mut nwk_frame,
             security,
@@ -897,13 +870,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source
         );
 
-        // Transit traffic draws from the forwarding tier: under a best-effort flood we
-        // keep relaying, and under true exhaustion the drop is the originator's to
-        // retry end-to-end. The originator's sequence number is preserved. Any failure
-        // handling (route invalidation, the network status back to the originator)
-        // follows the send table's verdict; nothing is awaited here.
+        // The originator's sequence number is preserved. Any failure handling (route
+        // invalidation, the network status back to the originator) follows the send
+        // table's verdict; nothing is awaited here.
         let poll_address = Self::poll_address(&self.core().nib, next_hop_address);
-        let admitted = self.enqueue_unicast(
+        self.enqueue_unicast(
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
@@ -913,10 +884,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             next_hop_address,
             poll_address,
         );
-
-        if let Err(err) = admitted {
-            tracing::warn!("Dropping relay to {destination:?}: {err}");
-        }
     }
 
     /// Zigbee spec 3.6.4.8.1: when relaying fails, the routes through the dead link are
@@ -1010,7 +977,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The first relay waits out the jitter. The passive-ack contract was recorded
         // when we received the frame, so the timer's quorum check already covers
         // relayed broadcasts.
-        let admitted = self.enqueue_broadcast(
+        self.enqueue_broadcast(
             Frame::nwk(relayed_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
@@ -1022,9 +989,5 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 next_attempt: self.core_now() + self.broadcast_jitter(),
             },
         );
-
-        if let Err(err) = admitted {
-            tracing::warn!("Not relaying broadcast {key:?}: {err}");
-        }
     }
 }

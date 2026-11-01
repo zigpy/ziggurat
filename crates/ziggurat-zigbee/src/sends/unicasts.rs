@@ -114,8 +114,6 @@ impl<F, W, E> Default for Unicasts<F, W, E> {
 }
 
 impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
-    pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, Record<F, W>)>();
-
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }

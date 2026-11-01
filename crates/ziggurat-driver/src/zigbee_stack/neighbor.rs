@@ -6,7 +6,7 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
-use crate::frame_token::TrafficClass;
+use super::TrafficClass;
 
 use super::{
     Broadcast, EnqueueError, NwkSecurityMode, SendHandle, TxPolicy, TxPriority, ZigbeeStack,
@@ -156,7 +156,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 frame: link_status_frame,
                 security: NwkSecurityMode::NetworkKey,
                 // Housekeeping the mesh depends on: last to transmit, but never
-                // memory-starved by a host flood
+                // refused by a host flood
                 policy: TxPolicy {
                     priority: TxPriority::Background,
                     class: TrafficClass::Critical,
@@ -165,10 +165,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             let sent = self.send_oneshot_broadcast(send);
             if is_last {
-                return sent;
-            }
-            if let Err(err) = sent {
-                tracing::warn!("Dropping link status frame: {err}");
+                return Ok(sent);
             }
 
             // Repeat the boundary entry as the first of the next frame

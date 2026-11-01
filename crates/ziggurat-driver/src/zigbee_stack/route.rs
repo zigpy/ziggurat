@@ -11,12 +11,12 @@ use ziggurat_zigbee::nwk::commands::{
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
+use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
-use crate::frame_token::TrafficClass;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, EnqueueError, NwkSecurityMode, SendActions, SendHandle,
-    SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendActions, SendHandle, SendMode,
+    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -272,7 +272,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// router records a path toward the concentrator. Devices can then reach us without
     /// per-device route discoveries, and respond with route record commands that we
     /// store for future source routing.
-    pub fn send_many_to_one_route_request(&self) -> Result<SendHandle, EnqueueError> {
+    pub fn send_many_to_one_route_request(&self) -> SendHandle {
         let route_request_identifier = self.core().nib.routing.begin_many_to_one_advertisement(
             self.state.network_address,
             self.core_now(),
@@ -329,9 +329,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let min_deadline = self.core_now() + self.tunables.mtorr_min_interval();
             let max_deadline = self.core_now() + self.tunables.mtorr_max_interval();
 
-            if let Ok(advertisement) = self.send_many_to_one_route_request() {
-                let _ = advertisement.delivered().await;
-            }
+            let _ = self.send_many_to_one_route_request().delivered().await;
 
             self.core().nib.routing.reset_mtorr_triggers();
 

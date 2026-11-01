@@ -16,42 +16,19 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as UnicastRecord};
 
-use crate::frame_token;
 use crate::runtime::Runtime;
 
 use super::routing::Status as RouteStatus;
 use super::{
-    Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, HeldFrame, Nib, NwkSecurityMode,
-    RouteDirective, Schedule, SendActions, SendHandle, SendId, SendMode, SendSlot, Transmit,
-    TxPolicy, TxPriority, ZigbeeCore, ZigbeeStack,
+    Confirm, CoreGuard, DeliveryError, Frame, Nib, NwkSecurityMode, RouteDirective, Schedule,
+    SendActions, SendHandle, SendId, SendMode, SendSlot, Transmit, TxPolicy, ZigbeeCore,
+    ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    /// Take a frame token from the policy's budget tier and the slot the send's verdicts
-    /// go to. A refused token rejects the send.
-    pub(super) fn hold_frame(
-        &self,
-        frame: Frame,
-        policy: TxPolicy,
-    ) -> Result<(HeldFrame, Arc<SendSlot>), EnqueueError> {
-        let token = frame_token::take(policy.class).ok_or_else(|| {
-            tracing::warn!(
-                "Frame budget exhausted ({}/{} tokens); rejecting {:?} frame",
-                frame_token::used(),
-                frame_token::total(),
-                policy.class,
-            );
-            EnqueueError::BudgetExhausted
-        })?;
-
-        Ok((HeldFrame { frame, token }, Arc::new(SendSlot::default())))
-    }
-
     /// Enqueue a unicast to `next_hop`, held until the device polls under
     /// `poll_address` if it is given. Every send gets a slot: dropping the returned
     /// handle is how a caller detaches from a send it does not await.
-    // The guard is moved into `commit_sends`; the lint misreads the `?` return path
-    #[allow(clippy::significant_drop_tightening)]
     pub(super) fn enqueue_unicast(
         &self,
         frame: Frame,
@@ -59,12 +36,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         confirm: Confirm,
         next_hop: Nwk,
         poll_address: Option<Ieee802154Address>,
-    ) -> Result<SendHandle, EnqueueError> {
+    ) -> SendHandle {
         let mut core = self.core();
         let (handle, actions) =
-            self.enqueue_unicast_in(&mut core, frame, policy, confirm, next_hop, poll_address)?;
+            self.enqueue_unicast_in(&mut core, frame, policy, confirm, next_hop, poll_address);
         self.commit_sends(core, actions);
-        Ok(handle)
+        handle
     }
 
     /// [`Self::enqueue_unicast`] under a core lock the caller holds and commits.
@@ -76,8 +53,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         confirm: Confirm,
         next_hop: Nwk,
         poll_address: Option<Ieee802154Address>,
-    ) -> Result<(SendHandle, SendActions), EnqueueError> {
-        let (frame, slot) = self.hold_frame(frame, policy)?;
+    ) -> (SendHandle, SendActions) {
+        let slot = Arc::new(SendSlot::default());
         let (id, actions) = core.sends.enqueue_unicast(
             UnicastRecord {
                 frame,
@@ -91,22 +68,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &self.tunables,
         );
 
-        Ok((SendHandle::new(id, slot), actions))
+        (SendHandle::new(id, slot), actions)
     }
 
     /// Enqueue a broadcast, or any frame transmitted on a schedule.
-    // The guard is moved into `commit_sends`; the lint misreads the `?` return path
-    #[allow(clippy::significant_drop_tightening)]
     pub(super) fn enqueue_broadcast(
         &self,
         frame: Frame,
         policy: TxPolicy,
         schedule: Schedule,
-    ) -> Result<SendHandle, EnqueueError> {
+    ) -> SendHandle {
         let mut core = self.core();
-        let (handle, actions) = self.enqueue_broadcast_in(&mut core, frame, policy, schedule)?;
+        let (handle, actions) = self.enqueue_broadcast_in(&mut core, frame, policy, schedule);
         self.commit_sends(core, actions);
-        Ok(handle)
+        handle
     }
 
     /// [`Self::enqueue_broadcast`] under a core lock the caller holds and commits.
@@ -116,25 +91,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         frame: Frame,
         policy: TxPolicy,
         schedule: Schedule,
-    ) -> Result<(SendHandle, SendActions), EnqueueError> {
-        let (frame, slot) = self.hold_frame(frame, policy)?;
-        Ok(self.enqueue_held_broadcast(core, frame, slot, policy.priority, schedule))
-    }
-
-    /// Enqueue a broadcast whose frame is already held, so admission happened before
-    /// whatever the caller did between the two.
-    pub(super) fn enqueue_held_broadcast(
-        &self,
-        core: &mut ZigbeeCore,
-        frame: HeldFrame,
-        slot: Arc<SendSlot>,
-        priority: TxPriority,
-        schedule: Schedule,
     ) -> (SendHandle, SendActions) {
+        let slot = Arc::new(SendSlot::default());
         let (id, actions) = core.sends.enqueue_broadcast(
             BroadcastRecord {
                 frame,
-                priority,
+                priority: policy.priority,
                 waiter: slot.clone(),
                 schedule,
             },
@@ -168,16 +130,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     failed_hop,
                 } => {
                     if let Some(next_hop) = failed_hop
-                        && let Frame::Nwk { nwk_frame, .. } = &frame.frame
+                        && let Frame::Nwk { nwk_frame, .. } = &frame
                     {
                         tracing::error!("Failed to send unicast frame after all attempts");
                         self.handle_unicast_send_failure(nwk_frame, next_hop);
                     }
 
                     waiter.settled(result);
-
-                    // Frees the frame token
-                    drop(frame);
                 }
             }
         }
@@ -260,9 +219,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 };
 
                 let transmit = in_flight.transmit();
-                let result = self
-                    .transmit(&mut in_flight.frame_mut().frame, transmit)
-                    .await;
+                let result = self.transmit(in_flight.frame_mut(), transmit).await;
 
                 let now = self.core_now();
                 let retry_delay = self.unicast_retry_delay();
@@ -362,7 +319,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     destination,
                     now,
                     &self.tunables,
-                    |send| self.resolve_routed_unicast(&core.nib, &mut send.frame),
+                    |send| self.resolve_routed_unicast(&core.nib, send),
                 ));
             } else if core
                 .nib

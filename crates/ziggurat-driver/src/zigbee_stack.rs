@@ -1,6 +1,5 @@
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame, ParseError};
 
-use crate::frame_token::{self, FrameToken, TrafficClass};
 use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
@@ -82,8 +81,6 @@ const NOTIFICATION_QUEUE_CAP: usize = 64;
 pub enum EnqueueError {
     #[error("rejected due to rate limiting, retry in {retry_in:?}")]
     RateLimited { retry_in: Duration },
-    #[error("frame memory budget exhausted")]
-    BudgetExhausted,
     #[error("payload does not fit in a single frame")]
     PayloadTooLong,
     #[error("aps security material unavailable or unusable")]
@@ -138,12 +135,26 @@ impl From<SendFailure> for DeliveryError {
     }
 }
 
+/// Which tier of the broadcast budget admits a broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrafficClass {
+    /// A frame we originate on the host's behalf: refused first under pressure, the
+    /// host is told and can pace itself.
+    Host,
+    /// A transit frame relayed for another device: dropping one degrades the mesh but
+    /// the originator retries end-to-end.
+    Forwarding,
+    /// Stack machinery the mesh cannot function without: joins, APS acks, NWK
+    /// commands, indirect deliveries. Always admitted.
+    Critical,
+}
+
 /// How a transmit is treated under contention.
 ///
 /// The axes are independent: `priority` orders the send queue (who transmits first),
-/// `class` picks the frame-budget tier (who may hold memory under pressure). A link
-/// status frame is background priority but critical class; a host send may be high
-/// priority but is always host class.
+/// `class` picks the broadcast-budget tier (whose broadcasts are refused under a flood).
+/// A link status frame is background priority but critical class; a host send may be
+/// high priority but is always host class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxPolicy {
     pub priority: TxPriority,
@@ -153,7 +164,7 @@ pub struct TxPolicy {
 impl TxPolicy {
     /// Stack machinery answering protocol events (key transports, rejoin responses,
     /// APS acks, network status reports): critical for both transmit scheduling and
-    /// the frame budget.
+    /// the broadcast budget.
     pub const STACK_CRITICAL: Self = Self {
         priority: TxPriority::StackCritical,
         class: TrafficClass::Critical,
@@ -293,18 +304,10 @@ pub enum Frame {
     Raw(Ieee802154Frame),
 }
 
-/// A send's frame together with its slice of the frame budget. The token is returned
-/// when the send settles and its record drops this.
-#[derive(Debug)]
-pub struct HeldFrame {
-    pub frame: Frame,
-    pub token: FrameToken,
-}
-
 /// The send table, specialised to the driver's types. See [`Sends`].
-pub type SendTable = Sends<HeldFrame, Arc<SendSlot>, DeliveryError>;
-pub type SendAction = ziggurat_zigbee::sends::Action<HeldFrame, Arc<SendSlot>, DeliveryError>;
-pub type SendActions = ziggurat_zigbee::sends::Actions<HeldFrame, Arc<SendSlot>, DeliveryError>;
+pub type SendTable = Sends<Frame, Arc<SendSlot>, DeliveryError>;
+pub type SendAction = ziggurat_zigbee::sends::Action<Frame, Arc<SendSlot>, DeliveryError>;
+pub type SendActions = ziggurat_zigbee::sends::Actions<Frame, Arc<SendSlot>, DeliveryError>;
 
 /// A unicast handed to [`ZigbeeStack::send_unicast`].
 #[derive(Debug)]
@@ -798,8 +801,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tunables: Tunables,
         spawner: R::Spawner,
     ) -> Arc<Self> {
-        Self::configure_frame_budget(&tunables);
-
         let raw_frame_rx = radio.subscribe_rx();
         let reset_rx = radio.subscribe_reset();
 
@@ -846,53 +847,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// the next read: in-flight waits (a sleeping retry, a stamped deadline) finish
     /// under the value they started with.
     pub fn set_tunable(&self, name: &str, raw: u64) -> Result<(), TunableError> {
-        // These size the global frame-token pool once, in `configure_frame_budget`.
-        if matches!(
-            name,
-            "frame_budget_bytes" | "critical_reserve_frames" | "forwarding_reserve_frames"
-        ) {
-            return Err(TunableError::StartupOnly);
-        }
         self.tunables.set(name, raw)
-    }
-
-    /// Size the frame-token budget from the platform's heap arena and the tunables.
-    ///
-    /// A token is priced at a held frame's worst case: its send-table record. The budget
-    /// is what remains of the arena after a worst-case ceiling for every other heap
-    /// user, itemized below for the current 128KB MG24 platform; hardware `peak_used`
-    /// measurements should refine it.
-    fn configure_frame_budget(tunables: &Tunables) {
-        const TOKEN_BYTES: usize = SendTable::RECORD_BYTES;
-
-        // Worst-case heap held by everything that is not an enqueued frame
-        const NON_FRAME_HEAP_CEILING: usize = 80 * 1024;
-
-        let arena = frame_token::heap_arena();
-        if arena == 0 {
-            // An unbounded host allocator; the budget only counts, never refuses.
-            frame_token::set_budget(0, 0, 0);
-            return;
-        }
-
-        let budget_bytes = match tunables.frame_budget_bytes() {
-            0 => arena.saturating_sub(NON_FRAME_HEAP_CEILING),
-            bytes => bytes,
-        };
-        let total = budget_bytes / TOKEN_BYTES;
-
-        // A budget too small to hold the reserves means the platform's queue caps and
-        // this ceiling need rethinking, not silent operation with a starved stack.
-        assert!(
-            total > tunables.critical_reserve_frames() + tunables.forwarding_reserve_frames(),
-            "frame budget of {total} tokens cannot hold the configured reserves"
-        );
-
-        frame_token::set_budget(
-            total,
-            tunables.critical_reserve_frames(),
-            tunables.forwarding_reserve_frames(),
-        );
     }
 
     /// Queue a network event and wake the notification drainer. Bounded: when the queue is

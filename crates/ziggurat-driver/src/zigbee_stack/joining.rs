@@ -1,4 +1,4 @@
-use crate::frame_token::TrafficClass;
+use super::TrafficClass;
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::commands::{
     AssociationRequestDeviceType, Ieee802154AssociationRequestCommand,
@@ -194,7 +194,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// 802.15.4 spec 6.4.1: association responses are sent indirectly. The joiner
     /// extracts the queued response by polling with a MAC Data Request. For a
     /// successful association the returned handle's `delivered` is that extraction;
-    /// a denial (or an exhausted frame budget) returns `None`.
+    /// a denial returns `None`.
     fn queue_association_response(
         &self,
         eui64: Eui64,
@@ -209,7 +209,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A denial has no follow-up; a successful join's tasklet awaits the
         // extraction. A raw MAC frame has no later verdict: extraction is delivery.
-        let admitted = self.enqueue_unicast(
+        let handle = self.enqueue_unicast(
             Frame::Raw(response_frame),
             TxPolicy::STACK_CRITICAL,
             Confirm::OnHandoff,
@@ -217,15 +217,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Some(Ieee802154Address::Eui64(eui64)),
         );
 
-        match admitted {
-            Ok(handle) => match status {
-                Ieee802154AssociationStatus::AssociationSuccessful => Some(handle),
-                _ => None,
-            },
-            Err(err) => {
-                tracing::warn!("Dropping association response to {eui64:?}: {err}");
-                None
-            }
+        match status {
+            Ieee802154AssociationStatus::AssociationSuccessful => Some(handle),
+            _ => None,
         }
     }
 

@@ -57,8 +57,6 @@ impl<F, W, E> Default for UnroutedUnicasts<F, W, E> {
 }
 
 impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
-    pub(super) const RECORD_BYTES: usize = core::mem::size_of::<(SendId, UnroutedUnicast<F, W>)>();
-
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }

@@ -18,7 +18,7 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
-use crate::frame_token::TrafficClass;
+use super::TrafficClass;
 
 use super::{
     DeliveryError, Frame, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, Schedule, TxPolicy,
@@ -153,10 +153,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        let admitted = self.enqueue_broadcast(Frame::Raw(beacon_frame), policy, Schedule::Once);
-        if let Err(err) = admitted {
-            tracing::warn!("Dropping beacon: {err}");
-        }
+        self.enqueue_broadcast(Frame::Raw(beacon_frame), policy, Schedule::Once);
     }
 
     /// The beacon-spam reactor (the [`hack_beacon_spam_duration`] hack): while a spray
