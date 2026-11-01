@@ -74,8 +74,9 @@ struct Record<F, W> {
     schedule: Schedule,
     copy: CopyState,
     handed_off: bool,
-    /// The quorum was heard while a copy was in the radio; that copy's report settles
-    /// the send.
+    /// The quorum was heard before a copy was handed off: the audience was empty, or
+    /// the neighbors relayed while the copy was in the radio. The first handoff settles
+    /// the send; a broadcast is never delivered without reaching the air once.
     quorum_heard: bool,
     deadline: Instant,
 }
@@ -194,7 +195,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             actions.push(Action::HandedOff(record.waiter.clone()));
         }
 
-        if record.quorum_heard {
+        if record.quorum_heard && record.handed_off {
             self.settle(id, Ok(()), &mut actions);
         }
 
@@ -219,14 +220,15 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         self.records
             .values()
             .filter_map(|record| match record.schedule {
-                Schedule::PassiveAck { key, .. } => Some(key),
+                Schedule::PassiveAck { key, .. } if !record.quorum_heard => Some(key),
                 _ => None,
             })
             .collect()
     }
 
-    /// The passive-ack quorum for a broadcast was heard: the send is delivered. A copy
-    /// in the radio right now settles it on its report instead.
+    /// The passive-ack quorum for a broadcast was heard: the send is delivered once a
+    /// copy was handed off. Until then (no copy handed off yet, or one in the radio
+    /// right now) the first successful report settles it instead.
     pub(super) fn delivered(&mut self, key: (Nwk, u8)) -> Actions<F, W, E> {
         let mut actions = Actions::new();
 
@@ -243,7 +245,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         };
 
         let record = self.records.get_mut(&id).unwrap();
-        if record.copy == CopyState::Transmitting {
+        if record.copy == CopyState::Transmitting || !record.handed_off {
             record.quorum_heard = true;
         } else {
             self.settle(id, Ok(()), &mut actions);
