@@ -40,7 +40,8 @@ pub(super) struct Record<F, W> {
 #[derive(Debug)]
 pub(super) struct UnroutedUnicasts<F, W, E> {
     records: FlatMap<SendId, Record<F, W>>,
-    /// Discovery restarts left, per destination with unrouted sends.
+    /// Discovery restarts left, per destination with unrouted sends. The first
+    /// discovery is the driver's, started at admission; these are the ones after it.
     retries: FlatMap<Nwk, u8>,
     _error: PhantomData<fn() -> E>,
 }
@@ -89,8 +90,13 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         );
 
         if !self.retries.contains_key(&destination) {
-            self.retries
-                .insert(destination, tunables.pending_route_discovery_attempts());
+            // The tunable counts discoveries; the first one is not a restart
+            self.retries.insert(
+                destination,
+                tunables
+                    .pending_route_discovery_attempts()
+                    .saturating_sub(1),
+            );
         }
     }
 
