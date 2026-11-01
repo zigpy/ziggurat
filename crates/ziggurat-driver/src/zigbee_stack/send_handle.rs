@@ -24,13 +24,15 @@ struct Progress {
 
 /// The slot a send's verdicts are written into: the send table's waiter.
 ///
-/// Two verdicts and one wake: the handle's awaiter re-checks the verdict it wants after
-/// every wake. The send table's record and every awaiter/poller share one via `Arc`.
-/// The table writes each verdict exactly once.
+/// Two verdicts, each with its own single-waiter wake, so the two stages can be awaited
+/// at once (`join!`) without one stage's awaiter consuming the other's wake. The send
+/// table's record and every awaiter/poller share one via `Arc`. The table writes each
+/// verdict exactly once.
 #[derive(Debug, Default)]
 pub struct SendSlot {
     progress: Mutex<Progress>,
-    wake: Notify,
+    handed_off_wake: Notify,
+    delivered_wake: Notify,
 }
 
 /// A non-blocking snapshot of a slot's two verdicts, taken by the wire tracker's sweep.
@@ -53,7 +55,7 @@ impl SendSlot {
             progress.completion_wake.clone()
         };
 
-        self.wake.notify_one();
+        self.handed_off_wake.notify_one();
         if let Some(completion) = completion {
             completion.notify_one();
         }
@@ -71,7 +73,8 @@ impl SendSlot {
             progress.completion_wake.clone()
         };
 
-        self.wake.notify_one();
+        self.handed_off_wake.notify_one();
+        self.delivered_wake.notify_one();
         if let Some(completion) = completion {
             completion.notify_one();
         }
@@ -80,8 +83,8 @@ impl SendSlot {
 
 /// An awaitable, detachable view over one send.
 ///
-/// Cloning it is deliberately not offered: the slot has a single-waiter wake, so a send
-/// is awaited by one task. Dropping the handle detaches — the send table keeps its own
+/// Cloning it is deliberately not offered: each stage has a single-waiter wake, so a
+/// stage is awaited by one task. Dropping the handle detaches — the send table keeps its own
 /// `Arc` and resolves harmlessly into the slot; nothing is cancelled (fire-and-forget
 /// is "drop the handle").
 #[derive(Debug)]
@@ -110,7 +113,7 @@ impl SendHandle {
             // Arm the wake before checking, so a resolution between the check and the
             // await is not lost. Bind the snapshot to a local so the guard drops before
             // the await.
-            let wait = self.slot.wake.notified();
+            let wait = self.slot.handed_off_wake.notified();
             let resolved = self.slot.progress.lock().handed_off.clone();
             if let Some(result) = resolved {
                 return result;
@@ -124,7 +127,7 @@ impl SendHandle {
     /// broadcast/groupcast.
     pub async fn delivered(&self) -> Result<(), DeliveryError> {
         loop {
-            let wait = self.slot.wake.notified();
+            let wait = self.slot.delivered_wake.notified();
             let resolved = self.slot.progress.lock().delivered.clone();
             if let Some(result) = resolved {
                 return result;
