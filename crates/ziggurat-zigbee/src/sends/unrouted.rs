@@ -159,6 +159,16 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .collect()
     }
 
+    /// Drop every record and return its waiter: the stack is shutting down.
+    pub(super) fn abandon(&mut self) -> Vec<W> {
+        self.retries.clear();
+        let mut waiters = Vec::new();
+        while let Some((_, send)) = self.records.pop_first() {
+            waiters.push(send.waiter);
+        }
+        waiters
+    }
+
     /// The destination stays awaited, so a new send to it does not start a second
     /// discovery; it lapses on its own once nothing waits on it.
     pub(super) fn cancel(&mut self, id: SendId) -> Actions<F, W, E> {

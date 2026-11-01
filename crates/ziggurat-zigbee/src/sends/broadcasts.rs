@@ -273,6 +273,16 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         actions
     }
 
+    /// Drop every record and return its waiter: the stack is shutting down and no
+    /// copy, in the radio or not, is ever reported on again.
+    pub(super) fn abandon(&mut self) -> Vec<W> {
+        let mut waiters = Vec::new();
+        while let Some((_, record)) = self.records.pop_first() {
+            waiters.push(record.waiter);
+        }
+        waiters
+    }
+
     /// `None` if a copy is in the radio right now, or the send is unknown.
     pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
         if self.records.get(&id)?.copy == CopyState::Transmitting {

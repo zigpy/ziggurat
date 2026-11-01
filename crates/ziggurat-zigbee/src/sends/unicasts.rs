@@ -370,6 +370,16 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         actions
     }
 
+    /// Drop every record and return its waiter: the stack is shutting down and no
+    /// frame, in the radio or not, is ever reported on again.
+    pub(super) fn abandon(&mut self) -> Vec<W> {
+        let mut waiters = Vec::new();
+        while let Some((_, record)) = self.records.pop_first() {
+            waiters.push(record.waiter);
+        }
+        waiters
+    }
+
     /// `None` if the send is in the radio right now, or unknown.
     pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
         let record = self.records.get(&id)?;

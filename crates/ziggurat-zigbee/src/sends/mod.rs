@@ -469,6 +469,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unicasts.drop_indirect(eui64, nwk)
     }
 
+    /// Empty every table and return the waiter of each send that was still live, for
+    /// the driver to fail: the stack is shutting down, so no send is ever reported on
+    /// again. A frame on loan to the radio is left with the sender that holds it.
+    pub fn abandon(&mut self) -> Vec<W> {
+        let mut waiters = self.unicasts.abandon();
+        waiters.extend(self.unrouted_unicasts.abandon());
+        waiters.extend(self.broadcasts.abandon());
+        waiters
+    }
+
     /// Cancel a send. `None` if it is unknown, already over, or in the radio right now
     /// (its own report settles it within the radio's timeout).
     pub fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {

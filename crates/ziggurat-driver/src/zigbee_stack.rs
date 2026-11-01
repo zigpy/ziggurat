@@ -1473,6 +1473,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // On executors that can abort (tokio), this also reaps the finished JoinSet
         // entries; on embassy it is a no-op.
         self.spawner.shutdown().await;
+
+        let waiters = self.core().sends.abandon();
+        for waiter in waiters {
+            waiter.settled(Err(DeliveryError::Cancelled));
+        }
     }
 
     pub fn next_aps_counter(&self) -> u8 {
