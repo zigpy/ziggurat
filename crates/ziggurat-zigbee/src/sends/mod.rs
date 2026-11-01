@@ -281,7 +281,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         tunables: &Tunables,
     ) -> (SendId, Actions<F, W, E>) {
         let id = self.next_id();
-        self.unicasts.enqueue(id, unicast, now, tunables);
+        self.unicasts.enqueue(id, unicast, now, None, tunables);
         (id, Actions::new())
     }
 
@@ -408,10 +408,10 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unrouted_unicasts.fail(destination)
     }
 
-    /// A route to `destination` is known: move every unrouted send to it to the unicasts.
-    /// `resolve` finds each frame's next hop (rewriting the frame for a source route)
-    /// and the address the device polls under if the frame must wait for its poll, or
-    /// fails the send.
+    /// A route to `destination` is known: move every unrouted send to it to the unicasts,
+    /// keeping the deadline it was admitted with. `resolve` finds each frame's next hop
+    /// (rewriting the frame for a source route) and the address the device polls under
+    /// if the frame must wait for its poll, or fails the send.
     pub fn route_unicasts(
         &mut self,
         destination: Nwk,
@@ -419,7 +419,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         tunables: &Tunables,
         mut resolve: impl FnMut(&mut F) -> Result<(Nwk, Option<Ieee802154Address>), E>,
     ) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
+        // Fail the sends past their deadline first, so routing never revives one
+        let mut actions = self.unrouted_unicasts.tick(now);
 
         for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
             match resolve(&mut unrouted.frame) {
@@ -434,6 +435,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                         poll_address,
                     },
                     now,
+                    Some(unrouted.deadline),
                     tunables,
                 ),
                 Err(err) => actions.push(Action::Settled {

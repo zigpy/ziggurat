@@ -119,20 +119,23 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     /// A unicast fails if not handed off within the handoff timeout; a held frame if
-    /// not polled for within the transaction persistence time.
+    /// not polled for within the transaction persistence time. A send admitted earlier
+    /// passes the deadline it was admitted with: it replaces the handoff timeout and
+    /// caps the persistence time.
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
         unicast: Unicast<F, W>,
         now: Instant,
+        admitted_deadline: Option<Instant>,
         tunables: &Tunables,
     ) {
-        let (stage, deadline) = match unicast.poll_address {
-            None => (Stage::Queued, now + tunables.handoff_timeout()),
-            Some(_) => (
-                Stage::AwaitingPoll,
-                now + tunables.transaction_persistence_time(),
-            ),
+        let persistence_deadline = now + tunables.transaction_persistence_time();
+        let (stage, deadline) = match (unicast.poll_address, admitted_deadline) {
+            (None, None) => (Stage::Queued, now + tunables.handoff_timeout()),
+            (None, Some(deadline)) => (Stage::Queued, deadline),
+            (Some(_), None) => (Stage::AwaitingPoll, persistence_deadline),
+            (Some(_), Some(deadline)) => (Stage::AwaitingPoll, persistence_deadline.min(deadline)),
         };
 
         self.records.insert(
