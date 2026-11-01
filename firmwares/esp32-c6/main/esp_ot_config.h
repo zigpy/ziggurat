@@ -41,10 +41,17 @@
             },                                                           \
     }
 #else // CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
-#define ESP_OPENTHREAD_DEFAULT_HOST_CONFIG()                             \
-    {                                                                    \
-        .host_connection_mode = HOST_CONNECTION_MODE_RCP_USB,            \
-        .host_usb_config      = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT(), \
+// otPlatUartSend (patched in build.sh) queues a whole HDLC chunk, up to
+// OPENTHREAD_CONFIG_NCP_HDLC_TX_CHUNK_SIZE (2048 bytes), in one call, so the TX
+// ring must hold one chunk while another drains. The 256-byte default fits neither.
+#define ESP_OPENTHREAD_DEFAULT_HOST_CONFIG()                  \
+    {                                                         \
+        .host_connection_mode = HOST_CONNECTION_MODE_RCP_USB, \
+        .host_usb_config =                                    \
+            {                                                 \
+                .tx_buffer_size = 4096,                       \
+                .rx_buffer_size = 2048,                       \
+            },                                                \
     }
 #endif
 

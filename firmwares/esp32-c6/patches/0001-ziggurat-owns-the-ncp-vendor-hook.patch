@@ -1,0 +1,34 @@
+Ziggurat owns the NCP vendor hook
+
+Espressif compiles its own NcpBase::Vendor* handlers (SPINEL_PROP_VENDOR_ESP_*
+coex/console) into esp_openthread_ncp.cpp; the vendor hook is a set of class
+member definitions with no second slot. Compile that tail out so ziggurat_ncp.cpp
+(copied in as esp_openthread_ncp_hdlc.cpp) provides the hook, and build the
+shared platform glue inside the component, where OT core C++ headers are visible.
+
+--- a/src/ncp/esp_openthread_ncp.cpp
++++ b/src/ncp/esp_openthread_ncp.cpp
+@@ -111,6 +111,7 @@
+ #endif // CONFIG_OPENTHREAD_RCP_SPINEL_CONSOLE
+ }
+ 
++#if 0 // ziggurat owns the NCP vendor hook (ziggurat_ncp.cpp)
+ namespace ot {
+ namespace Ncp {
+ 
+@@ -234,3 +235,5 @@
+ 
+ } // namespace Ncp
+ } // namespace ot
++
++#endif // ziggurat owns the NCP vendor hook
+--- a/srcs_radio.cmake
++++ b/srcs_radio.cmake
+@@ -73,6 +73,7 @@
+     src/esp_openthread_task_queue.c
+     # ESP NCP
+     src/ncp/esp_openthread_ncp.cpp
++    src/ncp/ziggurat_glue.cpp
+ )
+ 
+ # Conditional sources based on host connection mode

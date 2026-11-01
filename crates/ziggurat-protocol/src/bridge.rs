@@ -126,16 +126,14 @@ pub fn child_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<
     core.nib
         .neighbors
         .entries()
-        .filter(|entry| entry.is_child())
+        // Router children need no restore: their next link status recreates the entry
+        .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
         .map(|entry| ChildEntry {
             ieee: entry.extended_address,
             nwk: entry.network_address,
             flags: ChildFlags {
                 rx_on_when_idle: entry.rx_on_when_idle,
-                device_type: match entry.device_type {
-                    NwkDeviceType::Router => ChildDeviceType::Router,
-                    _ => ChildDeviceType::EndDevice,
-                },
+                device_type: ChildDeviceType::EndDevice,
             },
         })
         .collect()
