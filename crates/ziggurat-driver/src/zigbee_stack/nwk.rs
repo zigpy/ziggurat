@@ -639,6 +639,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Send a broadcast, retransmitted until its passive-ack quorum is heard or its
     /// attempts run out. `Err` rejects at admission and no handle is returned. A caller
     /// that does not await the send drops the handle.
+    // The guard is moved into `commit_sends`; the lint misreads the `?` return path
+    #[allow(clippy::significant_drop_tightening)]
     pub(super) fn send_broadcast(&self, send: Broadcast) -> Result<SendHandle, EnqueueError> {
         let Broadcast {
             frame: mut nwk_frame,
@@ -661,43 +663,50 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
-
-        // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
-        // for each (spec 3.6.6).
-        self.maybe_fan_out_broadcast_to_sleepy_children(&nwk_frame, security, policy.class);
-
         let key = (
             nwk_frame.nwk_header.source,
             nwk_frame.nwk_header.sequence_number,
         );
 
+        // The broadcast itself is admitted first: a refused budget rejects the whole
+        // send before any copy of it is queued
+        let (frame, slot) = self.hold_frame(Frame::nwk(nwk_frame, security), policy)?;
+        let Frame::Nwk { nwk_frame, .. } = &frame.frame else {
+            unreachable!("the frame was built as a NWK frame above")
+        };
+
+        // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
+        // for each (spec 3.6.6).
+        self.maybe_fan_out_broadcast_to_sleepy_children(nwk_frame, security, policy.class);
+
         // The passive ack contract is formed at transmission time: only routers that
         // are neighbors right now are expected to relay
-        {
-            let mut core = self.core();
-            let audience = core.nib.neighbors.expected_broadcast_relayers();
-
-            core.nib.broadcasts.record_transmission(
-                key.0,
-                key.1,
-                audience,
-                self.core_now(),
-                self.tunables.broadcast_delivery_time(),
-            );
-        }
+        let mut core = self.core();
+        let audience = core.nib.neighbors.expected_broadcast_relayers();
+        core.nib.broadcasts.record_transmission(
+            key.0,
+            key.1,
+            audience,
+            self.core_now(),
+            self.tunables.broadcast_delivery_time(),
+        );
 
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
         // is the send's handoff; the quorum is its delivery.
-        self.enqueue_broadcast(
-            Frame::nwk(nwk_frame, security),
-            policy,
+        let (handle, actions) = self.enqueue_held_broadcast(
+            &mut core,
+            frame,
+            slot,
+            policy.priority,
             Schedule::PassiveAck {
                 key,
                 copies_remaining: self.tunables.max_broadcast_retries() + 1,
                 next_attempt: self.core_now(),
             },
-        )
+        );
+        self.commit_sends(core, actions);
+        Ok(handle)
     }
 
     /// Send a single-copy broadcast: assign its sequence number and queue one copy for

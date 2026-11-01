@@ -23,7 +23,7 @@ use super::routing::Status as RouteStatus;
 use super::{
     Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, HeldFrame, Nib, NwkSecurityMode,
     RouteDirective, Schedule, SendActions, SendHandle, SendId, SendMode, SendSlot, Transmit,
-    TxPolicy, ZigbeeCore, ZigbeeStack,
+    TxPolicy, TxPriority, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -118,10 +118,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         schedule: Schedule,
     ) -> Result<(SendHandle, SendActions), EnqueueError> {
         let (frame, slot) = self.hold_frame(frame, policy)?;
+        Ok(self.enqueue_held_broadcast(core, frame, slot, policy.priority, schedule))
+    }
+
+    /// Enqueue a broadcast whose frame is already held, so admission happened before
+    /// whatever the caller did between the two.
+    pub(super) fn enqueue_held_broadcast(
+        &self,
+        core: &mut ZigbeeCore,
+        frame: HeldFrame,
+        slot: Arc<SendSlot>,
+        priority: TxPriority,
+        schedule: Schedule,
+    ) -> (SendHandle, SendActions) {
         let (id, actions) = core.sends.enqueue_broadcast(
             BroadcastRecord {
                 frame,
-                priority: policy.priority,
+                priority,
                 waiter: slot.clone(),
                 schedule,
             },
@@ -129,7 +142,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &self.tunables,
         );
 
-        Ok((SendHandle::new(id, slot), actions))
+        (SendHandle::new(id, slot), actions)
     }
 
     /// Finish a mutation of the send table from any task but the timer: carry out the
