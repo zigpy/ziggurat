@@ -214,7 +214,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             loop {
                 // The frame leaves the table on loan, so the core is unlocked across the
                 // transmit
-                let Some(mut in_flight) = self.core().sends.dequeue() else {
+                let now = self.core_now();
+                let Some(mut in_flight) = self.core().sends.dequeue(now) else {
                     break;
                 };
 

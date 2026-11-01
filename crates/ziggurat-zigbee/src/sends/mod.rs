@@ -314,15 +314,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// Lend the highest-priority queued frame (oldest first within a priority) to the
-    /// sender, which must hand it back through `transmitted`.
-    pub fn dequeue(&mut self) -> Option<InFlight<F>> {
+    /// sender, which must hand it back through `transmitted`. A frame past its deadline
+    /// is never lent: once in the radio its deadline no longer applies.
+    pub fn dequeue(&mut self, now: Instant) -> Option<InFlight<F>> {
         let unicast = self
             .unicasts
-            .best_queued()
+            .best_queued(now)
             .map(|(id, priority)| (id, priority, true));
         let broadcast = self
             .broadcasts
-            .best_queued()
+            .best_queued(now)
             .map(|(id, priority)| (id, priority, false));
 
         // Higher priority first; between equal priorities the older send (lower id)

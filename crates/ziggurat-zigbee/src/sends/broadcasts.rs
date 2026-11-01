@@ -148,11 +148,12 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         );
     }
 
-    /// The highest-priority queued copy, oldest first within a priority.
-    pub(super) fn best_queued(&self) -> Option<(SendId, TxPriority)> {
+    /// The highest-priority queued copy, oldest first within a priority. A send past its
+    /// deadline is left for `tick` to fail.
+    pub(super) fn best_queued(&self, now: Instant) -> Option<(SendId, TxPriority)> {
         self.records
             .iter()
-            .filter(|(_, record)| record.copy == CopyState::Queued)
+            .filter(|(_, record)| record.copy == CopyState::Queued && now < record.deadline)
             .max_by_key(|(id, record)| (record.priority, Reverse(**id)))
             .map(|(id, record)| (*id, record.priority))
     }
