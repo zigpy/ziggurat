@@ -285,11 +285,17 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
     /// `None` if a copy is in the radio right now, or the send is unknown.
     pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
-        if self.records.get(&id)?.copy == CopyState::Transmitting {
+        let record = self.records.get(&id)?;
+        if record.copy == CopyState::Transmitting {
             return None;
         }
 
         let mut actions = Actions::new();
+        // The handoff's own action may still be on its way to the waiter: repeat it, so
+        // the cancel does not back-fill a handoff that happened as failed
+        if record.handed_off {
+            actions.push(Action::HandedOff(record.waiter.clone()));
+        }
         self.settle(id, Err(SendFailure::Cancelled.into()), &mut actions);
         Some(actions)
     }

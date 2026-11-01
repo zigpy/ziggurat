@@ -388,6 +388,11 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         }
 
         let mut actions = Actions::new();
+        // The handoff's own action may still be on its way to the waiter: repeat it, so
+        // the cancel does not back-fill a handoff that happened as failed
+        if record.stage == Stage::AwaitingApsAck {
+            actions.push(Action::HandedOff(record.waiter.clone()));
+        }
         self.settle(id, Err(SendFailure::Cancelled.into()), None, &mut actions);
         Some(actions)
     }
