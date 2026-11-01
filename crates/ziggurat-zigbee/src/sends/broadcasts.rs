@@ -19,6 +19,10 @@ use crate::flat_map::FlatMap;
 use super::{Action, Actions, InFlight, SendFailure, SendId, Transmit, TxPriority};
 
 /// How a broadcast is retransmitted and when it is done.
+///
+/// `next_attempt` is when the next copy is due. It is re-armed when a copy's transmit
+/// completes, so the interval between copies is measured on the air, not from when the
+/// copy was queued.
 #[derive(Debug, Clone, Copy)]
 pub enum Schedule {
     /// One copy; its transmit result is the verdict.
@@ -167,11 +171,14 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
     }
 
+    /// `passive_ack_interval` spaces the next passive-ack copy from this one.
     pub(super) fn transmitted(
         &mut self,
         id: SendId,
         frame: F,
         result: Result<(), E>,
+        now: Instant,
+        passive_ack_interval: Duration,
     ) -> Actions<F, W, E> {
         let mut actions = Actions::new();
 
@@ -183,9 +190,21 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         record.copy = CopyState::Idle;
         record.frame = Some(frame);
 
-        if matches!(record.schedule, Schedule::Once) {
-            self.settle(id, result, &mut actions);
-            return actions;
+        match &mut record.schedule {
+            Schedule::Once => {
+                self.settle(id, result, &mut actions);
+                return actions;
+            }
+            Schedule::PassiveAck { next_attempt, .. } => {
+                *next_attempt = now + passive_ack_interval;
+            }
+            Schedule::FixedInterval {
+                interval,
+                next_attempt,
+                ..
+            } => {
+                *next_attempt = now + *interval;
+            }
         }
 
         // A lost copy is not terminal: the schedule retransmits. The first copy on air
@@ -266,12 +285,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     }
 
     /// Queue copies that are due, complete or fail schedules that ran out, and fail
-    /// records past their deadline. `passive_ack_interval` spaces passive-ack copies.
-    pub(super) fn tick(
-        &mut self,
-        now: Instant,
-        passive_ack_interval: Duration,
-    ) -> Actions<F, W, E> {
+    /// records past their deadline.
+    pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
         let mut actions = Actions::new();
         let mut settle: Vec<(SendId, Result<(), E>)> = Vec::new();
 
@@ -281,8 +296,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             }
 
             if record.copy == CopyState::Idle
-                && let Some(due) =
-                    Self::schedule_due(&mut record.schedule, now, passive_ack_interval)
+                && let Some(due) = Self::schedule_due(&mut record.schedule, now)
             {
                 match due {
                     Due::Copy => record.copy = CopyState::Queued,
@@ -310,12 +324,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         actions
     }
 
-    /// Advance a schedule whose next copy is due. `None` means nothing is due.
-    fn schedule_due(
-        schedule: &mut Schedule,
-        now: Instant,
-        passive_ack_interval: Duration,
-    ) -> Option<Due<E>> {
+    /// Consume a schedule's next copy if it is due. `None` means nothing is due.
+    fn schedule_due(schedule: &mut Schedule, now: Instant) -> Option<Due<E>> {
         match schedule {
             Schedule::Once => None,
             Schedule::PassiveAck {
@@ -332,13 +342,12 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                     ));
                 }
                 *copies_remaining -= 1;
-                *next_attempt = now + passive_ack_interval;
                 Some(Due::Copy)
             }
             Schedule::FixedInterval {
-                interval,
                 copies_remaining,
                 next_attempt,
+                ..
             } => {
                 if *next_attempt > now {
                     return None;
@@ -348,7 +357,6 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                     return Some(Due::Over(Ok(())));
                 }
                 *copies_remaining -= 1;
-                *next_attempt = now + *interval;
                 Some(Due::Copy)
             }
         }

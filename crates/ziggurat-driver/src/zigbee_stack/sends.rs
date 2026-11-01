@@ -266,8 +266,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                 let now = self.core_now();
                 let retry_delay = self.unicast_retry_delay();
+                let passive_ack_interval =
+                    self.tunables.passive_ack_timeout() + self.broadcast_jitter();
                 let mut core = self.core();
-                let actions = core.sends.transmitted(in_flight, result, now, retry_delay);
+                let actions = core.sends.transmitted(
+                    in_flight,
+                    result,
+                    now,
+                    retry_delay,
+                    passive_ack_interval,
+                );
                 self.commit_sends(core, actions);
             }
 
@@ -336,7 +344,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// on, which lives in the routing table.
     fn drive_sends(&self) -> Option<CoreInstant> {
         let now = self.core_now();
-        let passive_ack_interval = self.tunables.passive_ack_timeout() + self.broadcast_jitter();
 
         let mut guard = self.core();
         // A plain `&mut ZigbeeCore`, so the closure below borrows `nib` beside `sends`
@@ -372,7 +379,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         }
 
-        actions.extend(core.sends.tick(now, passive_ack_interval));
+        actions.extend(core.sends.tick(now));
 
         let discoveries = core
             .sends

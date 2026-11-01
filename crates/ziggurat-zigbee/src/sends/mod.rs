@@ -346,13 +346,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// The sender's report for a lent frame, which comes back with it. `retry_delay`
-    /// is how long a failed unicast waits before its next attempt.
+    /// is how long a failed unicast waits before its next attempt;
+    /// `passive_ack_interval` how long a passive-ack broadcast waits before its next
+    /// copy.
     pub fn transmitted(
         &mut self,
         in_flight: InFlight<F>,
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
+        passive_ack_interval: Duration,
     ) -> Actions<F, W, E> {
         let InFlight {
             id,
@@ -366,7 +369,10 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                 self.unicasts
                     .transmitted(id, frame, result, now, retry_delay)
             }
-            Transmit::Broadcast => self.broadcasts.transmitted(id, frame, result),
+            Transmit::Broadcast => {
+                self.broadcasts
+                    .transmitted(id, frame, result, now, passive_ack_interval)
+            }
         }
     }
 
@@ -476,11 +482,10 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// The timer pass: re-queue what is due and fail what is past its deadline.
-    /// `passive_ack_interval` spaces passive-ack broadcast copies.
-    pub fn tick(&mut self, now: Instant, passive_ack_interval: Duration) -> Actions<F, W, E> {
+    pub fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
         let mut actions = self.unicasts.tick(now);
         actions.extend(self.unrouted_unicasts.tick(now));
-        actions.extend(self.broadcasts.tick(now, passive_ack_interval));
+        actions.extend(self.broadcasts.tick(now));
         actions
     }
 
