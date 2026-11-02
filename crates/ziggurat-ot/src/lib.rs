@@ -14,11 +14,18 @@
 
 extern crate alloc;
 
-#[cfg(all(target_os = "none", not(any(feature = "efr32", feature = "esp-idf"))))]
-compile_error!("ziggurat-ot needs a platform feature: `efr32` or `esp-idf`");
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "efr32", feature = "esp-idf", feature = "nrf52"))
+))]
+compile_error!("ziggurat-ot needs a platform feature: `efr32`, `esp-idf` or `nrf52`");
 
-#[cfg(all(feature = "efr32", feature = "esp-idf"))]
-compile_error!("the `efr32` and `esp-idf` features are mutually exclusive");
+#[cfg(any(
+    all(feature = "efr32", feature = "esp-idf"),
+    all(feature = "efr32", feature = "nrf52"),
+    all(feature = "esp-idf", feature = "nrf52")
+))]
+compile_error!("the `efr32`, `esp-idf` and `nrf52` features are mutually exclusive");
 
 #[cfg(feature = "efr32")]
 mod target {
@@ -26,6 +33,14 @@ mod target {
     use cortex_m as _;
 
     pub const PLATFORM_INFO: &str = "EFR32";
+}
+
+#[cfg(feature = "nrf52")]
+mod target {
+    // Provides the critical-section implementation (PRIMASK, single-core).
+    use cortex_m as _;
+
+    pub const PLATFORM_INFO: &str = "nRF52";
 }
 
 #[cfg(feature = "esp-idf")]
@@ -202,6 +217,30 @@ mod heap {
     static HEAP: IdfHeap = IdfHeap;
 
     pub fn init() {}
+}
+
+// nRF52: ot-nrf528xx has no SDK heap. Its linker script places newlib's `.heap` after
+// `.bss` and the main stack at the top of RAM. The RAM between them is otherwise unused,
+// so the arena takes all of it.
+//
+/// cbindgen:ignore
+#[cfg(feature = "nrf52")]
+mod heap {
+    use embedded_alloc::TlsfHeap;
+
+    unsafe extern "C" {
+        static __HeapLimit: u8;
+        static __StackLimit: u8;
+    }
+
+    #[global_allocator]
+    static HEAP: TlsfHeap = TlsfHeap::empty();
+
+    pub fn init() {
+        let start = core::ptr::addr_of!(__HeapLimit) as usize;
+        let end = core::ptr::addr_of!(__StackLimit) as usize;
+        unsafe { HEAP.init(start, end - start) };
+    }
 }
 
 #[cfg(target_os = "none")]
