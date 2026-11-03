@@ -32,6 +32,30 @@ const BEACON_SPAM_INTERVAL: Duration = Duration::from_millis(5);
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
+        // Not every radio filters by address. Without this check, a data poll sent to a
+        // parent in another PAN looks like a poll from an unknown child of ours.
+        let pan_id = self.core().mac.pan_id;
+
+        match command_frame.header.dest_pan_id {
+            Some(dest_pan_id) if dest_pan_id == pan_id || dest_pan_id == PanId(0xFFFF) => {}
+            dest_pan_id => {
+                tracing::trace!(
+                    "Ignoring command frame, destination PAN ID {dest_pan_id:?} is not ours"
+                );
+                return;
+            }
+        }
+
+        match command_frame.header.dest_address {
+            Some(Ieee802154Address::Nwk(nwk))
+                if nwk == self.state.network_address || nwk == Nwk(0xFFFF) => {}
+            Some(Ieee802154Address::Eui64(eui64)) if eui64 == self.state.ieee_address => {}
+            dest_address => {
+                tracing::trace!("Ignoring command frame, destination {dest_address:?} is not us");
+                return;
+            }
+        }
+
         tracing::debug!(
             "Received 802.15.4 command frame: {:?}",
             command_frame.command_payload.command_id()
