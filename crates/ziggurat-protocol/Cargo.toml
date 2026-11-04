@@ -1,6 +1,6 @@
 [package]
 name = "ziggurat-protocol"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "The binary Ziggurat control protocol, shared by the embedded firmware and the host server"
 license = "Apache-2.0"
