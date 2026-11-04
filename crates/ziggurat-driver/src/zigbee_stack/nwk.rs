@@ -23,12 +23,12 @@ use ziggurat_zigbee::nwk::frame::{
     NwkSecurityLevel,
 };
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
-use ziggurat_zigbee::sends::UnroutedUnicast;
+use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
-    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendMode,
-    SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendId,
+    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -586,19 +586,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Spec 3.6.6: a coordinator/router with rx-off end-device children must re-deliver
     /// every 0xFFFF broadcast to each of them as a MAC unicast, since a sleeping radio
     /// never hears the broadcast itself. The NWK source is skipped (it already has the
-    /// frame). Each copy awaits its child's poll, or expires.
+    /// frame). Each copy awaits its child's poll, or expires. `copy_of` is our own
+    /// broadcast's send, which cancels the copies with it.
     fn maybe_fan_out_broadcast_to_sleepy_children(
         &self,
+        core: &mut ZigbeeCore,
         nwk_frame: &NwkFrame,
         security: NwkSecurityMode,
         class: TrafficClass,
-    ) {
+        copy_of: Option<SendId>,
+    ) -> SendActions {
+        let mut actions = SendActions::new();
         if nwk_frame.nwk_header.destination != BROADCAST_ALL_DEVICES {
-            return;
+            return actions;
         }
 
-        let sleepy_children: Vec<(Eui64, Nwk)> = self
-            .core()
+        let sleepy_children: Vec<(Eui64, Nwk)> = core
             .nib
             .neighbors
             .sleepy_children()
@@ -606,18 +609,36 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .filter(|(_, child_nwk)| *child_nwk != nwk_frame.nwk_header.source)
             .collect();
 
+        let policy = TxPolicy {
+            priority: TxPriority::UserNormal,
+            class,
+        };
+
         for (child_eui64, child_nwk) in sleepy_children {
-            self.enqueue_unicast(
-                Frame::nwk(nwk_frame.clone(), security),
-                TxPolicy {
-                    priority: TxPriority::UserNormal,
-                    class,
-                },
-                Confirm::OnHandoff,
-                child_nwk,
-                Some(Ieee802154Address::Eui64(child_eui64)),
-            );
+            // Nobody awaits a copy: its slot is dropped with the record
+            let unicast = UnicastRecord {
+                frame: Frame::nwk(nwk_frame.clone(), security),
+                priority: policy.priority,
+                waiter: Arc::new(SendSlot::default()),
+                confirm: Confirm::OnHandoff,
+                next_hop: child_nwk,
+                poll_address: Some(Ieee802154Address::Eui64(child_eui64)),
+            };
+            let (_, copy_actions) = match copy_of {
+                Some(broadcast) => core.sends.enqueue_broadcast_copy(
+                    broadcast,
+                    unicast,
+                    self.core_now(),
+                    &self.tunables,
+                ),
+                None => core
+                    .sends
+                    .enqueue_unicast(unicast, self.core_now(), &self.tunables),
+            };
+            actions.extend(copy_actions);
         }
+
+        actions
     }
 
     /// Send a broadcast, retransmitted until its passive-ack quorum is heard or its
@@ -652,10 +673,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.sequence_number,
         );
 
-        // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
-        // for each (spec 3.6.6).
-        self.maybe_fan_out_broadcast_to_sleepy_children(&nwk_frame, security, policy.class);
-
         // The passive ack contract is formed at transmission time: only routers that
         // are neighbors right now are expected to relay
         let mut core = self.core();
@@ -671,9 +688,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
         // is the send's handoff; the quorum is its delivery.
-        let (handle, actions) = self.enqueue_broadcast_in(
+        let (handle, mut actions) = self.enqueue_broadcast_in(
             &mut core,
-            Frame::nwk(nwk_frame, security),
+            Frame::nwk(nwk_frame.clone(), security),
             policy,
             Schedule::PassiveAck {
                 key,
@@ -681,6 +698,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 next_attempt: self.core_now(),
             },
         );
+
+        // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
+        // for each (spec 3.6.6)
+        actions.extend(self.maybe_fan_out_broadcast_to_sleepy_children(
+            &mut core,
+            &nwk_frame,
+            security,
+            policy.class,
+            Some(handle.id()),
+        ));
         self.commit_sends(core, actions);
         Ok(handle)
     }
@@ -932,6 +959,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// originator's source address and sequence number. The first relay is jittered to
     /// decorrelate from the originator's wave; the broadcast-retransmit reactor then
     /// retransmits until the passive-ack quorum is heard or attempts run out.
+    // The guard is moved into `commit_sends`; the lint misses the move
+    #[allow(clippy::significant_drop_tightening)]
     fn maybe_relay_broadcast(&self, nwk_frame: &NwkFrame) {
         // Broadcast NWK commands are not generically relayed: link status and leave
         // frames have a radius of 1, and route requests accumulate path cost in their
@@ -957,11 +986,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.6: deliver another device's 0xFFFF broadcast to our own sleepy
         // children as MAC unicasts (a no-op for non-0xFFFF destinations).
-        self.maybe_fan_out_broadcast_to_sleepy_children(
+        let mut core = self.core();
+        let actions = self.maybe_fan_out_broadcast_to_sleepy_children(
+            &mut core,
             &relayed_frame,
             NwkSecurityMode::NetworkKey,
             TrafficClass::Forwarding,
+            None,
         );
+        self.commit_sends(core, actions);
 
         relayed_frame.nwk_header.radius = relayed_frame.nwk_header.radius.saturating_sub(1);
         if relayed_frame.nwk_header.radius == 0 {

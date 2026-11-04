@@ -281,7 +281,23 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         tunables: &Tunables,
     ) -> (SendId, Actions<F, W, E>) {
         let id = self.next_id();
-        self.unicasts.enqueue(id, unicast, now, None, tunables);
+        self.unicasts
+            .enqueue(id, unicast, now, None, None, tunables);
+        (id, Actions::new())
+    }
+
+    /// Enqueue a copy of the 0xFFFF broadcast `broadcast` for one sleepy child (spec
+    /// 3.6.6). Cancelling the broadcast cancels the copy too.
+    pub fn enqueue_broadcast_copy(
+        &mut self,
+        broadcast: SendId,
+        unicast: Unicast<F, W>,
+        now: Instant,
+        tunables: &Tunables,
+    ) -> (SendId, Actions<F, W, E>) {
+        let id = self.next_id();
+        self.unicasts
+            .enqueue(id, unicast, now, None, Some(broadcast), tunables);
         (id, Actions::new())
     }
 
@@ -436,6 +452,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                     },
                     now,
                     Some(unrouted.deadline),
+                    None,
                     tunables,
                 ),
                 Err(err) => actions.push(Action::Settled {
@@ -483,8 +500,26 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         } else if self.unrouted_unicasts.contains(id) {
             Some(self.unrouted_unicasts.cancel(id))
         } else {
-            self.broadcasts.cancel(id)
+            self.cancel_broadcast(id)
         }
+    }
+
+    /// A broadcast is cancelled together with its live copies to sleepy children. If the
+    /// broadcast or any copy is in the radio right now, nothing is cancelled.
+    fn cancel_broadcast(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
+        let copies = self.unicasts.copies_of(id);
+        if copies
+            .iter()
+            .any(|copy| self.unicasts.is_transmitting(*copy))
+        {
+            return None;
+        }
+
+        let mut actions = self.broadcasts.cancel(id)?;
+        for copy in copies {
+            actions.extend(self.unicasts.cancel(copy).unwrap());
+        }
+        Some(actions)
     }
 
     /// The timer pass: re-queue what is due and fail what is past its deadline.

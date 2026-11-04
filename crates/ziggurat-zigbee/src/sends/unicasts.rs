@@ -61,6 +61,9 @@ struct Record<F, W> {
     attempts_remaining: u8,
     stage: Stage,
     deadline: Instant,
+    /// The 0xFFFF broadcast this frame is a sleepy child's copy of. Cancelling that
+    /// broadcast cancels this copy too.
+    copy_of: Option<SendId>,
 }
 
 impl<F, W> Record<F, W> {
@@ -128,6 +131,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         unicast: Unicast<F, W>,
         now: Instant,
         admitted_deadline: Option<Instant>,
+        copy_of: Option<SendId>,
         tunables: &Tunables,
     ) {
         let persistence_deadline = now + tunables.transaction_persistence_time();
@@ -150,6 +154,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 attempts_remaining: tunables.unicast_retries(),
                 stage,
                 deadline,
+                copy_of,
             },
         );
     }
@@ -400,6 +405,22 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         let mut actions = Actions::new();
         self.settle(id, Err(SendFailure::Cancelled.into()), None, &mut actions);
         Some(actions)
+    }
+
+    pub(super) fn is_transmitting(&self, id: SendId) -> bool {
+        matches!(
+            self.records.get(&id).unwrap().stage,
+            Stage::Transmitting { .. }
+        )
+    }
+
+    /// The live copies of a broadcast to its sleepy children.
+    pub(super) fn copies_of(&self, broadcast: SendId) -> Vec<SendId> {
+        self.records
+            .iter()
+            .filter(|(_, record)| record.copy_of == Some(broadcast))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Re-queue retries that are due and fail records past their deadline.
