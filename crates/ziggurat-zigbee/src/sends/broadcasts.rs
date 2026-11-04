@@ -222,13 +222,10 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     }
 
     /// Remove a record and report its verdict. The only way a record leaves the table.
-    ///
-    /// A handed-off send reports its handoff again, right before the verdict. Another
-    /// task can settle the send before the handoff's own action reaches the waiter, and
-    /// the waiter keeps the first handoff result it sees.
     fn settle(&mut self, id: SendId, result: Result<(), E>, actions: &mut Actions<F, W, E>) {
         let record = self.records.remove(&id).unwrap();
 
+        // Repeat the handoff: its own action may not have reached the waiter yet
         if record.handed_off {
             actions.push(Action::HandedOff(record.waiter.clone()));
         }

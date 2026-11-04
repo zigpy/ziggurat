@@ -586,8 +586,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Spec 3.6.6: a coordinator/router with rx-off end-device children must re-deliver
     /// every 0xFFFF broadcast to each of them as a MAC unicast, since a sleeping radio
     /// never hears the broadcast itself. The NWK source is skipped (it already has the
-    /// frame). Each copy awaits its child's poll, or expires. `copy_of` is our own
-    /// broadcast's send, which cancels the copies with it.
+    /// frame). Each copy awaits its child's poll, or expires.
     fn maybe_fan_out_broadcast_to_sleepy_children(
         &self,
         core: &mut ZigbeeCore,
@@ -615,7 +614,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         for (child_eui64, child_nwk) in sleepy_children {
-            // Nobody awaits a copy: its slot is dropped with the record
             let unicast = UnicastRecord {
                 frame: Frame::nwk(nwk_frame.clone(), security),
                 priority: policy.priority,

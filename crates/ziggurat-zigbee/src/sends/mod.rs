@@ -286,8 +286,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         (id, Actions::new())
     }
 
-    /// Enqueue a copy of the 0xFFFF broadcast `broadcast` for one sleepy child (spec
-    /// 3.6.6). Cancelling the broadcast cancels the copy too.
+    /// Enqueue a broadcast's copy for one sleepy child (spec 3.6.6).
     pub fn enqueue_broadcast_copy(
         &mut self,
         broadcast: SendId,
@@ -504,8 +503,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         }
     }
 
-    /// A broadcast is cancelled together with its live copies to sleepy children. If the
-    /// broadcast or any copy is in the radio right now, nothing is cancelled.
+    /// Cancel a broadcast with its sleepy child copies, or nothing if any is in the radio.
     fn cancel_broadcast(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
         let copies = self.unicasts.copies_of(id);
         if copies

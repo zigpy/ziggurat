@@ -61,8 +61,7 @@ struct Record<F, W> {
     attempts_remaining: u8,
     stage: Stage,
     deadline: Instant,
-    /// The 0xFFFF broadcast this frame is a sleepy child's copy of. Cancelling that
-    /// broadcast cancels this copy too.
+    /// The broadcast this frame copies to a sleepy child.
     copy_of: Option<SendId>,
 }
 
@@ -269,10 +268,6 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     /// Remove a record and report its verdict. The only way a record leaves the table.
-    ///
-    /// A handed-off send reports its handoff again, right before the verdict. Another
-    /// task can settle the send before the handoff's own action reaches the waiter, and
-    /// the waiter keeps the first handoff result it sees.
     fn settle(
         &mut self,
         id: SendId,
@@ -282,6 +277,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     ) {
         let record = self.records.remove(&id).unwrap();
 
+        // Repeat the handoff: its own action may not have reached the waiter yet
         if record.stage == Stage::AwaitingApsAck {
             actions.push(Action::HandedOff(record.waiter.clone()));
         }
