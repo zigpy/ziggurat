@@ -39,13 +39,79 @@ pub const ZDP_PROFILE_ID: u16 = 0x0000;
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u16)]
 pub enum ZdpClusterId {
+    NodeDescReq = 0x0002,
     DeviceAnnce = 0x0013,
     ParentAnnce = 0x001F,
     MgmtLqiReq = 0x0031,
     MgmtRtgReq = 0x0032,
+    NodeDescRsp = 0x8002,
     ParentAnnceRsp = 0x801F,
     MgmtLqiRsp = 0x8031,
     MgmtRtgRsp = 0x8032,
+}
+
+/// Zigbee spec 2.4.3.1.2: request the node descriptor for a network address.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NodeDescReq {
+    pub nwk_addr_of_interest: Nwk,
+}
+
+impl ZdpCommand for NodeDescReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::NodeDescReq;
+}
+
+/// Stack-compliance revision advertised by this implementation.
+pub const STACK_COMPLIANCE_REVISION: u8 = 22;
+
+/// Zigbee spec 2.3.2.3: the coordinator's node descriptor.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NodeDescriptor {
+    logical_type_and_flags: u8,
+    aps_flags_and_frequency_band: u8,
+    mac_capability_flags: u8,
+    manufacturer_code: u16,
+    maximum_buffer_size: u8,
+    maximum_incoming_transfer_size: u16,
+    server_mask: u16,
+    maximum_outgoing_transfer_size: u16,
+    descriptor_capability_field: u8,
+}
+
+impl NodeDescriptor {
+    /// Describe a 2.4 GHz coordinator that owns the primary Trust Center.
+    pub const fn coordinator() -> Self {
+        Self {
+            // Logical type Coordinator; no complex or user descriptor.
+            logical_type_and_flags: 0x00,
+            // APS flags 0; 2.4 GHz frequency band.
+            aps_flags_and_frequency_band: 0x40,
+            // Alternate PAN coordinator, FFD, mains powered, receiver on while idle,
+            // security capable, and able to allocate addresses.
+            mac_capability_flags: 0x8f,
+            manufacturer_code: 0x0000,
+            maximum_buffer_size: 82,
+            maximum_incoming_transfer_size: 82,
+            // Primary Trust Center (bit 0); stack compliance revision in bits 9..15.
+            server_mask: 0x0001 | ((STACK_COMPLIANCE_REVISION as u16) << 9),
+            maximum_outgoing_transfer_size: 82,
+            descriptor_capability_field: 0x00,
+        }
+    }
+}
+
+/// Zigbee spec 2.4.4.1.2: successful node descriptor response.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NodeDescRsp {
+    pub status: ZdpStatus,
+    pub nwk_addr_of_interest: Nwk,
+    pub node_descriptor: NodeDescriptor,
+}
+
+impl ZdpCommand for NodeDescRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::NodeDescRsp;
 }
 
 /// Zigbee spec Table 2-129 (partial): ZDP response status values.
@@ -274,4 +340,37 @@ fn deserialize<T: AbstractBits>(bytes: &[u8]) -> Result<(u8, T), DeserializeErro
         })?;
 
     Ok((*tsn, command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_descriptor_request_round_trips() {
+        let request = NodeDescReq {
+            nwk_addr_of_interest: Nwk(0x0000),
+        };
+
+        let encoded = request.serialize(0x27).unwrap();
+        assert_eq!(encoded, [0x27, 0x00, 0x00]);
+        assert_eq!(NodeDescReq::deserialize(&encoded).unwrap(), (0x27, request));
+    }
+
+    #[test]
+    fn coordinator_node_descriptor_advertises_r22_trust_center() {
+        let response = NodeDescRsp {
+            status: ZdpStatus::Success,
+            nwk_addr_of_interest: Nwk(0x0000),
+            node_descriptor: NodeDescriptor::coordinator(),
+        };
+
+        assert_eq!(
+            response.serialize(0x27).unwrap(),
+            [
+                0x27, 0x00, 0x00, 0x00, 0x00, 0x40, 0x8f, 0x00, 0x00, 0x52, 0x52, 0x00, 0x01, 0x2c,
+                0x52, 0x00, 0x00,
+            ]
+        );
+    }
 }

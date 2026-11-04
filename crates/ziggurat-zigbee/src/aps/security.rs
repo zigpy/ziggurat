@@ -221,6 +221,14 @@ impl ApsSecurity {
         self.device_key(eui64).is_some() || self.tclk_seed.is_some()
     }
 
+    /// Whether a fresh unique trust center link key has been issued but not yet
+    /// proven by the device with a Verify-Key command.
+    pub fn link_key_update_pending(&self, eui64: Eui64) -> bool {
+        self.devices
+            .get(&eui64)
+            .is_some_and(|entry| entry.pending_key.is_some())
+    }
+
     pub fn device_key_count(&self) -> usize {
         self.devices.values().filter(|e| e.key.is_some()).count()
     }
@@ -238,6 +246,14 @@ impl ApsSecurity {
     /// `fresh_key` is caller-generated randomness, used only when no TCLK seed is
     /// configured.
     pub fn issue_device_key(&mut self, eui64: Eui64, fresh_key: Key) -> Key {
+        if let Some(pending_key) = self
+            .devices
+            .get(&eui64)
+            .and_then(|entry| entry.pending_key.clone())
+        {
+            return pending_key;
+        }
+
         let key = self
             .tclk_seed
             .as_ref()
@@ -517,5 +533,43 @@ impl ApsSecurity {
             frame.decrypt(key, source).ok()
         })
         .map(|(frame, _key)| frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOCAL: Eui64 = Eui64([0x10; 8]);
+    const DEVICE: Eui64 = Eui64([0x20; 8]);
+
+    fn security() -> ApsSecurity {
+        ApsSecurity::new(Key(*b"ZigBeeAlliance09"), LOCAL, None)
+    }
+
+    #[test]
+    fn repeated_link_key_issue_reuses_the_pending_key() {
+        let mut security = security();
+        let first = security.issue_device_key(DEVICE, Key([0x31; 16]));
+        let retry = security.issue_device_key(DEVICE, Key([0x42; 16]));
+
+        assert_eq!(first, Key([0x31; 16]));
+        assert_eq!(retry, first);
+        assert!(security.link_key_update_pending(DEVICE));
+        assert!(!security.has_unique_link_key(DEVICE));
+    }
+
+    #[test]
+    fn verified_pending_key_becomes_the_active_unique_key() {
+        let mut security = security();
+        let pending = security.issue_device_key(DEVICE, Key([0x53; 16]));
+
+        assert_eq!(
+            security.verify_device_key(DEVICE, &verify_key_hash(&pending)),
+            Some(true)
+        );
+        assert!(!security.link_key_update_pending(DEVICE));
+        assert!(security.has_unique_link_key(DEVICE));
+        assert_eq!(security.device_link_key(DEVICE), pending);
     }
 }
