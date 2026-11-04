@@ -12,8 +12,7 @@
 //! FCS normalization (OT frames include the 2-byte FCS, ziggurat PSDUs never do) is the
 //! glue's job: PSDUs on both sides of this crate exclude the FCS.
 //!
-//! Unlike `Efr32Phy` there is no software retry loop: `max_frame_retries` is handed to
-//! the OT sub-MAC, which owns CSMA, retries, and ACK timing, so [`deliver_tx_result`]
+//! There is no software retry loop: `max_frame_retries` is handed to the OT sub-MAC, which owns CSMA, retries, and ACK timing, so [`deliver_tx_result`]
 //! reports the terminal outcome.
 
 #![no_std]

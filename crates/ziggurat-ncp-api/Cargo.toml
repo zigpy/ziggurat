@@ -17,7 +17,7 @@ embassy-sync = "0.8"
 embassy-futures = "0.1"
 tracing = { version = "0.1", default-features = false }
 
-# Standalone workspace: consumed only by the MCU firmware crates (ziggurat-ot,
-# ziggurat-esp), which pin ziggurat-driver to the embassy runtime; excluded from the host
+# Standalone workspace: consumed only by the MCU firmware crate (ziggurat-ot), which
+# pins ziggurat-driver to the embassy runtime; excluded from the host
 # workspace so its feature selection doesn't unify with the tokio build.
 [workspace]
