@@ -35,7 +35,7 @@ pub enum Schedule {
         next_attempt: Instant,
     },
     /// `copies_remaining` copies at `interval` (a route request); running out completes
-    /// the send.
+    /// the send, or fails it if no copy was handed off.
     FixedInterval {
         interval: Duration,
         copies_remaining: u8,
@@ -53,11 +53,11 @@ pub struct Broadcast<F, W> {
 }
 
 /// What a tick finds a schedule's next copy to be.
-enum Due<E> {
+enum Due {
     /// A copy is due: queue it.
     Copy,
-    /// The schedule ran out, with the verdict that means.
-    Over(Result<(), E>),
+    /// The schedule ran out.
+    Over,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ enum CopyState {
 }
 
 #[derive(Debug)]
-struct Record<F, W> {
+struct Record<F, W, E> {
     /// `None` exactly while a copy is on loan to the radio (`CopyState::Transmitting`).
     frame: Option<F>,
     priority: TxPriority,
@@ -82,10 +82,13 @@ struct Record<F, W> {
     /// the neighbors relayed while the copy was in the radio. The first handoff settles
     /// the send; a broadcast is never delivered without reaching the air once.
     quorum_heard: bool,
+    /// The last copy's radio failure: the verdict if the copies run out before one is
+    /// handed off.
+    last_error: Option<E>,
     deadline: Instant,
 }
 
-impl<F, W> Record<F, W> {
+impl<F, W, E> Record<F, W, E> {
     const fn next_attempt(&self) -> Option<Instant> {
         match self.schedule {
             Schedule::Once => None,
@@ -108,7 +111,7 @@ impl<F, W> Record<F, W> {
 
 #[derive(Debug)]
 pub(super) struct Broadcasts<F, W, E> {
-    records: FlatMap<SendId, Record<F, W>>,
+    records: FlatMap<SendId, Record<F, W, E>>,
     _error: PhantomData<fn() -> E>,
 }
 
@@ -143,6 +146,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 },
                 handed_off: false,
                 quorum_heard: false,
+                last_error: None,
                 deadline: now + tunables.handoff_timeout(),
             },
         );
@@ -209,7 +213,10 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         // A lost copy is not terminal: the schedule retransmits. The first copy on air
         // is the handoff.
         let first_handoff = result.is_ok() && !record.handed_off;
-        record.handed_off |= result.is_ok();
+        match result {
+            Ok(()) => record.handed_off = true,
+            Err(err) => record.last_error = Some(err),
+        }
 
         if record.quorum_heard && record.handed_off {
             // `settle` reports the handoff
@@ -316,7 +323,15 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             {
                 match due {
                     Due::Copy => record.copy = CopyState::Queued,
-                    Due::Over(verdict) => {
+                    Due::Over => {
+                        let verdict = match (record.handed_off, record.schedule) {
+                            (false, _) => Err(record.last_error.take().unwrap()),
+                            (true, Schedule::PassiveAck { .. }) => {
+                                Err(SendFailure::BroadcastQuorumNotReached.into())
+                            }
+                            (true, Schedule::FixedInterval { .. }) => Ok(()),
+                            (true, Schedule::Once) => unreachable!("a single copy never runs out"),
+                        };
                         settle.push((*id, verdict));
                         continue;
                     }
@@ -341,7 +356,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     }
 
     /// Consume a schedule's next copy if it is due. `None` means nothing is due.
-    fn schedule_due(schedule: &mut Schedule, now: Instant) -> Option<Due<E>> {
+    fn schedule_due(schedule: &mut Schedule, now: Instant) -> Option<Due> {
         match schedule {
             Schedule::Once => None,
             Schedule::PassiveAck {
@@ -353,9 +368,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                     return None;
                 }
                 if *copies_remaining == 0 {
-                    return Some(Due::Over(
-                        Err(SendFailure::BroadcastQuorumNotReached.into()),
-                    ));
+                    return Some(Due::Over);
                 }
                 *copies_remaining -= 1;
                 Some(Due::Copy)
@@ -368,9 +381,8 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 if *next_attempt > now {
                     return None;
                 }
-                // A fixed-interval broadcast completes by running out of copies
                 if *copies_remaining == 0 {
-                    return Some(Due::Over(Ok(())));
+                    return Some(Due::Over);
                 }
                 *copies_remaining -= 1;
                 Some(Due::Copy)
