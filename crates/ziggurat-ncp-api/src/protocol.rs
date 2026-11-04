@@ -143,9 +143,9 @@ async fn dispatch<P: RadioPhy>(
             .await
         }
         Request::SendUnicast(payload) => {
-            let (handle, confirm_kind) = proto::send_unicast(&**running(app)?, payload)?;
+            let ((handle, confirm_kind), result) = proto::send_unicast(&**running(app)?, payload)?;
             crate::track_send(&app.sends, request_id, handle, confirm_kind);
-            Ok(Response::Empty)
+            Ok(Response::SendUnicastResult(result))
         }
         Request::SendBroadcast(payload) => {
             let (handle, confirm_kind) = proto::send_broadcast(&**running(app)?, payload)?;
