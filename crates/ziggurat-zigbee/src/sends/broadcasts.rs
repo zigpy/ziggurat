@@ -208,21 +208,30 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
         // A lost copy is not terminal: the schedule retransmits. The first copy on air
         // is the handoff.
-        if result.is_ok() && !record.handed_off {
-            record.handed_off = true;
-            actions.push(Action::HandedOff(record.waiter.clone()));
-        }
+        let first_handoff = result.is_ok() && !record.handed_off;
+        record.handed_off |= result.is_ok();
 
         if record.quorum_heard && record.handed_off {
+            // `settle` reports the handoff
             self.settle(id, Ok(()), &mut actions);
+        } else if first_handoff {
+            actions.push(Action::HandedOff(record.waiter.clone()));
         }
 
         actions
     }
 
     /// Remove a record and report its verdict. The only way a record leaves the table.
+    ///
+    /// A handed-off send reports its handoff again, right before the verdict. Another
+    /// task can settle the send before the handoff's own action reaches the waiter, and
+    /// the waiter keeps the first handoff result it sees.
     fn settle(&mut self, id: SendId, result: Result<(), E>, actions: &mut Actions<F, W, E>) {
         let record = self.records.remove(&id).unwrap();
+
+        if record.handed_off {
+            actions.push(Action::HandedOff(record.waiter.clone()));
+        }
 
         actions.push(Action::Settled {
             waiter: record.waiter,
@@ -290,11 +299,6 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
 
         let mut actions = Actions::new();
-        // The handoff's own action may still be on its way to the waiter: repeat it, so
-        // the cancel does not back-fill a handoff that happened as failed
-        if record.handed_off {
-            actions.push(Action::HandedOff(record.waiter.clone()));
-        }
         self.settle(id, Err(SendFailure::Cancelled.into()), &mut actions);
         Some(actions)
     }
