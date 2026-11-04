@@ -19,7 +19,7 @@ pub use send_tracker::*;
 pub use wire::*;
 
 /// Reported by `GetFirmwareInfo`, e.g. `ziggurat/0.1.0+0490795-dirty`.
-pub const VERSION: &str = concat!(
+pub const VERSION_STRING: &str = concat!(
     "ziggurat/",
     env!("CARGO_PKG_VERSION"),
     "+",
