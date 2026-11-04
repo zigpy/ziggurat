@@ -1,40 +1,18 @@
-use crate::frame_token::{self, TrafficClass};
 use crate::runtime::Runtime;
-use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame, Ieee802154Frame};
-use alloc::boxed::Box;
+use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame};
 use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioError, RadioPhy};
 
-use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 
-use ziggurat_zigbee::indirect::Delivery;
-
 use super::{
-    DeliveryError, DeviceLeaveReason, IndirectFrame, IndirectPayload, NwkSecurityMode, SendKind,
-    TxOutcome, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
+    Confirm, DeviceLeaveReason, Frame, NwkSecurityMode, TxPolicy, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    /// Queue a frame for a polling device (802.15.4 spec 6.7.3), under its own
-    /// `poll_address`. Its `outcome` is resolved when the device extracts the frame, or
-    /// with an error on expiry or eviction.
-    pub(super) fn enqueue_indirect_frame(&self, frame: IndirectFrame, outcome: TxOutcome) {
-        self.core().mac.indirect_queue.push(
-            frame.poll_address,
-            frame,
-            outcome,
-            self.core_now(),
-            self.tunables.transaction_persistence_time(),
-        );
-
-        self.src_match_sync.notify_one();
-        self.maintenance_wake.notify_one();
-    }
-
-    /// 802.15.4 spec 6.7.3: a MAC Data Request extracts the oldest transaction queued
-    /// for the polling device. The poll doubles as the child keepalive (spec 3.6.10.4).
+    /// 802.15.4 spec 6.7.3: a MAC Data Request extracts the oldest frame awaiting the
+    /// polling device. The poll doubles as the child keepalive (spec 3.6.10.4).
     pub(super) fn handle_data_request(&self, command_frame: &Ieee802154CommandFrame) {
         // Polls during association use extended addressing (the device has no short
         // address yet); joined children poll with their short address
@@ -69,8 +47,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let fp_advertised =
             poll_source.is_some_and(|address| self.src_match_written.lock().contains(address));
 
-        let delivered =
-            fp_advertised && self.deliver_indirect_transaction(source_eui64, source_nwk);
+        let now = self.core_now();
+        let delivered = fp_advertised && {
+            let mut core = self.core();
+            let (queued, actions) = core.sends.poll(source_eui64, source_nwk, now);
+            self.commit_sends(core, actions);
+            queued
+        };
+
+        if delivered {
+            tracing::debug!("Delivering queued indirect frame to {poll_source:?}");
+        }
 
         // Spec 3.6.10.4: polls from devices without a neighbor table entry are
         // answered with an indirectly delivered leave, steering the stale child
@@ -83,104 +70,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Pop and transmit the oldest live transaction queued under either of the polling
-    /// device's addresses. Returns whether a transaction was found.
-    fn deliver_indirect_transaction(
-        &self,
-        source_eui64: Option<Eui64>,
-        source_nwk: Option<Nwk>,
-    ) -> bool {
-        let outcome =
-            self.core()
-                .mac
-                .indirect_queue
-                .extract(source_eui64, source_nwk, self.core_now());
-
-        for (destination, transaction) in outcome.expired {
-            self.resolve_outcome(
-                transaction.completion,
-                Err(DeliveryError::IndirectExpired { destination }),
-            );
-        }
-
-        let Some(delivery) = outcome.delivery else {
-            return false;
-        };
-
-        let Delivery {
-            destination,
-            transaction,
-            more_pending,
-        } = delivery;
-
-        tracing::debug!("Delivering queued indirect frame to {destination:?}");
-
-        // Finish a deferred NWK frame now, at delivery time: this is where its frame
-        // counter is assigned (via `encrypt_nwk_frame`), just before the frame hits the
-        // air, rather than when it was queued. The transaction is left intact (we clone
-        // out of it) so a failed transmit can requeue the plaintext and earn a fresh
-        // counter on the next poll.
-        let mut frame = match &transaction.frame.payload {
-            IndirectPayload::Deferred {
-                nwk_frame,
-                next_hop,
-                security,
-            } => self.finish_unicast_nwk_frame(nwk_frame.clone(), *next_hop, *security),
-            IndirectPayload::Final(frame) => frame.clone(),
-        };
-
-        if more_pending {
-            match frame {
-                Ieee802154Frame::Data(ref mut f) => f.header.frame_control.frame_pending = true,
-                Ieee802154Frame::Ack(ref mut f) => f.header.frame_control.frame_pending = true,
-                Ieee802154Frame::Beacon(ref mut f) => f.header.frame_control.frame_pending = true,
-                Ieee802154Frame::Command(ref mut f) => f.header.frame_control.frame_pending = true,
-            }
-        }
-
-        // Indirect delivery answers a sleepy child's poll within `macResponseWaitTime`.
-        // The transaction rides along in the outcome: the sender resolves its
-        // completion after the transmit, or requeues it for the next poll on failure.
-        let raw_frame = Ieee802154Frame::from_bytes_without_fcs(&frame.to_bytes_without_fcs())
-            .expect("a built indirect frame round-trips through bytes");
-
-        self.enqueue_send(
-            SendKind::Raw { frame: raw_frame },
-            TxPolicy {
-                priority: TxPriority::StackCritical,
-                class: TrafficClass::Critical,
-            },
-            TxOutcome::IndirectDelivery {
-                destination,
-                transaction: Box::new(transaction),
-            },
-        );
-
-        true
-    }
-
-    pub(super) fn remove_indirect_queue_if_empty(&self, destination: Ieee802154Address) {
-        self.core().mac.indirect_queue.remove_if_empty(destination);
-
-        self.src_match_sync.notify_one();
-    }
-
-    /// Drop every transaction queued for a device that is no longer a child.
+    /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
-        let dropped = self.core().mac.indirect_queue.drop_for(eui64, nwk);
-
-        if dropped.is_empty() {
-            return;
-        }
-
-        for (destination, transaction) in dropped {
-            self.resolve_outcome(
-                transaction.completion,
-                Err(DeliveryError::IndirectExpired { destination }),
-            );
-        }
-
-        self.src_match_sync.notify_one();
+        let mut core = self.core();
+        let actions = core.sends.drop_indirect_unicasts(eui64, nwk);
+        self.commit_sends(core, actions);
     }
 
     /// Spec 3.6.10.4: a poll from a device with no neighbor table entry is answered
@@ -190,16 +84,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let destination = Ieee802154Address::Nwk(nwk);
 
         // One queued leave at a time, or every poll until extraction would add one
-        if self.core().mac.indirect_queue.has_queued(destination) {
+        if self.core().sends.has_unicast_awaiting_poll(destination) {
             return;
         }
 
         tracing::info!("Poll from unknown device {nwk:?}, queueing a leave request");
-
-        let Some(token) = frame_token::take(TrafficClass::Critical) else {
-            tracing::warn!("Frame budget exhausted; not queueing a leave for {nwk:?}");
-            return;
-        };
 
         // Spec 3.6.10.4.1: no destination IEEE address is included
         let mut nwk_frame = self
@@ -215,24 +104,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
         // Fire-and-forget: an expiry (the stale child never polled again) is only
-        // worth a log line, which the discarded outcome provides.
-        self.enqueue_indirect_frame(
-            IndirectFrame {
-                poll_address: destination,
-                payload: IndirectPayload::Deferred {
-                    nwk_frame,
-                    next_hop: nwk,
-                    security: NwkSecurityMode::NetworkKey,
-                },
-                token,
-            },
-            TxOutcome::Discard,
+        // worth a log line.
+        self.enqueue_unicast(
+            Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
+            TxPolicy::STACK_CRITICAL,
+            Confirm::OnHandoff,
+            nwk,
+            Some(destination),
         );
     }
 
-    /// Mirrors the indirect queue keys into the RCP source address match table:
-    /// auto-ACKs to MAC Data Requests carry frame-pending=1 exactly for the devices
-    /// that have something queued.
+    /// Mirrors the devices with frames awaiting their poll into the RCP source address
+    /// match table: auto-ACKs to MAC Data Requests carry frame-pending=1 exactly for the
+    /// devices that have something queued.
     pub(super) async fn src_match_sync_task(&self) {
         loop {
             self.src_match_sync.notified().await;
@@ -247,15 +131,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Replace the RCP source address match table with the addresses of every device
-    /// that has queued indirect transactions.
+    /// that has a frame awaiting its poll. An unchanged table is not rewritten.
     pub(super) async fn write_src_match_table(&self) -> Result<(), RadioError> {
         let table = {
             let core = self.core();
-
-            core.mac
-                .indirect_queue
-                .queued_addresses(core.nib.address_map.map())
+            core.sends.poll_addresses(core.nib.address_map.map())
         };
+
+        if *self.src_match_written.lock() == table {
+            return Ok(());
+        }
 
         tracing::debug!(
             "Writing source address match table: {:?} {:?}",
@@ -274,16 +159,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(())
     }
 
-    /// Expires undelivered indirect transactions and evicts children whose keepalive
-    /// deadline has lapsed (spec 3.6.10.1). Sleeps until the earliest pending
-    /// deadline, woken early when a new transaction or child entry could move it
-    /// closer; keepalive refreshes only push deadlines out and need no wake.
-    pub(super) async fn indirect_maintenance_task(&self) {
+    /// Evicts children whose keepalive deadline has lapsed (spec 3.6.10.1). Sleeps
+    /// until the earliest deadline, woken early when a new or renegotiated child entry
+    /// could move it closer; keepalive refreshes only push deadlines out and need no
+    /// wake.
+    pub(super) async fn child_timeout_task(&self) {
         loop {
-            self.expire_indirect_transactions();
             self.evict_timed_out_children();
 
-            match self.next_maintenance_deadline() {
+            let next_timeout = self.core().nib.neighbors.next_child_timeout();
+            match next_timeout {
                 Some(deadline) => {
                     let _ = self
                         .timeout_at_core(deadline, self.maintenance_wake.notified())
@@ -292,33 +177,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 None => self.maintenance_wake.notified().await,
             }
         }
-    }
-
-    /// The earliest deadline the maintenance task has to act on: an indirect
-    /// transaction expiry or a child keepalive timeout.
-    fn next_maintenance_deadline(&self) -> Option<CoreInstant> {
-        let next_expiry = self.core().mac.indirect_queue.next_expiry();
-        let next_eviction = self.core().nib.neighbors.next_child_timeout();
-
-        [next_expiry, next_eviction].into_iter().flatten().min()
-    }
-
-    fn expire_indirect_transactions(&self) {
-        let expired = self.core().mac.indirect_queue.expire(self.core_now());
-
-        if expired.is_empty() {
-            return;
-        }
-
-        for (destination, transaction) in expired {
-            tracing::warn!("Indirect transaction to {destination:?} expired without a poll");
-            self.resolve_outcome(
-                transaction.completion,
-                Err(DeliveryError::IndirectExpired { destination }),
-            );
-        }
-
-        self.src_match_sync.notify_one();
     }
 
     fn evict_timed_out_children(&self) {

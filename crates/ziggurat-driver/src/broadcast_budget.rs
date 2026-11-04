@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use ziggurat_zigbee::Instant as CoreInstant;
 
-use crate::frame_token::TrafficClass;
+use crate::zigbee_stack::TrafficClass;
 
 /// The outcome of asking the budget to admit one broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

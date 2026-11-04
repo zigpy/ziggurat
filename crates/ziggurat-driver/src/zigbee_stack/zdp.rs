@@ -15,12 +15,11 @@ use ziggurat_zigbee::zdp::{
     ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus,
 };
 
+use super::TrafficClass;
 use super::{
-    Broadcast, EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective, SendHandle,
-    SendMode, TrackStage, TxOutcome, TxPolicy, TxPriority, Unicast, ZigbeeStack, neighbors,
-    routing,
+    Broadcast, Confirm, EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective,
+    SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeStack, neighbors, routing,
 };
-use crate::frame_token::TrafficClass;
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
@@ -307,32 +306,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             class: TrafficClass::Host,
         };
 
-        let (handle, slot) = SendHandle::new();
-
         match delivery_mode {
-            ApsDeliveryMode::Broadcast => {
-                self.send_broadcast(Broadcast {
-                    frame: nwk_frame,
-                    security: NwkSecurityMode::NetworkKey,
-                    policy,
-                    slot: Some(slot),
-                })?;
-            }
-            ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => {
-                self.send_unicast(Unicast {
-                    frame: nwk_frame,
-                    security: NwkSecurityMode::NetworkKey,
-                    mode: SendMode::Route(RouteDirective::StackDecides),
-                    policy,
-                    outcome: TxOutcome::Track {
-                        slot,
-                        stage: TrackStage::Delivery,
-                    },
-                })?
-            }
+            ApsDeliveryMode::Broadcast => self.send_broadcast(Broadcast {
+                frame: nwk_frame,
+                security: NwkSecurityMode::NetworkKey,
+                policy,
+            }),
+            ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => self.send_unicast(Unicast {
+                frame: nwk_frame,
+                security: NwkSecurityMode::NetworkKey,
+                mode: SendMode::Route(RouteDirective::StackDecides),
+                policy,
+                confirm: Confirm::OnHandoff,
+            }),
         }
-
-        Ok(handle)
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming

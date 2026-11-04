@@ -11,12 +11,12 @@ use ziggurat_zigbee::nwk::commands::{
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
+use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
-use crate::frame_token::TrafficClass;
 
 use super::{
-    AddrConflictSource, Broadcast, NwkSecurityMode, SendHandle, SendMode, TxOutcome, TxPolicy,
-    TxPriority, Unicast, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendActions, SendHandle, SendMode,
+    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -59,7 +59,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let (next_hop_nwk, path_cost) = match outcome.disposition {
             RouteReplyDisposition::Drop => return,
             RouteReplyDisposition::Established => {
-                self.pending_route_wake.notify_one();
+                self.send_timer_wake.notify_one();
                 return;
             }
             RouteReplyDisposition::Relay {
@@ -68,7 +68,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             } => (next_hop, path_cost),
         };
 
-        self.pending_route_wake.notify_one();
+        self.send_timer_wake.notify_one();
 
         let next_hop_link = self.core().nib.neighbors.link(next_hop_nwk);
 
@@ -104,7 +104,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             security: NwkSecurityMode::NetworkKey,
             mode: SendMode::Direct,
             policy: TxPolicy::STACK_CRITICAL,
-            outcome: TxOutcome::Discard,
+            confirm: Confirm::OnHandoff,
         })
         .map_err(|err| tracing::warn!("Failed to relay route reply: {err}"))
         .ok();
@@ -165,7 +165,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        self.pending_route_wake.notify_one();
+        self.send_timer_wake.notify_one();
 
         // TODO: what do we do if the address and the EUI64 don't agree? This would be
         // an error, some device on the network is storing invalid information about
@@ -207,7 +207,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 security: NwkSecurityMode::NetworkKey,
                 mode: SendMode::Direct,
                 policy: TxPolicy::STACK_CRITICAL,
-                outcome: TxOutcome::Discard,
+                confirm: Confirm::OnHandoff,
             })
             .map_err(|err| tracing::warn!("Failed to send route reply: {err}"))
             .ok();
@@ -261,11 +261,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .mul_f32(crate::rng::random_f32()))
             * 2;
 
-        self.broadcast_route_request(
-            relayed_route_request_cmd,
-            self.tunables.rreq_retries() + 1,
-            jitter,
-        );
+        let attempts = self.tunables.rreq_retries() + 1;
+        let mut core = self.core();
+        let actions =
+            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        self.commit_sends(core, actions);
     }
 
     /// Zigbee spec 3.6.4.5.1: advertise a many-to-one route to ourselves so that every
@@ -294,8 +294,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             )
             .with_radius(self.tunables.concentrator_radius());
 
-        let (handle, slot) = SendHandle::new();
-
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
         self.send_oneshot_broadcast(Broadcast {
             frame: many_to_one_request_frame,
@@ -304,10 +302,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 priority: TxPriority::Background,
                 class: TrafficClass::Critical,
             },
-            slot: Some(slot),
-        });
-
-        handle
+        })
     }
 
     pub async fn periodic_many_to_one_route_request_task(&self) {
@@ -454,14 +449,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Begin or restart ad-hoc route discovery toward a destination: the routing entry
-    /// enters `DiscoveryUnderway` and a route request is broadcast. The waiting is
-    /// owned by the pending-route reactor, not the caller; this only kicks off the
-    /// discovery.
-    #[allow(clippy::significant_drop_tightening)]
-    pub(super) fn send_route_discovery(&self, destination: Nwk) {
+    /// enters `DiscoveryUnderway` and a route request is broadcast. The send timer
+    /// watches the discovery on behalf of the unrouted sends to it; this only kicks it
+    /// off. Under a core lock the caller holds and commits.
+    pub(super) fn start_route_discovery(
+        &self,
+        core: &mut ZigbeeCore,
+        destination: Nwk,
+    ) -> SendActions {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
 
-        let route_request_identifier = self.core().nib.routing.begin_discovery(
+        let route_request_identifier = core.nib.routing.begin_discovery(
             self.state.network_address,
             destination,
             self.core_now(),
@@ -469,7 +467,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         // If we know the EUI64 corresponding to the NWK, use it
-        let destination_eui64 = self.core().nib.address_map.eui64_for(destination);
+        let destination_eui64 = core.nib.address_map.eui64_for(destination);
 
         let route_request_frame = self
             .nwk_command_frame(
@@ -484,14 +482,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             )
             // Retried broadcasts of a route request share one sequence number,
             // assigned now: `transmit_*` does not touch it
-            .with_sequence_number(self.next_nwk_sequence_number());
+            .with_sequence_number(core.nib.next_sequence_number());
 
         // Spec 3.6.4.5.1: the initial broadcast is repeated `nwkcInitialRREQRetries`
         // times, separated by the retry interval
         self.broadcast_route_request(
+            core,
             route_request_frame,
             self.tunables.initial_rreq_retries() + 1,
             Duration::ZERO,
-        );
+        )
     }
 }

@@ -31,9 +31,6 @@ pub const WELL_KNOWN_LINK_KEY: Key = Key::from_string(b"ZigBeeAlliance09");
 pub enum TunableError {
     UnknownName,
     InvalidValue,
-    /// The value feeds startup-only sizing (the frame budget) and cannot change on a
-    /// live stack.
-    StartupOnly,
 }
 
 impl fmt::Display for TunableError {
@@ -41,7 +38,6 @@ impl fmt::Display for TunableError {
         f.write_str(match self {
             Self::UnknownName => "unknown tunable",
             Self::InvalidValue => "value out of range",
-            Self::StartupOnly => "tunable only applies at configure time",
         })
     }
 }
@@ -359,6 +355,11 @@ tunables! {
     /// back.
     aps_ack_timeout_indirect: Duration = Duration::from_millis(10000),
 
+    /// How long any send may wait to reach the mesh before it fails with
+    /// `HandoffTimeout`. Should be longer than route discovery plus indirect
+    /// persistence.
+    handoff_timeout: Duration = Duration::from_secs(30),
+
     /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel
     /// before declaring a transmit failed.
     mac_max_csma_backoffs: u8 = 2,
@@ -367,19 +368,8 @@ tunables! {
     /// unacknowledged before declaring it failed.
     mac_max_frame_retries: u8 = 5,
 
-    /// Bytes of heap the driver may hold in parked frames. 0 derives it from the
-    /// platform's heap arena minus a worst-case ceiling for everything else.
-    frame_budget_bytes: usize = 0,
-
-    /// Frame tokens only stack-critical traffic may use.
-    critical_reserve_frames: usize = 32,
-
-    /// Frame tokens reserved for transit traffic, so a host flood cannot stop the
-    /// device from routing.
-    forwarding_reserve_frames: usize = 16,
-
     /// Broadcast admission budget: a token bucket shared across traffic classes,
-    /// mirroring the frame budget above but bounding broadcast *rate*.
+    /// bounding broadcast *rate*.
     broadcast_budget_tokens: u8 = 40,
 
     /// Time to regenerate one broadcast token; the reciprocal is the sustained
