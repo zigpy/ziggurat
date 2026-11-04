@@ -1,14 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# ziggurat-phy-esp and ziggurat-esp only build for an ESP32-C6 (riscv32imac) with esp-hal;
-# excluded so host `cargo build` over the workspace doesn't try (and fail) to compile them.
-# ziggurat-ot (and its ziggurat-ncp-api / ziggurat-phy-otlink deps) likewise only build
-# for thumbv8m.main-none-eabihf, as the staticlib embedded in the OpenThread RCP firmware.
+# ziggurat-ot (and its ziggurat-ncp-api / ziggurat-phy-otlink deps) only build for MCU
+# targets, as the staticlib embedded in the OpenThread RCP firmware. They are excluded so
+# host `cargo build` over the workspace doesn't try (and fail) to compile them.
 exclude = [
     "fuzz",
-    "crates/ziggurat-phy-esp",
-    "crates/ziggurat-esp",
     "crates/ziggurat-ncp-api",
     "crates/ziggurat-ot",
     "crates/ziggurat-phy-otlink",
