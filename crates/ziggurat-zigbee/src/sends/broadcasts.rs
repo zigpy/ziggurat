@@ -34,8 +34,7 @@ pub enum Schedule {
         copies_remaining: u8,
         next_attempt: Instant,
     },
-    /// `copies_remaining` copies at `interval` (a route request); running out completes
-    /// the send, or fails it if no copy was handed off.
+    /// `copies_remaining` copies at `interval` (a route request).
     FixedInterval {
         interval: Duration,
         copies_remaining: u8,
@@ -324,13 +323,10 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 match due {
                     Due::Copy => record.copy = CopyState::Queued,
                     Due::Over => {
-                        let verdict = match (record.handed_off, record.schedule) {
-                            (false, _) => Err(record.last_error.take().unwrap()),
-                            (true, Schedule::PassiveAck { .. }) => {
-                                Err(SendFailure::BroadcastQuorumNotReached.into())
-                            }
-                            (true, Schedule::FixedInterval { .. }) => Ok(()),
-                            (true, Schedule::Once) => unreachable!("a single copy never runs out"),
+                        let verdict = if record.handed_off {
+                            Self::handed_off_verdict(record.schedule)
+                        } else {
+                            Err(record.last_error.take().unwrap())
                         };
                         settle.push((*id, verdict));
                         continue;
@@ -339,12 +335,12 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             }
 
             if record.deadline <= now {
-                let failure = if record.handed_off {
-                    SendFailure::BroadcastQuorumNotReached
+                let verdict = if record.handed_off {
+                    Self::handed_off_verdict(record.schedule)
                 } else {
-                    SendFailure::HandoffTimeout
+                    Err(SendFailure::HandoffTimeout.into())
                 };
-                settle.push((*id, Err(failure.into())));
+                settle.push((*id, verdict));
             }
         }
 
@@ -353,6 +349,16 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
 
         actions
+    }
+
+    /// The verdict of a handed-off broadcast whose schedule ended before a quorum.
+    fn handed_off_verdict(schedule: Schedule) -> Result<(), E> {
+        match schedule {
+            Schedule::PassiveAck { .. } => Err(SendFailure::BroadcastQuorumNotReached.into()),
+            // Nothing confirms a fixed-interval broadcast: one copy on the air completes it
+            Schedule::FixedInterval { .. } => Ok(()),
+            Schedule::Once => unreachable!("a single copy settles on its own report"),
+        }
     }
 
     /// Consume a schedule's next copy if it is due. `None` means nothing is due.
