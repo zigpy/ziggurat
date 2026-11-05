@@ -16,3 +16,6 @@ abstract-bits = { git = "https://github.com/puddly/abstract-bits.git", rev = "1f
 arbitrary-int = "2.2.0"
 num_enum = { version = "0.7.6", default-features = false }
 tracing = { version = "0.1", default-features = false }
+
+[build-dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["now"] }

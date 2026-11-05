@@ -10,6 +10,9 @@
 
 extern crate alloc;
 
+use alloc::format;
+use alloc::string::String;
+
 pub mod bridge;
 pub mod send_tracker;
 pub mod wire;
@@ -18,10 +21,10 @@ pub use bridge::*;
 pub use send_tracker::*;
 pub use wire::*;
 
-/// Reported by `GetFirmwareInfo`, e.g. `ziggurat/0.1.0+0490795-dirty`.
-pub const VERSION_STRING: &str = concat!(
-    "ziggurat/",
-    env!("CARGO_PKG_VERSION"),
-    "+",
-    env!("ZIGGURAT_GIT_VERSION")
-);
+pub fn version_string(platform: &str) -> String {
+    format!(
+        "ziggurat/{}; {platform}; {}",
+        env!("ZIGGURAT_VERSION"),
+        env!("ZIGGURAT_BUILD_DATETIME")
+    )
+}
