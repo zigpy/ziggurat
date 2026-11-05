@@ -78,6 +78,9 @@ pub trait Platform: Send + Sync {
     /// The factory-programmed EUI-64, used as the coordinator IEEE address.
     fn hw_eui64(&self) -> Eui64;
 
+    /// The platform field of the version string, e.g. `EFR32`.
+    fn platform_info(&self) -> &'static str;
+
     /// Reboot the MCU (the hard `reset` request). Divergent: the transport drops
     /// and the client reconnects.
     fn hard_reset(&self) -> !;

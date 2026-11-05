@@ -16,15 +16,27 @@ extern crate alloc;
 
 #[cfg(all(target_os = "none", not(any(feature = "efr32", feature = "esp-idf"))))]
 compile_error!("ziggurat-ot needs a platform feature: `efr32` or `esp-idf`");
+
 #[cfg(all(feature = "efr32", feature = "esp-idf"))]
 compile_error!("the `efr32` and `esp-idf` features are mutually exclusive");
 
-// Provides the critical-section implementation (PRIMASK, single-core).
 #[cfg(feature = "efr32")]
-use cortex_m as _;
-// Provides the critical-section implementation (mstatus.MIE, single-hart).
+mod target {
+    // Provides the critical-section implementation (PRIMASK, single-core).
+    use cortex_m as _;
+
+    pub const PLATFORM_INFO: &str = "EFR32";
+}
+
 #[cfg(feature = "esp-idf")]
-use riscv as _;
+mod target {
+    // Provides the critical-section implementation (mstatus.MIE, single-hart).
+    use riscv as _;
+
+    pub const PLATFORM_INFO: &str = "ESP-IDF";
+}
+
+use target::PLATFORM_INFO;
 
 mod crypto;
 mod link_ops;
@@ -258,6 +270,10 @@ impl Platform for OtPlatform {
         let mut bytes = [0u8; 8];
         unsafe { platform::ziggurat_platform_hw_eui64(bytes.as_mut_ptr()) };
         Eui64::from_be_bytes(bytes)
+    }
+
+    fn platform_info(&self) -> &'static str {
+        PLATFORM_INFO
     }
 
     fn hard_reset(&self) -> ! {

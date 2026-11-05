@@ -507,9 +507,7 @@ impl ZigguratServer {
             R::Reset(payload) => self.handle_reset(payload).await,
             R::GetFirmwareInfo => Ok(proto::Response::FirmwareInfo(proto::FirmwareInfoPayload {
                 protocol_version: proto::PROTOCOL_VERSION,
-                version: concat!("ziggurat/", env!("CARGO_PKG_VERSION"))
-                    .as_bytes()
-                    .to_vec(),
+                version: proto::version_string("POSIX").into_bytes(),
             })),
             R::GetHwAddress => self.handle_get_hw_address().await,
             R::Shutdown => self.handle_shutdown().await,
