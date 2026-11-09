@@ -1311,6 +1311,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         max_frame_retries: 0,
                         max_csma_backoffs: self.tunables.mac_max_csma_backoffs(),
                         security_processed: true,
+                        tx_at: None,
                     })
                     .await;
                 if let Err(e) = tx {

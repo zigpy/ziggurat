@@ -28,6 +28,19 @@ pub struct TxFrame {
     pub max_frame_retries: u8,
     pub max_csma_backoffs: u8,
     pub security_processed: bool,
+    /// Transmit at a set time instead of as soon as possible
+    pub tx_at: Option<TxAt>,
+}
+
+/// When a timed transmit starts.
+///
+/// The end of its SFD is at `base_us + delay_us` on the radio clock, the clock of
+/// [`RxFrame::timestamp_us`]. The radio sends a late frame at once, so the caller must
+/// check the time before handing it over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxAt {
+    pub base_us: u64,
+    pub delay_us: u32,
 }
 
 /// A received frame, normalized: `psdu` is the 802.15.4 frame with the FCS stripped.

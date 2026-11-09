@@ -91,14 +91,17 @@ unsafe extern "C" {
 
     /// Submit one frame; `psdu` excludes the FCS (account for it in mLength).
     /// Completion must call `ziggurat_radio_tx_done`. One in flight at a time.
-    /// Nonzero = failure.
+    /// The receiver returns to `rx_channel` afterwards.
     pub fn ziggurat_platform_radio_transmit(
         psdu: *const u8,
         len: usize,
         channel: u8,
+        rx_channel: u8,
         csma_ca: bool,
         max_frame_retries: u8,
         max_csma_backoffs: u8,
+        tx_delay: u32,
+        tx_delay_base_time: u32,
     ) -> i32;
 
     /// Start an energy scan; completion must call

@@ -28,8 +28,8 @@ use embassy_sync::signal::Signal;
 use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
-    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
-    TxResult,
+    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxAt,
+    TxFrame, TxResult,
 };
 use ziggurat_runtime::sync::{AsyncMutex, AsyncMutexGuard};
 
@@ -54,14 +54,18 @@ pub trait LinkOps: Send + Sync {
     fn set_frame_pending_table(&self, short: &[Nwk], extended: &[Eui64]) -> Result<(), RadioError>;
 
     /// Submit one frame (PSDU without FCS). Completion arrives via
-    /// [`deliver_tx_result`]; only one transmit is in flight at a time.
+    /// [`deliver_tx_result`]; only one transmit is in flight at a time. The receiver
+    /// returns to `rx_channel` afterwards.
+    #[allow(clippy::too_many_arguments)]
     fn transmit(
         &self,
         psdu: &[u8],
         channel: u8,
+        rx_channel: u8,
         csma_ca: bool,
         max_frame_retries: u8,
         max_csma_backoffs: u8,
+        tx_at: Option<TxAt>,
     ) -> Result<(), RadioError>;
 
     /// Start an energy scan. Completion arrives via [`deliver_energy_result`].
@@ -138,16 +142,16 @@ impl OtLinkPhy {
     async fn transmit_inner(&self, frame: &TxFrame) -> Result<TxResult, RadioError> {
         // Hold the radio lock across the completion wait: one transmit in flight.
         let _state = self.state.lock().await;
-        let channel = frame
-            .channel
-            .unwrap_or_else(|| CURRENT_CHANNEL.load(Ordering::Relaxed));
+        let orig_channel = CURRENT_CHANNEL.load(Ordering::Relaxed);
         TX_COMPLETE.reset();
         self.ops.transmit(
             &frame.psdu,
-            channel,
+            frame.channel.unwrap_or(orig_channel),
+            orig_channel,
             frame.csma_ca,
             frame.max_frame_retries,
             frame.max_csma_backoffs,
+            frame.tx_at,
         )?;
         Ok(TX_COMPLETE.wait().await)
     }
