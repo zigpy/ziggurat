@@ -92,6 +92,10 @@ pub struct TableEntry {
     // Spec-expected field: `pub router_age: u16`, we instead keep track of a timestamp
     pub router_added_timestamp: Instant,
 
+    /// When the device last associated or rejoined through us. `None` for neighbors that
+    /// never attached to us.
+    pub attached_at: Option<Instant>,
+
     pub router_connectivity: u8,
     pub router_neighbor_set_diversity: u8,
     pub router_outbound_activity: u8,
@@ -222,6 +226,24 @@ impl Neighbors {
         self.table
             .values()
             .any(|entry| entry.network_address == nwk)
+    }
+
+    /// Whether `nwk` is a router child that associated or rejoined through us within
+    /// `window`.
+    pub fn is_recently_attached_router_child(
+        &self,
+        nwk: Nwk,
+        now: Instant,
+        window: Duration,
+    ) -> bool {
+        self.table.values().any(|entry| {
+            entry.network_address == nwk
+                && entry.device_type == NwkDeviceType::Router
+                && entry.is_child()
+                && entry
+                    .attached_at
+                    .is_some_and(|attached_at| now < attached_at + window)
+        })
     }
 
     /// The EUI64 of the end device child with the given network address, if one
@@ -503,6 +525,7 @@ impl Neighbors {
             mac_unicast_bytes_transmitted: 0,
             mac_unicast_bytes_received: 0,
             router_added_timestamp: now,
+            attached_at: Some(now),
             router_connectivity: 0,
             router_neighbor_set_diversity: 0,
             router_outbound_activity: 0,
@@ -510,6 +533,7 @@ impl Neighbors {
             security_timer: 0,
         });
 
+        entry.attached_at = Some(now);
         entry.network_address = child.network_address;
         entry.device_type = child.device_type;
         entry.rx_on_when_idle = child.rx_on_when_idle;
@@ -686,6 +710,7 @@ impl Neighbors {
                 mac_unicast_bytes_transmitted: 0,
                 mac_unicast_bytes_received: 0,
                 router_added_timestamp: now,
+                attached_at: None,
                 router_connectivity: 0,
                 router_neighbor_set_diversity: 0,
                 router_outbound_activity: 0,
