@@ -71,3 +71,41 @@ interface's IPv4 address, mDNS runs only there and advertises only that address,
 peer addresses on the same subnet are preferred. Without it, all interfaces are used
 (mDNS then advertises Docker bridges and loopback too). The old `--backbone-*` flag
 names still work as aliases.
+
+## Findings (bench, 2026-11-10)
+
+Bench: coordinator and satellite are ESP32-C6 boards on stock OpenThread RCP (UART, no
+flow control) driven by Ziggurat on one Linux host, ZLOE on `enp4s0f0`; two more
+ESP32-C6 boards run an esp-zigbee-lib 2.1 (ZBOSS) on/off-light **router**
+(spinel2quic `zbpeer`, 4 MB build) as third-party routers. Test network on channel 25.
+Driven without ZHA: `--test-network` + `zloe-ctl`.
+
+- **Discovery / bootstrap:** satellite started before the coordinator, found it over
+  mDNS ~4 s after it came up, fetched settings over ZLOE and was a router 60 ms later.
+  Backbone neighbours settle at cost 1/1 within one Link Status period.
+- **mDNS advertises every interface** (Docker bridges, loopback): fixed by preferring
+  LAN addresses and locking a peer to its datagrams' source; `--zloe-interface` confines
+  everything to one NIC.
+- **Out-of-range via the backbone works:** with the coordinator denying router `0xBDE5`,
+  the coordinator source-routes through the satellite (`relays: [satellite]`), the
+  satellite relays over the air. On/Off: 10/10 delivered, 42–74 ms to APS ack
+  (median ~55 ms). Mgmt_Lqi round trip over the same path: 42 ms.
+- **Direct path (no deny):** 10/10 over the air, 40–68 ms (median ~41 ms); the backbone
+  is not used when the destination is a direct neighbour.
+- **Third-party routers are not confused:** both ZBOSS routers list the coordinator and
+  the satellite as ordinary sibling routers with plausible LQIs; nothing anomalous seen
+  in their Link Status handling. (The overlapping-Link-Status worry applies to one node
+  with several radios; a satellite is a separate node, so it does not arise.)
+- **ESP RCP LQI is low:** boards centimetres apart report LQA ~10 (cost 7), so the
+  backbone's cost 1 dominates route selection.
+- **Unrelated upstream issues hit on the way:**
+  - zigpy/ziggurat#88 (router joiners leave): worked around in the spike by delivering
+    to router children directly.
+  - Without zigpy nobody answers `Node_Desc_req`; ZBOSS joiners leave. `--test-network`
+    answers it.
+  - Host sends with radius 0 go out with radius 1 (clamped); a relayed hop then drops
+    them ("radius is exhausted"). zigpy always sends a real radius, `zloe-ctl` now 30.
+
+Not covered: satellites accepting joins (router-side join), children on satellites,
+multiple satellites, Wi-Fi backbone under loss, restart/rejoin behaviour, real IKEA
+devices.
