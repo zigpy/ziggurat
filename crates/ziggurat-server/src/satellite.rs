@@ -182,5 +182,75 @@ pub async fn test_coordinator(
         .await
         .map_err(|_| "start_network failed")?;
     tracing::info!("Test network: coordinator is up");
+    spawn_zdp_responder(server);
     Ok(())
+}
+
+/// SPIKE: zigpy normally answers ZDP requests addressed to the coordinator. Without a
+/// client, joiners (ZBOSS) give up when Node_Desc_req for 0x0000 goes unanswered (they
+/// need the TC's stack revision), so answer that one ourselves.
+fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>) {
+    use ziggurat_driver::zigbee_stack::{ApsAck, RouteDirective, TxPriority, ZigbeeNotification};
+
+    let mut notifications = server.notification_tx.subscribe();
+    let server = server.clone();
+    tokio::spawn(async move {
+        loop {
+            let notification = match notifications.recv().await {
+                Ok(n) => n,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => return,
+            };
+            let ZigbeeNotification::ReceivedApsCommand {
+                source,
+                profile_id: 0x0000,
+                cluster_id: 0x0002,
+                dst_ep: 0,
+                data,
+                ..
+            } = notification
+            else {
+                continue;
+            };
+            let [seq, lo, hi, ..] = data[..] else {
+                continue;
+            };
+            if u16::from_le_bytes([lo, hi]) != 0x0000 {
+                continue;
+            }
+            let Some(stack) = server.current_stack() else {
+                continue;
+            };
+
+            // Node descriptor: coordinator, 2.4 GHz, MAC caps 0x8F, manufacturer 0x0000,
+            // buffer 82, transfer sizes 128, server mask = primary TC + network manager,
+            // stack compliance revision 22
+            let server_mask: u16 = 0x0001 | 0x0040 | (22 << 9);
+            let mut rsp = vec![seq, 0x00, 0x00, 0x00, 0x00, 0x40, 0x8F, 0x00, 0x00, 0x52];
+            rsp.extend_from_slice(&128u16.to_le_bytes());
+            rsp.extend_from_slice(&server_mask.to_le_bytes());
+            rsp.extend_from_slice(&128u16.to_le_bytes());
+            rsp.push(0x00);
+
+            let result = stack.send_aps_unicast(
+                source,
+                0x0000,
+                0x8002,
+                0,
+                0,
+                ApsAck::None,
+                None,
+                0,
+                rsp,
+                None,
+                false,
+                TxPriority::StackCritical,
+                RouteDirective::StackDecides,
+            );
+            tracing::info!(
+                "Test network: answered Node_Desc_req from {source:?}: {:?}",
+                result.map(|_| ())
+            );
+        }
+    });
 }

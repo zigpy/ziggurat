@@ -30,3 +30,8 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 name = "ziggurat"
 path = "src/main.rs"
 doc = false
+
+[[bin]]
+name = "zloe-ctl"
+path = "src/bin/zloe_ctl.rs"
+doc = false
