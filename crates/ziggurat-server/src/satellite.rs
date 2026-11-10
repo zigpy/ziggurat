@@ -78,6 +78,7 @@ async fn start_router(
         .await
         .map_err(|_| "start_network failed")?;
 
+    spawn_zdp_responder(server, nwk);
     announce(server, nwk, ieee);
     tracing::info!("Satellite: router is up");
     Ok(())
@@ -207,16 +208,20 @@ pub async fn test_coordinator(
         .await
         .map_err(|_| "start_network failed")?;
     tracing::info!("Test network: coordinator is up");
-    spawn_zdp_responder(server);
+    spawn_zdp_responder(server, Nwk(0x0000));
     Ok(())
 }
 
-/// SPIKE: zigpy normally answers ZDP requests addressed to the coordinator. Without a
-/// client, joiners (ZBOSS) give up when Node_Desc_req for 0x0000 goes unanswered (they
-/// need the TC's stack revision), so answer that one ourselves.
-fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>) {
+/// SPIKE: answer the ZDP requests of a device interview ourselves, for nodes without
+/// a client to do it: the test-network coordinator (zigpy's job normally; ZBOSS joiners
+/// leave when the coordinator's Node_Desc_req goes unanswered) and satellites (zigpy
+/// interviews them after their Device_annce and gives up otherwise).
+///
+/// Answers Node_Desc_req and Active_EP_req (no endpoints) for our own address.
+fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>, own: Nwk) {
     use ziggurat_driver::zigbee_stack::{ApsAck, RouteDirective, TxPriority, ZigbeeNotification};
 
+    let coordinator = own == Nwk(0x0000);
     let mut notifications = server.notification_tx.subscribe();
     let server = server.clone();
     tokio::spawn(async move {
@@ -229,7 +234,7 @@ fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>) {
             let ZigbeeNotification::ReceivedApsCommand {
                 source,
                 profile_id: 0x0000,
-                cluster_id: 0x0002,
+                cluster_id,
                 dst_ep: 0,
                 data,
                 ..
@@ -240,32 +245,56 @@ fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>) {
             let [seq, lo, hi, ..] = data[..] else {
                 continue;
             };
-            if u16::from_le_bytes([lo, hi]) != 0x0000 {
+            if Nwk(u16::from_le_bytes([lo, hi])) != own {
                 continue;
             }
             let Some(stack) = server.current_stack() else {
                 continue;
             };
 
-            // Node descriptor: coordinator, 2.4 GHz, MAC caps 0x8F, manufacturer 0x0000,
-            // buffer 82, transfer sizes 128, server mask = primary TC + network manager,
-            // stack compliance revision 22
-            let server_mask: u16 = 0x0001 | 0x0040 | (22 << 9);
-            let mut rsp = vec![seq, 0x00, 0x00, 0x00, 0x00, 0x40, 0x8F, 0x00, 0x00, 0x52];
-            rsp.extend_from_slice(&128u16.to_le_bytes());
-            rsp.extend_from_slice(&server_mask.to_le_bytes());
-            rsp.extend_from_slice(&128u16.to_le_bytes());
-            rsp.push(0x00);
+            let (rsp_cluster, rsp) = match cluster_id {
+                // Node descriptor: 2.4 GHz, buffer 82, transfer sizes 128, stack
+                // compliance revision 22. Coordinator: logical type 0, MAC caps 0x8F,
+                // server mask primary TC + network manager. Router: type 1, caps 0x8E
+                0x0002 => {
+                    let (logical_type, caps, mask) = if coordinator {
+                        (0x00, 0x8F, 0x0001 | 0x0040)
+                    } else {
+                        (0x01, 0x8E, 0x0000)
+                    };
+                    let server_mask: u16 = mask | (22 << 9);
+                    let mut rsp = vec![
+                        seq,
+                        0x00,
+                        lo,
+                        hi,
+                        logical_type,
+                        0x40,
+                        caps,
+                        0x00,
+                        0x00,
+                        0x52,
+                    ];
+                    rsp.extend_from_slice(&128u16.to_le_bytes());
+                    rsp.extend_from_slice(&server_mask.to_le_bytes());
+                    rsp.extend_from_slice(&128u16.to_le_bytes());
+                    rsp.push(0x00);
+                    (0x8002, rsp)
+                }
+                // Active endpoints: none
+                0x0005 => (0x8005, vec![seq, 0x00, lo, hi, 0x00]),
+                _ => continue,
+            };
 
             let result = stack.send_aps_unicast(
                 source,
                 0x0000,
-                0x8002,
+                rsp_cluster,
                 0,
                 0,
                 ApsAck::None,
                 None,
-                0,
+                30,
                 rsp,
                 None,
                 false,
@@ -273,7 +302,7 @@ fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>) {
                 RouteDirective::StackDecides,
             );
             tracing::info!(
-                "Test network: answered Node_Desc_req from {source:?}: {:?}",
+                "ZDP responder: answered {cluster_id:#06x} from {source:?}: {:?}",
                 result.map(|_| ())
             );
         }
@@ -304,5 +333,8 @@ fn announce(server: &std::sync::Arc<ZigguratServer>, nwk: Nwk, ieee: Eui64) {
         payload,
         TxPriority::StackCritical,
     );
-    tracing::info!("Satellite: Device_annce for {nwk:?}: {:?}", result.map(|_| ()));
+    tracing::info!(
+        "Satellite: Device_annce for {nwk:?}: {:?}",
+        result.map(|_| ())
+    );
 }
