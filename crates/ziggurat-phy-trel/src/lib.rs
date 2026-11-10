@@ -1,4 +1,5 @@
-//! SPIKE (throwaway): a TREL-like IP backbone, wrapped around any [`RadioPhy`].
+//! SPIKE (throwaway): ZLOE (Zigbee Link Over Ethernet), a TREL-like IP backbone,
+//! wrapped around any [`RadioPhy`].
 //!
 //! The backbone behaves as a second 802.15.4 "radio" that only reaches other Ziggurat
 //! nodes. Raw 802.15.4 frames (FCS stripped) are carried in UDP datagrams:
@@ -12,7 +13,7 @@
 //!   on), so NWK link costs to backbone peers are 1 and routing prefers the backbone
 //!   without any NWK changes.
 //!
-//! Peers are discovered with mDNS/DNS-SD (`_zigtrel._udp`), configured statically, or
+//! Peers are discovered with mDNS/DNS-SD (`_zloe._udp`), configured statically, or
 //! learned from the first datagram they send us.
 //!
 //! A test-only deny list fakes "out of radio range": over-the-air frames whose MAC
@@ -21,7 +22,7 @@
 //! devices at the hardware level; see the spike notes.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
@@ -32,7 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult};
 
-pub const SERVICE_TYPE: &str = "_zigtrel._udp.local.";
+pub const SERVICE_TYPE: &str = "_zloe._udp.local.";
 const MAGIC: [u8; 2] = *b"ZT";
 const VERSION: u8 = 1;
 const HEADER_LEN: usize = 19;
@@ -70,7 +71,26 @@ pub struct TrelConfig {
     /// Peers reachable without discovery; their identity is learned from traffic
     pub static_peers: Vec<SocketAddr>,
     pub mdns: bool,
+    /// Network interface (e.g. `eth0`) the backbone is confined to: the UDP socket
+    /// binds its IPv4 address and mDNS only runs there. `None`: all interfaces.
+    pub interface: Option<String>,
     pub deny: DenyList,
+}
+
+/// The IPv4 address and netmask of a named interface.
+fn interface_v4(name: &str) -> std::io::Result<(Ipv4Addr, Ipv4Addr)> {
+    if_addrs::get_if_addrs()?
+        .into_iter()
+        .find_map(|iface| match iface.addr {
+            if_addrs::IfAddr::V4(v4) if iface.name == name => Some((v4.ip, v4.netmask)),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("ZLOE interface {name:?} has no IPv4 address"),
+            )
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +134,8 @@ struct Backbone {
     static_peers: Vec<SocketAddr>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     port: u16,
+    /// Set when confined to one interface: its address and netmask
+    local_net: Option<(Ipv4Addr, Ipv4Addr)>,
 }
 
 pub struct TrelPhy<P: RadioPhy> {
@@ -140,14 +162,31 @@ impl<P: RadioPhy> TrelPhy<P> {
         let backbone = if config.port == 0 {
             None
         } else {
-            let socket = Arc::new(UdpSocket::bind(("0.0.0.0", config.port)).await?);
-            tracing::info!("TREL backbone listening on UDP {}", config.port);
+            let local_net = config.interface.as_deref().map(interface_v4).transpose()?;
+            let bind_ip = local_net.map_or(Ipv4Addr::UNSPECIFIED, |(ip, _)| ip);
+            let socket = Arc::new(UdpSocket::bind((bind_ip, config.port)).await?);
+            tracing::info!(
+                "ZLOE backbone listening on {bind_ip}:{} ({})",
+                config.port,
+                config.interface.as_deref().unwrap_or("all interfaces")
+            );
 
             let mdns = if config.mdns {
                 match mdns_sd::ServiceDaemon::new() {
-                    Ok(daemon) => Some(daemon),
+                    Ok(daemon) => {
+                        if let Some(name) = &config.interface {
+                            let _ = daemon.disable_interface(mdns_sd::IfKind::All);
+                            let _ = daemon.disable_interface(mdns_sd::IfKind::LoopbackV4);
+                            if let Err(e) =
+                                daemon.enable_interface(mdns_sd::IfKind::Name(name.clone()))
+                            {
+                                tracing::warn!("ZLOE: mDNS on {name} failed: {e}");
+                            }
+                        }
+                        Some(daemon)
+                    }
                     Err(e) => {
-                        tracing::warn!("TREL: mDNS unavailable, static peers only: {e}");
+                        tracing::warn!("ZLOE: mDNS unavailable, static peers only: {e}");
                         None
                     }
                 }
@@ -163,6 +202,7 @@ impl<P: RadioPhy> TrelPhy<P> {
                 static_peers: config.static_peers,
                 mdns,
                 port: config.port,
+                local_net,
             };
             backbone.spawn_udp_reader();
             backbone.spawn_mdns_browser();
@@ -194,13 +234,13 @@ impl Backbone {
                 let (len, from) = match socket.recv_from(&mut buf).await {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!("TREL: UDP receive failed: {e}");
+                        tracing::warn!("ZLOE: UDP receive failed: {e}");
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
                 };
                 let Some(header) = WireHeader::parse(&buf[..len]) else {
-                    tracing::debug!("TREL: dropping malformed datagram from {from}");
+                    tracing::debug!("ZLOE: dropping malformed datagram from {from}");
                     continue;
                 };
 
@@ -224,7 +264,7 @@ impl Backbone {
                     // Learn (or refresh) the peer from its own traffic
                     let peer = shared.peers.entry(header.eui64).or_insert_with(|| {
                         tracing::info!(
-                            "TREL: learned peer {:?} / {:?} at {from}",
+                            "ZLOE: learned peer {:?} / {:?} at {from}",
                             header.eui64,
                             header.nwk
                         );
@@ -279,7 +319,7 @@ impl Backbone {
 
                 if let Some((Some(tx), frame)) = deliver {
                     tracing::trace!(
-                        "TREL: rx {} bytes from {:?}",
+                        "ZLOE: rx {} bytes from {:?}",
                         frame.psdu.len(),
                         header.eui64
                     );
@@ -294,11 +334,12 @@ impl Backbone {
         let events = match daemon.browse(SERVICE_TYPE) {
             Ok(events) => events,
             Err(e) => {
-                tracing::warn!("TREL: mDNS browse failed: {e}");
+                tracing::warn!("ZLOE: mDNS browse failed: {e}");
                 return;
             }
         };
         let shared = Arc::clone(&self.shared);
+        let local_net = self.local_net;
 
         tokio::spawn(async move {
             while let Ok(event) = events.recv_async().await {
@@ -318,11 +359,13 @@ impl Backbone {
                             .and_then(|s| Nwk::try_from_hex(s).ok());
                         // mDNS lists every interface (Docker bridges, loopback, ...):
                         // pick deterministically, LAN first
-                        let Some(ip) = info
-                            .get_addresses_v4()
-                            .into_iter()
-                            .min_by_key(|ip| (address_rank(*ip), *ip))
-                        else {
+                        let Some(ip) = info.get_addresses_v4().into_iter().min_by_key(|ip| {
+                            let on_our_net = local_net.is_some_and(|(ours, mask)| {
+                                u32::from(*ip) & u32::from(mask)
+                                    == u32::from(ours) & u32::from(mask)
+                            });
+                            (!on_our_net, address_rank(*ip), *ip)
+                        }) else {
                             continue;
                         };
                         let addr = SocketAddr::new(IpAddr::V4(ip), info.get_port());
@@ -335,7 +378,7 @@ impl Backbone {
                             continue;
                         }
                         let peer = shared.peers.entry(eui64).or_insert_with(|| {
-                            tracing::info!("TREL: mDNS peer {eui64:?} / {nwk:?} at {addr}");
+                            tracing::info!("ZLOE: mDNS peer {eui64:?} / {nwk:?} at {addr}");
                             Peer {
                                 addr,
                                 nwk,
@@ -346,7 +389,7 @@ impl Backbone {
                         // Once the peer has talked to us, its datagrams' source address
                         // is authoritative
                         if peer.last_rx.is_none() && peer.addr != addr {
-                            tracing::info!("TREL: mDNS peer {eui64:?} moved to {addr}");
+                            tracing::info!("ZLOE: mDNS peer {eui64:?} moved to {addr}");
                             peer.addr = addr;
                         }
                         if nwk.is_some() {
@@ -367,7 +410,7 @@ impl Backbone {
                             .get(&eui64)
                             .is_some_and(|p| p.source == PeerSource::Mdns)
                         {
-                            tracing::info!("TREL: mDNS peer {eui64:?} went away");
+                            tracing::info!("ZLOE: mDNS peer {eui64:?} went away");
                             shared.peers.remove(&eui64);
                         }
                     }
@@ -395,19 +438,34 @@ impl Backbone {
         .collect();
 
         let host = format!("ziggurat-{instance}.local.");
-        match mdns_sd::ServiceInfo::new(SERVICE_TYPE, &instance, &host, "", self.port, properties) {
+        let ip = self
+            .local_net
+            .map(|(ip, _)| ip.to_string())
+            .unwrap_or_default();
+        match mdns_sd::ServiceInfo::new(
+            SERVICE_TYPE,
+            &instance,
+            &host,
+            ip.as_str(),
+            self.port,
+            properties,
+        ) {
             Ok(info) => {
-                let info = info.enable_addr_auto();
+                let info = if self.local_net.is_some() {
+                    info
+                } else {
+                    info.enable_addr_auto()
+                };
                 let fullname = info.get_fullname().to_string();
                 match daemon.register(info) {
                     Ok(()) => {
-                        tracing::info!("TREL: advertising {fullname}");
+                        tracing::info!("ZLOE: advertising {fullname}");
                         shared.mdns_fullname = Some(fullname);
                     }
-                    Err(e) => tracing::warn!("TREL: mDNS register failed: {e}"),
+                    Err(e) => tracing::warn!("ZLOE: mDNS register failed: {e}"),
                 }
             }
-            Err(e) => tracing::warn!("TREL: bad mDNS service info: {e}"),
+            Err(e) => tracing::warn!("ZLOE: bad mDNS service info: {e}"),
         }
     }
 
@@ -483,13 +541,13 @@ impl Backbone {
             }
             if tokio::time::timeout(ACK_TIMEOUT, rx).await.is_ok() {
                 if attempt > 0 {
-                    tracing::debug!("TREL: unicast to {to} acked after {} retries", attempt);
+                    tracing::debug!("ZLOE: unicast to {to} acked after {} retries", attempt);
                 }
                 return true;
             }
         }
         self.pending.lock().remove(&seq);
-        tracing::debug!("TREL: unicast to {to} not acked");
+        tracing::debug!("ZLOE: unicast to {to} not acked");
         false
     }
 }
@@ -553,18 +611,18 @@ impl<P: RadioPhy> RadioPhy for TrelPhy<P> {
                     .send_unicast(peer, &frame.psdu, mac.ack_request)
                     .await
                 {
-                    tracing::trace!("TREL: tx to {:?} via backbone", mac.dest);
+                    tracing::trace!("ZLOE: tx to {:?} via backbone", mac.dest);
                     return Ok(TxResult::Acked);
                 }
                 tracing::info!(
-                    "TREL: backbone to {:?} failed, falling back to air",
+                    "ZLOE: backbone to {:?} failed, falling back to air",
                     mac.dest
                 );
             }
         }
 
         if self.deny.denies(&mac.dest) {
-            tracing::trace!("TREL deny: not transmitting to {:?}", mac.dest);
+            tracing::trace!("ZLOE deny: not transmitting to {:?}", mac.dest);
             return Ok(if mac.ack_request {
                 TxResult::NoAck
             } else {
@@ -597,7 +655,7 @@ impl<P: RadioPhy> RadioPhy for TrelPhy<P> {
             while let Some(mut frame) = inner_rx.recv().await {
                 if let Some(mac) = MacHeader::parse(&frame.psdu) {
                     if deny.denies(&mac.source) {
-                        tracing::trace!("TREL deny: dropping air frame from {:?}", mac.source);
+                        tracing::trace!("ZLOE deny: dropping air frame from {:?}", mac.source);
                         continue;
                     }
                     if has_backbone {

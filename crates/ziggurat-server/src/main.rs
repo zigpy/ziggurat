@@ -1014,17 +1014,22 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:9999")]
     listen: String,
 
-    /// SPIKE: UDP port of the TREL-like IP backbone; 0 disables it
-    #[arg(long, default_value_t = 0)]
-    backbone_port: u16,
+    /// SPIKE: UDP port of the ZLOE (Zigbee Link Over Ethernet) backbone; 0 disables it
+    #[arg(long, alias = "backbone-port", default_value_t = 0)]
+    zloe_port: u16,
 
-    /// SPIKE: a backbone peer reachable without mDNS (`host:port`), repeatable
-    #[arg(long)]
-    backbone_peer: Vec<std::net::SocketAddr>,
+    /// SPIKE: network interface the ZLOE backbone is confined to (e.g. `eth0`): UDP
+    /// binds its IPv4 address and mDNS runs only there. Default: all interfaces
+    #[arg(long, alias = "backbone-interface")]
+    zloe_interface: Option<String>,
 
-    /// SPIKE: disable mDNS discovery of backbone peers
-    #[arg(long)]
-    no_mdns: bool,
+    /// SPIKE: a ZLOE peer reachable without mDNS (`host:port`), repeatable
+    #[arg(long, alias = "backbone-peer")]
+    zloe_peer: Vec<std::net::SocketAddr>,
+
+    /// SPIKE: disable mDNS discovery of ZLOE peers
+    #[arg(long, alias = "no-mdns")]
+    zloe_no_mdns: bool,
 
     /// SPIKE: fake "out of radio range" for a device, by EUI64 (16 hex digits) or NWK
     /// address (4 hex digits), repeatable
@@ -1100,14 +1105,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 flow_control: args.flow_control,
             },
             TrelConfig {
-                port: args.backbone_port,
-                static_peers: args.backbone_peer,
-                mdns: !args.no_mdns,
+                port: args.zloe_port,
+                static_peers: args.zloe_peer,
+                mdns: !args.zloe_no_mdns,
+                interface: args.zloe_interface,
                 deny,
             },
         ));
 
-        if args.backbone_port != 0 {
+        if args.zloe_port != 0 {
             let server = server.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(30));

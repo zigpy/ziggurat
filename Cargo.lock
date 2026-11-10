@@ -1967,6 +1967,7 @@ dependencies = [
 name = "ziggurat-phy-trel"
 version = "0.1.0"
 dependencies = [
+ "if-addrs",
  "mdns-sd",
  "parking_lot",
  "tokio",
