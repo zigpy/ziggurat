@@ -1,0 +1,112 @@
+//! SPIKE (throwaway): bring a Ziggurat node up as a satellite router, configured
+//! out-of-band from the coordinator's own Ziggurat API instead of joining over the air.
+
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
+use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_protocol::{self as proto};
+
+use crate::ZigguratServer;
+
+const REQUEST_ID: proto::RequestId = 1;
+
+pub async fn bootstrap(
+    server: &std::sync::Arc<ZigguratServer>,
+    coordinator: &str,
+    nwk: Option<Nwk>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!("Satellite: fetching network settings from {coordinator}");
+    let info = fetch_network_info(coordinator).await?;
+    let coord = &info.state;
+
+    let phy = server.phy().await?;
+    let ieee = phy.inner().hw_address().await?;
+    let nwk = nwk.unwrap_or_else(|| derive_nwk(ieee));
+
+    tracing::info!(
+        "Satellite: joining PAN {:?} (ext {:?}) on channel {} as router {nwk:?} / {ieee:?}",
+        coord.pan_id,
+        coord.extended_pan_id,
+        coord.channel
+    );
+
+    let payload = proto::ConfigurePayload {
+        role: proto::NodeRole::Router,
+        source_routing: false,
+        state: proto::NetworkState {
+            nwk_address: nwk,
+            ieee_address: ieee,
+            // Stateless, but restarts must not reuse counters (neighbours would drop
+            // our frames as replays): seed from the wall clock, 10 frames/s of headroom
+            network_key_tx_counter: clock_counter(),
+            aps_frame_counter: clock_counter(),
+            has_tclk_seed: false,
+            ..coord.clone()
+        },
+    };
+
+    server
+        .handle_configure(payload)
+        .await
+        .map_err(|_| "configure failed")?;
+    server
+        .handle_start_network()
+        .await
+        .map_err(|_| "start_network failed")?;
+
+    tracing::info!("Satellite: router is up");
+    Ok(())
+}
+
+async fn fetch_network_info(
+    url: &str,
+) -> Result<proto::NetworkInfoPayload, Box<dyn std::error::Error + Send + Sync>> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
+
+    let command = proto::RequestCommand::GetNetworkInfo as u8;
+    let request = proto::envelope(proto::FrameType::Request, command, REQUEST_ID);
+    ws.send(Message::Binary(request.into())).await?;
+
+    while let Some(message) = ws.next().await {
+        let Message::Binary(data) = message? else {
+            continue;
+        };
+        let Some((header, consumed)) = proto::Header::parse(&data) else {
+            continue;
+        };
+        if header.frame_type != proto::FrameType::Response || header.command != command {
+            continue; // the hello notification, other clients' traffic
+        }
+        let body = &data[consumed..];
+        if body.first() != Some(&(proto::Status::Ok as u8)) {
+            return Err(format!("coordinator refused get_network_info: {body:02X?}").into());
+        }
+        let info: proto::NetworkInfoPayload =
+            proto::parse(&body[1..]).ok_or("malformed network info")?;
+        if !info.started {
+            return Err("coordinator network is not started".into());
+        }
+        let _ = ws.close(None).await;
+        return Ok(info);
+    }
+    Err("coordinator closed the connection".into())
+}
+
+/// A stable address from the EUI64, outside the reserved 0x0000 and 0xFFF8.. ranges.
+/// No conflict check: the stack's address conflict detection will report one.
+fn derive_nwk(ieee: Eui64) -> Nwk {
+    let mut hash: u32 = 2_166_136_261;
+    for byte in ieee.0 {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+    }
+    let nwk = ((hash ^ (hash >> 16)) as u16) % 0xFFF7 + 1;
+    Nwk(nwk)
+}
+
+fn clock_counter() -> u32 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // Seconds since 2026-01-01, times 10: fits u32 for ~13 years
+    (secs.saturating_sub(1_767_225_600) * 10) as u32
+}
