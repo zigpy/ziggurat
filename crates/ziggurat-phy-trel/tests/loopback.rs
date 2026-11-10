@@ -120,6 +120,7 @@ async fn node(
             interface: None,
             prefer_ipv4: false,
             mcast_port: 0,
+            mcast_block_file: None,
             deny: DenyList::default(),
         },
     )

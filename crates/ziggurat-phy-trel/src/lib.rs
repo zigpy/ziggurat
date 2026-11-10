@@ -27,7 +27,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -50,6 +50,14 @@ const KIND_NETINFO_RSP: u8 = 3;
 /// Produces the encoded network settings a coordinator hands to satellites.
 pub type NetInfoProvider = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
 const FLAG_ACK_REQUEST: u8 = 0x01;
+/// Multicast liveness probe: no payload, answered with a unicast ack.
+const KIND_PROBE: u8 = 4;
+const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+/// A peer that has not acked a probe for this long (two missed probes) gets unicast
+/// copies of broadcasts again.
+const MCAST_CONFIRM_WINDOW: Duration = Duration::from_secs(12);
+/// 802.15.4 frame type "data": the only broadcasts that belong on the backbone.
+const MAC_FRAME_DATA: u8 = 1;
 
 const ACK_TIMEOUT: Duration = Duration::from_millis(50);
 const ATTEMPTS: usize = 3;
@@ -93,6 +101,9 @@ pub struct TrelConfig {
     /// UDP port of the network's multicast group (0: do not listen or advertise).
     /// Needs `interface`: link-local multicast is per interface.
     pub mcast_port: u16,
+    /// Test hook: while this file exists, datagrams arriving on the multicast group
+    /// are dropped, as if the network had stopped delivering multicast to us.
+    pub mcast_block_file: Option<std::path::PathBuf>,
     pub deny: DenyList,
 }
 
@@ -140,6 +151,10 @@ struct Peer {
     /// The multicast group and port the peer listens on (mDNS TXT `mc`), scoped to
     /// our backbone interface. `None`: the peer cannot be reached by multicast.
     mcast: Option<SocketAddrV6>,
+    /// When the peer last acked one of our multicast probes
+    mcast_acked: Option<Instant>,
+    /// The confirmation state last logged, to log each change once
+    mcast_logged_ok: bool,
 }
 
 impl Peer {
@@ -152,7 +167,18 @@ impl Peer {
             health: 1.0,
             alternates: Vec::new(),
             mcast: None,
+            mcast_acked: None,
+            mcast_logged_ok: false,
         }
+    }
+
+    /// The peer announces a multicast address and has acked a recent probe to it: our
+    /// multicast reaches it.
+    fn multicast_ok(&self) -> bool {
+        self.mcast.is_some()
+            && self
+                .mcast_acked
+                .is_some_and(|t| t.elapsed() < MCAST_CONFIRM_WINDOW)
     }
 
     /// The current address went unanswered: move to the next advertised one.
@@ -217,13 +243,29 @@ struct Shared {
     resolved: HashMap<Eui64, Resolved>,
     netinfo_provider: Option<NetInfoProvider>,
     netinfo_waiter: Option<oneshot::Sender<Vec<u8>>>,
+    /// Packet numbers of our latest multicast probes
+    probes: VecDeque<u32>,
+}
+
+/// Datagram counters, for the bench.
+#[derive(Default)]
+struct Stats {
+    /// 802.15.4 broadcasts handed to the backbone
+    broadcasts: AtomicU64,
+    /// Multicast datagrams they were sent as
+    multicast: AtomicU64,
+    /// Unicast copies sent to peers multicast does not reach
+    unicast_copies: AtomicU64,
+    probes: AtomicU64,
 }
 
 struct Backbone {
     socket: Arc<UdpSocket>,
     shared: Arc<Mutex<Shared>>,
     pending: Arc<Mutex<HashMap<u32, oneshot::Sender<()>>>>,
-    seq: AtomicU32,
+    seq: Arc<AtomicU32>,
+    stats: Arc<Stats>,
+    mcast_block_file: Option<std::path::PathBuf>,
     static_peers: Vec<SocketAddr>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     port: u16,
@@ -308,7 +350,9 @@ impl<P: RadioPhy> TrelPhy<P> {
                 socket,
                 shared: Arc::clone(&shared),
                 pending: Arc::new(Mutex::new(HashMap::new())),
-                seq: AtomicU32::new(rand_u32()),
+                seq: Arc::new(AtomicU32::new(rand_u32())),
+                stats: Arc::new(Stats::default()),
+                mcast_block_file: config.mcast_block_file,
                 static_peers: config.static_peers,
                 mdns,
                 port: config.port,
@@ -318,8 +362,9 @@ impl<P: RadioPhy> TrelPhy<P> {
                 mcast_port: config.mcast_port,
                 mcast_reader: Mutex::new(None),
             };
-            backbone.spawn_udp_reader(Arc::clone(&backbone.socket));
+            backbone.spawn_udp_reader(Arc::clone(&backbone.socket), None);
             backbone.spawn_mdns_browser();
+            backbone.spawn_prober();
             Some(backbone)
         };
 
@@ -463,6 +508,7 @@ fn apply_resolved(shared: &mut Shared, eui64: Eui64) {
     if peer.mcast != resolved.mcast {
         tracing::info!("ZLOE: peer {eui64:?} multicast: {:?}", resolved.mcast);
         peer.mcast = resolved.mcast;
+        peer.mcast_acked = None;
     }
     if peer.last_rx.is_none() && current_key.is_none_or(|k| best_key < k) {
         tracing::info!("ZLOE: mDNS peer {eui64:?} moved to {addr}");
@@ -533,7 +579,11 @@ fn canonical(addr: SocketAddr) -> SocketAddr {
 impl Backbone {
     /// Read datagrams from `rx` (the unicast socket, or the multicast one). Acks and
     /// replies always leave from the unicast socket, so peers see our unicast port.
-    fn spawn_udp_reader(&self, rx: Arc<UdpSocket>) -> tokio::task::JoinHandle<()> {
+    fn spawn_udp_reader(
+        &self,
+        rx: Arc<UdpSocket>,
+        block_file: Option<std::path::PathBuf>,
+    ) -> tokio::task::JoinHandle<()> {
         let socket = Arc::clone(&self.socket);
         let shared = Arc::clone(&self.shared);
         let pending = Arc::clone(&self.pending);
@@ -550,14 +600,26 @@ impl Backbone {
                         continue;
                     }
                 };
+                if block_file.as_deref().is_some_and(std::path::Path::exists) {
+                    continue;
+                }
                 let Some(header) = WireHeader::parse(&buf[..len]) else {
                     tracing::debug!("ZLOE: dropping malformed datagram from {from}");
                     continue;
                 };
 
                 if header.kind == KIND_ACK {
-                    if let Some(waiter) = pending.lock().remove(&header.seq) {
+                    let waiter = pending.lock().remove(&header.seq);
+                    if let Some(waiter) = waiter {
                         let _ = waiter.send(());
+                    } else {
+                        // Not a unicast we are waiting on: an answer to a probe?
+                        let mut shared = shared.lock();
+                        if shared.probes.contains(&header.seq)
+                            && let Some(peer) = shared.peers.get_mut(&header.eui64)
+                        {
+                            peer.mcast_acked = Some(Instant::now());
+                        }
                     }
                     continue;
                 }
@@ -588,6 +650,9 @@ impl Backbone {
                     continue;
                 }
 
+                if header.kind != KIND_DATA && header.kind != KIND_PROBE {
+                    continue;
+                }
                 let psdu = buf[HEADER_LEN..len].to_vec();
                 let (deliver, ack_to) = {
                     let mut shared = shared.lock();
@@ -612,8 +677,9 @@ impl Backbone {
                     peer.last_rx = Some(Instant::now());
                     let lqi = peer.lqi();
 
+                    // A probe only refreshes the peer and gets its ack
                     let seen = shared.seen.entry(header.eui64).or_default();
-                    let duplicate = seen.contains(&header.seq);
+                    let duplicate = header.kind == KIND_PROBE || seen.contains(&header.seq);
                     if !duplicate {
                         seen.push_back(header.seq);
                         if seen.len() > DEDUP_WINDOW {
@@ -797,7 +863,8 @@ impl Backbone {
             Ok(socket) => {
                 let mc = SocketAddrV6::new(group, self.mcast_port, 0, net.index);
                 tracing::info!("ZLOE: listening on multicast group {mc}");
-                *self.mcast_reader.lock() = Some(self.spawn_udp_reader(Arc::new(socket)));
+                *self.mcast_reader.lock() =
+                    Some(self.spawn_udp_reader(Arc::new(socket), self.mcast_block_file.clone()));
                 Some(mc)
             }
             Err(e) => {
@@ -859,16 +926,69 @@ impl Backbone {
         }
     }
 
-    /// Every address a broadcast goes to: known peers plus unidentified static peers.
-    fn broadcast_targets(&self) -> Vec<SocketAddr> {
-        let shared = self.shared.lock();
-        let mut targets: Vec<SocketAddr> = shared.peers.values().map(|p| p.addr).collect();
-        for addr in &self.static_peers {
-            if !targets.contains(addr) {
-                targets.push(*addr);
+    /// Every probe interval: multicast an empty datagram that each peer answers by
+    /// unicast, so we know which peers our multicast reaches.
+    fn spawn_prober(&self) {
+        let socket = Arc::clone(&self.socket);
+        let shared = Arc::clone(&self.shared);
+        let seq = Arc::clone(&self.seq);
+        let stats = Arc::clone(&self.stats);
+
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(PROBE_INTERVAL);
+            loop {
+                tick.tick().await;
+                let (probe, groups) = {
+                    let mut shared = shared.lock();
+                    let Some(identity) = shared.identity else {
+                        continue;
+                    };
+
+                    let mut groups: Vec<SocketAddrV6> = Vec::new();
+                    for (eui64, peer) in &mut shared.peers {
+                        let Some(group) = peer.mcast else { continue };
+                        if !groups.contains(&group) {
+                            groups.push(group);
+                        }
+                        let ok = peer.multicast_ok();
+                        if ok != peer.mcast_logged_ok {
+                            peer.mcast_logged_ok = ok;
+                            if ok {
+                                tracing::info!("ZLOE: multicast reaches {eui64:?}");
+                            } else {
+                                tracing::warn!(
+                                    "ZLOE: multicast does not reach {eui64:?}, \
+                                     sending it unicast copies"
+                                );
+                            }
+                        }
+                    }
+                    if groups.is_empty() {
+                        continue;
+                    }
+
+                    let seq = seq.fetch_add(1, Ordering::Relaxed);
+                    shared.probes.push_back(seq);
+                    if shared.probes.len() > 4 {
+                        shared.probes.pop_front();
+                    }
+                    let probe = WireHeader {
+                        kind: KIND_PROBE,
+                        flags: FLAG_ACK_REQUEST,
+                        seq,
+                        eui64: identity.eui64,
+                        nwk: identity.nwk,
+                        epan: identity.epan,
+                    }
+                    .to_bytes();
+                    (probe, groups)
+                };
+                for group in groups {
+                    let _ = socket.send_to(&probe, SocketAddr::V6(group)).await;
+                    stats.probes.fetch_add(1, Ordering::Relaxed);
+                }
             }
-        }
-        targets
+        });
     }
 
     fn peer_for(&self, dest: &MacAddress) -> Option<SocketAddr> {
@@ -917,8 +1037,41 @@ impl Backbone {
             return;
         };
         datagram.extend_from_slice(psdu);
-        for target in self.broadcast_targets() {
+
+        // One multicast datagram covers every peer it is known to reach; the others
+        // (no announced address, or probes unanswered) get a unicast copy with the
+        // same packet number, so a peer that receives both keeps one
+        let (groups, copies) = {
+            let shared = self.shared.lock();
+            let mut groups: Vec<SocketAddrV6> = Vec::new();
+            let mut copies: Vec<SocketAddr> = Vec::new();
+            for peer in shared.peers.values() {
+                match peer.mcast {
+                    Some(group) if peer.multicast_ok() => {
+                        if !groups.contains(&group) {
+                            groups.push(group);
+                        }
+                    }
+                    _ => copies.push(peer.addr),
+                }
+            }
+            // Static peers that have not identified themselves yet
+            for addr in &self.static_peers {
+                if !shared.peers.values().any(|p| p.addr == *addr) {
+                    copies.push(*addr);
+                }
+            }
+            (groups, copies)
+        };
+
+        self.stats.broadcasts.fetch_add(1, Ordering::Relaxed);
+        for group in groups {
+            let _ = self.socket.send_to(&datagram, SocketAddr::V6(group)).await;
+            self.stats.multicast.fetch_add(1, Ordering::Relaxed);
+        }
+        for target in copies {
             let _ = self.socket.send_to(&datagram, self.target(target)).await;
+            self.stats.unicast_copies.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1007,7 +1160,10 @@ impl<P: RadioPhy> RadioPhy for TrelPhy<P> {
 
         if let Some(backbone) = &self.backbone {
             if mac.dest.is_broadcast() {
-                backbone.send_broadcast(&frame.psdu).await;
+                // Beacon requests and other MAC commands mean nothing to backbone peers
+                if mac.frame_type == MAC_FRAME_DATA {
+                    backbone.send_broadcast(&frame.psdu).await;
+                }
             } else if let Some(peer) = backbone.peer_for(&mac.dest) {
                 if backbone
                     .send_unicast(peer, &frame.psdu, mac.ack_request)
@@ -1096,6 +1252,18 @@ impl<P: RadioPhy> RadioPhy for TrelPhy<P> {
 }
 
 impl<P: RadioPhy> TrelPhy<P> {
+    /// Datagram counters since start, for diagnostics.
+    pub fn stats(&self) -> Option<String> {
+        let stats = &self.backbone.as_ref()?.stats;
+        Some(format!(
+            "broadcasts={} multicast={} unicast_copies={} probes={}",
+            stats.broadcasts.load(Ordering::Relaxed),
+            stats.multicast.load(Ordering::Relaxed),
+            stats.unicast_copies.load(Ordering::Relaxed),
+            stats.probes.load(Ordering::Relaxed),
+        ))
+    }
+
     /// Peers currently known, for diagnostics.
     pub fn peers(&self) -> Vec<String> {
         self.shared
@@ -1109,7 +1277,17 @@ impl<P: RadioPhy> TrelPhy<P> {
                     p.addr,
                     p.source,
                     p.lqi(),
-                    p.mcast.map_or_else(|| "-".to_string(), |mc| mc.to_string()),
+                    p.mcast.map_or_else(
+                        || "-".to_string(),
+                        |mc| format!(
+                            "{mc} {}",
+                            if p.multicast_ok() {
+                                "ok"
+                            } else {
+                                "unconfirmed"
+                            }
+                        )
+                    ),
                     p.last_rx.map(|t| t.elapsed())
                 )
             })
@@ -1175,6 +1353,7 @@ impl MacAddress {
 }
 
 struct MacHeader {
+    frame_type: u8,
     ack_request: bool,
     dest: MacAddress,
     source: MacAddress,
@@ -1213,6 +1392,7 @@ impl MacHeader {
         let dest = read_addr(dest_mode, true)?;
         let source = read_addr(src_mode, !pan_compression)?;
         Some(Self {
+            frame_type: (fcf & 0b111) as u8,
             ack_request,
             dest,
             source,
