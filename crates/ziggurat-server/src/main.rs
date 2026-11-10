@@ -1053,9 +1053,14 @@ struct Args {
     zloe_mcast_port: u16,
 
     /// SPIKE test hook: while this file exists, drop datagrams arriving on the ZLOE
-    /// multicast group (simulates a network that stopped delivering multicast)
+    /// multicast groups (simulates a network that stopped delivering multicast). An
+    /// empty file blocks both groups; containing "v4" or "v6" blocks only that one
     #[arg(long)]
     zloe_test_mcast_block_file: Option<std::path::PathBuf>,
+
+    /// SPIKE test hook: behave like a host without IPv6
+    #[arg(long)]
+    zloe_test_ipv4_only: bool,
 
     /// SPIKE: disable mDNS discovery of ZLOE peers
     #[arg(long, alias = "no-mdns")]
@@ -1152,6 +1157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prefer_ipv4: args.zloe_ipv4,
                 mcast_port: args.zloe_mcast_port,
                 mcast_block_file: args.zloe_test_mcast_block_file,
+                ipv4_only: args.zloe_test_ipv4_only,
                 deny,
             },
         ));
