@@ -39,6 +39,13 @@ const VERSION: u8 = 1;
 const HEADER_LEN: usize = 19;
 const KIND_DATA: u8 = 0;
 const KIND_ACK: u8 = 1;
+/// Trusted-backbone bootstrap: ask a coordinator for the network settings, and its
+/// answer (an encoded `NetworkInfoPayload`, opaque to this crate).
+const KIND_NETINFO_REQ: u8 = 2;
+const KIND_NETINFO_RSP: u8 = 3;
+
+/// Produces the encoded network settings a coordinator hands to satellites.
+pub type NetInfoProvider = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
 const FLAG_ACK_REQUEST: u8 = 0x01;
 
 const ACK_TIMEOUT: Duration = Duration::from_millis(50);
@@ -124,6 +131,11 @@ struct Shared {
     seen: HashMap<Eui64, VecDeque<u16>>,
     rx_tx: Option<mpsc::Sender<RxFrame>>,
     mdns_fullname: Option<String>,
+    /// Coordinators seen on the backbone (mDNS `role=coordinator`), kept even before
+    /// we have an identity of our own: satellites bootstrap from them
+    coordinators: HashMap<Eui64, (SocketAddr, Option<PanId>)>,
+    netinfo_provider: Option<NetInfoProvider>,
+    netinfo_waiter: Option<oneshot::Sender<Vec<u8>>>,
 }
 
 struct Backbone {
@@ -220,6 +232,75 @@ impl<P: RadioPhy> TrelPhy<P> {
     pub const fn inner(&self) -> &P {
         &self.inner
     }
+
+    /// Coordinator side: hand these settings to satellites that ask over the backbone.
+    pub fn set_netinfo_provider(&self, provider: NetInfoProvider) {
+        self.shared.lock().netinfo_provider = Some(provider);
+    }
+
+    /// Satellite side: find a coordinator on the backbone (on `pan`, when given) and
+    /// fetch its network settings. Retries until `timeout`.
+    pub async fn fetch_network(
+        &self,
+        pan: Option<PanId>,
+        timeout: Duration,
+    ) -> std::io::Result<Vec<u8>> {
+        let backbone = self
+            .backbone
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("ZLOE backbone is disabled (--zloe-port 0)"))?;
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        while tokio::time::Instant::now() < deadline {
+            let candidates: Vec<(Eui64, SocketAddr, Option<PanId>)> = {
+                let shared = self.shared.lock();
+                shared
+                    .coordinators
+                    .iter()
+                    .filter(|(_, (_, p))| pan.is_none() || *p == pan)
+                    .map(|(eui64, (addr, p))| (*eui64, *addr, *p))
+                    .collect()
+            };
+            let Some(&(eui64, addr, coordinator_pan)) = candidates.first() else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            };
+            if candidates.len() > 1 {
+                tracing::warn!(
+                    "ZLOE: {} coordinators match, using {eui64:?} (PAN {coordinator_pan:?}); \
+                     pick one with --satellite-pan",
+                    candidates.len()
+                );
+            }
+
+            let (tx, rx) = oneshot::channel();
+            self.shared.lock().netinfo_waiter = Some(tx);
+            let seq = backbone.seq.fetch_add(1, Ordering::Relaxed);
+            let request = netinfo_header(KIND_NETINFO_REQ, seq, None);
+            tracing::info!("ZLOE: asking coordinator {eui64:?} at {addr} for network settings");
+            backbone.socket.send_to(&request, addr).await?;
+            if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_secs(1), rx).await {
+                return Ok(info);
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "no coordinator answered on the ZLOE backbone",
+        ))
+    }
+}
+
+/// Header for the bootstrap messages, sent before we may have an identity.
+fn netinfo_header(kind: u8, seq: u16, identity: Option<Identity>) -> Vec<u8> {
+    WireHeader {
+        kind,
+        flags: 0,
+        seq,
+        eui64: identity.map_or(Eui64([0; 8]), |i| i.eui64),
+        nwk: identity.map_or(Nwk(0xFFFF), |i| i.nwk),
+        pan_id: identity.map_or(PanId(0xFFFF), |i| i.pan_id),
+    }
+    .to_bytes()
 }
 
 impl Backbone {
@@ -247,6 +328,32 @@ impl Backbone {
                 if header.kind == KIND_ACK {
                     if let Some(waiter) = pending.lock().remove(&header.seq) {
                         let _ = waiter.send(());
+                    }
+                    continue;
+                }
+
+                // Bootstrap exchange: the backbone is trusted, so the settings (network
+                // key included) go to whoever asks
+                if header.kind == KIND_NETINFO_REQ {
+                    let (provider, identity) = {
+                        let shared = shared.lock();
+                        (shared.netinfo_provider.clone(), shared.identity)
+                    };
+                    let Some(info) = provider.and_then(|provide| provide()) else {
+                        continue;
+                    };
+                    tracing::info!(
+                        "ZLOE: sending network settings to {from} ({:?})",
+                        header.eui64
+                    );
+                    let mut rsp = netinfo_header(KIND_NETINFO_RSP, header.seq, identity);
+                    rsp.extend_from_slice(&info);
+                    let _ = socket.send_to(&rsp, from).await;
+                    continue;
+                }
+                if header.kind == KIND_NETINFO_RSP {
+                    if let Some(waiter) = shared.lock().netinfo_waiter.take() {
+                        let _ = waiter.send(buf[HEADER_LEN..len].to_vec());
                     }
                     continue;
                 }
@@ -371,6 +478,14 @@ impl Backbone {
                         let addr = SocketAddr::new(IpAddr::V4(ip), info.get_port());
 
                         let mut shared = shared.lock();
+                        if info.get_property_val_str("role") == Some("coordinator") {
+                            let known = shared.coordinators.insert(eui64, (addr, pan_id));
+                            if known.is_none() {
+                                tracing::info!(
+                                    "ZLOE: coordinator {eui64:?} (PAN {pan_id:?}) at {addr}"
+                                );
+                            }
+                        }
                         let Some(identity) = shared.identity else {
                             continue;
                         };
@@ -433,6 +548,15 @@ impl Backbone {
             ("eui64".to_string(), instance.clone()),
             ("nwk".to_string(), format!("{:04x}", identity.nwk.as_u16())),
             ("pan".to_string(), format!("{:04x}", identity.pan_id.0)),
+            (
+                "role".to_string(),
+                if identity.nwk == Nwk(0x0000) {
+                    "coordinator"
+                } else {
+                    "router"
+                }
+                .to_string(),
+            ),
         ]
         .into_iter()
         .collect();

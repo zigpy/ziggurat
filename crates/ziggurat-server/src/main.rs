@@ -723,6 +723,19 @@ impl ZigguratServer {
             arc_self.run().await;
         });
 
+        // SPIKE: on the trusted ZLOE backbone a coordinator hands its settings to any
+        // satellite that asks
+        let weak = Arc::downgrade(&stack);
+        stack.radio.set_netinfo_provider(Arc::new(move || {
+            let stack = weak.upgrade()?;
+            if stack.state.role != ziggurat_driver::zigbee_stack::NwkDeviceType::Coordinator {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            proto::append(&mut bytes, &proto::network_info_payload(&stack, true));
+            Some(bytes)
+        }));
+
         // Drain the stack's notification outbox into the server-level hub. The task is
         // aborted when the stack is replaced, so it doesn't need to observe a closed
         // channel to stop.
@@ -1050,6 +1063,15 @@ struct Args {
     #[arg(long, default_value_t = 25)]
     test_channel: u8,
 
+    /// SPIKE: run as a satellite router: find the coordinator on the ZLOE backbone,
+    /// fetch the network settings from it and start in router role
+    #[arg(long)]
+    satellite: bool,
+
+    /// SPIKE: with --satellite, only use a coordinator on this PAN (hex)
+    #[arg(long)]
+    satellite_pan: Option<String>,
+
     /// SPIKE: the satellite's NWK address (hex); derived from its EUI64 by default
     #[arg(long)]
     satellite_nwk: Option<String>,
@@ -1150,6 +1172,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::spawn(async move {
                 if let Err(e) = satellite::test_coordinator(&server, &path, channel).await {
                     tracing::error!("Test network bring-up failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+        }
+
+        if args.satellite && args.satellite_of.is_none() {
+            let nwk = args
+                .satellite_nwk
+                .as_deref()
+                .map(Nwk::try_from_hex)
+                .transpose()?;
+            let pan = args
+                .satellite_pan
+                .as_deref()
+                .map(PanId::try_from_hex)
+                .transpose()?;
+            let server = server.clone();
+            tokio::spawn(async move {
+                if let Err(e) = satellite::bootstrap_zloe(&server, pan, nwk).await {
+                    tracing::error!("Satellite bootstrap failed: {e}");
                     std::process::exit(1);
                 }
             });
