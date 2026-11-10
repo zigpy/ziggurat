@@ -1052,7 +1052,7 @@ struct Args {
     /// SPIKE: run as a satellite router: fetch the network from this coordinator's
     /// Ziggurat API (`ws://host:port`) and start in router role
     #[arg(long)]
-    satellite_of: Option<String>,
+    zloe_satellite_of: Option<String>,
 
     /// SPIKE: start as coordinator of a private test network kept in this file
     /// (created on first use), instead of waiting for a client to configure us
@@ -1066,15 +1066,15 @@ struct Args {
     /// SPIKE: run as a satellite router: find the coordinator on the ZLOE backbone,
     /// fetch the network settings from it and start in router role
     #[arg(long)]
-    satellite: bool,
+    zloe_satellite: bool,
 
-    /// SPIKE: with --satellite, only use a coordinator on this PAN (hex)
+    /// SPIKE: with --zloe-satellite, only use a coordinator on this PAN (hex)
     #[arg(long)]
-    satellite_pan: Option<String>,
+    zloe_satellite_pan: Option<String>,
 
     /// SPIKE: the satellite's NWK address (hex); derived from its EUI64 by default
     #[arg(long)]
-    satellite_nwk: Option<String>,
+    zloe_satellite_nwk: Option<String>,
 
     /// Log level (RUST_LOG still overrides, with per-module filters)
     #[arg(long, default_value_t = LevelFilter::DEBUG)]
@@ -1177,14 +1177,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        if args.satellite && args.satellite_of.is_none() {
+        if args.zloe_satellite && args.zloe_satellite_of.is_none() {
             let nwk = args
-                .satellite_nwk
+                .zloe_satellite_nwk
                 .as_deref()
                 .map(Nwk::try_from_hex)
                 .transpose()?;
             let pan = args
-                .satellite_pan
+                .zloe_satellite_pan
                 .as_deref()
                 .map(PanId::try_from_hex)
                 .transpose()?;
@@ -1197,9 +1197,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        if let Some(coordinator) = args.satellite_of {
+        if let Some(coordinator) = args.zloe_satellite_of {
             let nwk = args
-                .satellite_nwk
+                .zloe_satellite_nwk
                 .as_deref()
                 .map(Nwk::try_from_hex)
                 .transpose()?;

@@ -13,15 +13,15 @@ coordinator over IP, extend coverage without any NWK changes?
   peer is 1 and routing prefers the backbone.
 - Peers: mDNS `_zloe._udp` (TXT `eui64`, `nwk`, `pan`, `v`), `--zloe-peer`,
   or learned from the first datagram. Different PAN → ignored.
-- Satellite: `--satellite` finds the coordinator on the backbone like TREL peers find
+- Satellite: `--zloe-satellite` finds the coordinator on the backbone like TREL peers find
   each other (mDNS TXT `role=coordinator`), fetches its settings with a
   `NETINFO_REQ`/`NETINFO_RSP` exchange over ZLOE and starts in router role. The
   backbone is treated as **trusted**: the settings, network key included, go
-  unauthenticated to whoever asks. `--satellite-pan <hex>` picks a network when several
+  unauthenticated to whoever asks. `--zloe-satellite-pan <hex>` picks a network when several
   coordinators are on the LAN; the satellite may start before the coordinator (it
-  waits up to 60 s). `--satellite-of ws://coord:9999` (fetch via the coordinator's
+  waits up to 60 s). `--zloe-satellite-of ws://coord:9999` (fetch via the coordinator's
   Ziggurat API) remains as a fallback. NWK address derived from the
-  EUI64 (or `--satellite-nwk`). Frame counters seeded from the clock.
+  EUI64 (or `--zloe-satellite-nwk`). Frame counters seeded from the clock.
 - `--deny <eui64|nwk>` fakes "out of radio range" (drops air frames from it, refuses
   air unicasts to it).
 - Every 30 s with the backbone on: `[diag]` log lines with peers and router neighbours
@@ -40,7 +40,7 @@ Satellite (same box is fine, different port/radio):
 
 ```bash
 cargo run --bin ziggurat -- --device /dev/serial/by-id/<sat-c6> --listen 127.0.0.1:9998 \
-  --zloe-port 19791 --satellite
+  --zloe-port 19791 --zloe-satellite
 ```
 
 Experiment:
