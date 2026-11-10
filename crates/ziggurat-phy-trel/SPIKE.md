@@ -127,3 +127,25 @@ devices.
 - Bench: bootstrap and backbone over `fe80::…%enp4s0f0`; deny run 4/4 via the
   satellite, 41–64 ms. Known gap: a peer's address locks to its datagrams' source, so
   `--zloe-ipv4` on one side is overridden when the other side sends over IPv6.
+## Soak (ZHA, 3 backbone nodes, multicast)
+
+**Setup:**
+- Home Assistant 2026.11.1 with ZHA, coordinator plus two satellites on a wired backbone (IPv6 link-local), multicast on.
+- One On/Off every 30 s to the ESP32-C6 ZBOSS router `0x93E4`, sent through the coordinator's API alongside ZHA.
+
+**Window:** 17:31–18:23, 52.5 minutes.
+
+| Metric | Result |
+|---|---|
+| On/Off sent | 106 |
+| Acknowledged (APS ack) | **106 (100 %)** |
+| Latency to APS ack | min 40 ms, median 41 ms, p95 50 ms, p99 66 ms, max 66 ms |
+| Backbone broadcasts (3 nodes, 45 min) | 542, all sent as one multicast datagram, **0** unicast copies |
+| Multicast probes (3 nodes, 45 min) | 1626, preferred group only (one every 5 s per node) |
+| Backbone links | coordinator and satellites at cost 1/1 in every 5-minute snapshot |
+| Radio links to the ZBOSS router | stable at in-cost 7, out-cost 4–5 (ESP RCP LQI ~10) |
+
+**Observations:**
+- No failed send, no neighbour lost, and no fallback to unicast copies during the whole run.
+- The router is a direct radio neighbour of the coordinator, so the On/Off traffic stays on the radio. The backbone carries the mesh's own traffic: Link Status, many-to-one route requests, ZHA's topology scans.
+- Probe traffic is now about 3× the broadcast traffic on this quiet network (1626 against 542). Piggybacking the ack request on real broadcasts would remove most of it.
