@@ -117,6 +117,7 @@ async fn node(
                 vec![([127, 0, 0, 1], peer).into()]
             },
             mdns,
+            interface: None,
             deny: DenyList::default(),
         },
     )

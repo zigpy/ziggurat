@@ -1,4 +1,4 @@
-# SPIKE: TREL-like IP backbone for satellite routers (zigpy/ziggurat#84)
+# SPIKE: ZLOE (Zigbee Link Over Ethernet), a TREL-like IP backbone, for satellite routers (zigpy/ziggurat#84)
 
 Throwaway. Answers: can Ziggurat routers, configured out-of-band and linked to the
 coordinator over IP, extend coverage without any NWK changes?
@@ -11,7 +11,7 @@ coordinator over IP, extend coverage without any NWK changes?
   Broadcast → air **and** every peer (NWK broadcast dedup absorbs duplicates).
 - Frames from peers are reported with LQI 255 (on either link), so NWK link cost to a
   peer is 1 and routing prefers the backbone.
-- Peers: mDNS `_zigtrel._udp` (TXT `eui64`, `nwk`, `pan`, `v`), `--backbone-peer`,
+- Peers: mDNS `_zloe._udp` (TXT `eui64`, `nwk`, `pan`, `v`), `--zloe-peer`,
   or learned from the first datagram. Different PAN → ignored.
 - Satellite: `--satellite-of ws://coord:9999` fetches `get_network_info` from the
   coordinator's Ziggurat API and starts in router role. NWK address derived from the
@@ -27,14 +27,14 @@ Coordinator (ZHA connects here as usual):
 
 ```bash
 cargo run --bin ziggurat -- --device /dev/serial/by-id/<coord-c6> --listen 0.0.0.0:9999 \
-  --backbone-port 19790
+  --zloe-port 19790
 ```
 
 Satellite (same box is fine, different port/radio):
 
 ```bash
 cargo run --bin ziggurat -- --device /dev/serial/by-id/<sat-c6> --listen 127.0.0.1:9998 \
-  --backbone-port 19791 --satellite-of ws://127.0.0.1:9999
+  --zloe-port 19791 --satellite-of ws://127.0.0.1:9999
 ```
 
 Experiment:
@@ -57,3 +57,11 @@ Loopback smoke tests (no hardware): `cargo test -p ziggurat-phy-trel`.
   device. Fine once routes are established; misleading for direct joins.
 - No peer authentication (NWK frames are encrypted, but a LAN host could flood or
   replay). IPv4 only. No children on satellites. Satellite isn't announced to ZHA.
+
+## ZLOE interface
+
+`--zloe-interface <ifname>` confines the backbone to one interface: UDP binds that
+interface's IPv4 address, mDNS runs only there and advertises only that address, and
+peer addresses on the same subnet are preferred. Without it, all interfaces are used
+(mDNS then advertises Docker bridges and loopback too). The old `--backbone-*` flag
+names still work as aliases.
