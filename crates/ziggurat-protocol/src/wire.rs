@@ -718,7 +718,6 @@ pub enum SendStatus {
     CcaFailure = 5,
     TransmitFailed = 6,
     ApsAckTimeout = 7,
-    BroadcastQuorumNotReached = 8,
     IndirectExpired = 9,
     FrameBudgetExhausted = 10,
     Cancelled = 11,
@@ -738,7 +737,7 @@ pub struct ApsAckConfirmPayload {
     pub status: SendStatus,
 }
 
-/// The passive-ack quorum verdict of a broadcast or groupcast send.
+/// The verdict of a broadcast or groupcast send, sent once its retransmissions end.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct BroadcastConfirmPayload {

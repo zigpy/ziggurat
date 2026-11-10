@@ -685,7 +685,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
-        // is the send's handoff; the quorum is its delivery.
+        // is the send's handoff; the end of the retransmissions is its delivery.
         let (handle, mut actions) = self.enqueue_broadcast_in(
             &mut core,
             Frame::nwk(nwk_frame.clone(), security),
