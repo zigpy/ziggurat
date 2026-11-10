@@ -104,6 +104,8 @@ pub struct TrelConfig {
     /// Test hook: while this file exists, datagrams arriving on the multicast group
     /// are dropped, as if the network had stopped delivering multicast to us.
     pub mcast_block_file: Option<std::path::PathBuf>,
+    /// Test hook: behave like a host without IPv6 (IPv4 socket, no IPv6 peers or group)
+    pub ipv4_only: bool,
     pub deny: DenyList,
 }
 
@@ -325,7 +327,7 @@ impl<P: RadioPhy> TrelPhy<P> {
             None
         } else {
             let local_net = config.interface.as_deref().map(local_net).transpose()?;
-            let (socket, dual_stack) = bind_socket(config.port)?;
+            let (socket, dual_stack) = bind_socket(config.port, config.ipv4_only)?;
             let socket = Arc::new(socket);
             tracing::info!(
                 "ZLOE backbone listening on UDP {} ({}, {}, prefer {})",
@@ -575,13 +577,17 @@ fn update_identity(shared: &mut Shared) -> Option<Identity> {
 
 /// One dual-stack IPv6 socket (IPv4 arrives v4-mapped); IPv4-only when the host has no
 /// IPv6.
-fn bind_socket(port: u16) -> std::io::Result<(UdpSocket, bool)> {
+fn bind_socket(port: u16, ipv4_only: bool) -> std::io::Result<(UdpSocket, bool)> {
     use socket2::{Domain, Protocol, Socket, Type};
-    let v6 = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).and_then(|s| {
-        s.set_only_v6(false)?;
-        s.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
-        Ok(s)
-    });
+    let v6 = if ipv4_only {
+        Err(std::io::Error::other("IPv4 only requested"))
+    } else {
+        Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).and_then(|s| {
+            s.set_only_v6(false)?;
+            s.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+            Ok(s)
+        })
+    };
     let (socket, dual_stack) = match v6 {
         Ok(s) => (s, true),
         Err(e) => {
@@ -612,7 +618,7 @@ impl Backbone {
     fn spawn_udp_reader(
         &self,
         rx: Arc<UdpSocket>,
-        block_file: Option<std::path::PathBuf>,
+        block: Option<(std::path::PathBuf, &'static str)>,
     ) -> tokio::task::JoinHandle<()> {
         let socket = Arc::clone(&self.socket);
         let shared = Arc::clone(&self.shared);
@@ -630,7 +636,11 @@ impl Backbone {
                         continue;
                     }
                 };
-                if block_file.as_deref().is_some_and(std::path::Path::exists) {
+                // Test hook: an empty file blocks every group, "v4"/"v6" just one
+                if let Some((file, family)) = &block
+                    && let Ok(content) = std::fs::read_to_string(file)
+                    && (content.trim().is_empty() || content.contains(family))
+                {
                     continue;
                 }
                 let Some(header) = WireHeader::parse(&buf[..len]) else {
@@ -774,6 +784,7 @@ impl Backbone {
         };
         let shared = Arc::clone(&self.shared);
         let local_net = self.local_net;
+        let dual_stack = self.dual_stack;
         let prefer_ipv4 = self.prefer_ipv4;
 
         tokio::spawn(async move {
@@ -798,7 +809,7 @@ impl Backbone {
                         let mc6 = info
                             .get_property_val_str("mc")
                             .and_then(|s| s.parse::<SocketAddrV6>().ok())
-                            .filter(|mc| mc.ip().is_multicast())
+                            .filter(|mc| mc.ip().is_multicast() && dual_stack)
                             .zip(local_net)
                             .map(|(mut mc, net)| {
                                 mc.set_scope_id(net.index);
@@ -818,6 +829,7 @@ impl Backbone {
                             info.get_port(),
                             local_net,
                             prefer_ipv4,
+                            dual_stack,
                         );
                         let Some(&(_, addr)) = candidates.first() else {
                             continue;
@@ -875,6 +887,10 @@ impl Backbone {
         });
     }
 
+    fn block_hook(&self, family: &'static str) -> Option<(std::path::PathBuf, &'static str)> {
+        self.mcast_block_file.clone().map(|f| (f, family))
+    }
+
     /// Join the network's multicast groups and read from them: `[IPv6, IPv4]`, each
     /// `None` when multicast is off, the backbone interface (or its address of that
     /// family) is unknown, or joining fails.
@@ -923,7 +939,7 @@ impl Backbone {
                     let mc = SocketAddrV6::new(group, self.mcast_port, 0, net.index);
                     tracing::info!("ZLOE: listening on multicast group {mc}");
                     *self.mcast_reader.lock() =
-                        Some(self.spawn_udp_reader(socket, self.mcast_block_file.clone()));
+                        Some(self.spawn_udp_reader(socket, self.block_hook("v6")));
                     Some(SocketAddr::V6(mc))
                 }
                 Err(e) => {
@@ -949,7 +965,7 @@ impl Backbone {
                     let mc = SocketAddrV4::new(group, self.mcast_port);
                     tracing::info!("ZLOE: listening on multicast group {mc}");
                     *self.mcast4_reader.lock() =
-                        Some(self.spawn_udp_reader(socket, self.mcast_block_file.clone()));
+                        Some(self.spawn_udp_reader(socket, self.block_hook("v4")));
                     Some(SocketAddr::V4(mc))
                 }
                 (Err(e), _) | (_, Err(e)) => {
@@ -1511,6 +1527,7 @@ fn candidate_addresses(
     port: u16,
     local_net: Option<LocalNet>,
     prefer_ipv4: bool,
+    dual_stack: bool,
 ) -> Vec<((u8, u8), SocketAddr)> {
     let mut ranked: Vec<((u8, u8), SocketAddr)> = addrs
         .iter()
@@ -1518,7 +1535,7 @@ fn candidate_addresses(
             mdns_sd::ScopedIp::V6(v6) => {
                 let ip = *v6.addr();
                 let index = v6.scope_id().index;
-                if ip.is_loopback() {
+                if ip.is_loopback() || !dual_stack {
                     return None;
                 }
                 let link_local = (ip.segments()[0] & 0xffc0) == 0xfe80;

@@ -182,8 +182,15 @@ Bench (coordinator and satellite, `enp4s0f0`, IPv6 link-local):
   in preference order: IPv6 then IPv4, or IPv4 then IPv6 with `--zloe-ipv4`.
 - Bench (`--zloe-ipv4` on both nodes): both groups joined and confirmed within 10 s,
   broadcasts went to `239.255.124.18:19789`, unicast addresses unaffected.
-- Not covered: an IPv4-only host (no dual-stack socket) is untested; the test hook
-  blocks both groups at once, so per-family failover is untested.
+- Test hooks: `--zloe-test-mcast-block-file` blocks both groups while the file is
+  empty, or one group when it contains `v4` or `v6`; `--zloe-test-ipv4-only` behaves
+  like a host without IPv6.
+- Per-family failover (both nodes `--zloe-ipv4`, IPv4 blocked on the satellite): the
+  satellite's IPv4 group went unconfirmed, the coordinator kept reaching it through
+  the IPv6 group (no unicast copies), IPv4 came back after unblocking.
+- IPv4-only satellite: bootstrap over IPv4, announces only `mc4`, the dual-stack
+  coordinator reaches it through the IPv4 group with no unicast copies, neighbour
+  cost 1/1. IPv6 groups are ignored without IPv6.
 
 ## Behaviour
 
