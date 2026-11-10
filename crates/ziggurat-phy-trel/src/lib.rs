@@ -25,7 +25,7 @@
 //! devices at the hardware level; see the spike notes.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -150,9 +150,7 @@ struct Peer {
     alternates: Vec<SocketAddr>,
     /// The multicast group and port the peer listens on (mDNS TXT `mc`), scoped to
     /// our backbone interface. `None`: the peer cannot be reached by multicast.
-    mcast: Option<SocketAddrV6>,
-    /// When the peer last acked one of our multicast probes
-    mcast_acked: Option<Instant>,
+    mcast: [Group; 2],
     /// The confirmation state last logged, to log each change once
     mcast_logged_ok: bool,
 }
@@ -166,19 +164,19 @@ impl Peer {
             last_rx: None,
             health: 1.0,
             alternates: Vec::new(),
-            mcast: None,
-            mcast_acked: None,
+            mcast: [Group::default(), Group::default()],
             mcast_logged_ok: false,
         }
     }
 
-    /// The peer announces a multicast address and has acked a recent probe to it: our
-    /// multicast reaches it.
-    fn multicast_ok(&self) -> bool {
-        self.mcast.is_some()
-            && self
-                .mcast_acked
-                .is_some_and(|t| t.elapsed() < MCAST_CONFIRM_WINDOW)
+    /// The group our multicast reaches this peer through, by preference: a group the
+    /// peer announced and has acked a recent probe on.
+    fn multicast_group(&self, prefer_ipv4: bool) -> Option<SocketAddr> {
+        let order = if prefer_ipv4 { [V4, V6] } else { [V6, V4] };
+        order
+            .into_iter()
+            .find(|&f| self.mcast[f].confirmed())
+            .and_then(|f| self.mcast[f].addr)
     }
 
     /// The current address went unanswered: move to the next advertised one.
@@ -215,6 +213,28 @@ impl Peer {
 
 /// Our identity on the backbone: complete once both the radio configuration (address,
 /// channel) and the network's extended PAN ID are known.
+/// Index into per-family multicast state.
+const V6: usize = 0;
+const V4: usize = 1;
+
+/// One multicast group a peer announced, and whether our probes reach it there.
+#[derive(Debug, Clone, Copy, Default)]
+struct Group {
+    /// Scoped to our backbone interface (IPv6) or plain (IPv4)
+    addr: Option<SocketAddr>,
+    /// When the peer last acked one of our probes on this group
+    acked: Option<Instant>,
+}
+
+impl Group {
+    fn confirmed(&self) -> bool {
+        self.addr.is_some()
+            && self
+                .acked
+                .is_some_and(|t| t.elapsed() < MCAST_CONFIRM_WINDOW)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Identity {
     eui64: Eui64,
@@ -243,8 +263,8 @@ struct Shared {
     resolved: HashMap<Eui64, Resolved>,
     netinfo_provider: Option<NetInfoProvider>,
     netinfo_waiter: Option<oneshot::Sender<Vec<u8>>>,
-    /// Packet numbers of our latest multicast probes
-    probes: VecDeque<u32>,
+    /// Packet numbers of our latest multicast probes, with their family
+    probes: VecDeque<(u32, usize)>,
 }
 
 /// Datagram counters, for the bench.
@@ -277,6 +297,7 @@ struct Backbone {
     mcast_port: u16,
     /// The task reading our multicast socket; replaced when the network changes
     mcast_reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    mcast4_reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 pub struct TrelPhy<P: RadioPhy> {
@@ -361,6 +382,7 @@ impl<P: RadioPhy> TrelPhy<P> {
                 dual_stack,
                 mcast_port: config.mcast_port,
                 mcast_reader: Mutex::new(None),
+                mcast4_reader: Mutex::new(None),
             };
             backbone.spawn_udp_reader(Arc::clone(&backbone.socket), None);
             backbone.spawn_mdns_browser();
@@ -473,7 +495,8 @@ struct Resolved {
     nwk: Option<Nwk>,
     /// Usable addresses, best first, with their rank
     candidates: Vec<((u8, u8), SocketAddr)>,
-    mcast: Option<SocketAddrV6>,
+    /// Announced groups: [IPv6 (`mc`), IPv4 (`mc4`)]
+    mcast: [Option<SocketAddr>; 2],
 }
 
 /// Create or update the peer for a resolved node on our network.
@@ -505,10 +528,17 @@ fn apply_resolved(shared: &mut Shared, eui64: Eui64) {
         .find(|(_, a)| *a == peer.addr)
         .map(|(k, _)| *k);
     peer.alternates = resolved.candidates.iter().map(|(_, a)| *a).collect();
-    if peer.mcast != resolved.mcast {
-        tracing::info!("ZLOE: peer {eui64:?} multicast: {:?}", resolved.mcast);
-        peer.mcast = resolved.mcast;
-        peer.mcast_acked = None;
+    for family in [V6, V4] {
+        if peer.mcast[family].addr != resolved.mcast[family] {
+            tracing::info!(
+                "ZLOE: peer {eui64:?} multicast: {:?}",
+                resolved.mcast[family]
+            );
+            peer.mcast[family] = Group {
+                addr: resolved.mcast[family],
+                acked: None,
+            };
+        }
     }
     if peer.last_rx.is_none() && current_key.is_none_or(|k| best_key < k) {
         tracing::info!("ZLOE: mDNS peer {eui64:?} moved to {addr}");
@@ -615,10 +645,15 @@ impl Backbone {
                     } else {
                         // Not a unicast we are waiting on: an answer to a probe?
                         let mut shared = shared.lock();
-                        if shared.probes.contains(&header.seq)
+                        let family = shared
+                            .probes
+                            .iter()
+                            .find(|(seq, _)| *seq == header.seq)
+                            .map(|(_, f)| *f);
+                        if let Some(family) = family
                             && let Some(peer) = shared.peers.get_mut(&header.eui64)
                         {
-                            peer.mcast_acked = Some(Instant::now());
+                            peer.mcast[family].acked = Some(Instant::now());
                         }
                     }
                     continue;
@@ -758,15 +793,24 @@ impl Backbone {
                             .get_property_val_str("nwk")
                             .and_then(|s| Nwk::try_from_hex(s).ok());
                         // Usable only on a known interface: the group is link-local
-                        let mcast = info
+                        // Usable only on a known interface: groups are link-local
+                        // (IPv6) or bound to the interface's subnet (IPv4)
+                        let mc6 = info
                             .get_property_val_str("mc")
                             .and_then(|s| s.parse::<SocketAddrV6>().ok())
                             .filter(|mc| mc.ip().is_multicast())
                             .zip(local_net)
                             .map(|(mut mc, net)| {
                                 mc.set_scope_id(net.index);
-                                mc
+                                SocketAddr::V6(mc)
                             });
+                        let mc4 = info
+                            .get_property_val_str("mc4")
+                            .and_then(|s| s.parse::<SocketAddrV4>().ok())
+                            .filter(|mc| mc.ip().is_multicast())
+                            .filter(|_| local_net.is_some_and(|n| n.v4.is_some()))
+                            .map(SocketAddr::V4);
+                        let mcast = [mc6, mc4];
                         // mDNS lists every address of every interface (Docker bridges,
                         // loopback, ...): pick deterministically
                         let candidates = candidate_addresses(
@@ -814,7 +858,7 @@ impl Backbone {
                         if let Some(peer) = shared.peers.get_mut(&eui64) {
                             // A peer kept alive by its own traffic loses what only
                             // mDNS told us
-                            peer.mcast = None;
+                            peer.mcast = [Group::default(), Group::default()];
                         }
                         if shared
                             .peers
@@ -831,47 +875,91 @@ impl Backbone {
         });
     }
 
-    /// Join the network's multicast group and read from it. `None` when multicast is
-    /// off, the backbone interface is unknown, or the host has no IPv6.
-    fn listen_multicast(&self, epan: Eui64) -> Option<SocketAddrV6> {
-        use socket2::{Domain, Protocol, Socket, Type};
+    /// Join the network's multicast groups and read from them: `[IPv6, IPv4]`, each
+    /// `None` when multicast is off, the backbone interface (or its address of that
+    /// family) is unknown, or joining fails.
+    fn listen_multicast(&self, epan: Eui64) -> [Option<SocketAddr>; 2] {
+        use socket2::{Domain, Protocol, SockRef, Socket, Type};
 
-        if let Some(old) = self.mcast_reader.lock().take() {
-            old.abort(); // closes the socket, leaving the previous group
+        for reader in [&self.mcast_reader, &self.mcast4_reader] {
+            if let Some(old) = reader.lock().take() {
+                old.abort(); // closes the socket, leaving the previous group
+            }
         }
-        if self.mcast_port == 0 || !self.dual_stack {
-            return None;
+        if self.mcast_port == 0 {
+            return [None, None];
         }
         let Some(net) = self.local_net else {
             tracing::info!("ZLOE: no multicast without --zloe-interface");
-            return None;
+            return [None, None];
         };
 
-        let group = multicast_group(epan);
-        let open = || -> std::io::Result<UdpSocket> {
-            let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-            socket.set_only_v6(true)?;
-            // Several nodes on one host (the bench) share the port
+        // Several nodes on one host (the bench) share the port
+        let open = |domain: Domain, bind: SocketAddr| -> std::io::Result<Socket> {
+            let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+            if domain == Domain::IPV6 {
+                socket.set_only_v6(true)?;
+            }
             socket.set_reuse_address(true)?;
             socket.set_reuse_port(true)?;
-            socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, self.mcast_port)).into())?;
-            socket.join_multicast_v6(&group, net.index)?;
-            socket.set_nonblocking(true)?;
-            UdpSocket::from_std(socket.into())
+            socket.bind(&bind.into())?;
+            Ok(socket)
         };
-        match open() {
-            Ok(socket) => {
-                let mc = SocketAddrV6::new(group, self.mcast_port, 0, net.index);
-                tracing::info!("ZLOE: listening on multicast group {mc}");
-                *self.mcast_reader.lock() =
-                    Some(self.spawn_udp_reader(Arc::new(socket), self.mcast_block_file.clone()));
-                Some(mc)
+        let start = |socket: Socket| -> std::io::Result<Arc<UdpSocket>> {
+            socket.set_nonblocking(true)?;
+            Ok(Arc::new(UdpSocket::from_std(socket.into())?))
+        };
+
+        let mc6 = self.dual_stack.then(|| {
+            let group = multicast_group(epan);
+            let joined = open(
+                Domain::IPV6,
+                (Ipv6Addr::UNSPECIFIED, self.mcast_port).into(),
+            )
+            .and_then(|s| s.join_multicast_v6(&group, net.index).map(|()| s))
+            .and_then(start);
+            match joined {
+                Ok(socket) => {
+                    let mc = SocketAddrV6::new(group, self.mcast_port, 0, net.index);
+                    tracing::info!("ZLOE: listening on multicast group {mc}");
+                    *self.mcast_reader.lock() =
+                        Some(self.spawn_udp_reader(socket, self.mcast_block_file.clone()));
+                    Some(SocketAddr::V6(mc))
+                }
+                Err(e) => {
+                    tracing::warn!("ZLOE: cannot join multicast group {group}: {e}");
+                    None
+                }
             }
-            Err(e) => {
-                tracing::warn!("ZLOE: cannot join multicast group {group}: {e}");
-                None
+        });
+
+        let mc4 = net.v4.map(|(iface_ip, _)| {
+            let group = multicast_group_v4(epan);
+            let joined = open(
+                Domain::IPV4,
+                (Ipv4Addr::UNSPECIFIED, self.mcast_port).into(),
+            )
+            .and_then(|s| s.join_multicast_v4(&group, &iface_ip).map(|()| s))
+            .and_then(start);
+            // Our IPv4 multicast leaves through the unicast socket (so peers see our
+            // unicast port), out of the backbone interface
+            let sending = SockRef::from(&*self.socket).set_multicast_if_v4(&iface_ip);
+            match (joined, sending) {
+                (Ok(socket), Ok(())) => {
+                    let mc = SocketAddrV4::new(group, self.mcast_port);
+                    tracing::info!("ZLOE: listening on multicast group {mc}");
+                    *self.mcast4_reader.lock() =
+                        Some(self.spawn_udp_reader(socket, self.mcast_block_file.clone()));
+                    Some(SocketAddr::V4(mc))
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::warn!("ZLOE: cannot use IPv4 multicast group {group}: {e}");
+                    None
+                }
             }
-        }
+        });
+
+        [mc6.flatten(), mc4.flatten()]
     }
 
     fn advertise(&self, identity: Identity) {
@@ -903,8 +991,11 @@ impl Backbone {
 
         // `mc`: where we listen for multicast. Absent when we cannot, so peers know
         // to reach us by unicast only
-        if let Some(mc) = mcast {
+        if let [Some(SocketAddr::V6(mc)), _] = mcast {
             properties.insert("mc".to_string(), format!("[{}]:{}", mc.ip(), mc.port()));
+        }
+        if let [_, Some(mc4)] = mcast {
+            properties.insert("mc4".to_string(), mc4.to_string());
         }
 
         // Addresses (IPv6 link-local and IPv4) come from the interfaces mDNS runs on,
@@ -933,33 +1024,39 @@ impl Backbone {
         let shared = Arc::clone(&self.shared);
         let seq = Arc::clone(&self.seq);
         let stats = Arc::clone(&self.stats);
+        let prefer_ipv4 = self.prefer_ipv4;
+        let dual_stack = self.dual_stack;
 
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(PROBE_INTERVAL);
             loop {
                 tick.tick().await;
-                let (probe, groups) = {
+                let probes = {
                     let mut shared = shared.lock();
                     let Some(identity) = shared.identity else {
                         continue;
                     };
 
-                    let mut groups: Vec<SocketAddrV6> = Vec::new();
+                    let mut groups: Vec<(usize, SocketAddr)> = Vec::new();
                     for (eui64, peer) in &mut shared.peers {
-                        let Some(group) = peer.mcast else { continue };
-                        if !groups.contains(&group) {
-                            groups.push(group);
+                        for family in [V6, V4] {
+                            if let Some(group) = peer.mcast[family].addr
+                                && !groups.contains(&(family, group))
+                            {
+                                groups.push((family, group));
+                            }
                         }
-                        let ok = peer.multicast_ok();
-                        if ok != peer.mcast_logged_ok {
-                            peer.mcast_logged_ok = ok;
-                            if ok {
-                                tracing::info!("ZLOE: multicast reaches {eui64:?}");
-                            } else {
-                                tracing::warn!(
+                        let ok = peer.multicast_group(prefer_ipv4);
+                        if ok.is_some() != peer.mcast_logged_ok {
+                            peer.mcast_logged_ok = ok.is_some();
+                            match ok {
+                                Some(group) => {
+                                    tracing::info!("ZLOE: multicast reaches {eui64:?} via {group}");
+                                }
+                                None => tracing::warn!(
                                     "ZLOE: multicast does not reach {eui64:?}, \
                                      sending it unicast copies"
-                                );
+                                ),
                             }
                         }
                     }
@@ -967,24 +1064,31 @@ impl Backbone {
                         continue;
                     }
 
-                    let seq = seq.fetch_add(1, Ordering::Relaxed);
-                    shared.probes.push_back(seq);
-                    if shared.probes.len() > 4 {
+                    // One probe per group, so an ack tells which family works
+                    let probes: Vec<(SocketAddr, Vec<u8>)> = groups
+                        .into_iter()
+                        .map(|(family, group)| {
+                            let seq = seq.fetch_add(1, Ordering::Relaxed);
+                            shared.probes.push_back((seq, family));
+                            let probe = WireHeader {
+                                kind: KIND_PROBE,
+                                flags: FLAG_ACK_REQUEST,
+                                seq,
+                                eui64: identity.eui64,
+                                nwk: identity.nwk,
+                                epan: identity.epan,
+                            }
+                            .to_bytes();
+                            (group, probe)
+                        })
+                        .collect();
+                    while shared.probes.len() > 8 {
                         shared.probes.pop_front();
                     }
-                    let probe = WireHeader {
-                        kind: KIND_PROBE,
-                        flags: FLAG_ACK_REQUEST,
-                        seq,
-                        eui64: identity.eui64,
-                        nwk: identity.nwk,
-                        epan: identity.epan,
-                    }
-                    .to_bytes();
-                    (probe, groups)
+                    probes
                 };
-                for group in groups {
-                    let _ = socket.send_to(&probe, SocketAddr::V6(group)).await;
+                for (group, probe) in probes {
+                    let _ = socket.send_to(&probe, to_family(group, dual_stack)).await;
                     stats.probes.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -1043,16 +1147,16 @@ impl Backbone {
         // same packet number, so a peer that receives both keeps one
         let (groups, copies) = {
             let shared = self.shared.lock();
-            let mut groups: Vec<SocketAddrV6> = Vec::new();
+            let mut groups: Vec<SocketAddr> = Vec::new();
             let mut copies: Vec<SocketAddr> = Vec::new();
             for peer in shared.peers.values() {
-                match peer.mcast {
-                    Some(group) if peer.multicast_ok() => {
+                match peer.multicast_group(self.prefer_ipv4) {
+                    Some(group) => {
                         if !groups.contains(&group) {
                             groups.push(group);
                         }
                     }
-                    _ => copies.push(peer.addr),
+                    None => copies.push(peer.addr),
                 }
             }
             // Static peers that have not identified themselves yet
@@ -1066,7 +1170,7 @@ impl Backbone {
 
         self.stats.broadcasts.fetch_add(1, Ordering::Relaxed);
         for group in groups {
-            let _ = self.socket.send_to(&datagram, SocketAddr::V6(group)).await;
+            let _ = self.socket.send_to(&datagram, self.target(group)).await;
             self.stats.multicast.fetch_add(1, Ordering::Relaxed);
         }
         for target in copies {
@@ -1277,17 +1381,12 @@ impl<P: RadioPhy> TrelPhy<P> {
                     p.addr,
                     p.source,
                     p.lqi(),
-                    p.mcast.map_or_else(
-                        || "-".to_string(),
-                        |mc| format!(
-                            "{mc} {}",
-                            if p.multicast_ok() {
-                                "ok"
-                            } else {
-                                "unconfirmed"
-                            }
-                        )
-                    ),
+                    [V6, V4]
+                        .into_iter()
+                        .filter_map(|f| p.mcast[f].addr.map(|a| (a, p.mcast[f].confirmed())))
+                        .map(|(a, ok)| format!("{a} {}", if ok { "ok" } else { "unconfirmed" }))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     p.last_rx.map(|t| t.elapsed())
                 )
             })
@@ -1474,6 +1573,13 @@ fn multicast_group(epan: Eui64) -> Ipv6Addr {
         u16::from_be_bytes([e[4], e[5]]),
         u16::from_be_bytes([e[6], e[7]]),
     )
+}
+
+/// The network's IPv4 multicast group, organization-local scope (RFC 2365), with the
+/// last two bytes of the extended PAN ID: `239.255.h.h`.
+fn multicast_group_v4(epan: Eui64) -> Ipv4Addr {
+    let e = epan.to_be_bytes();
+    Ipv4Addr::new(239, 255, e[6], e[7])
 }
 
 /// IPv4 targets on a dual-stack IPv6 socket must be v4-mapped.
