@@ -181,7 +181,7 @@ fn print_lqi_rsp(aps: &proto::ReceivedApsPayload, ms: u128) {
         "+{ms}ms Mgmt_Lqi_rsp from {:?}: status={} total={} start={} count={}",
         aps.source, d[1], d[2], d[3], d[4]
     );
-    for rec in d[5..].chunks_exact(22) {
+    for rec in d[5..].as_chunks::<22>().0 {
         let nwk = u16::from_le_bytes([rec[16], rec[17]]);
         let kind = match rec[18] & 0x03 {
             0 => "coordinator",

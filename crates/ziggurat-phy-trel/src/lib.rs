@@ -9,12 +9,15 @@
 //!   failure;
 //! * broadcasts go over the air *and* to every backbone peer (NWK broadcast dedup
 //!   absorbs the duplicates);
-//! * frames from backbone peers are reported with LQI 255 (whichever link they came in
-//!   on), so NWK link costs to backbone peers are 1 and routing prefers the backbone
-//!   without any NWK changes.
+//! * frames received over the backbone carry an LQI derived from the backbone link's
+//!   health (ack success), 255 when clean, so NWK link costs to backbone peers are low
+//!   and routing prefers the backbone without NWK changes; over-the-air copies of a
+//!   live backbone peer's frames are dropped (they also come over the backbone), so the
+//!   peer's link quality is not mixed with the radio's.
 //!
-//! Peers are discovered with mDNS/DNS-SD (`_zloe._udp`), configured statically, or
-//! learned from the first datagram they send us.
+//! Peers are discovered with mDNS/DNS-SD (`_zloe._udp`, TXT `xa`/`xp` as in TREL),
+//! configured statically, or learned from the first datagram they send us. Transport
+//! is one dual-stack UDP socket: IPv6 link-local is preferred, IPv4 works too.
 //!
 //! A test-only deny list fakes "out of radio range": over-the-air frames whose MAC
 //! source is denied are dropped, and over-the-air unicasts to a denied MAC destination
@@ -22,21 +25,21 @@
 //! devices at the hardware level; see the spike notes.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
-use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
+use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult};
 
 pub const SERVICE_TYPE: &str = "_zloe._udp.local.";
-const MAGIC: [u8; 2] = *b"ZT";
-const VERSION: u8 = 1;
-const HEADER_LEN: usize = 19;
+const MAGIC: [u8; 2] = *b"ZL";
+const VERSION: u8 = 2;
+const HEADER_LEN: usize = 27;
 const KIND_DATA: u8 = 0;
 const KIND_ACK: u8 = 1;
 /// Trusted-backbone bootstrap: ask a coordinator for the network settings, and its
@@ -51,9 +54,13 @@ const FLAG_ACK_REQUEST: u8 = 0x01;
 const ACK_TIMEOUT: Duration = Duration::from_millis(50);
 const ATTEMPTS: usize = 3;
 const DEDUP_WINDOW: usize = 64;
-/// LQI and RSSI reported for frames from backbone peers.
-const BACKBONE_LQI: u8 = 255;
+/// RSSI reported for frames received over the backbone.
 const BACKBONE_RSSI: i8 = -20;
+/// A peer whose datagrams arrived this recently has a live backbone link: its
+/// over-the-air frames are duplicates (two Link Status periods).
+const BACKBONE_LIVE: Duration = Duration::from_secs(35);
+/// Weight of the newest sample in the backbone ack-success average.
+const HEALTH_ALPHA: f32 = 0.125;
 
 #[derive(Debug, Clone, Default)]
 pub struct DenyList {
@@ -78,26 +85,37 @@ pub struct TrelConfig {
     /// Peers reachable without discovery; their identity is learned from traffic
     pub static_peers: Vec<SocketAddr>,
     pub mdns: bool,
-    /// Network interface (e.g. `eth0`) the backbone is confined to: the UDP socket
-    /// binds its IPv4 address and mDNS only runs there. `None`: all interfaces.
+    /// Network interface (e.g. `eth0`) the backbone is confined to: mDNS only runs
+    /// there and peers are reached through its addresses. `None`: all interfaces.
     pub interface: Option<String>,
+    /// Reach peers over IPv4 when they advertise both (default: IPv6 link-local)
+    pub prefer_ipv4: bool,
     pub deny: DenyList,
 }
 
-/// The IPv4 address and netmask of a named interface.
-fn interface_v4(name: &str) -> std::io::Result<(Ipv4Addr, Ipv4Addr)> {
-    if_addrs::get_if_addrs()?
+/// The addresses of the interface the backbone is confined to.
+#[derive(Debug, Clone, Copy)]
+struct LocalNet {
+    index: u32,
+    v4: Option<(Ipv4Addr, Ipv4Addr)>,
+}
+
+fn local_net(name: &str) -> std::io::Result<LocalNet> {
+    let addrs: Vec<_> = if_addrs::get_if_addrs()?
         .into_iter()
-        .find_map(|iface| match iface.addr {
-            if_addrs::IfAddr::V4(v4) if iface.name == name => Some((v4.ip, v4.netmask)),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("ZLOE interface {name:?} has no IPv4 address"),
-            )
-        })
+        .filter(|iface| iface.name == name)
+        .collect();
+    let index = addrs.iter().find_map(|i| i.index).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("ZLOE interface {name:?} not found"),
+        )
+    })?;
+    let v4 = addrs.iter().find_map(|i| match &i.addr {
+        if_addrs::IfAddr::V4(v4) => Some((v4.ip, v4.netmask)),
+        if_addrs::IfAddr::V6(_) => None,
+    });
+    Ok(LocalNet { index, v4 })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,28 +130,82 @@ struct Peer {
     nwk: Option<Nwk>,
     source: PeerSource,
     last_rx: Option<Instant>,
+    /// Backbone ack success, exponentially averaged (1.0 = clean)
+    health: f32,
+    /// Every usable address mDNS gave, best first: tried in turn when sends fail
+    alternates: Vec<SocketAddr>,
 }
 
+impl Peer {
+    fn new(addr: SocketAddr, nwk: Option<Nwk>, source: PeerSource) -> Self {
+        Self {
+            addr,
+            nwk,
+            source,
+            last_rx: None,
+            health: 1.0,
+            alternates: Vec::new(),
+        }
+    }
+
+    /// The current address went unanswered: move to the next advertised one.
+    fn rotate(&mut self) {
+        if self.alternates.len() < 2 {
+            return;
+        }
+        let next = self
+            .alternates
+            .iter()
+            .position(|a| *a == self.addr)
+            .map_or(0, |i| (i + 1) % self.alternates.len());
+        tracing::info!(
+            "ZLOE: {} unanswered, trying {}",
+            self.addr,
+            self.alternates[next]
+        );
+        self.addr = self.alternates[next];
+    }
+
+    fn live(&self) -> bool {
+        self.last_rx.is_some_and(|t| t.elapsed() < BACKBONE_LIVE)
+    }
+
+    fn lqi(&self) -> u8 {
+        (self.health * 255.0).round().clamp(1.0, 255.0) as u8
+    }
+
+    fn record(&mut self, acked: bool) {
+        let sample = if acked { 1.0 } else { 0.0 };
+        self.health += HEALTH_ALPHA * (sample - self.health);
+    }
+}
+
+/// Our identity on the backbone: complete once both the radio configuration (address,
+/// channel) and the network's extended PAN ID are known.
 #[derive(Debug, Clone, Copy)]
 struct Identity {
     eui64: Eui64,
     nwk: Nwk,
-    pan_id: PanId,
+    epan: Eui64,
     channel: u8,
 }
 
 #[derive(Default)]
 struct Shared {
     identity: Option<Identity>,
+    /// Radio half of the identity, from `reconfigure`
+    radio: Option<(Eui64, Nwk, u8)>,
+    /// Network half, from `set_extended_pan_id`
+    epan: Option<Eui64>,
     peers: HashMap<Eui64, Peer>,
     /// Recently delivered (sender, backbone seq), to drop retransmits of a frame whose
     /// ack was lost.
-    seen: HashMap<Eui64, VecDeque<u16>>,
+    seen: HashMap<Eui64, VecDeque<u32>>,
     rx_tx: Option<mpsc::Sender<RxFrame>>,
     mdns_fullname: Option<String>,
     /// Coordinators seen on the backbone (mDNS `role=coordinator`), kept even before
     /// we have an identity of our own: satellites bootstrap from them
-    coordinators: HashMap<Eui64, (SocketAddr, Option<PanId>)>,
+    coordinators: HashMap<Eui64, (SocketAddr, Option<Eui64>)>,
     netinfo_provider: Option<NetInfoProvider>,
     netinfo_waiter: Option<oneshot::Sender<Vec<u8>>>,
 }
@@ -141,13 +213,16 @@ struct Shared {
 struct Backbone {
     socket: Arc<UdpSocket>,
     shared: Arc<Mutex<Shared>>,
-    pending: Arc<Mutex<HashMap<u16, oneshot::Sender<()>>>>,
-    seq: AtomicU16,
+    pending: Arc<Mutex<HashMap<u32, oneshot::Sender<()>>>>,
+    seq: AtomicU32,
     static_peers: Vec<SocketAddr>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     port: u16,
-    /// Set when confined to one interface: its address and netmask
-    local_net: Option<(Ipv4Addr, Ipv4Addr)>,
+    /// Set when confined to one interface
+    local_net: Option<LocalNet>,
+    prefer_ipv4: bool,
+    /// The socket is IPv6 dual-stack: IPv4 targets go out as v4-mapped addresses
+    dual_stack: bool,
 }
 
 pub struct TrelPhy<P: RadioPhy> {
@@ -174,13 +249,23 @@ impl<P: RadioPhy> TrelPhy<P> {
         let backbone = if config.port == 0 {
             None
         } else {
-            let local_net = config.interface.as_deref().map(interface_v4).transpose()?;
-            let bind_ip = local_net.map_or(Ipv4Addr::UNSPECIFIED, |(ip, _)| ip);
-            let socket = Arc::new(UdpSocket::bind((bind_ip, config.port)).await?);
+            let local_net = config.interface.as_deref().map(local_net).transpose()?;
+            let (socket, dual_stack) = bind_socket(config.port)?;
+            let socket = Arc::new(socket);
             tracing::info!(
-                "ZLOE backbone listening on {bind_ip}:{} ({})",
+                "ZLOE backbone listening on UDP {} ({}, {}, prefer {})",
                 config.port,
-                config.interface.as_deref().unwrap_or("all interfaces")
+                if dual_stack {
+                    "IPv6 dual-stack"
+                } else {
+                    "IPv4 only"
+                },
+                config.interface.as_deref().unwrap_or("all interfaces"),
+                if config.prefer_ipv4 {
+                    "IPv4"
+                } else {
+                    "IPv6 link-local"
+                },
             );
 
             let mdns = if config.mdns {
@@ -189,6 +274,7 @@ impl<P: RadioPhy> TrelPhy<P> {
                         if let Some(name) = &config.interface {
                             let _ = daemon.disable_interface(mdns_sd::IfKind::All);
                             let _ = daemon.disable_interface(mdns_sd::IfKind::LoopbackV4);
+                            let _ = daemon.disable_interface(mdns_sd::IfKind::LoopbackV6);
                             if let Err(e) =
                                 daemon.enable_interface(mdns_sd::IfKind::Name(name.clone()))
                             {
@@ -210,11 +296,13 @@ impl<P: RadioPhy> TrelPhy<P> {
                 socket,
                 shared: Arc::clone(&shared),
                 pending: Arc::new(Mutex::new(HashMap::new())),
-                seq: AtomicU16::new(rand_u16()),
+                seq: AtomicU32::new(rand_u32()),
                 static_peers: config.static_peers,
                 mdns,
                 port: config.port,
                 local_net,
+                prefer_ipv4: config.prefer_ipv4,
+                dual_stack,
             };
             backbone.spawn_udp_reader();
             backbone.spawn_mdns_browser();
@@ -233,16 +321,29 @@ impl<P: RadioPhy> TrelPhy<P> {
         &self.inner
     }
 
+    /// The network's extended PAN ID (TREL's `xp` in mDNS): peers on other networks are
+    /// ignored. Set by the stack's owner when the network is configured.
+    pub fn set_extended_pan_id(&self, epan: Eui64) {
+        let identity = {
+            let mut shared = self.shared.lock();
+            shared.epan = Some(epan);
+            update_identity(&mut shared)
+        };
+        if let (Some(identity), Some(backbone)) = (identity, &self.backbone) {
+            backbone.advertise(identity);
+        }
+    }
+
     /// Coordinator side: hand these settings to satellites that ask over the backbone.
     pub fn set_netinfo_provider(&self, provider: NetInfoProvider) {
         self.shared.lock().netinfo_provider = Some(provider);
     }
 
-    /// Satellite side: find a coordinator on the backbone (on `pan`, when given) and
-    /// fetch its network settings. Retries until `timeout`.
+    /// Satellite side: find a coordinator on the backbone (on extended PAN `epan`, when
+    /// given) and fetch its network settings. Retries until `timeout`.
     pub async fn fetch_network(
         &self,
-        pan: Option<PanId>,
+        epan: Option<Eui64>,
         timeout: Duration,
     ) -> std::io::Result<Vec<u8>> {
         let backbone = self
@@ -252,23 +353,23 @@ impl<P: RadioPhy> TrelPhy<P> {
         let deadline = tokio::time::Instant::now() + timeout;
 
         while tokio::time::Instant::now() < deadline {
-            let candidates: Vec<(Eui64, SocketAddr, Option<PanId>)> = {
+            let candidates: Vec<(Eui64, SocketAddr, Option<Eui64>)> = {
                 let shared = self.shared.lock();
                 shared
                     .coordinators
                     .iter()
-                    .filter(|(_, (_, p))| pan.is_none() || *p == pan)
-                    .map(|(eui64, (addr, p))| (*eui64, *addr, *p))
+                    .filter(|(_, (_, x))| epan.is_none() || *x == epan)
+                    .map(|(eui64, (addr, x))| (*eui64, *addr, *x))
                     .collect()
             };
-            let Some(&(eui64, addr, coordinator_pan)) = candidates.first() else {
+            let Some(&(eui64, addr, coordinator_epan)) = candidates.first() else {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 continue;
             };
             if candidates.len() > 1 {
                 tracing::warn!(
-                    "ZLOE: {} coordinators match, using {eui64:?} (PAN {coordinator_pan:?}); \
-                     pick one with --satellite-pan",
+                    "ZLOE: {} coordinators match, using {eui64:?} (epan {coordinator_epan:?}); \
+                     pick one with --zloe-satellite-epan",
                     candidates.len()
                 );
             }
@@ -278,7 +379,10 @@ impl<P: RadioPhy> TrelPhy<P> {
             let seq = backbone.seq.fetch_add(1, Ordering::Relaxed);
             let request = netinfo_header(KIND_NETINFO_REQ, seq, None);
             tracing::info!("ZLOE: asking coordinator {eui64:?} at {addr} for network settings");
-            backbone.socket.send_to(&request, addr).await?;
+            backbone
+                .socket
+                .send_to(&request, backbone.target(addr))
+                .await?;
             if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_secs(1), rx).await {
                 return Ok(info);
             }
@@ -291,16 +395,66 @@ impl<P: RadioPhy> TrelPhy<P> {
 }
 
 /// Header for the bootstrap messages, sent before we may have an identity.
-fn netinfo_header(kind: u8, seq: u16, identity: Option<Identity>) -> Vec<u8> {
+fn netinfo_header(kind: u8, seq: u32, identity: Option<Identity>) -> Vec<u8> {
     WireHeader {
         kind,
         flags: 0,
         seq,
         eui64: identity.map_or(Eui64([0; 8]), |i| i.eui64),
         nwk: identity.map_or(Nwk(0xFFFF), |i| i.nwk),
-        pan_id: identity.map_or(PanId(0xFFFF), |i| i.pan_id),
+        epan: identity.map_or(Eui64([0; 8]), |i| i.epan),
     }
     .to_bytes()
+}
+
+/// Combine the radio and network halves into the identity, once both are known.
+fn update_identity(shared: &mut Shared) -> Option<Identity> {
+    let (eui64, nwk, channel) = shared.radio?;
+    let epan = shared.epan?;
+    let identity = Identity {
+        eui64,
+        nwk,
+        epan,
+        channel,
+    };
+    let changed = shared.identity.is_none_or(|old| {
+        old.eui64 != identity.eui64 || old.nwk != identity.nwk || old.epan != identity.epan
+    });
+    shared.identity = Some(identity);
+    changed.then_some(identity)
+}
+
+/// One dual-stack IPv6 socket (IPv4 arrives v4-mapped); IPv4-only when the host has no
+/// IPv6.
+fn bind_socket(port: u16) -> std::io::Result<(UdpSocket, bool)> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let v6 = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).and_then(|s| {
+        s.set_only_v6(false)?;
+        s.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+        Ok(s)
+    });
+    let (socket, dual_stack) = match v6 {
+        Ok(s) => (s, true),
+        Err(e) => {
+            tracing::warn!("ZLOE: no IPv6 socket ({e}), using IPv4 only");
+            let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+            (s, false)
+        }
+    };
+    socket.set_nonblocking(true)?;
+    Ok((UdpSocket::from_std(socket.into())?, dual_stack))
+}
+
+/// v4-mapped IPv6 back to plain IPv4, so a peer has one spelling of its address.
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V6(v6) => v6
+            .ip()
+            .to_ipv4_mapped()
+            .map_or(addr, |v4| SocketAddr::new(IpAddr::V4(v4), v6.port())),
+        SocketAddr::V4(_) => addr,
+    }
 }
 
 impl Backbone {
@@ -308,12 +462,13 @@ impl Backbone {
         let socket = Arc::clone(&self.socket);
         let shared = Arc::clone(&self.shared);
         let pending = Arc::clone(&self.pending);
+        let dual_stack = self.dual_stack;
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; 2048];
             loop {
                 let (len, from) = match socket.recv_from(&mut buf).await {
-                    Ok(r) => r,
+                    Ok((len, from)) => (len, canonical(from)),
                     Err(e) => {
                         tracing::warn!("ZLOE: UDP receive failed: {e}");
                         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -348,7 +503,7 @@ impl Backbone {
                     );
                     let mut rsp = netinfo_header(KIND_NETINFO_RSP, header.seq, identity);
                     rsp.extend_from_slice(&info);
-                    let _ = socket.send_to(&rsp, from).await;
+                    let _ = socket.send_to(&rsp, to_family(from, dual_stack)).await;
                     continue;
                 }
                 if header.kind == KIND_NETINFO_RSP {
@@ -364,7 +519,7 @@ impl Backbone {
                     let Some(identity) = shared.identity else {
                         continue;
                     };
-                    if header.pan_id != identity.pan_id || header.eui64 == identity.eui64 {
+                    if header.epan != identity.epan || header.eui64 == identity.eui64 {
                         continue;
                     }
 
@@ -375,16 +530,12 @@ impl Backbone {
                             header.eui64,
                             header.nwk
                         );
-                        Peer {
-                            addr: from,
-                            nwk: None,
-                            source: PeerSource::Learned,
-                            last_rx: None,
-                        }
+                        Peer::new(from, None, PeerSource::Learned)
                     });
                     peer.addr = from;
                     peer.nwk = Some(header.nwk);
                     peer.last_rx = Some(Instant::now());
+                    let lqi = peer.lqi();
 
                     let seen = shared.seen.entry(header.eui64).or_default();
                     let duplicate = seen.contains(&header.seq);
@@ -403,7 +554,7 @@ impl Backbone {
                                 psdu,
                                 channel: identity.channel,
                                 rssi: BACKBONE_RSSI,
-                                lqi: BACKBONE_LQI,
+                                lqi,
                                 timestamp_us: 0,
                             },
                         )
@@ -418,10 +569,10 @@ impl Backbone {
                         seq: header.seq,
                         eui64: identity.eui64,
                         nwk: identity.nwk,
-                        pan_id: identity.pan_id,
+                        epan: identity.epan,
                     }
                     .to_bytes();
-                    let _ = socket.send_to(&ack, to).await;
+                    let _ = socket.send_to(&ack, to_family(to, dual_stack)).await;
                 }
 
                 if let Some((Some(tx), frame)) = deliver {
@@ -447,63 +598,68 @@ impl Backbone {
         };
         let shared = Arc::clone(&self.shared);
         let local_net = self.local_net;
+        let prefer_ipv4 = self.prefer_ipv4;
 
         tokio::spawn(async move {
             while let Ok(event) = events.recv_async().await {
                 match event {
                     mdns_sd::ServiceEvent::ServiceResolved(info) => {
                         let Some(eui64) = info
-                            .get_property_val_str("eui64")
+                            .get_property_val_str("xa")
                             .and_then(|s| Eui64::try_from_hex(s).ok())
                         else {
                             continue;
                         };
-                        let pan_id = info
-                            .get_property_val_str("pan")
-                            .and_then(|s| PanId::try_from_hex(s).ok());
+                        let epan = info
+                            .get_property_val_str("xp")
+                            .and_then(|s| Eui64::try_from_hex(s).ok());
                         let nwk = info
                             .get_property_val_str("nwk")
                             .and_then(|s| Nwk::try_from_hex(s).ok());
-                        // mDNS lists every interface (Docker bridges, loopback, ...):
-                        // pick deterministically, LAN first
-                        let Some(ip) = info.get_addresses_v4().into_iter().min_by_key(|ip| {
-                            let on_our_net = local_net.is_some_and(|(ours, mask)| {
-                                u32::from(*ip) & u32::from(mask)
-                                    == u32::from(ours) & u32::from(mask)
-                            });
-                            (!on_our_net, address_rank(*ip), *ip)
-                        }) else {
+                        // mDNS lists every address of every interface (Docker bridges,
+                        // loopback, ...): pick deterministically
+                        let candidates = candidate_addresses(
+                            info.get_addresses(),
+                            info.get_port(),
+                            local_net,
+                            prefer_ipv4,
+                        );
+                        let Some(&(best_key, addr)) = candidates.first() else {
                             continue;
                         };
-                        let addr = SocketAddr::new(IpAddr::V4(ip), info.get_port());
+                        let alternates: Vec<SocketAddr> =
+                            candidates.iter().map(|(_, a)| *a).collect();
 
                         let mut shared = shared.lock();
                         if info.get_property_val_str("role") == Some("coordinator") {
-                            let known = shared.coordinators.insert(eui64, (addr, pan_id));
+                            let known = shared.coordinators.insert(eui64, (addr, epan));
                             if known.is_none() {
                                 tracing::info!(
-                                    "ZLOE: coordinator {eui64:?} (PAN {pan_id:?}) at {addr}"
+                                    "ZLOE: coordinator {eui64:?} (epan {epan:?}) at {addr}"
                                 );
                             }
                         }
                         let Some(identity) = shared.identity else {
                             continue;
                         };
-                        if eui64 == identity.eui64 || pan_id != Some(identity.pan_id) {
+                        if eui64 == identity.eui64 || epan != Some(identity.epan) {
                             continue;
                         }
                         let peer = shared.peers.entry(eui64).or_insert_with(|| {
                             tracing::info!("ZLOE: mDNS peer {eui64:?} / {nwk:?} at {addr}");
-                            Peer {
-                                addr,
-                                nwk,
-                                source: PeerSource::Mdns,
-                                last_rx: None,
-                            }
+                            Peer::new(addr, nwk, PeerSource::Mdns)
                         });
                         // Once the peer has talked to us, its datagrams' source address
                         // is authoritative
-                        if peer.last_rx.is_none() && peer.addr != addr {
+                        // Until the peer talks to us, follow mDNS, but only to a
+                        // strictly better address: answers trickle in per interface
+                        // and would make it flap
+                        let current_key = candidates
+                            .iter()
+                            .find(|(_, a)| *a == peer.addr)
+                            .map(|(k, _)| *k);
+                        peer.alternates = alternates;
+                        if peer.last_rx.is_none() && current_key.is_none_or(|k| best_key < k) {
                             tracing::info!("ZLOE: mDNS peer {eui64:?} moved to {addr}");
                             peer.addr = addr;
                         }
@@ -545,9 +701,9 @@ impl Backbone {
         let instance = hex_be(&identity.eui64.to_be_bytes());
         let properties: HashMap<String, String> = [
             ("v".to_string(), VERSION.to_string()),
-            ("eui64".to_string(), instance.clone()),
+            ("xa".to_string(), instance.clone()),
+            ("xp".to_string(), hex_be(&identity.epan.to_be_bytes())),
             ("nwk".to_string(), format!("{:04x}", identity.nwk.as_u16())),
-            ("pan".to_string(), format!("{:04x}", identity.pan_id.0)),
             (
                 "role".to_string(),
                 if identity.nwk == Nwk(0x0000) {
@@ -561,25 +717,12 @@ impl Backbone {
         .into_iter()
         .collect();
 
+        // Addresses (IPv6 link-local and IPv4) come from the interfaces mDNS runs on,
+        // which --zloe-interface already narrows to one
         let host = format!("ziggurat-{instance}.local.");
-        let ip = self
-            .local_net
-            .map(|(ip, _)| ip.to_string())
-            .unwrap_or_default();
-        match mdns_sd::ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &host,
-            ip.as_str(),
-            self.port,
-            properties,
-        ) {
+        match mdns_sd::ServiceInfo::new(SERVICE_TYPE, &instance, &host, "", self.port, properties) {
             Ok(info) => {
-                let info = if self.local_net.is_some() {
-                    info
-                } else {
-                    info.enable_addr_auto()
-                };
+                let info = info.enable_addr_auto();
                 let fullname = info.get_fullname().to_string();
                 match daemon.register(info) {
                     Ok(()) => {
@@ -618,7 +761,7 @@ impl Backbone {
         }
     }
 
-    fn header(&self, kind: u8, flags: u8, seq: u16) -> Option<Vec<u8>> {
+    fn header(&self, kind: u8, flags: u8, seq: u32) -> Option<Vec<u8>> {
         let identity = self.shared.lock().identity?;
         Some(
             WireHeader {
@@ -627,10 +770,22 @@ impl Backbone {
                 seq,
                 eui64: identity.eui64,
                 nwk: identity.nwk,
-                pan_id: identity.pan_id,
+                epan: identity.epan,
             }
             .to_bytes(),
         )
+    }
+
+    /// The address as this socket's family wants it.
+    fn target(&self, addr: SocketAddr) -> SocketAddr {
+        to_family(addr, self.dual_stack)
+    }
+
+    fn record_link(&self, to: SocketAddr, acked: bool) {
+        let mut shared = self.shared.lock();
+        if let Some(peer) = shared.peers.values_mut().find(|p| p.addr == to) {
+            peer.record(acked);
+        }
     }
 
     async fn send_broadcast(&self, psdu: &[u8]) {
@@ -640,7 +795,7 @@ impl Backbone {
         };
         datagram.extend_from_slice(psdu);
         for target in self.broadcast_targets() {
-            let _ = self.socket.send_to(&datagram, target).await;
+            let _ = self.socket.send_to(&datagram, self.target(target)).await;
         }
     }
 
@@ -653,17 +808,21 @@ impl Backbone {
         };
         datagram.extend_from_slice(psdu);
 
+        let dest = self.target(to);
         if !ack_request {
-            return self.socket.send_to(&datagram, to).await.is_ok();
+            return self.socket.send_to(&datagram, dest).await.is_ok();
         }
 
         for attempt in 0..ATTEMPTS {
             let (tx, rx) = oneshot::channel();
             self.pending.lock().insert(seq, tx);
-            if self.socket.send_to(&datagram, to).await.is_err() {
+            if self.socket.send_to(&datagram, dest).await.is_err() {
+                self.record_link(to, false);
                 break;
             }
-            if tokio::time::timeout(ACK_TIMEOUT, rx).await.is_ok() {
+            let acked = tokio::time::timeout(ACK_TIMEOUT, rx).await.is_ok();
+            self.record_link(to, acked);
+            if acked {
                 if attempt > 0 {
                     tracing::debug!("ZLOE: unicast to {to} acked after {} retries", attempt);
                 }
@@ -672,6 +831,9 @@ impl Backbone {
         }
         self.pending.lock().remove(&seq);
         tracing::debug!("ZLOE: unicast to {to} not acked");
+        if let Some(peer) = self.shared.lock().peers.values_mut().find(|p| p.addr == to) {
+            peer.rotate();
+        }
         false
     }
 }
@@ -692,23 +854,16 @@ impl<P: RadioPhy> RadioPhy for TrelPhy<P> {
         if config.short_address == Nwk(0xFFFF) || config.promiscuous {
             return Ok(());
         }
-        let identity = Identity {
-            eui64: config.extended_address,
-            nwk: config.short_address,
-            pan_id: config.pan_id,
-            channel: config.channel,
-        };
-        let changed = {
+        let identity = {
             let mut shared = self.shared.lock();
-            let changed = shared.identity.is_none_or(|old| {
-                old.eui64 != identity.eui64
-                    || old.nwk != identity.nwk
-                    || old.pan_id != identity.pan_id
-            });
-            shared.identity = Some(identity);
-            changed
+            shared.radio = Some((
+                config.extended_address,
+                config.short_address,
+                config.channel,
+            ));
+            update_identity(&mut shared)
         };
-        if changed && let Some(backbone) = &self.backbone {
+        if let (Some(identity), Some(backbone)) = (identity, &self.backbone) {
             backbone.advertise(identity);
         }
         Ok(())
@@ -774,28 +929,32 @@ impl<P: RadioPhy> RadioPhy for TrelPhy<P> {
         let shared = Arc::clone(&self.shared);
         let has_backbone = self.backbone.is_some();
 
-        // Over-the-air frames: apply the deny list and pin peers' LQI
+        // Over-the-air frames: apply the deny list, and drop copies of what a live
+        // backbone peer also sends over the backbone
         tokio::spawn(async move {
-            while let Some(mut frame) = inner_rx.recv().await {
+            while let Some(frame) = inner_rx.recv().await {
                 if let Some(mac) = MacHeader::parse(&frame.psdu) {
                     if deny.denies(&mac.source) {
                         tracing::trace!("ZLOE deny: dropping air frame from {:?}", mac.source);
                         continue;
                     }
                     if has_backbone {
-                        let is_peer = {
+                        let live_peer = {
                             let shared = shared.lock();
                             match &mac.source {
-                                MacAddress::Extended(eui64) => shared.peers.contains_key(eui64),
-                                MacAddress::Short(nwk) => {
-                                    shared.peers.values().any(|p| p.nwk == Some(*nwk))
+                                MacAddress::Extended(eui64) => {
+                                    shared.peers.get(eui64).is_some_and(Peer::live)
                                 }
+                                MacAddress::Short(nwk) => shared
+                                    .peers
+                                    .values()
+                                    .any(|p| p.nwk == Some(*nwk) && p.live()),
                                 MacAddress::None => false,
                             }
                         };
-                        if is_peer {
-                            frame.lqi = BACKBONE_LQI;
-                            frame.rssi = BACKBONE_RSSI;
+                        if live_peer {
+                            tracing::trace!("ZLOE: dropping air copy from {:?}", mac.source);
+                            continue;
                         }
                     }
                 }
@@ -822,10 +981,11 @@ impl<P: RadioPhy> TrelPhy<P> {
             .iter()
             .map(|(eui64, p)| {
                 format!(
-                    "{eui64:?} nwk={:?} addr={} via={:?} last_rx={:?}",
+                    "{eui64:?} nwk={:?} addr={} via={:?} lqi={} last_rx={:?}",
                     p.nwk,
                     p.addr,
                     p.source,
+                    p.lqi(),
                     p.last_rx.map(|t| t.elapsed())
                 )
             })
@@ -835,14 +995,15 @@ impl<P: RadioPhy> TrelPhy<P> {
 
 // -- wire format ---------------------------------------------------------------------
 
-/// `"ZT" | ver | kind | flags | seq:u16le | eui64 (wire order) | nwk:u16le | pan:u16le`
+/// `"ZL" | ver=2 | kind | flags | seq:u32le | xa: EUI64 | nwk:u16le | epan: extended PAN ID`
+/// (EUI64s in 802.15.4 wire order, i.e. little-endian)
 struct WireHeader {
     kind: u8,
     flags: u8,
-    seq: u16,
+    seq: u32,
     eui64: Eui64,
     nwk: Nwk,
-    pan_id: PanId,
+    epan: Eui64,
 }
 
 impl WireHeader {
@@ -853,10 +1014,10 @@ impl WireHeader {
         Some(Self {
             kind: bytes[3],
             flags: bytes[4],
-            seq: u16::from_le_bytes([bytes[5], bytes[6]]),
-            eui64: Eui64(bytes[7..15].try_into().ok()?),
-            nwk: Nwk(u16::from_le_bytes([bytes[15], bytes[16]])),
-            pan_id: PanId(u16::from_le_bytes([bytes[17], bytes[18]])),
+            seq: u32::from_le_bytes(bytes[5..9].try_into().ok()?),
+            eui64: Eui64(bytes[9..17].try_into().ok()?),
+            nwk: Nwk(u16::from_le_bytes([bytes[17], bytes[18]])),
+            epan: Eui64(bytes[19..27].try_into().ok()?),
         })
     }
 
@@ -869,7 +1030,7 @@ impl WireHeader {
         out.extend_from_slice(&self.seq.to_le_bytes());
         out.extend_from_slice(&self.eui64.0);
         out.extend_from_slice(&self.nwk.0.to_le_bytes());
-        out.extend_from_slice(&self.pan_id.0.to_le_bytes());
+        out.extend_from_slice(&self.epan.0);
         out
     }
 }
@@ -935,6 +1096,76 @@ impl MacHeader {
     }
 }
 
+/// Every address mDNS resolved for a peer that we could use, best first.
+///
+/// Confined to one interface (`--zloe-interface`): IPv6 link-local on that interface
+/// first (IPv4 first with `prefer_ipv4`), then IPv4 on its subnet, then routable IPv6.
+/// Not confined: a link-local address's scope is ambiguous (mDNS reports it once per
+/// interface the answer arrived on, Docker bridges and veths included), so IPv4 and
+/// routable IPv6 come first and link-local is a last resort.
+fn candidate_addresses(
+    addrs: &HashSet<mdns_sd::ScopedIp>,
+    port: u16,
+    local_net: Option<LocalNet>,
+    prefer_ipv4: bool,
+) -> Vec<((u8, u8), SocketAddr)> {
+    let mut ranked: Vec<((u8, u8), SocketAddr)> = addrs
+        .iter()
+        .filter_map(|scoped| match scoped {
+            mdns_sd::ScopedIp::V6(v6) => {
+                let ip = *v6.addr();
+                let index = v6.scope_id().index;
+                if ip.is_loopback() {
+                    return None;
+                }
+                let link_local = (ip.segments()[0] & 0xffc0) == 0xfe80;
+                let class = match (local_net, link_local) {
+                    (Some(net), true) if net.index != index => return None,
+                    (Some(_), true) => u8::from(prefer_ipv4),
+                    (Some(_), false) | (None, false) => 2,
+                    (None, true) => 3,
+                };
+                let scope = if link_local { index } else { 0 };
+                Some((
+                    (class, 0),
+                    SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope)),
+                ))
+            }
+            mdns_sd::ScopedIp::V4(v4) => {
+                let ip = *v4.addr();
+                if let Some(net) = local_net {
+                    let (ours, mask) = net.v4?;
+                    if u32::from(ip) & u32::from(mask) != u32::from(ours) & u32::from(mask) {
+                        return None;
+                    }
+                }
+                let class = if local_net.is_some() {
+                    u8::from(!prefer_ipv4)
+                } else {
+                    0
+                };
+                Some((
+                    (class, address_rank(ip)),
+                    SocketAddr::new(IpAddr::V4(ip), port),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    ranked.sort();
+    ranked
+}
+
+/// IPv4 targets on a dual-stack IPv6 socket must be v4-mapped.
+fn to_family(addr: SocketAddr, dual_stack: bool) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) if dual_stack => {
+            SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0))
+        }
+        _ => addr,
+    }
+}
+
 /// Lower is better: 192.168/16, 10/8, other non-loopback, 172.16/12 (usually
 /// container bridges), link-local, loopback.
 const fn address_rank(ip: std::net::Ipv4Addr) -> u8 {
@@ -953,10 +1184,10 @@ fn hex_be(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn rand_u16() -> u16 {
+fn rand_u32() -> u32 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
+        .map(|d| d.as_nanos())
         .unwrap_or(0);
-    (nanos ^ (nanos >> 16)) as u16
+    (nanos ^ (nanos >> 32)) as u32
 }

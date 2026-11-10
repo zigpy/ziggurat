@@ -118,12 +118,14 @@ async fn node(
             },
             mdns,
             interface: None,
+            prefer_ipv4: false,
             deny: DenyList::default(),
         },
     )
     .await
     .unwrap();
     phy.reconfigure(&config(eui, nwk)).await.unwrap();
+    phy.set_extended_pan_id(Eui64([0x5A; 8]));
     (phy, radio)
 }
 
@@ -168,6 +170,10 @@ async fn static_peers_broadcast_then_unicast() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mdns_discovery() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let (a, _) = node(47201, 0, 0xA1, 0x0000, true).await;
     let (b, _) = node(47202, 0, 0xB1, 0x2222, true).await;
     let mut rx_b = b.subscribe_rx();
@@ -188,8 +194,16 @@ async fn mdns_discovery() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let result = a.transmit(data_frame(0x2222, 0x0000, true)).await.unwrap();
-    assert_eq!(result, TxResult::Acked);
+    // The first address mDNS offers may be a link-local one with the wrong scope; an
+    // unanswered send rotates to the next advertised address, as NWK retries would
+    let mut result = TxResult::NoAck;
+    for _ in 0..5 {
+        result = a.transmit(data_frame(0x2222, 0x0000, true)).await.unwrap();
+        if result == TxResult::Acked {
+            break;
+        }
+    }
+    assert_eq!(result, TxResult::Acked, "peers: {:?}", a.peers());
     tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
         .await
         .unwrap()
