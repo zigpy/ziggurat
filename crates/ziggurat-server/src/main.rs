@@ -1052,6 +1052,11 @@ struct Args {
     #[arg(long, default_value_t = 19789)]
     zloe_mcast_port: u16,
 
+    /// SPIKE test hook: while this file exists, drop datagrams arriving on the ZLOE
+    /// multicast group (simulates a network that stopped delivering multicast)
+    #[arg(long)]
+    zloe_test_mcast_block_file: Option<std::path::PathBuf>,
+
     /// SPIKE: disable mDNS discovery of ZLOE peers
     #[arg(long, alias = "no-mdns")]
     zloe_no_mdns: bool,
@@ -1146,6 +1151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 interface: args.zloe_interface,
                 prefer_ipv4: args.zloe_ipv4,
                 mcast_port: args.zloe_mcast_port,
+                mcast_block_file: args.zloe_test_mcast_block_file,
                 deny,
             },
         ));
@@ -1159,6 +1165,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let Some(stack) = server.current_stack() else {
                         continue;
                     };
+                    if let Some(stats) = stack.radio.stats() {
+                        tracing::info!("[diag] backbone {stats}");
+                    }
                     for peer in stack.radio.peers() {
                         tracing::info!("[diag] backbone peer {peer}");
                     }

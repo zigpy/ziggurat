@@ -1,8 +1,8 @@
 # ZLOE broadcast delivery: design and gap analysis
 
-Status: design for the spike (zigpy/ziggurat#84). Built so far: the multicast
-announcement and listener (see "Multicast announcement"). Sending broadcasts by
-multicast, the probe and the hub are not built.
+Status: design for the spike (zigpy/ziggurat#84). Step 1 is built: multicast
+announcement, broadcasts by multicast, the probe, and per-peer unicast copies as the
+fallback (see "Step 1 as built"). The hub and suppression are not built.
 
 Styleguide: the repository has no written styleguide; its conventions are enforced by
 `.pre-commit-config.yaml` (`cargo fmt --all`, `cargo clippy --all-targets
@@ -144,6 +144,31 @@ record. A node that cannot (no `--zloe-interface`, no IPv6, port 0) announces no
 Bench check: both nodes joined `ff12::5a4c:f5d9:7c12` on `enp4s0f0` (kernel shows two
 users, two sockets on port 19789), each lists the other's `mc`, and a test datagram
 sent to the group reached both.
+
+## Step 1 as built
+
+- A broadcast goes out as one multicast datagram to each distinct group of peers whose
+  multicast is confirmed, plus a unicast copy (same packet number) to every other peer.
+  Receivers keep one copy per sender and packet number.
+- Only 802.15.4 data frames go to the backbone; beacon requests stay on the radio (M9).
+- Probe: every 5 s an empty `KIND_PROBE` datagram (kind 4) is multicast with the
+  ack-request flag; each peer answers with a unicast ack. A peer is confirmed while it
+  has acked a probe in the last 12 s. A peer that announces no `mc` is never confirmed.
+- `[diag] backbone broadcasts=… multicast=… unicast_copies=… probes=…` counts
+  datagrams since start.
+- Test hook `--zloe-test-mcast-block-file <path>`: while the file exists, datagrams
+  arriving on the group are dropped.
+
+Bench (coordinator and satellite, `enp4s0f0`, IPv6 link-local):
+
+- Both sides confirmed multicast within 2 s of meeting; broadcasts went out as one
+  multicast datagram with no unicast copies.
+- Satellite multicast blocked at 15:51:08: the coordinator switched it to unicast
+  copies at 15:51:23 (15 s). Unblocked at 15:51:48: back to multicast at 15:51:58
+  (10 s). The satellite stayed a cost-1 neighbour throughout.
+- Detection takes 12–17 s (12 s window plus up to one 5 s probe tick), not the
+  ≤ 10 s M4 aimed at; still well inside the 45 s neighbour ageing. Broadcasts sent in
+  that gap reach the peer only through Zigbee's own retries.
 
 ## Behaviour
 
