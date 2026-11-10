@@ -1036,6 +1036,15 @@ struct Args {
     #[arg(long)]
     satellite_of: Option<String>,
 
+    /// SPIKE: start as coordinator of a private test network kept in this file
+    /// (created on first use), instead of waiting for a client to configure us
+    #[arg(long)]
+    test_network: Option<String>,
+
+    /// SPIKE: channel for a newly created --test-network
+    #[arg(long, default_value_t = 25)]
+    test_channel: u8,
+
     /// SPIKE: the satellite's NWK address (hex); derived from its EUI64 by default
     #[arg(long)]
     satellite_nwk: Option<String>,
@@ -1125,6 +1134,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             n.outgoing_cost
                         );
                     }
+                }
+            });
+        }
+
+        if let Some(path) = args.test_network {
+            let server = server.clone();
+            let channel = args.test_channel;
+            tokio::spawn(async move {
+                if let Err(e) = satellite::test_coordinator(&server, &path, channel).await {
+                    tracing::error!("Test network bring-up failed: {e}");
+                    std::process::exit(1);
                 }
             });
         }
