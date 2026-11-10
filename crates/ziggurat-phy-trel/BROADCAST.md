@@ -1,6 +1,8 @@
 # ZLOE broadcast delivery: design and gap analysis
 
-Status: design for the spike (zigpy/ziggurat#84). Nothing here is built yet.
+Status: design for the spike (zigpy/ziggurat#84). Built so far: the multicast
+announcement and listener (see "Multicast announcement"). Sending broadcasts by
+multicast, the probe and the hub are not built.
 
 Styleguide: the repository has no written styleguide; its conventions are enforced by
 `.pre-commit-config.yaml` (`cargo fmt --all`, `cargo clippy --all-targets
@@ -67,8 +69,8 @@ limit of the spike; **open** = needs measurement.
 
 | ID | Gap | Severity | Resolution |
 |---|---|---|---|
-| M1 | Nodes listen on different UDP ports (two nodes on one host on the bench); multicast needs one shared port. | must | Second socket on a fixed multicast port with address and port reuse. Multicast is sent from the unicast socket, so receivers learn the sender's unicast address from it. |
-| M2 | Link-local multicast is per interface; without `--zloe-interface` the interface is unknown. | must | Multicast only when the backbone interface is known (`--zloe-interface`, or the host has exactly one candidate). Otherwise use the fallback. |
+| M1 | Nodes listen on different UDP ports (two nodes on one host on the bench); multicast needs one shared port. | must | Second socket on the multicast port with address and port reuse (built). Each node announces its group and port over mDNS; a sender uses one datagram per distinct announced address, normally one. Multicast is sent from the unicast socket, so receivers learn the sender's unicast address from it. |
+| M2 | Link-local multicast is per interface; without `--zloe-interface` the interface is unknown. | must | Multicast only with `--zloe-interface` (built). A node without it announces no multicast address, so peers reach it through the fallback. |
 | M3 | IPv4 multicast cannot be joined on the dual-stack socket. | accepted | IPv6 multicast only. IPv4-only links use the fallback. |
 | M4 | Multicast can silently stop (snooping switch without a querier, Wi-Fi isolation), and can fail in one direction only. | must | Probe: one multicast datagram per 5 s carries the ack-request flag; peers answer by unicast. A peer that misses two probes is unconfirmed, and the sender adds the fallback. Detection ≤ 10 s, well inside the 45 s neighbour ageing. |
 | M5 | Wi-Fi access points buffer multicast for sleeping clients and send it at the lowest rate. Expected +100–300 ms on broadcasts crossing the backbone. | open | Measure with a Wi-Fi satellite. Unicast is unaffected. |
@@ -118,10 +120,30 @@ multicast-hostile network show the fallback traffic is a problem.
 
 - Flags: bit 0 ack request (exists; on a multicast datagram it is the probe), bit 1
   "forward this" (satellite → coordinator), bit 2 "forwarded" (coordinator → peers).
-- Multicast group: `ff02::5a4c:hhhh:hhhh`, `h` = low 32 bits of the extended PAN ID.
-- Multicast port: fixed, configurable (`--zloe-mcast-port`).
+- Multicast group: `ff12::5a4c:hhhh:hhhh` (transient, link-local scope), `h` = low 32
+  bits of the extended PAN ID.
+- Multicast port: `--zloe-mcast-port`, default 19789, 0 disables multicast.
+- mDNS TXT `mc=[group]:port`: where the node listens for multicast.
 - No new header fields: the original sender is already in the header, a forwarded
   unicast's destination is in the inner 802.15.4 header.
+
+## Multicast announcement
+
+Built. A node that can receive multicast joins the network's group on the backbone
+interface and announces `mc=[ff12::5a4c:hhhh:hhhh]:port` in its `_zloe._udp` TXT
+record. A node that cannot (no `--zloe-interface`, no IPv6, port 0) announces no `mc`.
+
+- The announcement says a peer *can* receive multicast; the probe (M4) says whether
+  it *does*. A peer without `mc` is never counted as reachable by multicast.
+- Peers store the announced address scoped to their own backbone interface. It is
+  cleared when the peer's mDNS record goes away.
+- mDNS results are now kept while a node has no identity and applied once it has one:
+  a satellite browses before it knows its network, and used to miss everything the
+  coordinator announced.
+
+Bench check: both nodes joined `ff12::5a4c:f5d9:7c12` on `enp4s0f0` (kernel shows two
+users, two sockets on port 19789), each lists the other's `mc`, and a test datagram
+sent to the group reached both.
 
 ## Behaviour
 
@@ -147,6 +169,25 @@ Backbone (ziggurat-phy-trel)
             - sends nothing over the backbone
         Node has no network identity yet
             - sends nothing over the backbone
+    announce
+        Backbone interface known, IPv6 available, multicast port set
+            - joins the network's group on that interface
+            - announces TXT mc=[group]:port
+        Interface unknown, no IPv6, or multicast port 0
+            - joins no group
+            - announces no mc
+        Network (extended PAN ID) changes
+            - leaves the old group and joins the new one
+            - announces the new mc
+    resolve_peer
+        Peer announces a multicast address
+            - stores it scoped to our backbone interface
+        Peer announces none, or an address that is not multicast
+            - stores none; the peer is reached by unicast only
+        Peer's record is removed
+            - clears the stored multicast address
+        Record resolved before this node has an identity
+            - is applied when the identity becomes known
     receive_multicast
         Datagram from another node on our extended PAN ID
             - delivers the frame to the stack once, 802.15.4 source unchanged

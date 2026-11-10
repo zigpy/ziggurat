@@ -17,7 +17,7 @@ tokio = { version = "1.53.1", features = ["rt", "time", "sync", "net", "macros"]
 tracing = "0.1"
 mdns-sd = "0.21.7"
 if-addrs = "0.15"
-socket2 = "0.6.5"
+socket2 = { version = "0.6.5", features = ["all"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
