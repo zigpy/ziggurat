@@ -532,7 +532,7 @@ impl<P: RadioPhy> TrelPhy<P> {
                         shared
                             .coordinator_quic
                             .get(eui64)
-                            .map(|qp| (*eui64, SocketAddr::new(addr.ip(), *qp)))
+                            .map(|qp| (*eui64, with_port(*addr, *qp)))
                     })
             };
             if let Some((eui64, addr)) = target {
@@ -1230,7 +1230,7 @@ impl Backbone {
                         .iter()
                         .filter_map(|(eui64, p)| {
                             p.quic_port
-                                .map(|qp| (*eui64, SocketAddr::new(p.addr.ip(), qp)))
+                                .map(|qp| (*eui64, with_port(p.addr, qp)))
                         })
                         .collect();
                     for (peer, addr) in targets {
@@ -1860,6 +1860,13 @@ fn multicast_group(epan: Eui64) -> Ipv6Addr {
 fn multicast_group_v4(epan: Eui64) -> Ipv4Addr {
     let e = epan.to_be_bytes();
     Ipv4Addr::new(239, 255, e[6], e[7])
+}
+
+/// The same address on another port, keeping an IPv6 link-local scope
+/// (`SocketAddr::new(ip, port)` would drop it).
+fn with_port(mut addr: SocketAddr, port: u16) -> SocketAddr {
+    addr.set_port(port);
+    addr
 }
 
 /// IPv4 targets on a dual-stack IPv6 socket must be v4-mapped.
