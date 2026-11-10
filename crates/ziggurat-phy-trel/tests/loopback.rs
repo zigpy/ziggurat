@@ -122,6 +122,7 @@ async fn node(
             mcast_port: 0,
             mcast_block_file: None,
             ipv4_only: false,
+            quic: None,
             deny: DenyList::default(),
         },
     )

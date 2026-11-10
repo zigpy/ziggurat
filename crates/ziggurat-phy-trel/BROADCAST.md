@@ -490,3 +490,40 @@ Enrollment
    in `quic` mode.
 5. Bench: the deny run, satellite bootstrap via enrollment, a rogue node with another
    network key rejected, multicast replay rejected, coordinator restart.
+
+## QUIC PoC as built (2026-11-10)
+
+`--zloe-security quic` (default `none`):
+
+- `security.rs`: HKDF-SHA256 from the network key (salt = extended PAN ID) to an
+  Ed25519 seed for the network CA; the CA certificate comes out byte-identical on every
+  member. Each node issues itself an ephemeral Ed25519 certificate for
+  `x<eui64>.zloe`, validity fixed 2000–2100. `mcast_key` is derived but unused (no
+  multicast in secure mode yet).
+- `quic.rs`: one quinn endpoint per node (dual-stack, `--zloe-quic-port`, default
+  ZLOE port + 1), transport tuned as in spinel2quic (fixed window, immediate acks,
+  10 ms initial RTT, 1 s keepalive, 10 s idle timeout). ALPN `zloe/1`: mutual TLS
+  against the network CA, the dialer sends its EUI64 on a uni stream and the acceptor
+  checks the certificate names it. ZLOE datagrams (same header) travel as QUIC DATAGRAM
+  frames with the usual ack/retry; broadcasts go as one datagram per connected peer.
+- Secure mode switches off plain UDP data, multicast and the unauthenticated
+  `NETINFO_REQ` hand-out. mDNS TXT gains `sec=quic|none` and `qp`; nodes only peer
+  with nodes of the same mode.
+- Enrollment (ALPN `zloe-enroll/1`): proofs `HMAC(code, exporter ‖ side)` exchanged on
+  a bi stream; the coordinator then sends the `NetworkInfoPayload`. Codes are 128-bit
+  base32, one use, 10 minutes, logged and written to `--zloe-enroll-code-file`.
+- **Auto-enrollment:** while the coordinator's trust center permits joins (ZHA pairing
+  mode), it also accepts the empty code. `--zloe-satellite --zloe-enroll auto`.
+
+Loopback tests (`tests/quic.rs`, fake radios): secure peers exchange an acked unicast
+over QUIC; a node with another network key is discovered but never gets a link;
+enrollment with the code works once and refuses a wrong code; auto-enrollment is
+refused while pairing is closed and works once it opens. 5/5 runs green.
+
+### Auto-enrollment gaps
+
+| ID | Gap | Severity | Resolution |
+|---|---|---|---|
+| A1 | During the pairing window anyone on the LAN can enroll and get the network key. | accepted | Same exposure as Zigbee joining with the well-known link key during permit-join; window is ZHA's (default 254 s). Code enrollment for when that is not acceptable. |
+| A2 | The satellite cannot authenticate the coordinator (empty code): a LAN attacker answering first can hand it a fake network. | accepted for the spike | Pin the coordinator's CA fingerprint shown in ZHA, or confirm the satellite in ZHA before it gets the key (two-step approval). |
+| A3 | No record of which satellites enrolled. | minor | Coordinator logs each enrollment; ZHA lists satellites after their Device_annce. |
