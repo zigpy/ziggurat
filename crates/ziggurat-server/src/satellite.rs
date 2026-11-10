@@ -78,6 +78,7 @@ async fn start_router(
         .await
         .map_err(|_| "start_network failed")?;
 
+    announce(server, nwk, ieee);
     tracing::info!("Satellite: router is up");
     Ok(())
 }
@@ -277,4 +278,31 @@ fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>) {
             );
         }
     });
+}
+
+/// ZDP Device_annce (spec 2.4.3.1.11), as any router does after (re)joining: maps our
+/// EUI64 to our (possibly new) NWK address in every node's address and neighbor
+/// tables, and lets the coordinator's client (ZHA) learn about the satellite.
+fn announce(server: &std::sync::Arc<ZigguratServer>, nwk: Nwk, ieee: Eui64) {
+    use ziggurat_driver::zigbee_stack::TxPriority;
+
+    let Some(stack) = server.current_stack() else {
+        return;
+    };
+    // Capability: router, mains powered, receiver on when idle, allocate address
+    let mut payload = vec![0x00];
+    payload.extend_from_slice(&nwk.0.to_le_bytes());
+    payload.extend_from_slice(&ieee.0);
+    payload.push(0x8E);
+    let result = stack.send_aps_broadcast(
+        Nwk(0xFFFD),
+        0x0000,
+        0x0013,
+        0,
+        0,
+        30,
+        payload,
+        TxPriority::StackCritical,
+    );
+    tracing::info!("Satellite: Device_annce for {nwk:?}: {:?}", result.map(|_| ()));
 }
