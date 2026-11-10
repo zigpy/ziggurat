@@ -17,7 +17,7 @@ coordinator over IP, extend coverage without any NWK changes?
   each other (mDNS TXT `role=coordinator`), fetches its settings with a
   `NETINFO_REQ`/`NETINFO_RSP` exchange over ZLOE and starts in router role. The
   backbone is treated as **trusted**: the settings, network key included, go
-  unauthenticated to whoever asks. `--zloe-satellite-pan <hex>` picks a network when several
+  unauthenticated to whoever asks. `--zloe-satellite-epan <16 hex>` picks a network when several
   coordinators are on the LAN; the satellite may start before the coordinator (it
   waits up to 60 s). `--zloe-satellite-of ws://coord:9999` (fetch via the coordinator's
   Ziggurat API) remains as a fallback. NWK address derived from the
@@ -109,3 +109,21 @@ Driven without ZHA: `--test-network` + `zloe-ctl`.
 Not covered: satellites accepting joins (router-side join), children on satellites,
 multiple satellites, Wi-Fi backbone under loss, restart/rejoin behaviour, real IKEA
 devices.
+
+## Wire format v2 (TREL-aligned)
+
+- mDNS TXT: `xa` (extended address), `xp` (extended PAN ID), `nwk`, `role`, `v=2`.
+  Peers on another extended PAN ID are ignored; `--zloe-satellite-epan` picks one
+  network when several coordinators are on the LAN.
+- Header (27 bytes): `"ZL" | ver=2 | kind | flags | seq:u32le | xa | nwk:u16le | epan`.
+- One dual-stack UDP socket (IPv4 arrives v4-mapped; IPv4-only fallback). With
+  `--zloe-interface`, peers are reached over IPv6 link-local on that interface first
+  (`--zloe-ipv4` prefers IPv4). Without it, link-local scopes are ambiguous (mDNS
+  reports one address per interface the answer arrived on), so IPv4/routable IPv6
+  come first. Unanswered sends rotate through the peer's advertised addresses.
+- Link quality: frames over the backbone carry an LQI from backbone ack success
+  (EWMA, 255 = clean); over-the-air copies of a live backbone peer's frames are
+  dropped instead of being re-labelled.
+- Bench: bootstrap and backbone over `fe80::…%enp4s0f0`; deny run 4/4 via the
+  satellite, 41–64 ms. Known gap: a peer's address locks to its datagrams' source, so
+  `--zloe-ipv4` on one side is overridden when the other side sends over IPv6.

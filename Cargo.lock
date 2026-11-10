@@ -1970,8 +1970,10 @@ dependencies = [
  "if-addrs",
  "mdns-sd",
  "parking_lot",
+ "socket2",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "ziggurat-ieee-802154",
  "ziggurat-phy",
 ]

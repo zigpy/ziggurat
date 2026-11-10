@@ -687,6 +687,8 @@ impl ZigguratServer {
         let phy = self.phy().await.map_err(radio_error)?;
 
         let aps_frame_counter = payload.state.aps_frame_counter;
+        // SPIKE: ZLOE peers are scoped by the extended PAN ID (TREL's `xp`)
+        phy.set_extended_pan_id(payload.state.extended_pan_id);
         let stack = ZigbeeStack::new(
             phy,
             proto::network_config(&payload),
@@ -1040,6 +1042,11 @@ struct Args {
     #[arg(long, alias = "backbone-peer")]
     zloe_peer: Vec<std::net::SocketAddr>,
 
+    /// SPIKE: reach ZLOE peers over IPv4 when they advertise both (default: IPv6
+    /// link-local)
+    #[arg(long)]
+    zloe_ipv4: bool,
+
     /// SPIKE: disable mDNS discovery of ZLOE peers
     #[arg(long, alias = "no-mdns")]
     zloe_no_mdns: bool,
@@ -1068,9 +1075,10 @@ struct Args {
     #[arg(long)]
     zloe_satellite: bool,
 
-    /// SPIKE: with --zloe-satellite, only use a coordinator on this PAN (hex)
+    /// SPIKE: with --zloe-satellite, only use a coordinator on this extended PAN ID
+    /// (16 hex digits)
     #[arg(long)]
-    zloe_satellite_pan: Option<String>,
+    zloe_satellite_epan: Option<String>,
 
     /// SPIKE: the satellite's NWK address (hex); derived from its EUI64 by default
     #[arg(long)]
@@ -1131,6 +1139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 static_peers: args.zloe_peer,
                 mdns: !args.zloe_no_mdns,
                 interface: args.zloe_interface,
+                prefer_ipv4: args.zloe_ipv4,
                 deny,
             },
         ));
@@ -1183,14 +1192,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_deref()
                 .map(Nwk::try_from_hex)
                 .transpose()?;
-            let pan = args
-                .zloe_satellite_pan
+            let epan = args
+                .zloe_satellite_epan
                 .as_deref()
-                .map(PanId::try_from_hex)
+                .map(Eui64::try_from_hex)
                 .transpose()?;
             let server = server.clone();
             tokio::spawn(async move {
-                if let Err(e) = satellite::bootstrap_zloe(&server, pan, nwk).await {
+                if let Err(e) = satellite::bootstrap_zloe(&server, epan, nwk).await {
                     tracing::error!("Satellite bootstrap failed: {e}");
                     std::process::exit(1);
                 }
