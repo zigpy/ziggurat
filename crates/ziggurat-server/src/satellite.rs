@@ -17,6 +17,30 @@ pub async fn bootstrap(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Satellite: fetching network settings from {coordinator}");
     let info = fetch_network_info(coordinator).await?;
+    start_router(server, &info, nwk).await
+}
+
+/// Find the coordinator on the (trusted) ZLOE backbone and fetch the settings from it.
+pub async fn bootstrap_zloe(
+    server: &std::sync::Arc<ZigguratServer>,
+    pan: Option<ziggurat_driver::ziggurat_ieee_802154::types::PanId>,
+    nwk: Option<Nwk>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!("Satellite: looking for a coordinator on the ZLOE backbone");
+    let phy = server.phy().await?;
+    let bytes = phy
+        .fetch_network(pan, std::time::Duration::from_secs(60))
+        .await?;
+    let info: proto::NetworkInfoPayload =
+        proto::parse(&bytes).ok_or("malformed network settings from coordinator")?;
+    start_router(server, &info, nwk).await
+}
+
+async fn start_router(
+    server: &std::sync::Arc<ZigguratServer>,
+    info: &proto::NetworkInfoPayload,
+    nwk: Option<Nwk>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let coord = &info.state;
 
     let phy = server.phy().await?;
