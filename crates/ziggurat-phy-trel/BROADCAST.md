@@ -192,6 +192,19 @@ Bench (coordinator and satellite, `enp4s0f0`, IPv6 link-local):
   coordinator reaches it through the IPv4 group with no unicast copies, neighbour
   cost 1/1. IPv6 groups are ignored without IPv6.
 
+## Probe overhead
+
+- Every node used to probe every announced group (IPv6 and IPv4) every 5 s. With 3
+  backbone nodes that was 144 probes (plus ~2 acks each) per 120 s against 38 data
+  datagrams saved.
+- Now a node probes each peer's preferred group only, and the other group only while
+  the preferred one is absent or unconfirmed: 72 probes per 120 s on the same bench,
+  still 1.00 data datagram per broadcast.
+- Failover to the other group now takes one more probe interval: IPv6 blocked, the
+  peer got unicast copies after 13 s and was back on multicast via IPv4 5 s later.
+- At this traffic level (~0.1 broadcasts/s per node) probes plus acks still outweigh
+  the saving; piggybacking the ack request on real broadcasts would remove most of it.
+
 ## Behaviour
 
 ```
