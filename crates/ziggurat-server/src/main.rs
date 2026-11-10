@@ -689,6 +689,15 @@ impl ZigguratServer {
         let aps_frame_counter = payload.state.aps_frame_counter;
         // SPIKE: ZLOE peers are scoped by the extended PAN ID (TREL's `xp`)
         phy.set_extended_pan_id(payload.state.extended_pan_id);
+        // SPIKE: secure ZLOE derives its network CA from the network key
+        if let Err(e) = phy.set_network_key(
+            &payload.state.network_key.0,
+            payload.state.extended_pan_id,
+            payload.state.ieee_address,
+            payload.role == proto::NodeRole::Coordinator,
+        ) {
+            tracing::warn!("ZLOE/QUIC: cannot set up security: {e}");
+        }
         let stack = ZigbeeStack::new(
             phy,
             proto::network_config(&payload),
@@ -724,6 +733,14 @@ impl ZigguratServer {
         stack.spawn_tracked(|arc_self| async move {
             arc_self.run().await;
         });
+
+        // SPIKE: secure ZLOE accepts enrollment without a code while joins are open
+        let pairing_stack = Arc::downgrade(&stack);
+        stack.radio.set_pairing_open(Arc::new(move || {
+            pairing_stack
+                .upgrade()
+                .is_some_and(|s| s.trust_center_permitting_joins())
+        }));
 
         // SPIKE: on the trusted ZLOE backbone a coordinator hands its settings to any
         // satellite that asks
@@ -1058,6 +1075,25 @@ struct Args {
     #[arg(long)]
     zloe_test_mcast_block_file: Option<std::path::PathBuf>,
 
+    /// SPIKE: ZLOE security: `none` (trusted backbone) or `quic` (authenticated
+    /// QUIC peer links, keys derived from the network key)
+    #[arg(long, default_value = "none")]
+    zloe_security: String,
+
+    /// SPIKE: UDP port of the ZLOE QUIC endpoint (default: --zloe-port + 1)
+    #[arg(long, default_value_t = 0)]
+    zloe_quic_port: u16,
+
+    /// SPIKE: with --zloe-satellite and --zloe-security quic, enroll with this code
+    /// from the coordinator, or `auto` while the network is in pairing mode
+    #[arg(long)]
+    zloe_enroll: Option<String>,
+
+    /// SPIKE: coordinator in --zloe-security quic: write the current enrollment code
+    /// to this file
+    #[arg(long)]
+    zloe_enroll_code_file: Option<std::path::PathBuf>,
+
     /// SPIKE test hook: behave like a host without IPv6
     #[arg(long)]
     zloe_test_ipv4_only: bool,
@@ -1158,6 +1194,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mcast_port: args.zloe_mcast_port,
                 mcast_block_file: args.zloe_test_mcast_block_file,
                 ipv4_only: args.zloe_test_ipv4_only,
+                quic: match args.zloe_security.as_str() {
+                    "quic" => Some(ziggurat_phy_trel::QuicConfig {
+                        port: if args.zloe_quic_port != 0 {
+                            args.zloe_quic_port
+                        } else {
+                            args.zloe_port + 1
+                        },
+                        code_file: args.zloe_enroll_code_file.clone(),
+                    }),
+                    "none" => None,
+                    other => {
+                        return Err(
+                            format!("--zloe-security must be none or quic, not {other:?}").into(),
+                        );
+                    }
+                },
                 deny,
             },
         ));
@@ -1218,9 +1270,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_deref()
                 .map(Eui64::try_from_hex)
                 .transpose()?;
+            let enroll = args.zloe_enroll.clone();
             let server = server.clone();
             tokio::spawn(async move {
-                if let Err(e) = satellite::bootstrap_zloe(&server, epan, nwk).await {
+                let result = match enroll {
+                    Some(code) => satellite::bootstrap_enroll(&server, epan, nwk, &code).await,
+                    None => satellite::bootstrap_zloe(&server, epan, nwk).await,
+                };
+                if let Err(e) = result {
                     tracing::error!("Satellite bootstrap failed: {e}");
                     std::process::exit(1);
                 }

@@ -18,6 +18,11 @@ tracing = "0.1"
 mdns-sd = "0.21.7"
 if-addrs = "0.15"
 socket2 = { version = "0.6.5", features = ["all"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+ring = "0.17"
+rcgen = "0.13"
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }

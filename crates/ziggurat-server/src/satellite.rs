@@ -36,6 +36,36 @@ pub async fn bootstrap_zloe(
     start_router(server, &info, nwk).await
 }
 
+/// Secure mode: enroll with the coordinator over QUIC (with a code, or `auto` while the
+/// network is in pairing mode) and start with the settings it sends.
+pub async fn bootstrap_enroll(
+    server: &std::sync::Arc<ZigguratServer>,
+    epan: Option<Eui64>,
+    nwk: Option<Nwk>,
+    code: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let code = if code == "auto" {
+        ziggurat_phy_trel::quic::AUTO_CODE
+    } else {
+        code
+    };
+    tracing::info!(
+        "Satellite: enrolling over ZLOE/QUIC ({})",
+        if code.is_empty() {
+            "pairing mode"
+        } else {
+            "code"
+        }
+    );
+    let phy = server.phy().await?;
+    let bytes = phy
+        .enroll(epan, code, std::time::Duration::from_secs(60))
+        .await?;
+    let info: proto::NetworkInfoPayload =
+        proto::parse(&bytes).ok_or("malformed network settings from coordinator")?;
+    start_router(server, &info, nwk).await
+}
+
 async fn start_router(
     server: &std::sync::Arc<ZigguratServer>,
     info: &proto::NetworkInfoPayload,
