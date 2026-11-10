@@ -319,3 +319,174 @@ Optional suppression
 - Stop the coordinator for 60 s with two satellites and check that they stay
   neighbours.
 - Re-run the deny experiment (On/Off through the satellite) in each transport.
+
+# Secure ZLOE over QUIC: design and gap analysis
+
+Status: design (2026-11-10). Nothing built yet.
+
+Styleguide: as above (`.pre-commit-config.yaml`: `cargo fmt`, clippy with
+`-D warnings -Dclippy::all -Dclippy::nursery`). New code lives in
+`crates/ziggurat-phy-trel` (`security` module) with the server flags in
+`crates/ziggurat-server`.
+
+## Goal
+
+Today the backbone is trusted: anyone on the LAN can read ZLOE headers, inject frames
+and fetch the network key from the coordinator. Goal: authenticated and encrypted
+ZLOE, without giving up statelessness (Ziggurat keeps no state between starts) and
+without breaking the transports above (unicast, multicast, fallback).
+
+## Trust model
+
+- **Root of trust: the Zigbee network key.** Every ZLOE secret is derived from it
+  with HKDF-SHA256, salt = extended PAN ID:
+  - `ca_key = HKDF(nwk_key, "zloe ca v1")` → Ed25519 network CA (deterministic, so
+    every member can recompute it and nothing is stored),
+  - `mc_key = HKDF(nwk_key, "zloe multicast v1")` → ChaCha20-Poly1305 group key.
+- **Authorization = network membership.** A node that holds the network key is a
+  backbone member, as it already is for Zigbee itself. Roles (coordinator / satellite)
+  are claims inside the node's certificate, signed by the network CA.
+- **Revocation = network key rotation** (ZHA can rotate the network key): new key, new
+  CA, every old certificate stops verifying.
+- **Enrollment** gives a new satellite the network key. It is the only step that needs
+  a secret from outside: a one-time enrollment code.
+
+## Protocol
+
+1. **Node identity.** At start a member generates an ephemeral Ed25519 key pair and
+   issues itself a certificate from the derived CA: subject = its EUI64, extension =
+   role and NWK address, validity = start time ± 1 year (clocks on MCUs are not
+   trusted; validity is not what revocation relies on).
+2. **Peer links.** One QUIC connection (quinn + rustls, ALPN `zloe/1`) per peer pair:
+   mutual TLS, both certificates must chain to the network CA and name the EUI64 the
+   peer announces over mDNS. The lower EUI64 dials, the higher accepts, so a pair has
+   one connection.
+3. **Frames over QUIC.** 802.15.4 frames travel as QUIC DATAGRAM frames (RFC 9221):
+   unreliable, no head-of-line blocking. ZLOE keeps its own per-frame ack (50 ms ×3),
+   carried as a datagram too.
+4. **Link health from QUIC.** RTT and loss from the QUIC connection replace the
+   ack-success estimate; keepalive PINGs replace the multicast probe for unicast peers.
+5. **Multicast.** Datagrams to the groups are sealed with `mc_key`
+   (ChaCha20-Poly1305, nonce = sender EUI64 ‖ 32-bit packet number, header as AAD).
+   Each sender also has a random 32-bit **epoch** per start, sent to every peer over
+   its QUIC connection; receivers accept multicast only for a sender's current epoch
+   and reject packet numbers already seen in it (replay window). The ZLOE header
+   gains the epoch field.
+6. **Enrollment.** `ziggurat --zloe-satellite --zloe-enroll <code>`:
+   - The coordinator prints a fresh code when asked (`zloe-ctl enroll`, later a ZHA
+     button): 128 random bits, base32, valid 10 minutes, one use.
+   - The satellite opens QUIC to the coordinator with ALPN `zloe-enroll/1`, accepting
+     any server certificate.
+   - Both sides compute `proof = HMAC(code, TLS exporter("zloe enroll", 32) ‖ role)`
+     and exchange proofs on a stream; each verifies the other's. A man in the middle
+     has two different TLS sessions and no code, so it cannot produce either proof;
+     with 128 bits it cannot brute-force the code from what it observes.
+   - On success the coordinator sends the network settings (the `NetworkInfoPayload`
+     the unauthenticated bootstrap sends today) and the connection closes.
+7. **Modes.** `--zloe-security none|quic` (default `none` in the spike, so today's
+   behaviour stays available). Nodes announce their mode in mDNS TXT `sec`; a `quic`
+   node ignores `none` peers.
+
+## Gap analysis
+
+| ID | Gap | Severity | Resolution |
+|---|---|---|---|
+| Q1 | Microcontroller satellites: spinel2quic measured ~37 KB heap and ~641 ms per QUIC handshake on an ESP32 (ngtcp2). A full mesh means N−1 connections per node. | must for MCU satellites | Host satellites first. For MCUs: connect only to the coordinator plus peers it exchanges unicast with (lazy connections, closed when idle). |
+| Q2 | quinn's default loss recovery stretches outages: PTO backoff turned a 3 s outage into a 5.4 s stall (spinel2quic). | must | Fixed congestion window, short max ack delay, 10 ms keepalive datagrams while traffic flows, as tuned in spinel2quic. |
+| Q3 | Statelessness: the CA and multicast key are derived from the network key, so a leaked network key gives full backbone access. | accepted | Same trust as Zigbee itself (the network key already decrypts all NWK traffic). Rotation revokes everything. |
+| Q4 | Network key rotation: nodes must re-derive keys and reconnect; peers on the old key stop verifying. | must | Rebuild identity and reconnect on `set_extended_pan_id`/network key change; old connections closed; rotation window where both keys are accepted (Zigbee keeps the previous key sequence too). |
+| Q5 | Certificate validity needs time: MCUs boot with no clock. | minor | Long validity, time checks disabled in the verifier; certificates are ephemeral and re-issued every start. |
+| Q6 | Group key for multicast lets any member forge another member's multicast. | accepted | Same as Zigbee NWK security (any key holder can forge NWK frames). Per-sender keys over QUIC are the upgrade if needed. |
+| Q7 | Multicast replay after a sender restart: packet numbers restart randomly. | must | Per-start epoch announced over the authenticated QUIC link; receivers drop unknown epochs. |
+| Q8 | Multicast from a sender we have no QUIC connection to yet (startup race) is dropped. | minor | Zigbee retries; the first Link Status round after the connection is up repairs it. |
+| Q9 | Enrollment code UX: ZHA has no UI for it. | open | Spike: printed by the coordinator (`zloe-ctl enroll`). Later: ZHA repair/config flow, or a QR code. |
+| Q10 | Enrollment code brute force. | covered | 128-bit codes, one use, 10 minute lifetime; proofs bound to the TLS session. A human-typeable short code would need a PAKE (SPAKE2) instead of HMAC. |
+| Q11 | mDNS stays unauthenticated: an attacker can announce fake peers or addresses. | covered | Announcements only trigger connection attempts; a peer is accepted only after mutual TLS. Bad addresses cost retries (address rotation exists). |
+| Q12 | Mixed networks (some nodes `none`, some `quic`). | minor | `quic` nodes ignore `none` peers; the coordinator decides which mode the network uses and satellites follow its TXT `sec`. |
+| Q13 | Datagram size: 802.15.4 frame ≤127 B + ZLOE header + QUIC/UDP/IPv6 overhead. | covered | Well under the 1200 B minimum QUIC path MTU. |
+| Q14 | Dependencies (quinn, rustls, ring/aws-lc, rcgen) for the host build; the `no_std` crates are untouched. | minor | Feature-gated in `ziggurat-phy-trel` and `ziggurat-server`. |
+| Q15 | The unauthenticated bootstrap (`NETINFO_REQ`) still hands out the network key in `none` mode. | accepted | `quic` mode disables it; enrollment replaces it. |
+
+## Behaviour
+
+```
+Security (ziggurat-phy-trel::security)
+    derive_keys
+        Network key and extended PAN ID known
+            - derives the same CA key and multicast key on every node
+            - derives different keys for a different network key or extended PAN ID
+    issue_identity
+        Network keys derived
+            - creates a certificate for this node's EUI64 signed by the network CA
+            - includes role and NWK address
+Backbone (QUIC mode)
+    connect_peer
+        Peer announced over mDNS with sec=quic, lower EUI64 is us
+            - dials the peer with ALPN zloe/1 and our certificate
+        Peer's certificate chains to the network CA and names the announced EUI64
+            - accepts the connection
+            - exchanges multicast epochs
+        Peer's certificate is signed by another CA (other network key)
+            - closes the connection
+            - logs the rejection once
+        Peer's certificate names a different EUI64 than announced
+            - closes the connection
+        Peer announces sec=none
+            - does not connect
+    send_unicast
+        Peer connected
+            - sends the frame as a QUIC datagram
+            - returns Acked when the ZLOE ack datagram arrives
+        No ack after 3 tries
+            - falls back to the radio
+        Peer not connected
+            - falls back to the radio
+    send_broadcast
+        Peers reachable by multicast
+            - sends one datagram per group, sealed with the multicast key
+        Other peers
+            - sends a QUIC datagram copy to each
+    receive_multicast
+        Sealed with the multicast key, sender's current epoch, new packet number
+            - delivers the frame once
+        Fails authentication
+            - drops it
+        Unknown epoch for that sender
+            - drops it
+        Packet number already seen in the epoch
+            - drops it
+    rotate_network_key
+        Network key changes
+            - derives new keys and certificates
+            - closes connections made with the old identity
+            - reconnects to peers
+Enrollment
+    coordinator issue_code
+        Requested by zloe-ctl enroll
+            - returns a 128-bit base32 code valid 10 minutes
+    satellite enroll
+        Correct code
+            - both proofs verify
+            - receives the network settings
+            - starts in router role in quic mode
+        Wrong code
+            - proofs fail on both sides
+            - receives nothing
+            - coordinator logs the failed attempt
+        Code expired or already used
+            - coordinator rejects the proof
+        Man in the middle without the code
+            - neither side's proof verifies
+```
+
+## Spike plan
+
+1. Key derivation + self-issued certificates (rcgen), verifier pinned to the derived
+   CA.
+2. QUIC peer links (quinn) carrying datagrams, with the spinel2quic tuning; ZLOE ack
+   over datagrams; fall back to the radio when not connected.
+3. Sealed multicast with epochs.
+4. Enrollment with code and exporter-bound proofs; `none` mode bootstrap disabled
+   in `quic` mode.
+5. Bench: the deny run, satellite bootstrap via enrollment, a rogue node with another
+   network key rejected, multicast replay rejected, coordinator restart.

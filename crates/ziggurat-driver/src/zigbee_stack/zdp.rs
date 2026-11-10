@@ -83,7 +83,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     extended_pan_id: self.state.extended_pan_id,
                     extended_address: entry.extended_address,
                     network_address: entry.network_address,
+                    // Entries learned from Link Status default to Router; 0x0000 is
+                    // always the coordinator (SPIKE #84 bench fix)
                     device_type: match entry.device_type {
+                        _ if entry.network_address == Nwk(0x0000) => ZdpDeviceType::Coordinator,
                         NwkDeviceType::Coordinator => ZdpDeviceType::Coordinator,
                         NwkDeviceType::Router => ZdpDeviceType::Router,
                         NwkDeviceType::EndDevice => ZdpDeviceType::EndDevice,
@@ -102,9 +105,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         _ => ZdpAffinity::NoneOfTheAbove,
                     },
                     permit_joining: ZdpPermitJoining::Unknown,
-                    // We are the coordinator (tree depth 0), so every neighbor of
-                    // ours sits at depth 1
-                    depth: 1,
+                    // The coordinator sits at tree depth 0, its neighbors at 1. A
+                    // router does not track depth; its neighbors are reported at 1
+                    // like the coordinator's (SPIKE #84 bench fix for 0x0000)
+                    depth: u8::from(entry.network_address != Nwk(0x0000)),
                     lqa: entry.lqa().unwrap_or(0),
                 })
                 .collect();
