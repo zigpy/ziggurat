@@ -316,7 +316,13 @@ impl Backbone {
                         let nwk = info
                             .get_property_val_str("nwk")
                             .and_then(|s| Nwk::try_from_hex(s).ok());
-                        let Some(ip) = info.get_addresses_v4().into_iter().next() else {
+                        // mDNS lists every interface (Docker bridges, loopback, ...):
+                        // pick deterministically, LAN first
+                        let Some(ip) = info
+                            .get_addresses_v4()
+                            .into_iter()
+                            .min_by_key(|ip| (address_rank(*ip), *ip))
+                        else {
                             continue;
                         };
                         let addr = SocketAddr::new(IpAddr::V4(ip), info.get_port());
@@ -328,14 +334,21 @@ impl Backbone {
                         if eui64 == identity.eui64 || pan_id != Some(identity.pan_id) {
                             continue;
                         }
-                        tracing::info!("TREL: mDNS peer {eui64:?} / {nwk:?} at {addr}");
-                        let peer = shared.peers.entry(eui64).or_insert(Peer {
-                            addr,
-                            nwk,
-                            source: PeerSource::Mdns,
-                            last_rx: None,
+                        let peer = shared.peers.entry(eui64).or_insert_with(|| {
+                            tracing::info!("TREL: mDNS peer {eui64:?} / {nwk:?} at {addr}");
+                            Peer {
+                                addr,
+                                nwk,
+                                source: PeerSource::Mdns,
+                                last_rx: None,
+                            }
                         });
-                        peer.addr = addr;
+                        // Once the peer has talked to us, its datagrams' source address
+                        // is authoritative
+                        if peer.last_rx.is_none() && peer.addr != addr {
+                            tracing::info!("TREL: mDNS peer {eui64:?} moved to {addr}");
+                            peer.addr = addr;
+                        }
                         if nwk.is_some() {
                             peer.nwk = nwk;
                         }
@@ -737,6 +750,20 @@ impl MacHeader {
             dest,
             source,
         })
+    }
+}
+
+/// Lower is better: 192.168/16, 10/8, other non-loopback, 172.16/12 (usually
+/// container bridges), link-local, loopback.
+const fn address_rank(ip: std::net::Ipv4Addr) -> u8 {
+    let o = ip.octets();
+    match o {
+        [192, 168, ..] => 0,
+        [10, ..] => 1,
+        [172, 16..=31, ..] => 3,
+        [169, 254, ..] => 4,
+        [127, ..] => 5,
+        _ => 2,
     }
 }
 

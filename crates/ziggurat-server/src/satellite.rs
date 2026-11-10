@@ -110,3 +110,77 @@ fn clock_counter() -> u32 {
     // Seconds since 2026-01-01, times 10: fits u32 for ~13 years
     (secs.saturating_sub(1_767_225_600) * 10) as u32
 }
+
+/// SPIKE: bring this node up as coordinator of a private test network, created on
+/// first use and kept in `path` (`key=value` lines) so restarts keep the network.
+pub async fn test_coordinator(
+    server: &std::sync::Arc<ZigguratServer>,
+    path: &str,
+    channel: u8,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use ziggurat_driver::ziggurat_ieee_802154::types::{Key, PanId};
+
+    if !std::path::Path::new(path).exists() {
+        let mut random = [0u8; 26];
+        std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut random)?;
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let pan = u16::from_le_bytes([random[0], random[1]]) % 0xFFF0 + 1;
+        std::fs::write(
+            path,
+            format!(
+                "channel={channel}\npan={pan:04x}\nepid={}\nkey={}\n",
+                hex(&random[2..10]),
+                hex(&random[10..26])
+            ),
+        )?;
+        tracing::info!("Test network: created {path}");
+    }
+
+    let text = std::fs::read_to_string(path)?;
+    let get = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")))
+            .ok_or_else(|| format!("{path}: missing {k}"))
+    };
+    let mut key = [0u8; 16];
+    let key_hex = get("key")?;
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&key_hex[i * 2..i * 2 + 2], 16)?;
+    }
+
+    let phy = server.phy().await?;
+    let ieee = phy.inner().hw_address().await?;
+
+    let payload = proto::ConfigurePayload {
+        role: proto::NodeRole::Coordinator,
+        source_routing: true,
+        state: proto::NetworkState {
+            channel: get("channel")?.parse()?,
+            nwk_update_id: 0,
+            pan_id: PanId::try_from_hex(get("pan")?)?,
+            extended_pan_id: Eui64::try_from_hex(get("epid")?)?,
+            nwk_address: Nwk(0x0000),
+            ieee_address: ieee,
+            network_key: Key(key),
+            network_key_seq: 0,
+            network_key_tx_counter: clock_counter(),
+            tc_link_key: Key(*b"ZigBeeAlliance09"),
+            has_tclk_seed: false,
+            tclk_seed: Key([0; 16]),
+            tclk_flavor: proto::TclkFlavorId::ZStack,
+            tx_power: 8,
+            aps_frame_counter: clock_counter(),
+        },
+    };
+    tracing::info!("Test network: coordinator {ieee:?} from {path}");
+    server
+        .handle_configure(payload)
+        .await
+        .map_err(|_| "configure failed")?;
+    server
+        .handle_start_network()
+        .await
+        .map_err(|_| "start_network failed")?;
+    tracing::info!("Test network: coordinator is up");
+    Ok(())
+}
