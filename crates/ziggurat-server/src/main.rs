@@ -25,12 +25,17 @@ use ziggurat_driver::zigbee_stack::{SendHandle, Tunables, ZigbeeNotification, Zi
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
+use ziggurat_phy_trel::{DenyList, TrelConfig, TrelPhy};
+
 use ziggurat_protocol::{self as proto};
 
 use reconnect::{Outage, ReconnectPolicy};
 
-type Phy = SpinelPhy<TokioRuntime>;
-type Stack = ZigbeeStack<Phy, TokioRuntime>;
+mod satellite;
+
+/// SPIKE: every radio is wrapped in the (optionally disabled) TREL-like backbone.
+pub type Phy = TrelPhy<SpinelPhy<TokioRuntime>>;
+pub type Stack = ZigbeeStack<Phy, TokioRuntime>;
 
 /// Outbound frames a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -86,6 +91,7 @@ pub struct ZigguratServer {
     /// with `EBUSY`, or a second concurrent connection to the same TCP endpoint
     phy: AsyncMutex<Option<Arc<Phy>>>,
     stack: Mutex<Option<Arc<Stack>>>,
+    trel: TrelConfig,
     started: AtomicBool,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
     notification_forwarder: Mutex<Option<JoinHandle<()>>>,
@@ -94,11 +100,12 @@ pub struct ZigguratServer {
 impl ZigguratServer {
     /// The RCP transport is not opened and the Zigbee stack is not created until a
     /// client sends a command that needs them.
-    pub fn new(serial: SerialConfig) -> Self {
+    pub fn new(serial: SerialConfig, trel: TrelConfig) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_HUB_DEPTH);
 
         Self {
             serial,
+            trel,
             phy: AsyncMutex::new(None),
             stack: Mutex::new(None),
             started: AtomicBool::new(false),
@@ -172,7 +179,7 @@ impl ZigguratServer {
     }
 
     /// The process-lifetime radio transport, opening the RCP link on first use.
-    async fn phy(&self) -> std::io::Result<Arc<Phy>> {
+    pub(crate) async fn phy(&self) -> std::io::Result<Arc<Phy>> {
         let mut phy = self.phy.lock().await;
 
         if let Some(phy) = &*phy {
@@ -180,8 +187,10 @@ impl ZigguratServer {
         }
 
         let transport = open_transport(&self.serial).await?;
-        let new_phy = Arc::new(Phy::new());
-        new_phy.set_close_when_unresponsive(self.serial.reconnect_on_unresponsive);
+        let new_phy = Arc::new(TrelPhy::new(SpinelPhy::new(), self.trel.clone()).await?);
+        new_phy
+            .inner()
+            .set_close_when_unresponsive(self.serial.reconnect_on_unresponsive);
 
         tokio::spawn(run_link(new_phy.clone(), self.serial.clone(), transport));
 
@@ -671,7 +680,7 @@ impl ZigguratServer {
 
     async fn handle_get_hw_address(&self) -> Result<proto::Response, proto::Error> {
         let phy = self.phy().await.map_err(radio_error)?;
-        let ieee = phy.hw_address().await.map_err(radio_error)?;
+        let ieee = phy.inner().hw_address().await.map_err(radio_error)?;
         Ok(proto::Response::HwAddress(proto::HwAddressPayload { ieee }))
     }
 
@@ -690,7 +699,7 @@ impl ZigguratServer {
     /// (Re)initializes the Zigbee stack, but does not start it: `load_*` then
     /// `start_network` follow. The stack deliberately outlives client connections;
     /// reconfiguring replaces it wholesale.
-    async fn handle_configure(
+    pub(crate) async fn handle_configure(
         &self,
         payload: proto::ConfigurePayload,
     ) -> Result<proto::Response, proto::Error> {
@@ -726,7 +735,7 @@ impl ZigguratServer {
     /// permission to send commands: the network must be fully up (RCP reset handled,
     /// radio programmed) before replying, or the client's first command would race
     /// with the boot-time reset.
-    async fn handle_start_network(&self) -> Result<proto::Response, proto::Error> {
+    pub(crate) async fn handle_start_network(&self) -> Result<proto::Response, proto::Error> {
         let stack = self.loadable()?;
 
         if let Err(e) = stack.start_network().await {
@@ -972,6 +981,7 @@ async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTra
     loop {
         let (reader, writer) = tokio::io::split(transport);
         let error = phy
+            .inner()
             .run_link(FromTokio::new(reader), FromTokio::new(writer))
             .await;
 
@@ -983,7 +993,7 @@ async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTra
 
         // A link the RCP never answered on does not end the outage: a peer that
         // accepts and drops connections must not keep the process alive forever
-        if phy.rcp_answered() {
+        if phy.inner().rcp_answered() {
             outage = None;
         }
         let outage = outage.get_or_insert_with(Outage::start);
@@ -1106,6 +1116,32 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:9999")]
     listen: String,
 
+    /// SPIKE: UDP port of the TREL-like IP backbone; 0 disables it
+    #[arg(long, default_value_t = 0)]
+    backbone_port: u16,
+
+    /// SPIKE: a backbone peer reachable without mDNS (`host:port`), repeatable
+    #[arg(long)]
+    backbone_peer: Vec<std::net::SocketAddr>,
+
+    /// SPIKE: disable mDNS discovery of backbone peers
+    #[arg(long)]
+    no_mdns: bool,
+
+    /// SPIKE: fake "out of radio range" for a device, by EUI64 (16 hex digits) or NWK
+    /// address (4 hex digits), repeatable
+    #[arg(long)]
+    deny: Vec<String>,
+
+    /// SPIKE: run as a satellite router: fetch the network from this coordinator's
+    /// Ziggurat API (`ws://host:port`) and start in router role
+    #[arg(long)]
+    satellite_of: Option<String>,
+
+    /// SPIKE: the satellite's NWK address (hex); derived from its EUI64 by default
+    #[arg(long)]
+    satellite_nwk: Option<String>,
+
     /// Log level (RUST_LOG still overrides, with per-module filters)
     #[arg(long, default_value_t = LevelFilter::DEBUG)]
     log_level: LevelFilter,
@@ -1137,13 +1173,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .init();
         }
 
-        let server = Arc::new(ZigguratServer::new(SerialConfig {
-            device: args.device,
-            baudrate: args.baudrate,
-            flow_control: args.flow_control,
-            reconnect_timeout: Duration::from_secs(args.reconnect_timeout),
-            reconnect_on_unresponsive: args.reconnect_on_unresponsive,
-        }));
+        let mut deny = DenyList::default();
+        for entry in &args.deny {
+            match entry.len() {
+                16 => {
+                    deny.eui64.insert(Eui64::try_from_hex(entry)?);
+                }
+                4 => {
+                    deny.nwk.insert(Nwk::try_from_hex(entry)?);
+                }
+                _ => return Err(format!("bad --deny entry {entry:?}").into()),
+            }
+        }
+
+        let server = Arc::new(ZigguratServer::new(
+            SerialConfig {
+                device: args.device,
+                baudrate: args.baudrate,
+                flow_control: args.flow_control,
+                reconnect_timeout: Duration::from_secs(args.reconnect_timeout),
+                reconnect_on_unresponsive: args.reconnect_on_unresponsive,
+            },
+            TrelConfig {
+                port: args.backbone_port,
+                static_peers: args.backbone_peer,
+                mdns: !args.no_mdns,
+                deny,
+            },
+        ));
+
+        if args.backbone_port != 0 {
+            let server = server.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    let Some(stack) = server.current_stack() else {
+                        continue;
+                    };
+                    for peer in stack.radio.peers() {
+                        tracing::info!("[diag] backbone peer {peer}");
+                    }
+                    let core = stack.state.core.lock();
+                    for n in core.nib.neighbors.entries() {
+                        if n.device_type == ziggurat_driver::zigbee_stack::NwkDeviceType::EndDevice
+                        {
+                            continue;
+                        }
+                        tracing::info!(
+                            "[diag] neighbor {:?} {:?} lqa={:?} in_cost={} out_cost={}",
+                            n.network_address,
+                            n.extended_address,
+                            n.lqa(),
+                            n.incoming_link_cost(),
+                            n.outgoing_cost
+                        );
+                    }
+                }
+            });
+        }
+
+        if let Some(coordinator) = args.satellite_of {
+            let nwk = args
+                .satellite_nwk
+                .as_deref()
+                .map(Nwk::try_from_hex)
+                .transpose()?;
+            let server = server.clone();
+            tokio::spawn(async move {
+                if let Err(e) = satellite::bootstrap(&server, &coordinator, nwk).await {
+                    tracing::error!("Satellite bootstrap failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+        }
 
         match args.api {
             ApiMode::Ws => server.run(&args.listen).await?,

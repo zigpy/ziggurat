@@ -1,0 +1,21 @@
+[package]
+name = "ziggurat-phy-trel"
+version.workspace = true
+description = "SPIKE: TREL-like IP backbone link wrapped around a ziggurat-phy RadioPhy"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ziggurat-ieee-802154.workspace = true
+ziggurat-phy.workspace = true
+
+parking_lot = "0.12.5"
+tokio = { version = "1.53.1", features = ["rt", "time", "sync", "net", "macros"] }
+tracing = "0.1"
+mdns-sd = "0.21.7"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
