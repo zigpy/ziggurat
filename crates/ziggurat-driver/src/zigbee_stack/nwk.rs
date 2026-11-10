@@ -336,6 +336,41 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
+    /// Deliver a frame we addressed to ourselves as if it had been received: the stack
+    /// handles the ZDP requests it owns (its answers loop back the same way), and the
+    /// client gets the frame. The send succeeds at once.
+    fn deliver_locally(&self, nwk_frame: &NwkFrame) -> SendHandle {
+        use ziggurat_zigbee::aps::frame::{ApsFrame, parse_aps_frame};
+
+        let slot = Arc::new(super::SendSlot::default());
+        let id = self.core().sends.local_id();
+        slot.settled(Ok(()));
+
+        if let Some(payload) = nwk_frame.payload.as_opaque()
+            && let Ok(ApsFrame::Data(aps_frame)) = parse_aps_frame(payload)
+        {
+            tracing::debug!(
+                "Delivering frame to ourselves locally: cluster {:#06x}",
+                aps_frame.cluster_id
+            );
+            self.handle_zdp_frame(nwk_frame, &aps_frame);
+            self.push_notification(super::ZigbeeNotification::ReceivedApsCommand {
+                source: nwk_frame.nwk_header.source,
+                destination: nwk_frame.nwk_header.destination,
+                group: aps_frame.group_id,
+                profile_id: aps_frame.profile_id,
+                cluster_id: aps_frame.cluster_id,
+                src_ep: aps_frame.source_endpoint,
+                dst_ep: aps_frame.destination_endpoint.unwrap_or(0),
+                lqi: 255,
+                rssi: 0,
+                aps_encrypted: false,
+                data: aps_frame.asdu.to_vec(),
+            });
+        }
+        SendHandle::new(id, slot)
+    }
+
     /// Send a unicast: assign its NWK sequence number, resolve a next hop, and enqueue
     /// it, held for a route discovery if none is known. Resolution and enqueueing share
     /// one core lock, so the next hop cannot change in between. `Err` means nothing was
@@ -358,6 +393,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         let destination = nwk_frame.nwk_header.destination;
+
+        // SPIKE (#84 bench): a frame addressed to ourselves (zigpy scanning the
+        // coordinator's own tables with ZDP) is delivered locally instead of routed
+        if destination == self.state.network_address {
+            return Ok(self.deliver_locally(&nwk_frame));
+        }
+
         let now = self.core_now();
 
         let mut core = self.core();

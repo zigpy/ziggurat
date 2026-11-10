@@ -266,6 +266,12 @@ impl<F, W, E> Default for Sends<F, W, E> {
 }
 
 impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
+    /// An id for a send that never enters the table (delivered locally, e.g. a frame
+    /// we address to ourselves).
+    pub const fn local_id(&mut self) -> SendId {
+        self.next_id()
+    }
+
     const fn next_id(&mut self) -> SendId {
         let id = SendId(self.next_id);
         self.next_id += 1;
