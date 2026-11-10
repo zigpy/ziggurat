@@ -33,3 +33,8 @@ tokio = { version = "1.53.1", features = ["test-util"] }
 name = "ziggurat"
 path = "src/main.rs"
 doc = false
+
+[[bin]]
+name = "zloe-ctl"
+path = "src/bin/zloe_ctl.rs"
+doc = false
