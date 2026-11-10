@@ -284,6 +284,14 @@ impl Routing {
         self.route_table.remove(&destination).is_some()
     }
 
+    /// The device at `nwk` left or joined again, clear associated state.
+    pub fn forget(&mut self, nwk: Nwk) {
+        self.route_table.remove(&nwk);
+        self.route_record_table.remove(&nwk);
+        self.discovery_table
+            .retain(|_, entry| entry.destination_address != nwk && entry.source_address != nwk);
+    }
+
     /// Seed an active routing entry restored by the client on startup. Unlike a route
     /// learned at runtime, this does not record a change (the client already has it).
     pub fn restore_route(&mut self, destination: Nwk, next_hop: Nwk, path_cost: u8) {

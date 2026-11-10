@@ -1035,8 +1035,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 });
             }
             ApsUpdateDeviceStatus::DeviceLeft => {
-                // Spec 4.4.3.2.3: informative only, no action is taken beyond
-                // notifying the client
+                // Spec 4.4.3.2.3: informative only. The device is gone, so our state
+                // for its address is stale.
+                self.forget_nwk_state(update.device_short_address);
+
                 let router_ieee = nwk_frame
                     .nwk_header
                     .source_ieee
@@ -1305,7 +1307,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The address map entry and any negotiated link key are kept around so that the
         // device can rejoin later
         self.drop_indirect_transactions(source_ieee, source);
-        self.core().nib.routing.remove_route(source);
+        self.forget_nwk_state(source);
 
         self.push_notification(ZigbeeNotification::DeviceLeft {
             nwk: source,

@@ -32,12 +32,31 @@ use super::{
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
+    /// A device joined or rejoined as `nwk`: the address starts a new session.
+    pub(super) fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
+        self.forget_nwk_state(nwk);
+
         let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
 
         if conflict {
             self.handle_address_conflict(nwk, AddrConflictSource::Local);
         }
+    }
+
+    /// The device at `nwk` left or joined again, so what we know about the address
+    /// belongs to its previous session. Held sends fail: they wait on a route request
+    /// the device never heard, and would block a new one until it expires. The device
+    /// may restart its APS counter, so its duplicate entries go too.
+    pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
+        self.state
+            .aps_duplicates
+            .lock()
+            .retain(|&(source, _), _| source != nwk);
+
+        let mut core = self.core();
+        core.nib.routing.forget(nwk);
+        let actions = core.sends.fail_unrouted(nwk);
+        self.commit_sends(core, actions);
     }
 
     /// Filter broadcast frames based on the NWK broadcast transaction table
@@ -148,9 +167,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
-        // Update the address cache
+        // Update the address cache. Hearing a device is not a join, so the address keeps
+        // its session state.
         if let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
-            self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
+            let source = nwk_frame.nwk_header.source;
+            let conflict = self
+                .core()
+                .nib
+                .address_map
+                .update_mapping(src_eui64, source);
+
+            if conflict {
+                self.handle_address_conflict(source, AddrConflictSource::Local);
+            }
         }
 
         // Spec 3.6.1.10.2: a frame addressed to our network address but a different
