@@ -1,8 +1,10 @@
 # ZLOE broadcast delivery: design and gap analysis
 
 Status: design for the spike (zigpy/ziggurat#84). Step 1 is built: multicast
-announcement, broadcasts by multicast, the probe, and per-peer unicast copies as the
-fallback (see "Step 1 as built"). The hub and suppression are not built.
+announcement (IPv6 and IPv4), broadcasts by multicast, the probe, and per-peer unicast
+copies as the fallback (see "Step 1 as built"). Decision 2026-11-10: no hub and no
+suppression. Peers on links where multicast is unreliable (Wi-Fi) run with
+`--zloe-mcast-port 0`: they announce no group and get unicast copies.
 
 Styleguide: the repository has no written styleguide; its conventions are enforced by
 `.pre-commit-config.yaml` (`cargo fmt --all`, `cargo clippy --all-targets
@@ -71,7 +73,7 @@ limit of the spike; **open** = needs measurement.
 |---|---|---|---|
 | M1 | Nodes listen on different UDP ports (two nodes on one host on the bench); multicast needs one shared port. | must | Second socket on the multicast port with address and port reuse (built). Each node announces its group and port over mDNS; a sender uses one datagram per distinct announced address, normally one. Multicast is sent from the unicast socket, so receivers learn the sender's unicast address from it. |
 | M2 | Link-local multicast is per interface; without `--zloe-interface` the interface is unknown. | must | Multicast only with `--zloe-interface` (built). A node without it announces no multicast address, so peers reach it through the fallback. |
-| M3 | IPv4 multicast cannot be joined on the dual-stack socket. | accepted | IPv6 multicast only. IPv4-only links use the fallback. |
+| M3 | IPv4 multicast cannot be joined on the dual-stack socket. | resolved | Separate IPv4 socket joins `239.255.h.h` on the backbone interface's address; sending uses the unicast socket with `IP_MULTICAST_IF` set, so peers still see the unicast port. |
 | M4 | Multicast can silently stop (snooping switch without a querier, Wi-Fi isolation), and can fail in one direction only. | must | Probe: one multicast datagram per 5 s carries the ack-request flag; peers answer by unicast. A peer that misses two probes is unconfirmed, and the sender adds the fallback. Detection ≤ 10 s, well inside the 45 s neighbour ageing. |
 | M5 | Wi-Fi access points buffer multicast for sleeping clients and send it at the lowest rate. Expected +100–300 ms on broadcasts crossing the backbone. | open | Measure with a Wi-Fi satellite. Unicast is unaffected. |
 | M6 | Multicast datagrams are unacknowledged. | covered | Each node receives up to N−1 copies of a flood (every relay), and Zigbee re-sends when passive acks are missing. |
@@ -123,7 +125,9 @@ multicast-hostile network show the fallback traffic is a problem.
 - Multicast group: `ff12::5a4c:hhhh:hhhh` (transient, link-local scope), `h` = low 32
   bits of the extended PAN ID.
 - Multicast port: `--zloe-mcast-port`, default 19789, 0 disables multicast.
-- mDNS TXT `mc=[group]:port`: where the node listens for multicast.
+- mDNS TXT `mc=[group]:port`: where the node listens for IPv6 multicast.
+- IPv4 group: `239.255.h.h` (organization-local, RFC 2365), `h` = last two bytes of the
+  extended PAN ID; TXT `mc4=239.255.h.h:port`.
 - No new header fields: the original sender is already in the header, a forwarded
   unicast's destination is in the inner 802.15.4 header.
 
@@ -169,6 +173,17 @@ Bench (coordinator and satellite, `enp4s0f0`, IPv6 link-local):
 - Detection takes 12–17 s (12 s window plus up to one 5 s probe tick), not the
   ≤ 10 s M4 aimed at; still well inside the 45 s neighbour ageing. Broadcasts sent in
   that gap reach the peer only through Zigbee's own retries.
+
+## IPv4 multicast
+
+- Each node joins both groups when it can: IPv6 needs the dual-stack socket, IPv4
+  needs an IPv4 address on `--zloe-interface`. It announces each group it joined.
+- Each group is probed separately; a peer is reached through its first confirmed group
+  in preference order: IPv6 then IPv4, or IPv4 then IPv6 with `--zloe-ipv4`.
+- Bench (`--zloe-ipv4` on both nodes): both groups joined and confirmed within 10 s,
+  broadcasts went to `239.255.124.18:19789`, unicast addresses unaffected.
+- Not covered: an IPv4-only host (no dual-stack socket) is untested; the test hook
+  blocks both groups at once, so per-family failover is untested.
 
 ## Behaviour
 
