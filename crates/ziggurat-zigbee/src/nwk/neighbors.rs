@@ -540,13 +540,16 @@ impl Neighbors {
             .min()
     }
 
-    /// Router neighbors with a live link, which are expected to relay our broadcasts
-    /// (passive acknowledgment, spec 3.6.6). Aging zeroes the outgoing cost, so a
-    /// non-zero cost means the router is still exchanging link statuses with us.
-    pub fn expected_broadcast_relayers(&self) -> Vec<Nwk> {
+    /// Router neighbors with a good live link, which are expected to relay our
+    /// broadcasts (passive acknowledgment, spec 3.6.6).
+    pub fn expected_broadcast_relayers(&self, max_link_cost: u8) -> Vec<Nwk> {
         self.table
             .values()
-            .filter(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
+            .filter(|entry| {
+                entry.device_type == NwkDeviceType::Router
+                    && (1..=max_link_cost).contains(&entry.outgoing_cost)
+                    && (1..=max_link_cost).contains(&entry.incoming_link_cost())
+            })
             .map(|entry| entry.network_address)
             .collect()
     }

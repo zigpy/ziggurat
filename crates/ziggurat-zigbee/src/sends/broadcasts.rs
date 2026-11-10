@@ -77,8 +77,8 @@ struct Record<F, W, E> {
     schedule: Schedule,
     copy: CopyState,
     handed_off: bool,
-    /// The quorum was heard before a copy was handed off: the audience was empty, or
-    /// the neighbors relayed while the copy was in the radio. The first handoff settles
+    /// The quorum was heard before a copy was handed off: the neighbors relayed while
+    /// the copy was in the radio. The first handoff settles
     /// the send; a broadcast is never delivered without reaching the air once.
     quorum_heard: bool,
     /// The last copy's radio failure: the verdict if the copies run out before one is
