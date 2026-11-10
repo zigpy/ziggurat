@@ -1047,6 +1047,11 @@ struct Args {
     #[arg(long)]
     zloe_ipv4: bool,
 
+    /// SPIKE: UDP port of the ZLOE multicast group, announced over mDNS (TXT `mc`);
+    /// needs --zloe-interface. 0 disables multicast
+    #[arg(long, default_value_t = 19789)]
+    zloe_mcast_port: u16,
+
     /// SPIKE: disable mDNS discovery of ZLOE peers
     #[arg(long, alias = "no-mdns")]
     zloe_no_mdns: bool,
@@ -1140,6 +1145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mdns: !args.zloe_no_mdns,
                 interface: args.zloe_interface,
                 prefer_ipv4: args.zloe_ipv4,
+                mcast_port: args.zloe_mcast_port,
                 deny,
             },
         ));

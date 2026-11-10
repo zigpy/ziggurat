@@ -119,6 +119,7 @@ async fn node(
             mdns,
             interface: None,
             prefer_ipv4: false,
+            mcast_port: 0,
             deny: DenyList::default(),
         },
     )
