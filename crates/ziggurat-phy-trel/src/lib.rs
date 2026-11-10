@@ -1055,11 +1055,19 @@ impl Backbone {
 
                     let mut groups: Vec<(usize, SocketAddr)> = Vec::new();
                     for (eui64, peer) in &mut shared.peers {
-                        for family in [V6, V4] {
-                            if let Some(group) = peer.mcast[family].addr
-                                && !groups.contains(&(family, group))
-                            {
+                        // Probe the preferred group only; the other one only while
+                        // the preferred one is absent or unconfirmed, so a peer can
+                        // fail over without doubling the probe traffic
+                        let order = if prefer_ipv4 { [V4, V6] } else { [V6, V4] };
+                        for family in order {
+                            let Some(group) = peer.mcast[family].addr else {
+                                continue;
+                            };
+                            if !groups.contains(&(family, group)) {
                                 groups.push((family, group));
+                            }
+                            if peer.mcast[family].confirmed() {
+                                break;
                             }
                         }
                         let ok = peer.multicast_group(prefer_ipv4);
