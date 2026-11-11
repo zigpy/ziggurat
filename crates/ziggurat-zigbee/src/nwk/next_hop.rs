@@ -2,8 +2,11 @@
 //! neighbor tables that may rewrite the frame to carry a source route (spec 3.6.4.3).
 
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use ziggurat_ieee_802154::types::Nwk;
+
+use crate::Instant;
 
 use crate::nwk::frame::{NwkFrame, NwkRouteDiscovery, NwkSourceRoute};
 use crate::nwk::neighbors::Neighbors;
@@ -70,6 +73,9 @@ pub struct Policy {
     pub force_route_discovery: bool,
     /// The longest source route we embed.
     pub max_source_route: u8,
+    /// How long after a router child associates or rejoins we send to it directly
+    /// when no route is known.
+    pub new_router_child_window: Duration,
 }
 
 /// Resolve the MAC next hop for a unicast.
@@ -83,6 +89,7 @@ pub fn resolve(
     frame: &mut NwkFrame,
     mode: &SendMode,
     policy: Policy,
+    now: Instant,
 ) -> NextHop {
     let destination = frame.nwk_header.destination;
 
@@ -116,6 +123,18 @@ pub fn resolve(
         && let Some(next_hop) = routing.next_hop(destination)
     {
         return NextHop::Resolved(next_hop);
+    }
+
+    // A router child that just attached has sent no link status yet, send to it
+    // directly for a short time
+    if !policy.force_route_discovery
+        && neighbors.is_recently_attached_router_child(
+            destination,
+            now,
+            policy.new_router_child_window,
+        )
+    {
+        return NextHop::Resolved(destination);
     }
 
     // No usable route. A host hint stands in for discovery rather than triggering it.

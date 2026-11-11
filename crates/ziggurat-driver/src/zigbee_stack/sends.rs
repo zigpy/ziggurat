@@ -166,6 +166,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             is_concentrator: self.state.is_concentrator,
             force_route_discovery: self.state.hack_force_route_discovery,
             max_source_route: self.tunables.max_source_route(),
+            new_router_child_window: 2 * self.tunables.link_status_period(),
         }
     }
 
@@ -184,6 +185,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         nib: &Nib,
         frame: &mut Frame,
+        now: CoreInstant,
     ) -> Result<(Nwk, Option<Ieee802154Address>), DeliveryError> {
         let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
@@ -195,6 +197,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame,
             &SendMode::Route(RouteDirective::StackDecides),
             self.next_hop_policy(),
+            now,
         );
 
         match resolved {
@@ -320,7 +323,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     destination,
                     now,
                     &self.tunables,
-                    |send| self.resolve_routed_unicast(&core.nib, send),
+                    |send| self.resolve_routed_unicast(&core.nib, send, now),
                 ));
             } else if core
                 .nib

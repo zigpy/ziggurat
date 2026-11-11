@@ -369,6 +369,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &mut nwk_frame,
             &mode,
             self.next_hop_policy(),
+            now,
         );
 
         let (handle, actions) = match resolved {
