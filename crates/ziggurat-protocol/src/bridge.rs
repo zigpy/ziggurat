@@ -191,7 +191,7 @@ pub fn apply_children<P: RadioPhy, R: Runtime>(
             // Unknown restores as an end device (the safe frame-pending default).
             ChildDeviceType::Unknown | ChildDeviceType::EndDevice => NwkDeviceType::EndDevice,
         };
-        core.nib.neighbors.upsert_child(
+        core.nib.neighbors.restore_child(
             ChildDescriptor {
                 eui64: entry.ieee,
                 network_address: entry.nwk,

@@ -506,6 +506,16 @@ impl Neighbors {
     /// are refreshed even on existing entries: a device may re-attach with different
     /// capabilities (e.g. re-flashed from router to end device).
     pub fn upsert_child(&mut self, child: ChildDescriptor, now: Instant) {
+        self.upsert(child, now, Some(now));
+    }
+
+    /// Seed a child entry restored by the client on startup. Unlike a device that
+    /// associates or rejoins, a restored child did not just attach to us.
+    pub fn restore_child(&mut self, child: ChildDescriptor, now: Instant) {
+        self.upsert(child, now, None);
+    }
+
+    fn upsert(&mut self, child: ChildDescriptor, now: Instant, attached_at: Option<Instant>) {
         let entry = self.table.entry(child.eui64).or_insert_with(|| TableEntry {
             extended_address: child.eui64,
             network_address: child.network_address,
@@ -525,7 +535,7 @@ impl Neighbors {
             mac_unicast_bytes_transmitted: 0,
             mac_unicast_bytes_received: 0,
             router_added_timestamp: now,
-            attached_at: Some(now),
+            attached_at,
             router_connectivity: 0,
             router_neighbor_set_diversity: 0,
             router_outbound_activity: 0,
@@ -533,7 +543,7 @@ impl Neighbors {
             security_timer: 0,
         });
 
-        entry.attached_at = Some(now);
+        entry.attached_at = attached_at;
         entry.network_address = child.network_address;
         entry.device_type = child.device_type;
         entry.rx_on_when_idle = child.rx_on_when_idle;
