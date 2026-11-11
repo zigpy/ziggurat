@@ -1055,6 +1055,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
                 // Spec 4.4.3.2.3: informative only. The device is gone, so our state
                 // for its address is stale.
+                //
+                // Known limitation: we do not track the parent of a device that is not
+                // our child. A late report from a router the device has since left for
+                // another router is taken as current.
                 self.forget_nwk_state(Some(update.device_address), update.device_short_address);
 
                 let router_ieee = nwk_frame
