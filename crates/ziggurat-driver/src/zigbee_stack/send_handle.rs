@@ -2,7 +2,7 @@
 //!
 //! An outgoing request goes through two send stages: hand off (the frame was actually
 //! sent on air, either to a next hop or as an initial broadcast) and delivery
-//! (dependent on the request: APS ACK, broadcast relay quorum, etc.). A send point can
+//! (dependent on the request: APS ACK, end of broadcast retransmissions, etc.). A send point can
 //! decide what stage to block on (if any).
 
 use alloc::sync::Arc;
@@ -123,7 +123,7 @@ impl SendHandle {
     }
 
     /// Await the send's final verdict: the end-to-end APS ack for an ack unicast, the
-    /// next-hop acceptance for a no-ack unicast, or the passive-ack quorum for a
+    /// next-hop acceptance for a no-ack unicast, or the end of retransmissions for a
     /// broadcast/groupcast.
     pub async fn delivered(&self) -> Result<(), DeliveryError> {
         loop {

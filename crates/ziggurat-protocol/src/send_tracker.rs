@@ -26,14 +26,14 @@ use crate::wire::{
 /// Which confirm frames a tracked send owes, fixed when the send is started.
 ///
 /// Frame names stay truthful: `SendConfirm` = the mesh accepted a unicast; `ApsAckConfirm`
-/// = the end-to-end APS ack verdict; `BroadcastConfirm` = the passive-ack quorum verdict.
+/// = the end-to-end APS ack verdict; `BroadcastConfirm` = the broadcast's retransmissions ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
     /// `SendConfirm` at `delivered` (which equals `handed_off` for a no-ack unicast).
     UnicastNoAck,
     /// `SendConfirm` at `handed_off`, then `ApsAckConfirm` at `delivered`.
     UnicastApsAck,
-    /// `BroadcastConfirm` at `delivered` (the passive-ack quorum verdict); groupcast
+    /// `BroadcastConfirm` at `delivered` (the retransmissions ended); groupcast
     /// too. The broadcast `handed_off` checkpoint stays local-only, never a wire
     /// frame.
     Broadcast,

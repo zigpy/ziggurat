@@ -84,12 +84,10 @@ impl Broadcasts {
         );
     }
 
-    /// Spec 3.6.6: a broadcast is fully delivered once every router that was in the
-    /// transaction's audience and is in `live_relayers` (still a live neighbor) has
-    /// been heard relaying it, bounded by the quorum: in dense neighborhoods it is
-    /// unreasonable to wait for all ~40 nearby routers, so _enough_ of them suffice.
-    /// An absent (expired) transaction means the delivery window has already closed,
-    /// which counts as acknowledged.
+    /// Spec 3.6.6: whether enough neighbors were heard relaying the broadcast.
+    /// Only expected relayers that are still good neighbors count. We need `quorum`
+    /// of them, or all of them if there are fewer. With none, the broadcast is never
+    /// acked. An expired transaction is always acked.
     pub fn passively_acked(
         &self,
         source: Nwk,
@@ -112,7 +110,7 @@ impl Broadcasts {
                     .filter(|nwk| transaction.heard_from.contains(nwk))
                     .count();
 
-                heard >= audience.len().min(quorum)
+                !audience.is_empty() && heard >= audience.len().min(quorum)
             })
     }
 }
