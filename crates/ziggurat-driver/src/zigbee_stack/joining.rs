@@ -1035,6 +1035,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 });
             }
             ApsUpdateDeviceStatus::DeviceLeft => {
+                // An end device has one parent. If it is our child now, it left the
+                // router before it joined us: the report is late and its state is
+                // current.
+                let is_our_child = self
+                    .core()
+                    .nib
+                    .neighbors
+                    .end_device_children()
+                    .contains(&update.device_address);
+
+                if is_our_child {
+                    tracing::debug!(
+                        "Ignoring late leave report for our child {:?} from {router_nwk:?}",
+                        update.device_address
+                    );
+                    return;
+                }
+
                 // Spec 4.4.3.2.3: informative only. The device is gone, so our state
                 // for its address is stale.
                 self.forget_nwk_state(Some(update.device_address), update.device_short_address);
