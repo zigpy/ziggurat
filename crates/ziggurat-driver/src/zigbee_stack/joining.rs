@@ -1053,8 +1053,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     return;
                 }
 
-                // Spec 4.4.3.2.3: informative only. The device is gone, so our state
-                // for its address is stale.
+                // Spec 4.4.3.2.3: "A Device Left is considered informative but SHOULD
+                // NOT be considered authoritative. Security related actions SHALL not
+                // be taken on receipt of this. No further processing SHALL be done."
+                //
+                // We go past that wording, but take no security action: keys, frame
+                // counters and the address map are kept. What we forget rebuilds
+                // itself, so a false report costs one route discovery.
                 //
                 // Known limitation: we do not track the parent of a device that is not
                 // our child. A late report from a router the device has since left for
