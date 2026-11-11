@@ -54,7 +54,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .retain(|&(source, _), _| source != nwk);
 
         let mut core = self.core();
-        core.nib.routing.forget(nwk);
+        core.nib.routing.forget(self.state.network_address, nwk);
         let actions = core.sends.fail_unrouted(nwk);
         self.commit_sends(core, actions);
     }

@@ -285,11 +285,16 @@ impl Routing {
     }
 
     /// The device at `nwk` left or joined again, clear associated state.
-    pub fn forget(&mut self, nwk: Nwk) {
+    pub fn forget(&mut self, own_address: Nwk, nwk: Nwk) {
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
-        self.discovery_table
-            .retain(|_, entry| entry.destination_address != nwk && entry.source_address != nwk);
+
+        // Only our own discoveries toward it are dropped. Discoveries we relay stay
+        // until they expire: they are the only duplicate check for late copies of
+        // their route requests.
+        self.discovery_table.retain(|_, entry| {
+            entry.source_address != own_address || entry.destination_address != nwk
+        });
     }
 
     /// Seed an active routing entry restored by the client on startup. Unlike a route
