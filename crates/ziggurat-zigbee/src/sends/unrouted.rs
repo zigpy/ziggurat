@@ -115,9 +115,18 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         self.discoveries.keys().copied().collect()
     }
 
-    /// The driver broadcast a route request for `destination`'s discovery.
-    pub(super) fn route_request_sent(&mut self, destination: Nwk, request: SendId) {
-        self.discoveries.get_mut(&destination).unwrap().request = Some(request);
+    /// The driver broadcast a route request for `destination`'s discovery. Returns the
+    /// broadcast of the request it replaces, for the caller to stop.
+    pub(super) fn route_request_sent(
+        &mut self,
+        destination: Nwk,
+        request: SendId,
+    ) -> Option<SendId> {
+        self.discoveries
+            .get_mut(&destination)
+            .unwrap()
+            .request
+            .replace(request)
     }
 
     /// Take every send to `destination`: its route is known.

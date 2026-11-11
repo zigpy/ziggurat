@@ -418,9 +418,15 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// The driver broadcast `request`, the route request of `destination`'s discovery.
-    pub fn route_request_sent(&mut self, destination: Nwk, request: SendId) {
-        self.unrouted_unicasts
-            .route_request_sent(destination, request);
+    /// Copies of the request it replaces still to come are not sent.
+    pub fn route_request_sent(&mut self, destination: Nwk, request: SendId) -> Actions<F, W, E> {
+        match self
+            .unrouted_unicasts
+            .route_request_sent(destination, request)
+        {
+            Some(previous) => self.broadcasts.stop(previous),
+            None => Actions::new(),
+        }
     }
 
     /// Fail every unrouted send to `destination`: its discovery is over without a
