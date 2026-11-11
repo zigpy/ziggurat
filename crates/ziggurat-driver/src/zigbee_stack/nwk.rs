@@ -34,7 +34,7 @@ use super::{
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// A device joined or rejoined as `nwk`: the address starts a new session.
     pub(super) fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        self.forget_nwk_state(nwk);
+        self.forget_nwk_state(Some(eui64), nwk);
 
         let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
 
@@ -47,7 +47,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// belongs to its previous session. Held sends fail: they wait on a route request
     /// the device never heard, and would block a new one until it expires. The device
     /// may restart its APS counter, so its duplicate entries go too.
-    pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
+    pub(super) fn forget_nwk_state(&self, eui64: Option<Eui64>, nwk: Nwk) {
         self.state
             .aps_duplicates
             .lock()
@@ -55,7 +55,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let mut core = self.core();
         core.nib.routing.forget(self.state.network_address, nwk);
-        let actions = core.sends.fail_unrouted(nwk);
+
+        // Frames awaiting its poll fail as well: a leave queued for a stale child must
+        // not reach the device after it has rejoined.
+        let mut actions = core.sends.fail_unrouted(nwk);
+        actions.extend(core.sends.drop_indirect_unicasts(eui64, nwk));
         self.commit_sends(core, actions);
     }
 
