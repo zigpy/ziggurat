@@ -109,8 +109,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         attempts: u8,
         initial_delay: Duration,
-    ) -> SendActions {
-        let (_, actions) = self.enqueue_broadcast_in(
+    ) -> (SendId, SendActions) {
+        let (handle, actions) = self.enqueue_broadcast_in(
             core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -124,7 +124,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
         );
 
-        actions
+        (handle.id(), actions)
     }
 
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).

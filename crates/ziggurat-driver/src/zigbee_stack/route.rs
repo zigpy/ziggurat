@@ -270,7 +270,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let attempts = self.tunables.rreq_retries() + 1;
         let mut core = self.core();
-        let actions =
+        let (_, actions) =
             self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
         self.commit_sends(core, actions);
     }
@@ -493,11 +493,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.4.5.1: the initial broadcast is repeated `nwkcInitialRREQRetries`
         // times, separated by the retry interval
-        self.broadcast_route_request(
+        let (request, actions) = self.broadcast_route_request(
             core,
             route_request_frame,
             self.tunables.initial_rreq_retries() + 1,
             Duration::ZERO,
-        )
+        );
+        core.sends.route_request_sent(destination, request);
+
+        actions
     }
 }

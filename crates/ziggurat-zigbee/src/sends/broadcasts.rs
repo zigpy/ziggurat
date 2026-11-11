@@ -306,6 +306,34 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         Some(actions)
     }
 
+    /// Send no further copies of a broadcast nobody waits on any more. A copy in the
+    /// radio right now cannot be recalled: its schedule is emptied instead, so the
+    /// record settles when it next comes due (a `Once` schedule settles on the copy's
+    /// own report).
+    pub(super) fn stop(&mut self, id: SendId) -> Actions<F, W, E> {
+        let mut actions = Actions::new();
+
+        let Some(record) = self.records.get_mut(&id) else {
+            return actions;
+        };
+
+        if record.copy == CopyState::Transmitting {
+            match &mut record.schedule {
+                Schedule::Once => {}
+                Schedule::PassiveAck {
+                    copies_remaining, ..
+                }
+                | Schedule::FixedInterval {
+                    copies_remaining, ..
+                } => *copies_remaining = 0,
+            }
+        } else {
+            self.settle(id, Err(SendFailure::Cancelled.into()), &mut actions);
+        }
+
+        actions
+    }
+
     /// Queue copies that are due, complete or fail schedules that ran out, and fail
     /// records past their deadline.
     pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
