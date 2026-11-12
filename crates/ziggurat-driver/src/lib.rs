@@ -2,15 +2,10 @@
 
 extern crate alloc;
 
-// The host bridge spawns an OS thread for the embassy executor; that path alone needs std.
-#[cfg(feature = "embassy-host")]
-extern crate std;
-
 pub mod broadcast_budget;
 pub mod rng;
-pub mod runtime;
-pub mod sync;
 pub mod zigbee_stack;
 
 pub use ziggurat_ieee_802154;
+pub use ziggurat_runtime::{runtime, sync};
 pub use ziggurat_zigbee;

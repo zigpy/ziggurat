@@ -1854,18 +1854,13 @@ version = "0.1.0"
 dependencies = [
  "abstract-bits",
  "arbitrary-int",
- "embassy-executor",
- "embassy-sync",
- "embassy-time",
  "futures",
- "parking_lot",
  "rand",
- "spin",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "ziggurat-ieee-802154",
  "ziggurat-phy",
+ "ziggurat-runtime",
  "ziggurat-zigbee",
 ]
 
@@ -1913,6 +1908,21 @@ dependencies = [
  "ziggurat-ieee-802154",
  "ziggurat-phy",
  "ziggurat-zigbee",
+]
+
+[[package]]
+name = "ziggurat-runtime"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-sync",
+ "embassy-time",
+ "futures",
+ "parking_lot",
+ "spin",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
