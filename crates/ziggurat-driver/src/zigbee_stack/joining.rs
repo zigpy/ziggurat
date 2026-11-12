@@ -1151,6 +1151,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         };
 
+        // Spec 4.7.3.6: an unsecured rejoin re-delivers the network key encrypted
+        // with the well-known key unless the device holds a unique link key. Reject
+        // when it has neither, so the network key is never exposed to anyone who
+        // knows the well-known key. Nobody authenticated this frame, so it is rejected
+        // before it changes any state.
+        if !secured && !self.may_rejoin_unsecured(source_ieee) {
+            tracing::warn!(
+                "Rejecting unsecured rejoin from {source_ieee:?} without a unique link key"
+            );
+            return;
+        }
+
         let requested_nwk = nwk_frame.nwk_header.source;
         let capability = &rejoin_request.capability_information;
 
@@ -1240,16 +1252,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A trust center rejoin means the device no longer has the network key
         if !secured {
-            // Spec 4.7.3.6: an unsecured rejoin re-delivers the network key encrypted
-            // with the well-known key unless the device holds a unique link key. Reject
-            // when it has neither, so the network key is never exposed to anyone who
-            // knows the well-known key.
-            if !self.may_rejoin_unsecured(source_ieee) {
-                tracing::warn!(
-                    "Rejecting unsecured rejoin from {source_ieee:?} without a unique link key"
-                );
-                return;
-            }
             // The join is announced only once the key transport lands
             let stack = self
                 .self_weak
