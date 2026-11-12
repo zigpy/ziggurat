@@ -45,6 +45,7 @@ pub use ziggurat_zigbee::constants::{
     MAX_DEPTH, PROTOCOL_VERSION, STACK_PROFILE, TunableError, Tunables, WELL_KNOWN_LINK_KEY,
 };
 pub use ziggurat_zigbee::nwk::NwkDeviceType;
+pub use ziggurat_zigbee::nwk::address_conflicts::{AddrConflictSource, AddressConflicts};
 pub use ziggurat_zigbee::nwk::addresses::AddressMap;
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
 pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
@@ -197,14 +198,6 @@ pub enum JoinKind {
     Rejoin,
 }
 
-/// How an address conflict (spec 3.6.1.10.5) came to our attention: detected locally
-/// from a received frame, or reported by another device's network status command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddrConflictSource {
-    Local,
-    Network,
-}
-
 #[derive(Debug)]
 pub enum NwkCapabilityInformationDeviceType {
     EndDevice = 0,
@@ -270,21 +263,6 @@ pub struct NetworkConfig {
     pub source_routing: bool,
 }
 
-/// Bookkeeping for a network address conflict (spec 3.6.1.10.5).
-///
-/// Detection re-triggers on every frame from the conflicted devices, so a conflict
-/// is handled once per delivery window, and our own notification broadcast is
-/// cancelled when another device reported the same conflict first.
-#[derive(Debug, Clone, Copy)]
-pub struct AddressConflict {
-    pub handled_at: CoreInstant,
-    pub heard_from_network: bool,
-    /// When our own jittered Network Status broadcast is due, acted on by the
-    /// address-conflict report reactor. `None` once sent, or when no report is owed
-    /// (the conflict was learned from the network).
-    pub report_at: Option<CoreInstant>,
-}
-
 /// The frame a send holds, as enqueued.
 ///
 /// A NWK frame is kept as plaintext and secured at transmit time, so its frame counter
@@ -348,6 +326,8 @@ pub struct Nib {
     pub routing: Routing,
     /// Broadcast deduplication and passive acknowledgment accounting
     pub broadcasts: Broadcasts,
+    /// Address conflicts being handled, and the reports we owe for them
+    pub address_conflicts: AddressConflicts,
     /// The network key, its outgoing frame counter, and per-relayer replay protection
     pub nwk_security: NwkSecurity,
     /// The EUI64-to-network-address map, one owner per network address
@@ -438,8 +418,6 @@ pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
 
-    pub address_conflicts: Mutex<FlatMap<Nwk, AddressConflict>>,
-
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
     /// the receipt time; an inbound data frame matching a live entry is a retransmission
     /// to be acknowledged but not delivered to the application a second time.
@@ -506,6 +484,7 @@ impl State {
                     neighbors: Neighbors::default(),
                     routing: Routing::default(),
                     broadcasts: Broadcasts::default(),
+                    address_conflicts: AddressConflicts::default(),
                     nwk_security: NwkSecurity::new(
                         config.network_key.clone(),
                         config.network_key_seq_number,
@@ -532,7 +511,6 @@ impl State {
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
             }),
-            address_conflicts: Mutex::new(FlatMap::new()),
             aps_duplicates: Mutex::new(FlatMap::new()),
 
             hack_ignore_broadcast_startup_wait_period: true,
