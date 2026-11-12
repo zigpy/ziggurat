@@ -1,3 +1,4 @@
+use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -27,7 +28,7 @@ const HELD_TIMED_OUT: Verdict = (HELD_UNICAST, Err(SendFailure::RouteDiscoveryTi
 const REQUEST_CANCELLED: Verdict = (ROUTE_REQUEST, Err(SendFailure::Cancelled));
 
 /// What the driver's routing table answers about `DESTINATION` during a timer pass.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Tables {
     /// No route yet, and a discovery toward it is running.
     Discovering,
@@ -359,4 +360,161 @@ fn test_new_route_request_stops_the_one_it_replaces() {
     assert_eq!(fixture.pass(Tables::Discovering), Pass::default());
     assert!(fixture.transmit_next().is_empty());
     assert!(fixture.dequeue().is_none());
+}
+
+/// One operation on the held unicasts to `DESTINATION`.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    Hold,
+    /// Cancel the oldest held unicast.
+    Cancel,
+    /// Let every unicast held so far pass its deadline.
+    Expire,
+    /// Fail the held unicasts, as the driver does when the device leaves.
+    FailHeld,
+    Pass(Tables),
+}
+
+const STEPS: [Step; 7] = [
+    Step::Hold,
+    Step::Cancel,
+    Step::Expire,
+    Step::FailHeld,
+    Step::Pass(Tables::Discovering),
+    Step::Pass(Tables::Lapsed),
+    Step::Pass(Tables::Routed),
+];
+
+/// What the tables should hold for `DESTINATION`, as counts instead of records.
+#[derive(Debug, Default)]
+struct Model {
+    /// Held unicasts within their deadline.
+    waiting: usize,
+    /// Held unicasts past their deadline, which the next pass fails.
+    expired: usize,
+    discovering: bool,
+    restarts_left: u8,
+}
+
+fn verdicts(count: usize, verdict: fn() -> Verdict) -> Vec<Verdict> {
+    (0..count).map(|_| verdict()).collect()
+}
+
+/// Run `steps` against the tables and the model, comparing them after each one.
+fn check_held_unicasts(steps: &[Step], restarts: u8) {
+    let mut fixture = Fixture::new();
+    fixture
+        .tunables
+        .set("pending_route_discovery_attempts", u64::from(restarts) + 1)
+        .unwrap();
+
+    let mut model = Model::default();
+    // The held unicasts, oldest first, so the expired ones lead
+    let mut held = VecDeque::new();
+
+    for step in steps {
+        match *step {
+            Step::Hold => {
+                held.push_back(fixture.hold_unicast());
+
+                if !model.discovering {
+                    model.discovering = true;
+                    model.restarts_left = restarts;
+                }
+                model.waiting += 1;
+            }
+            Step::Cancel => {
+                let Some(id) = held.pop_front() else {
+                    continue;
+                };
+
+                let cancelled = settled(fixture.sends.cancel(id).unwrap());
+                assert_eq!(cancelled, [(HELD_UNICAST, Err(SendFailure::Cancelled))]);
+
+                if model.expired > 0 {
+                    model.expired -= 1;
+                } else {
+                    model.waiting -= 1;
+                }
+            }
+            Step::Expire => {
+                fixture.advance(fixture.tunables.handoff_timeout());
+
+                model.expired += model.waiting;
+                model.waiting = 0;
+            }
+            Step::FailHeld => {
+                let failed = verdicts(model.expired + model.waiting, || HELD_TIMED_OUT);
+                assert_eq!(fixture.fail_held(), failed, "{steps:?}");
+
+                held.clear();
+                model = Model::default();
+            }
+            Step::Pass(tables) => {
+                // Deadlines come first, so routing never revives a late send
+                let mut expected = Pass::settling(verdicts(model.expired, || {
+                    (HELD_UNICAST, Err(SendFailure::HandoffTimeout))
+                }));
+                held.drain(..model.expired);
+                model.expired = 0;
+
+                let mut routed = 0;
+                match tables {
+                    Tables::Routed if model.waiting > 0 => {
+                        routed = model.waiting;
+                        model.waiting = 0;
+                        model.discovering = false;
+                    }
+                    // The route request is still on the network: the discovery stays
+                    Tables::Routed | Tables::Discovering => {}
+                    Tables::Lapsed if !model.discovering || model.waiting == 0 => {
+                        model.discovering = false;
+                    }
+                    Tables::Lapsed if model.restarts_left > 0 => {
+                        model.restarts_left -= 1;
+                        expected.restarts_discovery = true;
+                    }
+                    Tables::Lapsed => {
+                        expected
+                            .settled
+                            .extend(verdicts(model.waiting, || HELD_TIMED_OUT));
+                        expected.fails_discovery = true;
+                        model.waiting = 0;
+                        model.discovering = false;
+                    }
+                }
+                if model.waiting == 0 {
+                    held.clear();
+                }
+
+                assert_eq!(fixture.pass(tables), expected, "{steps:?}");
+
+                for _ in 0..routed {
+                    assert_eq!(fixture.transmit_next(), [(HELD_UNICAST, Ok(()))]);
+                }
+            }
+        }
+
+        assert_eq!(fixture.discovering(), model.discovering, "{steps:?}");
+    }
+}
+
+// Every sequence of six operations, with and without a discovery restart. The model
+// states when a discovery is tracked: from the first held unicast until a route takes
+// the last one, the discovery lapses with nothing waiting, or its unicasts fail.
+#[test]
+fn test_held_unicasts_match_the_model_over_every_short_sequence() {
+    const LENGTH: u32 = 6;
+
+    for restarts in [0, 1] {
+        for mut sequence in 0..STEPS.len().pow(LENGTH) {
+            let mut steps = Vec::new();
+            for _ in 0..LENGTH {
+                steps.push(STEPS[sequence % STEPS.len()]);
+                sequence /= STEPS.len();
+            }
+
+            check_held_unicasts(&steps, restarts);
+        }
+    }
 }
