@@ -102,6 +102,17 @@ impl TableEntry {
     }
 }
 
+/// What storing a route record changed.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteRecordChange {
+    /// The source route to the record's sender changed. Only these are worth the
+    /// client persisting.
+    pub source: bool,
+    /// Some stored source route changed: the sender's, or that of a relay on its path.
+    /// A send held for any of them may now have a route.
+    pub any: bool,
+}
+
 #[derive(Debug)]
 pub struct DiscoveryEntry {
     /// A sequence number for a route request command frame that is incremented each time
@@ -308,22 +319,33 @@ impl Routing {
         self.route_table.insert(destination, entry);
     }
 
-    /// Returns whether the stored relay list for `source` changed, so the client only
-    /// persists a genuinely new source route (most route records are redundant).
-    pub fn store_route_record(&mut self, source: Nwk, relays: Vec<Nwk>) -> bool {
+    /// Store the route record `source` sent, and the routes to its relays that follow
+    /// from it. Most route records are redundant, so the result says what changed.
+    pub fn store_route_record(&mut self, source: Nwk, relays: Vec<Nwk>) -> RouteRecordChange {
+        let mut relay_changed = false;
+
         // Spec 3.6.4.5.5: the new route also replaces any existing source routes to
         // the intermediary relays. The relays between relay `i` and us form its own
         // route; the last relay delivered the record to us directly.
         for i in 1..relays.len() {
-            self.route_record_table
-                .insert(relays[i - 1], relays[i..].to_vec());
+            relay_changed |= self.replace_route_record(relays[i - 1], relays[i..].to_vec());
         }
         if let Some(&last) = relays.last() {
-            self.route_record_table.insert(last, Vec::new());
+            relay_changed |= self.replace_route_record(last, Vec::new());
         }
 
-        let changed = self.route_record_table.get(&source) != Some(&relays);
-        self.route_record_table.insert(source, relays);
+        let source_changed = self.replace_route_record(source, relays);
+
+        RouteRecordChange {
+            source: source_changed,
+            any: source_changed || relay_changed,
+        }
+    }
+
+    /// Store one source route, returning whether it differs from the one it replaces.
+    fn replace_route_record(&mut self, destination: Nwk, relays: Vec<Nwk>) -> bool {
+        let changed = self.route_record_table.get(&destination) != Some(&relays);
+        self.route_record_table.insert(destination, relays);
 
         changed
     }

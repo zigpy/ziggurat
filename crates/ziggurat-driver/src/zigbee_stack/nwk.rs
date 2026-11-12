@@ -248,19 +248,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NwkCommand::RouteRecord(cmd) => {
                     tracing::trace!("Route record command frame received: {cmd:?}");
                     let source = nwk_frame.nwk_header.source;
-                    let changed = self
+                    let change = self
                         .core()
                         .nib
                         .routing
                         .store_route_record(source, cmd.relays.clone());
 
-                    if changed {
+                    if change.source {
                         self.push_notification(ZigbeeNotification::RouteRecord {
                             destination: source,
                             relays: cmd.relays.clone(),
                         });
+                    }
 
-                        // Sends held for a route to the device can now be source routed
+                    // Sends held for the device, or for a relay on its path, can now be
+                    // source routed
+                    if change.any {
                         self.send_timer_wake.notify_one();
                     }
                 }
