@@ -426,8 +426,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 tracing::debug!("Holding frame until a route to {destination:?} is known");
                 let slot = Arc::new(SendSlot::default());
 
-                // The first unrouted send to a destination starts its discovery
-                let discovering = core.sends.has_unrouted(destination);
                 let (id, mut actions) = core.sends.enqueue_unrouted_unicast(
                     UnroutedUnicast {
                         frame: Frame::nwk(nwk_frame, security),
@@ -439,8 +437,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     now,
                     &self.tunables,
                 );
-                if !discovering {
-                    actions.extend(self.start_route_discovery(&mut core, destination));
+
+                // The routing table starts a discovery unless one it started for this
+                // destination is still tracked
+                let route_request_identifier = core.nib.routing.want_route(
+                    self.state.network_address,
+                    destination,
+                    now,
+                    self.tunables.route_discovery_time(),
+                    self.tunables.pending_route_discovery_attempts(),
+                );
+                if let Some(route_request_identifier) = route_request_identifier {
+                    actions.extend(self.broadcast_discovery_request(
+                        &mut core,
+                        destination,
+                        route_request_identifier,
+                    ));
                 }
 
                 (SendHandle::new(id, slot), actions)

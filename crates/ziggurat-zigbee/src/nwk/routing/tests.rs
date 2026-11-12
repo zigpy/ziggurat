@@ -1,4 +1,5 @@
 use alloc::vec;
+use alloc::vec::Vec;
 use core::time::Duration;
 
 use ziggurat_ieee_802154::types::Nwk;
@@ -206,4 +207,268 @@ fn test_unchanged_route_record_reports_a_relay_route_it_restores() {
         routing.route_to(ROUTER, MAX_SOURCE_ROUTE),
         Some(Route::SourceRouted(vec![NEIGHBOR]))
     );
+}
+
+/// A frame of ours wants a route to `DEVICE`. Returns whether that starts a discovery.
+fn want(routing: &mut Routing, now: Instant, attempts: u8) -> bool {
+    routing
+        .want_route(OWN, DEVICE, now, ROUTE_DISCOVERY_TIME, attempts)
+        .is_some()
+}
+
+/// Run a timer pass, with a frame still waiting for the route or not.
+fn tick(routing: &mut Routing, now: Instant, wanted: bool) -> DiscoveryTick {
+    routing.tick_discoveries(OWN, now, ROUTE_DISCOVERY_TIME, |_| wanted)
+}
+
+// The route request is on the network whatever became of the frame that wanted it, so
+// a second frame waits on the same discovery.
+#[test]
+fn test_wanting_a_route_starts_one_discovery() {
+    let mut routing = Routing::default();
+
+    assert!(want(&mut routing, START, 1));
+    assert!(!want(&mut routing, START, 1));
+
+    assert_eq!(
+        routing.route_status(DEVICE),
+        Some(Status::DiscoveryUnderway)
+    );
+    assert_eq!(
+        routing.next_discovery_lapse(START),
+        Some(START + ROUTE_DISCOVERY_TIME)
+    );
+}
+
+#[test]
+fn test_lapsed_discovery_without_a_restart_makes_the_destination_unreachable() {
+    let mut routing = Routing::default();
+    assert!(want(&mut routing, START, 1));
+
+    let lapsed = START + ROUTE_DISCOVERY_TIME;
+    assert_eq!(tick(&mut routing, lapsed, true).unreachable, vec![DEVICE]);
+
+    assert_eq!(routing.route_status(DEVICE), Some(Status::DiscoveryFailed));
+    // The next frame starts over
+    assert!(want(&mut routing, lapsed, 1));
+}
+
+#[test]
+fn test_lapsed_discovery_is_restarted_while_a_frame_waits() {
+    let mut routing = Routing::default();
+    assert!(want(&mut routing, START, 2));
+
+    let lapsed = START + ROUTE_DISCOVERY_TIME;
+    let restarted = tick(&mut routing, lapsed, true).restarted;
+
+    assert_eq!(restarted.len(), 1);
+    assert_eq!(restarted[0].0, DEVICE);
+    assert_eq!(
+        routing.next_discovery_lapse(lapsed),
+        Some(lapsed + ROUTE_DISCOVERY_TIME)
+    );
+
+    // The restart was the last one
+    let lapsed_again = lapsed + ROUTE_DISCOVERY_TIME;
+    assert_eq!(
+        tick(&mut routing, lapsed_again, true).unreachable,
+        vec![DEVICE]
+    );
+}
+
+// A discovery nothing waits on is over, not failed: it is neither restarted nor
+// reported, and a route found for it stays.
+#[test]
+fn test_lapsed_discovery_nothing_waits_on_ends_quietly() {
+    let mut routing = Routing::default();
+    assert!(want(&mut routing, START, 2));
+
+    let lapsed = START + ROUTE_DISCOVERY_TIME;
+    assert_eq!(tick(&mut routing, lapsed, false), DiscoveryTick::default());
+
+    assert!(want(&mut routing, lapsed, 2));
+}
+
+#[test]
+fn test_live_discovery_is_left_alone() {
+    let mut routing = Routing::default();
+    assert!(want(&mut routing, START, 1));
+
+    let live = START + Duration::from_secs(1);
+    assert_eq!(tick(&mut routing, live, true), DiscoveryTick::default());
+    assert_eq!(tick(&mut routing, live, false), DiscoveryTick::default());
+    assert!(!want(&mut routing, live, 1));
+}
+
+// The reply answers the discovery. If the route is lost again, the next frame starts a
+// new one instead of waiting on a request that was already answered.
+#[test]
+fn test_route_reply_ends_the_discovery() {
+    let mut routing = Routing::default();
+    let request_id = routing
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
+        .unwrap();
+
+    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3);
+    assert_eq!(reply.disposition, RouteReplyDisposition::Established);
+    assert_eq!(routing.next_hop(DEVICE), Some(NEIGHBOR));
+
+    routing.invalidate_via(NEIGHBOR);
+    assert!(want(&mut routing, START, 1));
+}
+
+#[test]
+fn test_forget_ends_our_discovery_toward_the_device() {
+    let mut routing = Routing::default();
+    assert!(want(&mut routing, START, 1));
+
+    routing.forget(OWN, DEVICE);
+
+    assert_eq!(routing.next_discovery_lapse(START), None);
+    assert!(want(&mut routing, START, 1));
+}
+
+/// One event in the life of our route discovery toward `DEVICE`.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// A frame is held for the route.
+    Hold,
+    /// The held frames are gone: cancelled, or past their deadline.
+    Release,
+    /// Time passes until every discovery has lapsed.
+    Lapse,
+    Tick,
+    /// The device answers the live discovery.
+    Reply,
+    /// The route to the device is lost.
+    Break,
+}
+
+const STEPS: [Step; 6] = [
+    Step::Hold,
+    Step::Release,
+    Step::Lapse,
+    Step::Tick,
+    Step::Reply,
+    Step::Break,
+];
+
+/// What `Routing` should hold of our discovery toward `DEVICE`.
+#[derive(Debug, Default)]
+struct Model {
+    /// A frame waits for the route.
+    wanted: bool,
+    /// A discovery we started is tracked: from the first frame that wants the route
+    /// until a reply answers it, or it lapses with nothing left to restart it for.
+    tracked: bool,
+    /// The tracked discovery has not lapsed.
+    live: bool,
+    restarts_left: u8,
+}
+
+/// Run `steps` against `Routing` and the model, comparing them after each one.
+fn check_own_discovery(steps: &[Step], attempts: u8) {
+    let mut routing = Routing::default();
+    let mut model = Model::default();
+    let mut now = START;
+    let mut request_id = None;
+
+    for step in steps {
+        match *step {
+            // The driver only holds a frame when it has no route
+            Step::Hold if routing.next_hop(DEVICE).is_some() => {}
+            Step::Hold => {
+                let started = routing.want_route(OWN, DEVICE, now, ROUTE_DISCOVERY_TIME, attempts);
+                assert_eq!(started.is_some(), !model.tracked, "{steps:?}");
+
+                if let Some(started) = started {
+                    request_id = Some(started);
+                    model.tracked = true;
+                    model.live = true;
+                    model.restarts_left = attempts - 1;
+                }
+                model.wanted = true;
+            }
+            Step::Release => model.wanted = false,
+            Step::Lapse => {
+                now = now + ROUTE_DISCOVERY_TIME;
+                model.live = false;
+            }
+            Step::Tick => {
+                let tick = tick(&mut routing, now, model.wanted);
+                let mut restarted = false;
+                let mut unreachable = false;
+
+                if model.tracked && !model.live {
+                    if !model.wanted {
+                        model.tracked = false;
+                    } else if model.restarts_left > 0 {
+                        model.restarts_left -= 1;
+                        model.live = true;
+                        restarted = true;
+                    } else {
+                        model.tracked = false;
+                        // The driver fails the frames held for the destination
+                        model.wanted = false;
+                        unreachable = true;
+                    }
+                }
+
+                let destinations: Vec<Nwk> = tick.restarted.iter().map(|r| r.0).collect();
+                assert_eq!(
+                    destinations,
+                    [DEVICE][..usize::from(restarted)],
+                    "{steps:?}"
+                );
+                assert_eq!(
+                    tick.unreachable,
+                    [DEVICE][..usize::from(unreachable)],
+                    "{steps:?}"
+                );
+
+                if let Some(restart) = tick.restarted.first() {
+                    request_id = Some(restart.1);
+                }
+            }
+            Step::Reply if model.tracked && model.live => {
+                let reply =
+                    routing.accept_route_reply(OWN, OWN, request_id.unwrap(), DEVICE, NEIGHBOR, 3);
+                assert_eq!(
+                    reply.disposition,
+                    RouteReplyDisposition::Established,
+                    "{steps:?}"
+                );
+
+                model.tracked = false;
+                // The held frames have a next hop and leave
+                model.wanted = false;
+            }
+            Step::Reply => {}
+            Step::Break => routing.invalidate_via(NEIGHBOR),
+        }
+
+        assert_eq!(
+            routing.next_discovery_lapse(now).is_some(),
+            model.tracked && model.live,
+            "{steps:?}"
+        );
+    }
+}
+
+// Every sequence of seven events, with one and with two discovery attempts.
+#[test]
+fn test_own_discovery_matches_the_model_over_every_short_sequence() {
+    const LENGTH: u32 = 7;
+
+    for attempts in [1, 2] {
+        for mut sequence in 0..STEPS.len().pow(LENGTH) {
+            let mut steps = Vec::new();
+            for _ in 0..LENGTH {
+                steps.push(STEPS[sequence % STEPS.len()]);
+                sequence /= STEPS.len();
+            }
+
+            check_own_discovery(&steps, attempts);
+        }
+    }
 }

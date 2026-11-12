@@ -443,23 +443,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Begin or restart ad-hoc route discovery toward a destination: the routing entry
-    /// enters `DiscoveryUnderway` and a route request is broadcast. The send timer
-    /// watches the discovery on behalf of the unrouted sends to it; this only kicks it
-    /// off. Under a core lock the caller holds and commits.
-    pub(super) fn start_route_discovery(
+    /// Broadcast the route request of a discovery the routing table started or
+    /// restarted toward a destination. Under a core lock the caller holds and commits.
+    pub(super) fn broadcast_discovery_request(
         &self,
         core: &mut ZigbeeCore,
         destination: Nwk,
+        route_request_identifier: u8,
     ) -> SendActions {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
-
-        let route_request_identifier = core.nib.routing.begin_discovery(
-            self.state.network_address,
-            destination,
-            self.core_now(),
-            self.tunables.route_discovery_time(),
-        );
 
         // If we know the EUI64 corresponding to the NWK, use it
         let destination_eui64 = core.nib.address_map.eui64_for(destination);

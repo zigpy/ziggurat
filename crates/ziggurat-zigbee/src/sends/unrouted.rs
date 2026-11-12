@@ -1,9 +1,7 @@
-//! Unicasts with no route yet, held until their destination's route discovery ends.
+//! Unicasts with no route yet, held until one is known or their deadline passes.
 //!
-//! Discovery runs once per destination and the whole bucket moves on together, so ten
-//! frames to one device ride a single discovery. The discovery itself lives in the
-//! routing table; this table counts the restarts it has left and remembers the
-//! broadcast of its route request, to stop it if the discovery is abandoned.
+//! This table knows nothing of route discovery. The routing table decides when one is
+//! started, restarted or given up on; a held send only waits for a next hop.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -38,21 +36,9 @@ pub(super) struct Record<F, W> {
     pub(super) deadline: Instant,
 }
 
-/// What this table tracks of a destination's route discovery.
-#[derive(Debug)]
-struct Discovery {
-    /// Restarts left. The first discovery is the driver's, started at admission; these
-    /// are the ones after it.
-    restarts_left: u8,
-    /// The broadcast of the latest route request.
-    request: Option<SendId>,
-}
-
 #[derive(Debug)]
 pub(super) struct UnroutedUnicasts<F, W, E> {
     records: FlatMap<SendId, Record<F, W>>,
-    /// One per destination with unrouted sends.
-    discoveries: FlatMap<Nwk, Discovery>,
     _error: PhantomData<fn() -> E>,
 }
 
@@ -60,7 +46,6 @@ impl<F, W, E> Default for UnroutedUnicasts<F, W, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
-            discoveries: FlatMap::new(),
             _error: PhantomData,
         }
     }
@@ -71,12 +56,14 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         self.records.contains_key(&id)
     }
 
-    pub(super) fn has_unrouted(&self, destination: Nwk) -> bool {
-        self.discoveries.contains_key(&destination)
+    /// Whether any send waits for a route to `destination`.
+    pub(super) fn has_sends_to(&self, destination: Nwk) -> bool {
+        self.records
+            .values()
+            .any(|send| send.destination == destination)
     }
 
-    /// Hold a send. It fails if still unrouted within the handoff timeout. The first
-    /// unrouted send to a destination fixes how often its discovery may be restarted.
+    /// Hold a send. It fails if still unrouted within the handoff timeout.
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
@@ -84,7 +71,6 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         now: Instant,
         tunables: &Tunables,
     ) {
-        let destination = send.destination;
         self.records.insert(
             id,
             Record {
@@ -92,70 +78,24 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
                 priority: send.priority,
                 waiter: send.waiter,
                 confirm: send.confirm,
-                destination,
+                destination: send.destination,
                 deadline: now + tunables.handoff_timeout(),
             },
         );
-
-        if !self.discoveries.contains_key(&destination) {
-            self.discoveries.insert(
-                destination,
-                Discovery {
-                    // The tunable counts discoveries; the first one is not a restart
-                    restarts_left: tunables
-                        .pending_route_discovery_attempts()
-                        .saturating_sub(1),
-                    request: None,
-                },
-            );
-        }
     }
 
-    pub(super) fn destinations(&self) -> Vec<Nwk> {
-        self.discoveries.keys().copied().collect()
-    }
-
-    /// The driver broadcast a route request for `destination`'s discovery. Returns the
-    /// broadcast of the request it replaces, for the caller to stop.
-    pub(super) fn route_request_sent(
-        &mut self,
-        destination: Nwk,
-        request: SendId,
-    ) -> Option<SendId> {
-        self.discoveries
-            .get_mut(&destination)
-            .unwrap()
-            .request
-            .replace(request)
-    }
-
-    /// The id of every send to `destination`, oldest first.
-    pub(super) fn sends_to(&self, destination: Nwk) -> Vec<SendId> {
-        self.records
-            .iter()
-            .filter(|(_, send)| send.destination == destination)
-            .map(|(id, _)| *id)
-            .collect()
+    /// The id of every held send, oldest first.
+    pub(super) fn ids(&self) -> Vec<SendId> {
+        self.records.keys().copied().collect()
     }
 
     pub(super) fn frame_mut(&mut self, id: SendId) -> &mut F {
         &mut self.records.get_mut(&id).unwrap().frame
     }
 
-    /// Take a held send: it has a route, or it failed.
+    /// Take a held send: it has a route.
     pub(super) fn take(&mut self, id: SendId) -> Record<F, W> {
         self.records.remove(&id).unwrap()
-    }
-
-    /// Whether no send waits on `destination`'s discovery any more: its sends were
-    /// routed, cancelled or timed out.
-    pub(super) fn is_idle(&self, destination: Nwk) -> bool {
-        self.sends_to(destination).is_empty()
-    }
-
-    /// Stop tracking `destination`'s discovery.
-    pub(super) fn end_discovery(&mut self, destination: Nwk) {
-        self.discoveries.remove(&destination);
     }
 
     fn settled(send: Record<F, W>, failure: SendFailure) -> Action<F, W, E> {
@@ -167,37 +107,22 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         }
     }
 
-    /// Consume a restart of `destination`'s discovery, if one is left.
-    pub(super) fn retry_discovery(&mut self, destination: Nwk) -> bool {
-        let discovery = self.discoveries.get_mut(&destination).unwrap();
-        if discovery.restarts_left == 0 {
-            return false;
-        }
-
-        discovery.restarts_left -= 1;
-        true
-    }
-
-    /// Fail every send to `destination`: its discovery is over without a route. Returns
-    /// the broadcast of its route request, for the caller to stop.
-    pub(super) fn fail(&mut self, destination: Nwk) -> (Option<SendId>, Actions<F, W, E>) {
-        let request = self
-            .discoveries
-            .remove(&destination)
-            .and_then(|discovery| discovery.request);
-
-        let actions = self
-            .sends_to(destination)
-            .into_iter()
-            .map(|id| Self::settled(self.take(id), SendFailure::RouteDiscoveryTimeout))
+    /// Fail every send to `destination`: no route to it will be found.
+    pub(super) fn fail(&mut self, destination: Nwk) -> Actions<F, W, E> {
+        let ids: Vec<SendId> = self
+            .records
+            .iter()
+            .filter(|(_, send)| send.destination == destination)
+            .map(|(id, _)| *id)
             .collect();
 
-        (request, actions)
+        ids.into_iter()
+            .map(|id| Self::settled(self.take(id), SendFailure::RouteDiscoveryTimeout))
+            .collect()
     }
 
     /// Drop every record and return its waiter: the stack is shutting down.
     pub(super) fn abandon(&mut self) -> Vec<W> {
-        self.discoveries.clear();
         let mut waiters = Vec::new();
         while let Some((_, send)) = self.records.pop_first() {
             waiters.push(send.waiter);
@@ -205,9 +130,6 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         waiters
     }
 
-    /// The destination stays awaited, so a new send to it does not start a second
-    /// discovery: the route request is on the network whether or not anything still
-    /// waits on it. The discovery ends once it lapses.
     pub(super) fn cancel(&mut self, id: SendId) -> Actions<F, W, E> {
         let send = self.records.remove(&id).unwrap();
         let mut actions = Actions::new();

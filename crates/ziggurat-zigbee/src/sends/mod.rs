@@ -187,17 +187,6 @@ pub enum Action<F, W, E> {
     },
 }
 
-/// What a timer pass leaves for the driver.
-#[derive(Debug)]
-pub struct Tick<F, W, E> {
-    pub actions: Actions<F, W, E>,
-    /// Destinations whose route discovery lapsed with a restart left. The driver starts
-    /// a new discovery for each.
-    pub restart_discovery: Vec<Nwk>,
-    /// Destinations whose route discovery is over without a route. Their sends failed.
-    pub failed_discovery: Vec<Nwk>,
-}
-
 /// What the driver must do after a mutation, in order. Every mutating verb returns one,
 /// so a mutation whose consequences are dropped is a compile-time warning.
 #[must_use = "actions resolve waiters; dropping them loses sends"]
@@ -265,6 +254,10 @@ pub struct Sends<F, W, E> {
     unicasts: Unicasts<F, W, E>,
     unrouted_unicasts: UnroutedUnicasts<F, W, E>,
     broadcasts: Broadcasts<F, W, E>,
+    /// The broadcast carrying the latest route request toward a destination, while it
+    /// still has copies to send. Kept to stop those copies when the discovery is
+    /// replaced or abandoned.
+    route_requests: FlatMap<Nwk, SendId>,
 }
 
 impl<F, W, E> Default for Sends<F, W, E> {
@@ -274,6 +267,7 @@ impl<F, W, E> Default for Sends<F, W, E> {
             unicasts: Unicasts::default(),
             unrouted_unicasts: UnroutedUnicasts::default(),
             broadcasts: Broadcasts::default(),
+            route_requests: FlatMap::new(),
         }
     }
 }
@@ -312,10 +306,8 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         (id, Actions::new())
     }
 
-    /// Enqueue a unicast with no route yet, held until its destination's discovery
-    /// ends. The caller starts that discovery if the destination was not already
-    /// awaited; the first unrouted send to a destination fixes how often it is
-    /// restarted.
+    /// Enqueue a unicast with no route yet, held until a timer pass finds it a next
+    /// hop. The caller tells the routing table a route is wanted.
     pub fn enqueue_unrouted_unicast(
         &mut self,
         send: UnroutedUnicast<F, W>,
@@ -413,47 +405,40 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unicasts.ack_received(ack)
     }
 
-    /// Whether any unrouted send waits on `destination`'s route discovery.
+    /// Whether any unrouted send waits for a route to `destination`.
     pub fn has_unrouted(&self, destination: Nwk) -> bool {
-        self.unrouted_unicasts.has_unrouted(destination)
+        self.unrouted_unicasts.has_sends_to(destination)
     }
 
-    /// The driver broadcast `request`, the route request of `destination`'s discovery.
-    /// Copies of the request it replaces still to come are not sent.
+    /// The driver broadcast `request`, a route request toward `destination`. Copies of
+    /// the request it replaces still to come are not sent.
     pub fn route_request_sent(&mut self, destination: Nwk, request: SendId) -> Actions<F, W, E> {
-        match self
-            .unrouted_unicasts
-            .route_request_sent(destination, request)
-        {
+        match self.route_requests.insert(destination, request) {
             Some(previous) => self.broadcasts.stop(previous),
             None => Actions::new(),
         }
     }
 
-    /// Fail every unrouted send to `destination`: its discovery is over without a
-    /// route. Copies of its route request still to come are not sent.
+    /// Fail every unrouted send to `destination`: no route to it will be found. Copies
+    /// of its route request still to come are not sent.
     pub fn fail_unrouted(&mut self, destination: Nwk) -> Actions<F, W, E> {
-        let (request, mut actions) = self.unrouted_unicasts.fail(destination);
+        let mut actions = self.unrouted_unicasts.fail(destination);
 
-        if let Some(request) = request {
+        if let Some(request) = self.route_requests.remove(&destination) {
             actions.extend(self.broadcasts.stop(request));
         }
 
         actions
     }
 
-    /// Move the unrouted sends to `destination` that `next_hop` finds a next hop for.
-    /// Returns whether any moved.
+    /// Move every unrouted send that `next_hop` finds a next hop for.
     fn route_unicasts(
         &mut self,
-        destination: Nwk,
         now: Instant,
         tunables: &Tunables,
-        next_hop: &mut impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
-    ) -> bool {
-        let mut routed = false;
-
-        for id in self.unrouted_unicasts.sends_to(destination) {
+        mut next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+    ) {
+        for id in self.unrouted_unicasts.ids() {
             // `next_hop` may rewrite the frame for a source route. Without a next hop
             // the send stays held.
             let Some((next_hop, poll_address)) = next_hop(self.unrouted_unicasts.frame_mut(id))
@@ -477,10 +462,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                 None,
                 tunables,
             );
-            routed = true;
         }
-
-        routed
     }
 
     /// The key of every broadcast awaiting its passive-ack quorum.
@@ -505,6 +487,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         let mut waiters = self.unicasts.abandon();
         waiters.extend(self.unrouted_unicasts.abandon());
         waiters.extend(self.broadcasts.abandon());
+        self.route_requests.clear();
         waiters
     }
 
@@ -544,67 +527,24 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         tunables: &Tunables,
         // A frame's next hop, and the address its device polls under if the frame must
         // wait for its poll
-        mut next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
-        // When the live route discovery toward a destination lapses
-        discovery_deadline: impl Fn(Nwk) -> Option<Instant>,
-    ) -> Tick<F, W, E> {
+        next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+    ) -> Actions<F, W, E> {
         // Fail the sends past their deadline first, so routing never revives one
         let mut actions = self.unrouted_unicasts.tick(now);
-        let mut restart_discovery = Vec::new();
-        let mut failed_discovery = Vec::new();
-
-        for destination in self.unrouted_unicasts.destinations() {
-            let routed = self.route_unicasts(destination, now, tunables, &mut next_hop);
-            let idle = self.unrouted_unicasts.is_idle(destination);
-
-            // A route was found and nothing waits any more: the discovery did its job
-            if routed && idle {
-                self.unrouted_unicasts.end_discovery(destination);
-                continue;
-            }
-
-            // The route request is still on the network, whether or not anything waits
-            // on it. It stays tracked so a send that arrives meanwhile rides it
-            if discovery_deadline(destination).is_some() {
-                continue;
-            }
-
-            // A lapsed discovery nothing waits on is over, not failed: reporting it as
-            // failed would discard a route it found after its sends were gone
-            if idle {
-                self.unrouted_unicasts.end_discovery(destination);
-                continue;
-            }
-
-            if self.unrouted_unicasts.retry_discovery(destination) {
-                restart_discovery.push(destination);
-            } else {
-                actions.extend(self.fail_unrouted(destination));
-                failed_discovery.push(destination);
-            }
-        }
+        self.route_unicasts(now, tunables, next_hop);
 
         actions.extend(self.unicasts.tick(now));
         actions.extend(self.broadcasts.tick(now));
 
-        Tick {
-            actions,
-            restart_discovery,
-            failed_discovery,
-        }
+        // A route request with no copy left to send needs no stopping
+        self.route_requests
+            .retain(|_, request| self.broadcasts.contains(*request));
+
+        actions
     }
 
     /// When the timer must next run, or `None` when nothing is waiting on time.
-    pub fn next_wake(
-        &self,
-        discovery_deadline: impl Fn(Nwk) -> Option<Instant>,
-    ) -> Option<Instant> {
-        let discoveries = self
-            .unrouted_unicasts
-            .destinations()
-            .into_iter()
-            .filter_map(discovery_deadline);
-
+    pub fn next_wake(&self) -> Option<Instant> {
         [
             self.unicasts.next_wake(),
             self.unrouted_unicasts.next_wake(),
@@ -612,7 +552,6 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         ]
         .into_iter()
         .flatten()
-        .chain(discoveries)
         .min()
     }
 

@@ -295,6 +295,10 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     }
 
     /// `None` if a copy is in the radio right now, or the send is unknown.
+    pub(super) fn contains(&self, id: SendId) -> bool {
+        self.records.contains_key(&id)
+    }
+
     pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
         let record = self.records.get(&id)?;
         if record.copy == CopyState::Transmitting {
