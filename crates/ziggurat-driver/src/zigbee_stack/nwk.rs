@@ -26,10 +26,9 @@ use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError, Frame,
-    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
-    SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore,
-    ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
+    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendId,
+    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -46,17 +45,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        self.forget_nwk_state_in(core, nwk);
+        // The device can be reached again, so sends held for it are kept. The route
+        // request they wait on went out before it joined. With that discovery gone, the
+        // timer pass starts a new one.
+        core.nib.routing.forget(self.state.network_address, nwk);
+        self.commit_sends(core, SendActions::new());
     }
 
-    /// The device at `nwk` left or joined again, so what we know about the address
-    /// belongs to its previous session. Held sends fail: they wait on a route request
-    /// the device never heard, and would block a new one until it expires.
+    /// The device at `nwk` left, so what we know about the address belongs to a session
+    /// that is over. Held sends fail: nothing will answer a route request for it.
     pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
-        self.forget_nwk_state_in(self.core(), nwk);
-    }
-
-    fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
+        let mut core = self.core();
         core.nib.routing.forget(self.state.network_address, nwk);
         let actions = core.sends.fail_unrouted(nwk);
         self.commit_sends(core, actions);
