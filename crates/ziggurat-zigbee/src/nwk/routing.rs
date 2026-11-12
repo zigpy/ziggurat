@@ -193,6 +193,17 @@ pub struct RouteReplyOutcome {
     pub update: Option<RouteUpdate>,
 }
 
+/// A route discovery we started for our own frames.
+#[derive(Debug)]
+struct OwnDiscovery {
+    /// How many times it may still be started again.
+    restarts_left: u8,
+    /// A reply established a route to the destination. The discovery is over, but it
+    /// stays tracked until a timer pass has seen that no frame still waits: a frame
+    /// the route did not release must not be left without a discovery.
+    answered: bool,
+}
+
 /// What a timer pass decided about the route discoveries we started.
 #[derive(Debug, Default, PartialEq, Eq)]
 #[must_use = "restarted discoveries need their route request broadcast, and frames \
@@ -220,11 +231,10 @@ pub struct Routing {
     discovery_table: FlatMap<(Nwk, RouteRequestId), DiscoveryEntry>,
     route_record_table: FlatMap<Nwk, Vec<Nwk>>,
 
-    /// The destinations we are discovering a route to for our own frames, each with
-    /// the number of times its discovery may still be restarted. An entry lasts from
-    /// the first frame that wants the route until a reply answers the discovery, or
-    /// until it lapses with nothing left to restart it for.
-    own_discoveries: FlatMap<Nwk, u8>,
+    /// The route discoveries we started for our own frames, by destination. One lasts
+    /// from the first frame that wants the route until a timer pass finds it answered
+    /// or lapsed with no frame left waiting, or gives up on it.
+    own_discoveries: FlatMap<Nwk, OwnDiscovery>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
@@ -290,15 +300,21 @@ impl Routing {
             return None;
         }
 
-        // `attempts` counts discoveries; the first one is not a restart
-        self.own_discoveries
-            .insert(destination, attempts.saturating_sub(1));
+        self.own_discoveries.insert(
+            destination,
+            OwnDiscovery {
+                // `attempts` counts discoveries; the first one is not a restart
+                restarts_left: attempts.saturating_sub(1),
+                answered: false,
+            },
+        );
 
         Some(self.begin_discovery(own_address, destination, now, route_discovery_time))
     }
 
-    /// Decide what becomes of each discovery we started that has lapsed unanswered.
-    /// `wanted` says whether a frame still waits for a route to a destination.
+    /// Decide what becomes of each discovery we started that is over: answered, or
+    /// lapsed unanswered. `wanted` says whether a frame still waits for a route to a
+    /// destination, after the frames the routing table can now route have left.
     pub fn tick_discoveries(
         &mut self,
         own_address: Nwk,
@@ -308,24 +324,30 @@ impl Routing {
     ) -> DiscoveryTick {
         let mut tick = DiscoveryTick::default();
 
-        let lapsed: Vec<Nwk> = self
+        let over: Vec<Nwk> = self
             .own_discoveries
-            .keys()
-            .copied()
-            .filter(|destination| self.discovery_deadline(*destination, now).is_none())
+            .iter()
+            .filter(|(destination, discovery)| {
+                discovery.answered || self.discovery_deadline(**destination, now).is_none()
+            })
+            .map(|(destination, _)| *destination)
             .collect();
 
-        for destination in lapsed {
-            // Nothing waits for the route any more: the discovery is over, not failed
+        for destination in over {
+            // Nothing waits for the route any more: the discovery did its job, or
+            // nobody needs it. It is not failed
             if !wanted(destination) {
                 self.own_discoveries.remove(&destination);
                 continue;
             }
 
-            let restarts_left = self.own_discoveries.get_mut(&destination).unwrap();
+            // A frame still waits. An answered discovery whose route was lost again is
+            // started over like a lapsed one, so the frame is never left without one
+            let discovery = self.own_discoveries.get_mut(&destination).unwrap();
 
-            if *restarts_left > 0 {
-                *restarts_left -= 1;
+            if discovery.restarts_left > 0 {
+                discovery.restarts_left -= 1;
+                discovery.answered = false;
                 let request_id =
                     self.begin_discovery(own_address, destination, now, route_discovery_time);
                 tick.restarted.push((destination, request_id));
@@ -722,9 +744,11 @@ impl Routing {
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = updated_path_cost;
 
-            // The discovery is answered. Better replies are still taken until its
-            // entry expires, but a frame that needs the route again starts a new one
-            self.own_discoveries.remove(&responder);
+            // A route to the responder exists, whichever of our requests this reply
+            // answers. The next timer pass ends the discovery once no frame waits
+            if let Some(discovery) = self.own_discoveries.get_mut(&responder) {
+                discovery.answered = true;
+            }
 
             let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
                 destination: responder,
