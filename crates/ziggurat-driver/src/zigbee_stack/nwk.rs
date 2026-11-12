@@ -1,5 +1,4 @@
-use super::TrafficClass;
-use crate::broadcast_budget::BroadcastAdmission;
+use super::{BroadcastAdmission, TrafficClass};
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,

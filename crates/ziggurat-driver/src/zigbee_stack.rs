@@ -47,6 +47,9 @@ pub use ziggurat_zigbee::constants::{
 pub use ziggurat_zigbee::nwk::NwkDeviceType;
 pub use ziggurat_zigbee::nwk::address_conflicts::{AddrConflictSource, AddressConflicts};
 pub use ziggurat_zigbee::nwk::addresses::AddressMap;
+pub use ziggurat_zigbee::nwk::broadcast_budget::{
+    BroadcastAdmission, BroadcastBudget, TrafficClass,
+};
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
 pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
 pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
@@ -129,20 +132,6 @@ impl From<SendFailure> for DeliveryError {
             SendFailure::Cancelled => Self::Cancelled,
         }
     }
-}
-
-/// Which tier of the broadcast budget admits a broadcast.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrafficClass {
-    /// A frame we originate on the host's behalf: refused first under pressure, the
-    /// host is told and can pace itself.
-    Host,
-    /// A transit frame relayed for another device: dropping one degrades the mesh but
-    /// the originator retries end-to-end.
-    Forwarding,
-    /// Stack machinery the mesh cannot function without: joins, APS acks, NWK
-    /// commands, indirect deliveries. Always admitted.
-    Critical,
 }
 
 /// How a transmit is treated under contention.
@@ -709,7 +698,7 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
 
     /// Admission budget for outgoing broadcasts: a token bucket with per-class reserves
     /// so a host broadcast flood cannot starve stack-critical broadcasts.
-    pub(crate) broadcast_budget: Mutex<crate::broadcast_budget::BroadcastBudget>,
+    pub(crate) broadcast_budget: Mutex<BroadcastBudget>,
 
     /// Wakes the sender task when a frame may have become ready to transmit.
     pub(crate) send_wake: Notify,
@@ -804,9 +793,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
             tasklets: tasklets::Tasklets::default(),
-            broadcast_budget: Mutex::new(crate::broadcast_budget::BroadcastBudget::new(
-                initial_broadcast_tokens,
-            )),
+            broadcast_budget: Mutex::new(BroadcastBudget::new(initial_broadcast_tokens)),
             send_wake: Notify::new(),
             send_timer_wake: Notify::new(),
             spawner,

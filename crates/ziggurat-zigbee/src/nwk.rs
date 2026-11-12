@@ -1,5 +1,6 @@
 pub mod address_conflicts;
 pub mod addresses;
+pub mod broadcast_budget;
 pub mod broadcasts;
 pub mod commands;
 pub mod frame;

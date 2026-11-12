@@ -2,7 +2,6 @@
 
 extern crate alloc;
 
-pub mod broadcast_budget;
 pub mod rng;
 pub mod zigbee_stack;
 
