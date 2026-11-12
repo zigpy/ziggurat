@@ -295,8 +295,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Send a broadcast APS data frame to a broadcast sink, returning a [`SendHandle`].
     /// `Err` rejects at admission; on `Ok`, `handed_off` resolves when the first copy
-    /// reaches the air and `delivered` on the passive-ack quorum result. A broadcast is
-    /// never APS-secured nor end-to-end acked: the quorum is its confirmation.
+    /// reaches the air and `delivered` once the retransmissions end. A broadcast is
+    /// never APS-secured nor end-to-end acked, and missing passive acks never fail it.
     #[allow(clippy::too_many_arguments)]
     pub fn send_aps_broadcast(
         &self,
@@ -350,7 +350,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Send a groupcast (APS multicast) data frame, returning a [`SendHandle`]. The group
     /// lives only in the APS header; the NWK frame is broadcast to all rx-on-when-idle
     /// devices (spec 2.2.4.1.1.1), so it rides the broadcast machinery and, like a
-    /// broadcast, its confirmation is the passive-ack quorum result and it is never
+    /// broadcast, it is delivered once its retransmissions end and it is never
     /// APS-secured or acked.
     #[allow(clippy::too_many_arguments)]
     pub fn send_aps_groupcast(

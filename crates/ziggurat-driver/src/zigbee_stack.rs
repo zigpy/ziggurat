@@ -112,8 +112,6 @@ pub enum DeliveryError {
     /// radio.
     #[error("handoff timeout")]
     HandoffTimeout,
-    #[error("broadcast passive-ack quorum not reached")]
-    BroadcastQuorumNotReached,
     #[error("indirect transaction expired before {destination:?} polled")]
     IndirectExpired { destination: Ieee802154Address },
     #[error("send cancelled")]
@@ -129,7 +127,6 @@ impl From<SendFailure> for DeliveryError {
             SendFailure::ApsAckTimeout => Self::ApsAckTimeout,
             SendFailure::IndirectExpired { destination } => Self::IndirectExpired { destination },
             SendFailure::RouteDiscoveryTimeout => Self::RouteDiscoveryTimeout,
-            SendFailure::BroadcastQuorumNotReached => Self::BroadcastQuorumNotReached,
             SendFailure::Cancelled => Self::Cancelled,
         }
     }

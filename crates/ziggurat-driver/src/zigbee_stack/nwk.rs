@@ -69,9 +69,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         // The passive ack contract is formed when the transaction is created: only
-        // routers that were neighbors at that point are expected to relay
+        // routers that were good neighbors at that point are expected to relay
         let mut core = self.core();
-        let audience = core.nib.neighbors.expected_broadcast_relayers();
+        let audience = core
+            .nib
+            .neighbors
+            .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost());
 
         let duplicate = core.nib.broadcasts.filter_received(
             nwk_frame.nwk_header.source,
@@ -127,9 +130,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience
-    /// members that are still live neighbors.
+    /// members that are still good neighbors.
     pub(super) fn passive_ack_quorum_heard(&self, nib: &Nib, key: (Nwk, u8)) -> bool {
-        let live_relayers = nib.neighbors.expected_broadcast_relayers();
+        let live_relayers = nib
+            .neighbors
+            .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost());
 
         let acked = nib.broadcasts.passively_acked(
             key.0,
@@ -389,6 +394,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &mut nwk_frame,
             &mode,
             self.next_hop_policy(),
+            now,
         );
 
         let (handle, actions) = match resolved {
@@ -697,9 +703,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         // The passive ack contract is formed at transmission time: only routers that
-        // are neighbors right now are expected to relay
+        // are good neighbors right now are expected to relay
         let mut core = self.core();
-        let audience = core.nib.neighbors.expected_broadcast_relayers();
+        let audience = core
+            .nib
+            .neighbors
+            .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost());
+
         core.nib.broadcasts.record_transmission(
             key.0,
             key.1,
@@ -710,7 +720,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
-        // is the send's handoff; the quorum is its delivery.
+        // is the send's handoff; the end of the retransmissions is its delivery.
         let (handle, mut actions) = self.enqueue_broadcast_in(
             &mut core,
             Frame::nwk(nwk_frame.clone(), security),

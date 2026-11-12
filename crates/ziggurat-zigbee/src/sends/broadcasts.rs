@@ -28,7 +28,7 @@ pub enum Schedule {
     /// One copy; its transmit result is the verdict.
     Once,
     /// Spec 3.6.6: rebroadcast until the passive-ack quorum for `key` is heard, or
-    /// `copies_remaining` run out, which fails the send.
+    /// `copies_remaining` run out.
     PassiveAck {
         key: (Nwk, u8),
         copies_remaining: u8,
@@ -77,8 +77,8 @@ struct Record<F, W, E> {
     schedule: Schedule,
     copy: CopyState,
     handed_off: bool,
-    /// The quorum was heard before a copy was handed off: the audience was empty, or
-    /// the neighbors relayed while the copy was in the radio. The first handoff settles
+    /// The quorum was heard before a copy was handed off: the neighbors relayed while
+    /// the copy was in the radio. The first handoff settles
     /// the send; a broadcast is never delivered without reaching the air once.
     quorum_heard: bool,
     /// The last copy's radio failure: the verdict if the copies run out before one is
@@ -352,7 +352,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                     Due::Copy => record.copy = CopyState::Queued,
                     Due::Over => {
                         let verdict = if record.handed_off {
-                            Self::handed_off_verdict(record.schedule)
+                            Ok(())
                         } else {
                             Err(record.last_error.take().unwrap())
                         };
@@ -364,7 +364,7 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
             if record.deadline <= now {
                 let verdict = if record.handed_off {
-                    Self::handed_off_verdict(record.schedule)
+                    Ok(())
                 } else {
                     Err(SendFailure::HandoffTimeout.into())
                 };
@@ -377,16 +377,6 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
 
         actions
-    }
-
-    /// The verdict of a handed-off broadcast whose schedule ended before a quorum.
-    fn handed_off_verdict(schedule: Schedule) -> Result<(), E> {
-        match schedule {
-            Schedule::PassiveAck { .. } => Err(SendFailure::BroadcastQuorumNotReached.into()),
-            // Nothing confirms a fixed-interval broadcast: one copy on the air completes it
-            Schedule::FixedInterval { .. } => Ok(()),
-            Schedule::Once => unreachable!("a single copy settles on its own report"),
-        }
     }
 
     /// Consume a schedule's next copy if it is due. `None` means nothing is due.

@@ -121,7 +121,6 @@ pub enum SendFailure {
         destination: Ieee802154Address,
     },
     RouteDiscoveryTimeout,
-    BroadcastQuorumNotReached,
     Cancelled,
 }
 

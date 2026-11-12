@@ -291,6 +291,11 @@ tunables! {
     // e.g. per-neighbor estimates of how reliably we hear their rebroadcasts
     broadcast_passive_ack_quorum: usize = 8,
 
+    /// Only router neighbors whose incoming and outgoing link costs are both at most
+    /// this value are expected to relay our broadcasts. A relay over a bad link is
+    /// often not heard, so waiting for it only causes needless retransmissions.
+    broadcast_relayer_max_link_cost: u8 = 3,
+
     /// The minimum time between two consecutive many-to-one route requests, even when
     /// error thresholds are crossed.
     mtorr_min_interval: Duration = Duration::from_secs(10),

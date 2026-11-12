@@ -31,18 +31,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
 
-        let sender_link = self.core().nib.neighbors.link(nwk_frame.nwk_header.source);
-
-        let Some(sender_link) = sender_link else {
-            tracing::debug!("Ignoring route reply from unknown neighbor");
-            return;
-        };
-
-        if sender_link.outgoing_cost == 0 {
-            tracing::debug!("Ignoring route reply from neighbor with zero outgoing cost");
-            return;
-        }
-
         // The path cost already accounts for every link the reply has traversed: the
         // responder seeds the first hop and each relay adds the link it forwards across.
         let updated_path_cost = route_reply_cmd.path_cost;
