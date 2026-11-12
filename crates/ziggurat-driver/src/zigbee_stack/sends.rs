@@ -299,8 +299,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, run
     /// the send tables' pass against the routing and neighbor tables, then let the
-    /// routing table restart or give up on the discoveries that lapsed. Returns when
-    /// the next pass is due.
+    /// routing table start a discovery for, or give up on, each destination a send
+    /// still waits on with none underway. Returns when the next pass is due.
     fn drive_sends(&self) -> Option<CoreInstant> {
         let now = self.core_now();
 
@@ -319,7 +319,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.resolve_unrouted_unicast(&core.nib, frame, now)
         }));
 
-        // A discovery is only restarted for a destination a held send still waits on
         let discoveries = core.nib.routing.tick_discoveries(
             self.state.network_address,
             now,
@@ -341,7 +340,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let next_wake = [
             core.sends.next_wake(),
-            core.nib.routing.next_discovery_lapse(now),
+            core.nib
+                .routing
+                .next_discovery_lapse(self.state.network_address, now),
         ]
         .into_iter()
         .flatten()

@@ -438,8 +438,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     &self.tunables,
                 );
 
-                // The routing table starts a discovery unless one it started for this
-                // destination is still tracked
+                // The routing table starts a discovery unless the send can wait on
+                // one: a discovery of ours still underway, or one the timer pass starts
                 let route_request_identifier = core.nib.routing.want_route(
                     self.state.network_address,
                     destination,

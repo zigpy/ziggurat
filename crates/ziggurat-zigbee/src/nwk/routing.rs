@@ -19,6 +19,8 @@ const UNKNOWN_NEXT_HOP: Nwk = Nwk(0xFFFF);
 pub enum Status {
     Active = 0,
     DiscoveryUnderway = 1,
+    /// Never set: the spec defines the value but an unanswered discovery deletes its
+    /// entry (3.6.4.5.1.7).
     DiscoveryFailed = 2,
     Inactive = 3,
 }
@@ -193,24 +195,13 @@ pub struct RouteReplyOutcome {
     pub update: Option<RouteUpdate>,
 }
 
-/// A route discovery we started for our own frames.
-#[derive(Debug)]
-struct OwnDiscovery {
-    /// How many times it may still be started again.
-    restarts_left: u8,
-    /// A reply established a route to the destination. The discovery is over, but it
-    /// stays tracked until a timer pass has seen that no frame still waits: a frame
-    /// the route did not release must not be left without a discovery.
-    answered: bool,
-}
-
 /// What a timer pass decided about the route discoveries we started.
 #[derive(Debug, Default, PartialEq, Eq)]
 #[must_use = "restarted discoveries need their route request broadcast, and frames \
     held for an unreachable destination must fail"]
 pub struct DiscoveryTick {
-    /// Lapsed discoveries started again: the destination, and the identifier to put in
-    /// the new route request.
+    /// Discoveries started for frames that wait with none underway: the destination,
+    /// and the identifier to put in the new route request.
     pub restarted: Vec<(Nwk, RouteRequestId)>,
     /// Destinations given up on, with no restart left. Frames held for a route to them
     /// fail.
@@ -231,10 +222,11 @@ pub struct Routing {
     discovery_table: FlatMap<(Nwk, RouteRequestId), DiscoveryEntry>,
     route_record_table: FlatMap<Nwk, Vec<Nwk>>,
 
-    /// The route discoveries we started for our own frames, by destination. One lasts
-    /// from the first frame that wants the route until a timer pass finds it answered
-    /// or lapsed with no frame left waiting, or gives up on it.
-    own_discoveries: FlatMap<Nwk, OwnDiscovery>,
+    /// The destinations our frames wait for a route to, with how many more discoveries
+    /// each may get. An entry lasts from the first frame that wants the route until a
+    /// timer pass finds no frame waiting, or gives up. The discoveries themselves are
+    /// only in the two spec tables above.
+    discoveries_left: FlatMap<Nwk, u8>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
@@ -284,10 +276,40 @@ impl Routing {
             })
     }
 
+    /// When the last live discovery we started toward a destination lapses.
+    fn own_discovery_lapse(
+        &self,
+        own_address: Nwk,
+        destination: Nwk,
+        now: Instant,
+    ) -> Option<Instant> {
+        self.discovery_table
+            .values()
+            .filter(|entry| {
+                entry.source_address == own_address
+                    && entry.destination_address == destination
+                    && entry.expiration_time > now
+            })
+            .map(|entry| entry.expiration_time)
+            .max()
+    }
+
+    /// Spec 3.6.4.3: a frame waits on a discovery that is underway only if we started
+    /// it. The status alone does not say so: relaying another router's route request
+    /// sets it too. A route that was found and lost again ends the wait, because the
+    /// status is no longer `DiscoveryUnderway`.
+    fn own_discovery_underway(&self, own_address: Nwk, destination: Nwk, now: Instant) -> bool {
+        self.route_status(destination) == Some(Status::DiscoveryUnderway)
+            && self
+                .own_discovery_lapse(own_address, destination, now)
+                .is_some()
+    }
+
     /// One of our frames needs a route to `destination`. Returns the identifier to put
-    /// in the route request to broadcast, or `None` when a discovery we started is
-    /// still tracked. Its route request is on the network whatever became of the
-    /// frames that wanted it, so the new frame waits on that one.
+    /// in the route request to broadcast, or `None` when the frame waits on a discovery
+    /// that exists or that the next timer pass starts. A discovery we started that is
+    /// still underway counts as the first of the frame's `attempts`: its route request
+    /// is on the network whatever became of the frames that wanted it.
     pub fn want_route(
         &mut self,
         own_address: Nwk,
@@ -296,25 +318,23 @@ impl Routing {
         route_discovery_time: Duration,
         attempts: u8,
     ) -> Option<RouteRequestId> {
-        if self.own_discoveries.contains_key(&destination) {
+        if self.discoveries_left.contains_key(&destination) {
             return None;
         }
 
-        self.own_discoveries.insert(
-            destination,
-            OwnDiscovery {
-                // `attempts` counts discoveries; the first one is not a restart
-                restarts_left: attempts.saturating_sub(1),
-                answered: false,
-            },
-        );
+        self.discoveries_left
+            .insert(destination, attempts.saturating_sub(1));
+
+        if self.own_discovery_underway(own_address, destination, now) {
+            return None;
+        }
 
         Some(self.begin_discovery(own_address, destination, now, route_discovery_time))
     }
 
-    /// Decide what becomes of each discovery we started that is over: answered, or
-    /// lapsed unanswered. `wanted` says whether a frame still waits for a route to a
-    /// destination, after the frames the routing table can now route have left.
+    /// Decide what becomes of each destination our frames wait for a route to.
+    /// `wanted` says whether a frame still waits, after the frames the routing table
+    /// can now route have left.
     pub fn tick_discoveries(
         &mut self,
         own_address: Nwk,
@@ -324,36 +344,31 @@ impl Routing {
     ) -> DiscoveryTick {
         let mut tick = DiscoveryTick::default();
 
-        let over: Vec<Nwk> = self
-            .own_discoveries
-            .iter()
-            .filter(|(destination, discovery)| {
-                discovery.answered || self.discovery_deadline(**destination, now).is_none()
-            })
-            .map(|(destination, _)| *destination)
-            .collect();
+        self.expire_discoveries(now);
 
-        for destination in over {
-            // Nothing waits for the route any more: the discovery did its job, or
-            // nobody needs it. It is not failed
+        let destinations: Vec<Nwk> = self.discoveries_left.keys().copied().collect();
+
+        for destination in destinations {
             if !wanted(destination) {
-                self.own_discoveries.remove(&destination);
+                self.discoveries_left.remove(&destination);
                 continue;
             }
 
-            // A frame still waits. An answered discovery whose route was lost again is
-            // started over like a lapsed one, so the frame is never left without one
-            let discovery = self.own_discoveries.get_mut(&destination).unwrap();
+            if self.own_discovery_underway(own_address, destination, now) {
+                continue;
+            }
 
-            if discovery.restarts_left > 0 {
-                discovery.restarts_left -= 1;
-                discovery.answered = false;
+            // A frame waits and no discovery of ours is underway: it lapsed, or its
+            // route was lost before the frame could use it
+            let discoveries_left = self.discoveries_left.get_mut(&destination).unwrap();
+
+            if *discoveries_left > 0 {
+                *discoveries_left -= 1;
                 let request_id =
                     self.begin_discovery(own_address, destination, now, route_discovery_time);
                 tick.restarted.push((destination, request_id));
             } else {
-                self.own_discoveries.remove(&destination);
-                self.mark_discovery_failed(destination);
+                self.discoveries_left.remove(&destination);
                 tick.unreachable.push(destination);
             }
         }
@@ -361,21 +376,13 @@ impl Routing {
         tick
     }
 
-    /// When the next discovery we started lapses, or `None` when none is live.
-    pub fn next_discovery_lapse(&self, now: Instant) -> Option<Instant> {
-        self.own_discoveries
+    /// When the next discovery a frame of ours waits on lapses, or `None` when none
+    /// is live.
+    pub fn next_discovery_lapse(&self, own_address: Nwk, now: Instant) -> Option<Instant> {
+        self.discoveries_left
             .keys()
-            .filter_map(|destination| self.discovery_deadline(*destination, now))
+            .filter_map(|destination| self.own_discovery_lapse(own_address, *destination, now))
             .min()
-    }
-
-    /// A discovery ended without a route. A route found some other way stays.
-    fn mark_discovery_failed(&mut self, destination: Nwk) {
-        if let Some(entry) = self.route_table.get_mut(&destination)
-            && entry.status != Status::Active
-        {
-            entry.status = Status::DiscoveryFailed;
-        }
     }
 
     /// A frame was forwarded along the route: bump its usage counters.
@@ -422,7 +429,7 @@ impl Routing {
         // unknown responder. That router gets no route through us for that discovery.
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
-        self.own_discoveries.remove(&nwk);
+        self.discoveries_left.remove(&nwk);
 
         // Only our own discoveries toward it are dropped. Discoveries we relay stay
         // until they expire: they are the only duplicate check for late copies of
@@ -583,17 +590,6 @@ impl Routing {
         request_id
     }
 
-    /// The expiration time of the live discovery toward a destination, if any.
-    pub fn discovery_deadline(&self, destination: Nwk, now: Instant) -> Option<Instant> {
-        self.discovery_table.values().find_map(|entry| {
-            if entry.expiration_time > now && entry.destination_address == destination {
-                Some(entry.expiration_time)
-            } else {
-                None
-            }
-        })
-    }
-
     /// Deduplicate a received route request and track the best path back to its
     /// originator. Returns false for duplicates with a strictly worse forward cost
     /// (our own requests, seeded at cost 0, still never echo back); an equal-cost
@@ -743,12 +739,6 @@ impl Routing {
             routing_entry.next_hop_address = sender;
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = updated_path_cost;
-
-            // A route to the responder exists, whichever of our requests this reply
-            // answers. The next timer pass ends the discovery once no frame waits
-            if let Some(discovery) = self.own_discoveries.get_mut(&responder) {
-                discovery.answered = true;
-            }
 
             let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
                 destination: responder,
