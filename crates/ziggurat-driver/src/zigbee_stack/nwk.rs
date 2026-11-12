@@ -34,26 +34,12 @@ use super::{
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// A device joined or rejoined as `nwk`: the address starts a new session.
     pub(super) fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let (previous_nwk, conflict) = {
-            let mut core = self.core();
-
-            (
-                core.nib.address_map.nwk_for(eui64),
-                core.nib.address_map.update_mapping(eui64, nwk),
-            )
-        };
+        let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
 
         // `nwk` belongs to another device, whose state must stay
         if conflict {
             self.handle_address_conflict(nwk, AddrConflictSource::Local);
             return;
-        }
-
-        // A device that comes back under a new address leaves the old one behind
-        if let Some(previous_nwk) = previous_nwk
-            && previous_nwk != nwk
-        {
-            self.forget_nwk_state(previous_nwk);
         }
 
         self.forget_nwk_state(nwk);
@@ -184,14 +170,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         // Update the address cache. Hearing a device is not a join, so the address keeps
-        // its session state. A rejoin request is left to its handler, which must still
-        // see the device's previous address to forget it.
-        let is_rejoin_request = matches!(
-            &nwk_frame.payload,
-            NwkPayload::Command(NwkCommand::RejoinRequest(_))
-        );
-
-        if !is_rejoin_request && let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
+        // its session state.
+        if let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
             let source = nwk_frame.nwk_header.source;
             let conflict = self
                 .core()
