@@ -181,8 +181,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         // Update the address cache. Hearing a device is not a join, so the address keeps
-        // its session state.
-        if let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
+        // its session state. A rejoin request is left to its handler, which must still
+        // see the device's previous address to forget it.
+        let is_rejoin_request = matches!(
+            &nwk_frame.payload,
+            NwkPayload::Command(NwkCommand::RejoinRequest(_))
+        );
+
+        if !is_rejoin_request && let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
             let source = nwk_frame.nwk_header.source;
             let conflict = self
                 .core()
