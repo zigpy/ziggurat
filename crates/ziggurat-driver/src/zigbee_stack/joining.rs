@@ -255,7 +255,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let is_new =
             self.core()
-                .nib
                 .address_conflicts
                 .detect(address, source, now, window, report_jitter);
 
@@ -294,7 +293,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// owed report, then sends every due report another device hasn't already made.
     pub(super) async fn address_conflict_task(&self) {
         loop {
-            let next_report = self.core().nib.address_conflicts.next_report();
+            let next_report = self.core().address_conflicts.next_report();
 
             match next_report {
                 Some(deadline) => {
@@ -313,7 +312,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// arrived during the jitter window.
     fn drive_conflict_reports(&self) {
         let now = self.core_now();
-        let due = self.core().nib.address_conflicts.take_due_reports(now);
+        let due = self.core().address_conflicts.take_due_reports(now);
 
         for address in due {
             let conflict_frame = self.nwk_command_frame(

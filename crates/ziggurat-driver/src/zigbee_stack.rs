@@ -315,8 +315,6 @@ pub struct Nib {
     pub routing: Routing,
     /// Broadcast deduplication and passive acknowledgment accounting
     pub broadcasts: Broadcasts,
-    /// Address conflicts being handled, and the reports we owe for them
-    pub address_conflicts: AddressConflicts,
     /// The network key, its outgoing frame counter, and per-relayer replay protection
     pub nwk_security: NwkSecurity,
     /// The EUI64-to-network-address map, one owner per network address
@@ -366,6 +364,10 @@ pub struct ZigbeeCore {
     /// placed by the routing and neighbor tables, and a tick asks them whether a route
     /// became active or a broadcast's quorum was heard.
     pub sends: SendTable,
+
+    /// Address conflicts being handled, and the reports we owe for them. Under the core
+    /// lock because resolving one reads the address map and the routing table.
+    pub address_conflicts: AddressConflicts,
 
     /// Deadline until which the coordinator advertises `association_permit` in its
     /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
@@ -473,7 +475,6 @@ impl State {
                     neighbors: Neighbors::default(),
                     routing: Routing::default(),
                     broadcasts: Broadcasts::default(),
-                    address_conflicts: AddressConflicts::default(),
                     nwk_security: NwkSecurity::new(
                         config.network_key.clone(),
                         config.network_key_seq_number,
@@ -497,6 +498,7 @@ impl State {
                     pan_id: config.pan_id,
                 },
                 sends: SendTable::default(),
+                address_conflicts: AddressConflicts::default(),
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
