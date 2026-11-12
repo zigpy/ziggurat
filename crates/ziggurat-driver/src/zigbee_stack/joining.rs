@@ -1064,7 +1064,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 // Known limitation: we do not track the parent of a device that is not
                 // our child. A late report from a router the device has since left for
                 // another router is taken as current.
-                self.forget_nwk_state(Some(update.device_address), update.device_short_address);
+                //
+                // The report names the device by both addresses. A short address that
+                // another device holds is not this report's to clear.
+                let claimed_by_other = self
+                    .core()
+                    .nib
+                    .address_map
+                    .claimed_by_other(update.device_short_address, update.device_address);
+
+                if !claimed_by_other {
+                    self.forget_nwk_state(Some(update.device_address), update.device_short_address);
+                }
 
                 let router_ieee = nwk_frame
                     .nwk_header
