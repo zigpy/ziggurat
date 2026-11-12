@@ -258,6 +258,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                             destination: source,
                             relays: cmd.relays.clone(),
                         });
+
+                        // Sends held for a route to the device can now be source routed
+                        self.send_timer_wake.notify_one();
                     }
                 }
                 NwkCommand::RouteRequest(cmd) => {
