@@ -9,9 +9,11 @@
 //!   failure;
 //! * broadcasts go over the air *and* to every backbone peer (NWK broadcast dedup
 //!   absorbs the duplicates);
-//! * frames received over the backbone carry an LQI derived from the backbone link's
-//!   health (ack success), 255 when clean, so NWK link costs to backbone peers are low
-//!   and routing prefers the backbone without NWK changes; over-the-air copies of a
+//! * frames received over the backbone carry LQI 255, as TREL treats a peer that is
+//!   heard from, so NWK link costs to backbone peers are low and routing prefers the
+//!   backbone without NWK changes. Unanswered sends only drive retries, address
+//!   rotation and the fall back to the air: a score kept from them would stick, since a
+//!   costly link is no longer used and never earns a success back. Over-the-air copies of a
 //!   live backbone peer's frames are dropped (they also come over the backbone), so the
 //!   peer's link quality is not mixed with the radio's.
 //!
@@ -160,7 +162,7 @@ struct Peer {
     nwk: Option<Nwk>,
     source: PeerSource,
     last_rx: Option<Instant>,
-    /// Backbone ack success, exponentially averaged (1.0 = clean)
+    /// Backbone ack success, exponentially averaged (1.0 = clean); diagnostics only
     health: f32,
     /// Every usable address mDNS gave, best first: tried in turn when sends fail
     alternates: Vec<SocketAddr>,
@@ -220,8 +222,9 @@ impl Peer {
         self.last_rx.is_some_and(|t| t.elapsed() < BACKBONE_LIVE)
     }
 
-    fn lqi(&self) -> u8 {
-        (self.health * 255.0).round().clamp(1.0, 255.0) as u8
+    /// What frames from this peer report: a datagram arrived, so the link works.
+    const fn lqi(&self) -> u8 {
+        255
     }
 
     fn record(&mut self, acked: bool) {
@@ -1902,4 +1905,25 @@ fn rand_u32() -> u32 {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     (nanos ^ (nanos >> 32)) as u32
+}
+
+#[cfg(test)]
+mod peer_tests {
+    use super::*;
+
+    #[test]
+    fn frames_from_a_live_peer_report_full_lqi_after_failed_sends() {
+        let mut peer = Peer::new(([127, 0, 0, 1], 1).into(), None, PeerSource::Learned);
+        for _ in 0..50 {
+            peer.record(false);
+        }
+        assert_eq!(peer.lqi(), 255);
+    }
+
+    #[test]
+    fn failed_sends_still_lower_health() {
+        let mut peer = Peer::new(([127, 0, 0, 1], 1).into(), None, PeerSource::Learned);
+        peer.record(false);
+        assert!(peer.health < 1.0);
+    }
 }
