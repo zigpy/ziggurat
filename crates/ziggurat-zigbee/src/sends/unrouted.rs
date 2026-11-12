@@ -147,12 +147,15 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         self.records.remove(&id).unwrap()
     }
 
-    /// A send to `destination` found a route. Its discovery is over once no send waits
-    /// on it any more.
-    pub(super) fn routed(&mut self, destination: Nwk) {
-        if self.sends_to(destination).is_empty() {
-            self.discoveries.remove(&destination);
+    /// End `destination`'s discovery if no send waits on it any more: its sends were
+    /// routed, cancelled or timed out. Returns whether it ended.
+    pub(super) fn end_idle_discovery(&mut self, destination: Nwk) -> bool {
+        if !self.sends_to(destination).is_empty() {
+            return false;
         }
+
+        self.discoveries.remove(&destination);
+        true
     }
 
     fn settled(send: Record<F, W>, failure: SendFailure) -> Action<F, W, E> {
@@ -164,17 +167,10 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         }
     }
 
-    /// Consume a restart of `destination`'s discovery, if one is left and a send still
-    /// waits on it.
+    /// Consume a restart of `destination`'s discovery, if one is left.
     pub(super) fn retry_discovery(&mut self, destination: Nwk) -> bool {
-        let waiting = self
-            .records
-            .values()
-            .any(|send| send.destination == destination);
-
         let discovery = self.discoveries.get_mut(&destination).unwrap();
-        // A discovery nothing waits on any more is not restarted
-        if discovery.restarts_left == 0 || !waiting {
+        if discovery.restarts_left == 0 {
             return false;
         }
 

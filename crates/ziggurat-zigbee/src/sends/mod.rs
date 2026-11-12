@@ -448,8 +448,6 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         tunables: &Tunables,
         next_hop: &mut impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
     ) {
-        let mut routed = false;
-
         for id in self.unrouted_unicasts.sends_to(destination) {
             // `next_hop` may rewrite the frame for a source route. Without a next hop
             // the send stays held.
@@ -474,11 +472,6 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                 None,
                 tunables,
             );
-            routed = true;
-        }
-
-        if routed {
-            self.unrouted_unicasts.routed(destination);
         }
     }
 
@@ -555,7 +548,9 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         for destination in self.unrouted_unicasts.destinations() {
             self.route_unicasts(destination, now, tunables, &mut next_hop);
 
-            if !self.unrouted_unicasts.has_unrouted(destination)
+            // A discovery nothing waits on is over, not failed: reporting it as failed
+            // would discard a route it found after its sends were gone
+            if self.unrouted_unicasts.end_idle_discovery(destination)
                 || discovery_deadline(destination).is_some()
             {
                 continue;
