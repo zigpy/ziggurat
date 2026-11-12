@@ -1037,7 +1037,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             ApsUpdateDeviceStatus::DeviceLeft => {
                 // An end device has one parent. If it is our child now, it left the
                 // router before it joined us: the report is late and its state is
-                // current.
+                // current. A device that moved to another router is not detected
+                // because we do not track its parent.
                 let is_our_child = self
                     .core()
                     .nib
@@ -1053,18 +1054,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     return;
                 }
 
-                // Spec 4.4.3.2.3: "A Device Left is considered informative but SHOULD
-                // NOT be considered authoritative. Security related actions SHALL not
-                // be taken on receipt of this. No further processing SHALL be done."
-                //
-                // We go past that wording, but take no security action: keys, frame
-                // counters and the address map are kept. What we forget rebuilds
-                // itself, so a false report costs one route discovery.
-                //
-                // Known limitation: we do not track the parent of a device that is not
-                // our child. A late report from a router the device has since left for
-                // another router is taken as current.
-                //
                 // The report names the device by both addresses. A short address that
                 // another device holds is not this report's to clear.
                 let claimed_by_other = self
@@ -1074,6 +1063,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .claimed_by_other(update.device_short_address, update.device_address);
 
                 if !claimed_by_other {
+                    // Spec 4.4.3.2.3 calls this report informative, not authoritative,
+                    // and asks for no further processing. We still forget, but only
+                    // state that rebuilds itself: keys and the address map are kept.
                     self.forget_nwk_state(Some(update.device_address), update.device_short_address);
                 }
 
