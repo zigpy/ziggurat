@@ -147,15 +147,15 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         self.records.remove(&id).unwrap()
     }
 
-    /// End `destination`'s discovery if no send waits on it any more: its sends were
-    /// routed, cancelled or timed out. Returns whether it ended.
-    pub(super) fn end_idle_discovery(&mut self, destination: Nwk) -> bool {
-        if !self.sends_to(destination).is_empty() {
-            return false;
-        }
+    /// Whether no send waits on `destination`'s discovery any more: its sends were
+    /// routed, cancelled or timed out.
+    pub(super) fn is_idle(&self, destination: Nwk) -> bool {
+        self.sends_to(destination).is_empty()
+    }
 
+    /// Stop tracking `destination`'s discovery.
+    pub(super) fn end_discovery(&mut self, destination: Nwk) {
         self.discoveries.remove(&destination);
-        true
     }
 
     fn settled(send: Record<F, W>, failure: SendFailure) -> Action<F, W, E> {
@@ -206,7 +206,8 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
     }
 
     /// The destination stays awaited, so a new send to it does not start a second
-    /// discovery; it lapses on its own once nothing waits on it.
+    /// discovery: the route request is on the network whether or not anything still
+    /// waits on it. The discovery ends once it lapses.
     pub(super) fn cancel(&mut self, id: SendId) -> Actions<F, W, E> {
         let send = self.records.remove(&id).unwrap();
         let mut actions = Actions::new();

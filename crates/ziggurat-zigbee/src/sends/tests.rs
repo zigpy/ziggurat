@@ -255,9 +255,11 @@ fn test_lapsed_discovery_with_a_restart_left_is_restarted_once() {
     assert_eq!(fixture.pass(Tables::Lapsed), Pass::failing());
 }
 
-// A discovery whose sends are all gone has nothing left to fail, or to restart for.
-// Reporting it as failed makes the driver mark the route `DiscoveryFailed`, which
-// discards a route the reply produced after the sends were gone.
+// The route request is on the network whether or not anything still waits on it. A
+// discovery whose sends are all gone stays tracked until it lapses, so a send that
+// arrives meanwhile does not start a second one. Then it has nothing to fail, or to
+// restart for: reporting it as failed makes the driver mark the route
+// `DiscoveryFailed`, which discards a route the reply produced.
 #[test]
 fn test_discovery_ends_quietly_after_its_unicast_is_cancelled() {
     let mut fixture = Fixture::with_one_restart();
@@ -265,6 +267,9 @@ fn test_discovery_ends_quietly_after_its_unicast_is_cancelled() {
 
     let cancelled = settled(fixture.sends.cancel(id).unwrap());
     assert_eq!(cancelled, [(HELD_UNICAST, Err(SendFailure::Cancelled))]);
+
+    assert_eq!(fixture.pass(Tables::Discovering), Pass::default());
+    assert!(fixture.discovering());
 
     assert_eq!(fixture.pass(Tables::Lapsed), Pass::default());
     assert!(!fixture.discovering());

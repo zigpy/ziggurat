@@ -443,13 +443,16 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     }
 
     /// Move the unrouted sends to `destination` that `next_hop` finds a next hop for.
+    /// Returns whether any moved.
     fn route_unicasts(
         &mut self,
         destination: Nwk,
         now: Instant,
         tunables: &Tunables,
         next_hop: &mut impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
-    ) {
+    ) -> bool {
+        let mut routed = false;
+
         for id in self.unrouted_unicasts.sends_to(destination) {
             // `next_hop` may rewrite the frame for a source route. Without a next hop
             // the send stays held.
@@ -474,7 +477,10 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
                 None,
                 tunables,
             );
+            routed = true;
         }
+
+        routed
     }
 
     /// The key of every broadcast awaiting its passive-ack quorum.
@@ -548,13 +554,25 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         let mut failed_discovery = Vec::new();
 
         for destination in self.unrouted_unicasts.destinations() {
-            self.route_unicasts(destination, now, tunables, &mut next_hop);
+            let routed = self.route_unicasts(destination, now, tunables, &mut next_hop);
+            let idle = self.unrouted_unicasts.is_idle(destination);
 
-            // A discovery nothing waits on is over, not failed: reporting it as failed
-            // would discard a route it found after its sends were gone
-            if self.unrouted_unicasts.end_idle_discovery(destination)
-                || discovery_deadline(destination).is_some()
-            {
+            // A route was found and nothing waits any more: the discovery did its job
+            if routed && idle {
+                self.unrouted_unicasts.end_discovery(destination);
+                continue;
+            }
+
+            // The route request is still on the network, whether or not anything waits
+            // on it. It stays tracked so a send that arrives meanwhile rides it
+            if discovery_deadline(destination).is_some() {
+                continue;
+            }
+
+            // A lapsed discovery nothing waits on is over, not failed: reporting it as
+            // failed would discard a route it found after its sends were gone
+            if idle {
+                self.unrouted_unicasts.end_discovery(destination);
                 continue;
             }
 
