@@ -26,6 +26,8 @@
 //! deadline fails with the error its state implies.
 
 mod broadcasts;
+#[cfg(test)]
+mod tests;
 mod unicasts;
 mod unrouted;
 

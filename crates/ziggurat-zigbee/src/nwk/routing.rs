@@ -8,6 +8,9 @@ use ziggurat_ieee_802154::types::Nwk;
 
 use crate::nwk::frame::BROADCAST_ALL_ROUTERS_AND_COORDINATOR;
 
+#[cfg(test)]
+mod tests;
+
 pub type RouteRequestId = u8;
 
 const UNKNOWN_NEXT_HOP: Nwk = Nwk(0xFFFF);
