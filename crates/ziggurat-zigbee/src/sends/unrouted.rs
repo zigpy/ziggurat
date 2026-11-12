@@ -2,7 +2,8 @@
 //!
 //! Discovery runs once per destination and the whole bucket moves on together, so ten
 //! frames to one device ride a single discovery. The discovery itself lives in the
-//! routing table; this table only counts the restarts it has left.
+//! routing table; this table counts the restarts it has left and remembers the
+//! broadcast of its route request, to stop it if the discovery is abandoned.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -37,12 +38,21 @@ pub(super) struct Record<F, W> {
     pub(super) deadline: Instant,
 }
 
+/// What this table tracks of a destination's route discovery.
+#[derive(Debug)]
+struct Discovery {
+    /// Restarts left. The first discovery is the driver's, started at admission; these
+    /// are the ones after it.
+    restarts_left: u8,
+    /// The broadcast of the latest route request.
+    request: Option<SendId>,
+}
+
 #[derive(Debug)]
 pub(super) struct UnroutedUnicasts<F, W, E> {
     records: FlatMap<SendId, Record<F, W>>,
-    /// Discovery restarts left, per destination with unrouted sends. The first
-    /// discovery is the driver's, started at admission; these are the ones after it.
-    retries: FlatMap<Nwk, u8>,
+    /// One per destination with unrouted sends.
+    discoveries: FlatMap<Nwk, Discovery>,
     _error: PhantomData<fn() -> E>,
 }
 
@@ -50,7 +60,7 @@ impl<F, W, E> Default for UnroutedUnicasts<F, W, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
-            retries: FlatMap::new(),
+            discoveries: FlatMap::new(),
             _error: PhantomData,
         }
     }
@@ -62,7 +72,7 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
     }
 
     pub(super) fn has_unrouted(&self, destination: Nwk) -> bool {
-        self.retries.contains_key(&destination)
+        self.discoveries.contains_key(&destination)
     }
 
     /// Hold a send. It fails if still unrouted within the handoff timeout. The first
@@ -87,24 +97,41 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             },
         );
 
-        if !self.retries.contains_key(&destination) {
-            // The tunable counts discoveries; the first one is not a restart
-            self.retries.insert(
+        if !self.discoveries.contains_key(&destination) {
+            self.discoveries.insert(
                 destination,
-                tunables
-                    .pending_route_discovery_attempts()
-                    .saturating_sub(1),
+                Discovery {
+                    // The tunable counts discoveries; the first one is not a restart
+                    restarts_left: tunables
+                        .pending_route_discovery_attempts()
+                        .saturating_sub(1),
+                    request: None,
+                },
             );
         }
     }
 
     pub(super) fn destinations(&self) -> Vec<Nwk> {
-        self.retries.keys().copied().collect()
+        self.discoveries.keys().copied().collect()
+    }
+
+    /// The driver broadcast a route request for `destination`'s discovery. Returns the
+    /// broadcast of the request it replaces, for the caller to stop.
+    pub(super) fn route_request_sent(
+        &mut self,
+        destination: Nwk,
+        request: SendId,
+    ) -> Option<SendId> {
+        self.discoveries
+            .get_mut(&destination)
+            .unwrap()
+            .request
+            .replace(request)
     }
 
     /// Take every send to `destination`: its route is known.
     pub(super) fn route(&mut self, destination: Nwk) -> Vec<(SendId, Record<F, W>)> {
-        self.retries.remove(&destination);
+        self.discoveries.remove(&destination);
         self.take(destination)
     }
 
@@ -138,28 +165,36 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .values()
             .any(|send| send.destination == destination);
 
-        let retries = self.retries.get_mut(&destination).unwrap();
+        let discovery = self.discoveries.get_mut(&destination).unwrap();
         // A discovery nothing waits on any more is not restarted
-        if *retries == 0 || !waiting {
+        if discovery.restarts_left == 0 || !waiting {
             return false;
         }
 
-        *retries -= 1;
+        discovery.restarts_left -= 1;
         true
     }
 
-    /// Fail every send to `destination`: its discovery is over without a route.
-    pub(super) fn fail(&mut self, destination: Nwk) -> Actions<F, W, E> {
-        self.retries.remove(&destination);
-        self.take(destination)
+    /// Fail every send to `destination`: its discovery is over without a route. Returns
+    /// the broadcast of its route request, for the caller to stop.
+    pub(super) fn fail(&mut self, destination: Nwk) -> (Option<SendId>, Actions<F, W, E>) {
+        let request = self
+            .discoveries
+            .remove(&destination)
+            .and_then(|discovery| discovery.request);
+
+        let actions = self
+            .take(destination)
             .into_iter()
             .map(|(_, send)| Self::settled(send, SendFailure::RouteDiscoveryTimeout))
-            .collect()
+            .collect();
+
+        (request, actions)
     }
 
     /// Drop every record and return its waiter: the stack is shutting down.
     pub(super) fn abandon(&mut self) -> Vec<W> {
-        self.retries.clear();
+        self.discoveries.clear();
         let mut waiters = Vec::new();
         while let Some((_, send)) = self.records.pop_first() {
             waiters.push(send.waiter);

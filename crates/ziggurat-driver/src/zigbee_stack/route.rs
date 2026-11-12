@@ -112,6 +112,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let network_address = self.state.network_address;
         let many_to_one = route_request_cmd.many_to_one != NwkRouteRequestManyToOne::NotManyToOne;
 
+        // Neighbors relay our own route requests back to us. Our discovery entry may
+        // already be gone, so it cannot be what filters them.
+        if nwk_frame.nwk_header.source == network_address {
+            tracing::debug!("Ignoring our own route request relayed by {sender_nwk:?}");
+            return;
+        }
+
         // We need to know who sent the frame
         let sender_link = self.core().nib.neighbors.link(sender_nwk);
 
@@ -251,7 +258,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let attempts = self.tunables.rreq_retries() + 1;
         let mut core = self.core();
-        let actions =
+        let (_, actions) =
             self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
         self.commit_sends(core, actions);
     }
@@ -474,11 +481,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.4.5.1: the initial broadcast is repeated `nwkcInitialRREQRetries`
         // times, separated by the retry interval
-        self.broadcast_route_request(
+        let (request, mut actions) = self.broadcast_route_request(
             core,
             route_request_frame,
             self.tunables.initial_rreq_retries() + 1,
             Duration::ZERO,
-        )
+        );
+        actions.extend(core.sends.route_request_sent(destination, request));
+
+        actions
     }
 }

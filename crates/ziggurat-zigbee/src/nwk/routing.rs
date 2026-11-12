@@ -284,6 +284,22 @@ impl Routing {
         self.route_table.remove(&destination).is_some()
     }
 
+    /// The device at `nwk` left or joined again, clear associated state.
+    pub fn forget(&mut self, own_address: Nwk, nwk: Nwk) {
+        // TODO: a discovery toward `nwk` that we relay for another router loses its
+        // route entry here, so `accept_route_reply` drops the reply as coming from an
+        // unknown responder. That router gets no route through us for that discovery.
+        self.route_table.remove(&nwk);
+        self.route_record_table.remove(&nwk);
+
+        // Only our own discoveries toward it are dropped. Discoveries we relay stay
+        // until they expire: they are the only duplicate check for late copies of
+        // their route requests.
+        self.discovery_table.retain(|_, entry| {
+            entry.source_address != own_address || entry.destination_address != nwk
+        });
+    }
+
     /// Seed an active routing entry restored by the client on startup. Unlike a route
     /// learned at runtime, this does not record a change (the client already has it).
     pub fn restore_route(&mut self, destination: Nwk, next_hop: Nwk, path_cost: u8) {

@@ -416,10 +416,28 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unrouted_unicasts.retry_discovery(destination)
     }
 
+    /// The driver broadcast `request`, the route request of `destination`'s discovery.
+    /// Copies of the request it replaces still to come are not sent.
+    pub fn route_request_sent(&mut self, destination: Nwk, request: SendId) -> Actions<F, W, E> {
+        match self
+            .unrouted_unicasts
+            .route_request_sent(destination, request)
+        {
+            Some(previous) => self.broadcasts.stop(previous),
+            None => Actions::new(),
+        }
+    }
+
     /// Fail every unrouted send to `destination`: its discovery is over without a
-    /// route.
+    /// route. Copies of its route request still to come are not sent.
     pub fn fail_unrouted(&mut self, destination: Nwk) -> Actions<F, W, E> {
-        self.unrouted_unicasts.fail(destination)
+        let (request, mut actions) = self.unrouted_unicasts.fail(destination);
+
+        if let Some(request) = request {
+            actions.extend(self.broadcasts.stop(request));
+        }
+
+        actions
     }
 
     /// A route to `destination` is known: move every unrouted send to it to the unicasts,

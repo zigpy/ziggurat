@@ -32,12 +32,33 @@ use super::{
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
+    /// A device joined or rejoined as `nwk`: the address starts a new session. The
+    /// mapping and the state it replaces change under one lock, so no send can be
+    /// enqueued against the old session in between.
+    pub(super) fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
+        let mut core = self.core();
 
-        if conflict {
+        // `nwk` belongs to another device, whose state must stay
+        if core.nib.address_map.update_mapping(eui64, nwk) {
+            drop(core);
             self.handle_address_conflict(nwk, AddrConflictSource::Local);
+            return;
         }
+
+        // The device can be reached again, so sends held for it are kept. The route
+        // request they wait on went out before it joined. With that discovery gone, the
+        // timer pass starts a new one.
+        core.nib.routing.forget(self.state.network_address, nwk);
+        self.commit_sends(core, SendActions::new());
+    }
+
+    /// The device at `nwk` left, so what we know about the address belongs to a session
+    /// that is over. Held sends fail: nothing will answer a route request for it.
+    pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
+        let mut core = self.core();
+        core.nib.routing.forget(self.state.network_address, nwk);
+        let actions = core.sends.fail_unrouted(nwk);
+        self.commit_sends(core, actions);
     }
 
     /// Filter broadcast frames based on the NWK broadcast transaction table
@@ -89,8 +110,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         attempts: u8,
         initial_delay: Duration,
-    ) -> SendActions {
-        let (_, actions) = self.enqueue_broadcast_in(
+    ) -> (SendId, SendActions) {
+        let (handle, actions) = self.enqueue_broadcast_in(
             core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -104,7 +125,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
         );
 
-        actions
+        (handle.id(), actions)
     }
 
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
@@ -153,9 +174,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
-        // Update the address cache
+        // Update the address cache. Hearing a device is not a join, so the address keeps
+        // its session state.
         if let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
-            self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
+            let source = nwk_frame.nwk_header.source;
+            let conflict = self
+                .core()
+                .nib
+                .address_map
+                .update_mapping(src_eui64, source);
+
+            if conflict {
+                self.handle_address_conflict(source, AddrConflictSource::Local);
+            }
         }
 
         // Spec 3.6.1.10.2: a frame addressed to our network address but a different
