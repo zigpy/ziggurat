@@ -1468,6 +1468,7 @@ dependencies = [
  "embassy-sync",
  "ziggurat-ieee-802154",
  "ziggurat-phy",
+ "ziggurat-runtime",
 ]
 
 [[package]]
