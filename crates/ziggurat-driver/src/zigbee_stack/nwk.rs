@@ -34,9 +34,22 @@ use super::{
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// A device joined or rejoined as `nwk`: the address starts a new session.
     pub(super) fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        // A device that comes back under a new address leaves the old one behind
-        let previous_nwk = self.core().nib.address_map.nwk_for(eui64);
+        let (previous_nwk, conflict) = {
+            let mut core = self.core();
 
+            (
+                core.nib.address_map.nwk_for(eui64),
+                core.nib.address_map.update_mapping(eui64, nwk),
+            )
+        };
+
+        // `nwk` belongs to another device, whose state must stay
+        if conflict {
+            self.handle_address_conflict(nwk, AddrConflictSource::Local);
+            return;
+        }
+
+        // A device that comes back under a new address leaves the old one behind
         if let Some(previous_nwk) = previous_nwk
             && previous_nwk != nwk
         {
@@ -44,12 +57,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         self.forget_nwk_state(Some(eui64), nwk);
-
-        let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
-
-        if conflict {
-            self.handle_address_conflict(nwk, AddrConflictSource::Local);
-        }
     }
 
     /// The device at `nwk` left or joined again, so what we know about the address
