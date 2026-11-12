@@ -417,8 +417,14 @@ impl Routing {
         }
     }
 
-    /// Remove the route to a destination, returning whether an entry was removed.
+    /// Remove the route to a destination, returning whether an entry was removed. An
+    /// entry in `DiscoveryUnderway` holds no route and stays: without it the reply to
+    /// the discovery is dropped (spec 3.6.4.5.2).
     pub fn remove_route(&mut self, destination: Nwk) -> bool {
+        if self.route_status(destination) == Some(Status::DiscoveryUnderway) {
+            return false;
+        }
+
         self.route_table.remove(&destination).is_some()
     }
 

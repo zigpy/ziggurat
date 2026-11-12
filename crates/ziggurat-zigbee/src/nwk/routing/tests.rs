@@ -350,6 +350,24 @@ fn test_relayed_discovery_does_not_keep_ours_alive() {
     assert_eq!(tick(&mut routing, lapsed, true).unreachable, vec![DEVICE]);
 }
 
+// A relay can report an earlier frame undeliverable after the next frame started a
+// discovery. The report is about the old route. The discovery must still take its reply.
+#[test]
+fn test_removing_the_route_keeps_a_discovery_underway() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3);
+    assert!(routing.remove_route(DEVICE));
+
+    let request_id = routing
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
+        .unwrap();
+    assert!(!routing.remove_route(DEVICE));
+
+    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3);
+    assert_eq!(reply.disposition, RouteReplyDisposition::Established);
+    assert_eq!(routing.next_hop(DEVICE), Some(NEIGHBOR));
+}
+
 /// Start a discovery toward `DEVICE` and have the device answer it.
 fn answered_discovery(routing: &mut Routing, attempts: u8) {
     let request_id = routing
