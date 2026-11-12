@@ -286,6 +286,9 @@ impl Routing {
 
     /// The device at `nwk` left or joined again, clear associated state.
     pub fn forget(&mut self, own_address: Nwk, nwk: Nwk) {
+        // TODO: a discovery toward `nwk` that we relay for another router loses its
+        // route entry here, so `accept_route_reply` drops the reply as coming from an
+        // unknown responder. That router gets no route through us for that discovery.
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
 
