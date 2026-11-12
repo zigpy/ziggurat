@@ -26,30 +26,37 @@ use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
-    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendId,
-    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError, Frame,
+    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
+    SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore,
+    ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    /// A device joined or rejoined as `nwk`: the address starts a new session.
+    /// A device joined or rejoined as `nwk`: the address starts a new session. The
+    /// mapping and the state it replaces change under one lock, so no send can be
+    /// enqueued against the old session in between.
     pub(super) fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
+        let mut core = self.core();
 
         // `nwk` belongs to another device, whose state must stay
-        if conflict {
+        if core.nib.address_map.update_mapping(eui64, nwk) {
+            drop(core);
             self.handle_address_conflict(nwk, AddrConflictSource::Local);
             return;
         }
 
-        self.forget_nwk_state(nwk);
+        self.forget_nwk_state_in(core, nwk);
     }
 
     /// The device at `nwk` left or joined again, so what we know about the address
     /// belongs to its previous session. Held sends fail: they wait on a route request
     /// the device never heard, and would block a new one until it expires.
     pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
-        let mut core = self.core();
+        self.forget_nwk_state_in(self.core(), nwk);
+    }
+
+    fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
         core.nib.routing.forget(self.state.network_address, nwk);
         let actions = core.sends.fail_unrouted(nwk);
         self.commit_sends(core, actions);
