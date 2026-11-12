@@ -185,6 +185,17 @@ pub enum Action<F, W, E> {
     },
 }
 
+/// What a timer pass leaves for the driver.
+#[derive(Debug)]
+pub struct Tick<F, W, E> {
+    pub actions: Actions<F, W, E>,
+    /// Destinations whose route discovery lapsed with a restart left. The driver starts
+    /// a new discovery for each.
+    pub restart_discovery: Vec<Nwk>,
+    /// Destinations whose route discovery is over without a route. Their sends failed.
+    pub failed_discovery: Vec<Nwk>,
+}
+
 /// What the driver must do after a mutation, in order. Every mutating verb returns one,
 /// so a mutation whose consequences are dropped is a compile-time warning.
 #[must_use = "actions resolve waiters; dropping them loses sends"]
@@ -400,20 +411,9 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         self.unicasts.ack_received(ack)
     }
 
-    /// Every destination with unrouted sends.
-    pub fn unrouted_destinations(&self) -> Vec<Nwk> {
-        self.unrouted_unicasts.destinations()
-    }
-
     /// Whether any unrouted send waits on `destination`'s route discovery.
     pub fn has_unrouted(&self, destination: Nwk) -> bool {
         self.unrouted_unicasts.has_unrouted(destination)
-    }
-
-    /// `destination`'s discovery lapsed: consume a restart of it, if one is left and
-    /// an unrouted send still waits on it. The caller restarts the discovery.
-    pub fn retry_discovery(&mut self, destination: Nwk) -> bool {
-        self.unrouted_unicasts.retry_discovery(destination)
     }
 
     /// The driver broadcast `request`, the route request of `destination`'s discovery.
@@ -440,22 +440,20 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         actions
     }
 
-    /// Move the unrouted sends to `destination` that `resolve` finds a next hop for.
-    pub fn route_unicasts(
+    /// Move the unrouted sends to `destination` that `next_hop` finds a next hop for.
+    fn route_unicasts(
         &mut self,
         destination: Nwk,
         now: Instant,
         tunables: &Tunables,
-        mut resolve: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
-    ) -> Actions<F, W, E> {
-        // Fail the sends past their deadline first, so routing never revives one
-        let actions = self.unrouted_unicasts.tick(now);
+        next_hop: &mut impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+    ) {
         let mut routed = false;
 
         for id in self.unrouted_unicasts.sends_to(destination) {
-            // `resolve` may rewrite the frame for a source route. Without a next hop
+            // `next_hop` may rewrite the frame for a source route. Without a next hop
             // the send stays held.
-            let Some((next_hop, poll_address)) = resolve(self.unrouted_unicasts.frame_mut(id))
+            let Some((next_hop, poll_address)) = next_hop(self.unrouted_unicasts.frame_mut(id))
             else {
                 continue;
             };
@@ -482,8 +480,6 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         if routed {
             self.unrouted_unicasts.routed(destination);
         }
-
-        actions
     }
 
     /// The key of every broadcast awaiting its passive-ack quorum.
@@ -540,16 +536,60 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         Some(actions)
     }
 
-    /// The timer pass: re-queue what is due and fail what is past its deadline.
-    pub fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
-        let mut actions = self.unicasts.tick(now);
-        actions.extend(self.unrouted_unicasts.tick(now));
+    /// The timer pass over the three tables.
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        tunables: &Tunables,
+        // A frame's next hop, and the address its device polls under if the frame must
+        // wait for its poll
+        mut next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+        // When the live route discovery toward a destination lapses
+        discovery_deadline: impl Fn(Nwk) -> Option<Instant>,
+    ) -> Tick<F, W, E> {
+        // Fail the sends past their deadline first, so routing never revives one
+        let mut actions = self.unrouted_unicasts.tick(now);
+        let mut restart_discovery = Vec::new();
+        let mut failed_discovery = Vec::new();
+
+        for destination in self.unrouted_unicasts.destinations() {
+            self.route_unicasts(destination, now, tunables, &mut next_hop);
+
+            if !self.unrouted_unicasts.has_unrouted(destination)
+                || discovery_deadline(destination).is_some()
+            {
+                continue;
+            }
+
+            if self.unrouted_unicasts.retry_discovery(destination) {
+                restart_discovery.push(destination);
+            } else {
+                actions.extend(self.fail_unrouted(destination));
+                failed_discovery.push(destination);
+            }
+        }
+
+        actions.extend(self.unicasts.tick(now));
         actions.extend(self.broadcasts.tick(now));
-        actions
+
+        Tick {
+            actions,
+            restart_discovery,
+            failed_discovery,
+        }
     }
 
     /// When the timer must next run, or `None` when nothing is waiting on time.
-    pub fn next_wake(&self) -> Option<Instant> {
+    pub fn next_wake(
+        &self,
+        discovery_deadline: impl Fn(Nwk) -> Option<Instant>,
+    ) -> Option<Instant> {
+        let discoveries = self
+            .unrouted_unicasts
+            .destinations()
+            .into_iter()
+            .filter_map(discovery_deadline);
+
         [
             self.unicasts.next_wake(),
             self.unrouted_unicasts.next_wake(),
@@ -557,6 +597,7 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         ]
         .into_iter()
         .flatten()
+        .chain(discoveries)
         .min()
     }
 

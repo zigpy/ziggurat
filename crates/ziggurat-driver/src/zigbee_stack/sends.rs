@@ -297,16 +297,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, route
-    /// the held sends that have become routable, restart or fail the discoveries that
-    /// lapsed, then run the table's timed transitions. Returns when the next pass is
-    /// due: the table's next deadline, or that of a route discovery unrouted sends wait
-    /// on, which lives in the routing table.
+    /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, run
+    /// the send tables' pass against the routing and neighbor tables, then start the
+    /// route discoveries it asks for. Returns when the next pass is due.
     fn drive_sends(&self) -> Option<CoreInstant> {
         let now = self.core_now();
 
         let mut guard = self.core();
-        // A plain `&mut ZigbeeCore`, so the closure below borrows `nib` beside `sends`
+        // A plain `&mut ZigbeeCore`, so the closures below borrow `nib` beside `sends`
         let core = &mut *guard;
         let mut actions = SendActions::new();
 
@@ -316,38 +314,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         }
 
-        for destination in core.sends.unrouted_destinations() {
-            actions.extend(
-                core.sends
-                    .route_unicasts(destination, now, &self.tunables, |send| {
-                        self.resolve_unrouted_unicast(&core.nib, send, now)
-                    }),
-            );
+        let tick = core.sends.tick(
+            now,
+            &self.tunables,
+            |frame| self.resolve_unrouted_unicast(&core.nib, frame, now),
+            |destination| core.nib.routing.discovery_deadline(destination, now),
+        );
+        actions.extend(tick.actions);
 
-            if core.sends.has_unrouted(destination)
-                && core
-                    .nib
-                    .routing
-                    .discovery_deadline(destination, now)
-                    .is_none()
-            {
-                if core.sends.retry_discovery(destination) {
-                    actions.extend(self.start_route_discovery(core, destination));
-                } else {
-                    core.nib.routing.mark_discovery_failed(destination);
-                    actions.extend(core.sends.fail_unrouted(destination));
-                }
-            }
+        for destination in tick.restart_discovery {
+            actions.extend(self.start_route_discovery(core, destination));
         }
 
-        actions.extend(core.sends.tick(now));
+        for destination in tick.failed_discovery {
+            core.nib.routing.mark_discovery_failed(destination);
+        }
 
-        let discoveries = core
+        let next_wake = core
             .sends
-            .unrouted_destinations()
-            .into_iter()
-            .filter_map(|destination| core.nib.routing.discovery_deadline(destination, now));
-        let next_wake = core.sends.next_wake().into_iter().chain(discoveries).min();
+            .next_wake(|destination| core.nib.routing.discovery_deadline(destination, now));
 
         // This pass is the timer task's own: waking the timer here would make it spin
         self.run_send_actions(guard, actions);
