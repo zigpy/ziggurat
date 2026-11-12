@@ -18,7 +18,6 @@ use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as Un
 
 use crate::runtime::Runtime;
 
-use super::routing::Status as RouteStatus;
 use super::{
     Confirm, CoreGuard, DeliveryError, Frame, Nib, NwkSecurityMode, RouteDirective, Schedule,
     SendActions, SendHandle, SendId, SendMode, SendSlot, Transmit, TxPolicy, ZigbeeCore,
@@ -178,15 +177,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .map(Ieee802154Address::Eui64)
     }
 
-    /// The next hop of an unrouted frame once its route is known, and the address it
-    /// polls under if it is a sleepy child. The route can have vanished in the race,
-    /// which fails the send.
-    fn resolve_routed_unicast(
+    /// Resolve the route of an unrouted frame again: its next hop and the address it
+    /// polls under if it is a sleepy child. `None` means no route yet.
+    fn resolve_unrouted_unicast(
         &self,
         nib: &Nib,
         frame: &mut Frame,
         now: CoreInstant,
-    ) -> Result<(Nwk, Option<Ieee802154Address>), DeliveryError> {
+    ) -> Option<(Nwk, Option<Ieee802154Address>)> {
         let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
         };
@@ -201,9 +199,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         match resolved {
-            NextHop::Resolved(next_hop) => Ok((next_hop, Self::poll_address(nib, next_hop))),
-            NextHop::NeedDiscovery | NextHop::Discard => {
-                Err(DeliveryError::RouteInactiveAfterDiscovery)
+            NextHop::Resolved(next_hop) => Some((next_hop, Self::poll_address(nib, next_hop))),
+            NextHop::NeedDiscovery => None,
+            NextHop::Discard => {
+                unreachable!("a frame is only held for a route if it allows discovery")
             }
         }
     }
@@ -299,7 +298,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, route
-    /// the sends whose route became active, restart or fail the discoveries that
+    /// the held sends that have become routable, restart or fail the discoveries that
     /// lapsed, then run the table's timed transitions. Returns when the next pass is
     /// due: the table's next deadline, or that of a route discovery unrouted sends wait
     /// on, which lives in the routing table.
@@ -318,18 +317,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         for destination in core.sends.unrouted_destinations() {
-            if core.nib.routing.route_status(destination) == Some(RouteStatus::Active) {
-                actions.extend(core.sends.route_unicasts(
-                    destination,
-                    now,
-                    &self.tunables,
-                    |send| self.resolve_routed_unicast(&core.nib, send, now),
-                ));
-            } else if core
-                .nib
-                .routing
-                .discovery_deadline(destination, now)
-                .is_none()
+            actions.extend(
+                core.sends
+                    .route_unicasts(destination, now, &self.tunables, |send| {
+                        self.resolve_unrouted_unicast(&core.nib, send, now)
+                    }),
+            );
+
+            if core.sends.has_unrouted(destination)
+                && core
+                    .nib
+                    .routing
+                    .discovery_deadline(destination, now)
+                    .is_none()
             {
                 if core.sends.retry_discovery(destination) {
                     actions.extend(self.start_route_discovery(core, destination));

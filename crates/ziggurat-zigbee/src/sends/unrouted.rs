@@ -129,23 +129,30 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .replace(request)
     }
 
-    /// Take every send to `destination`: its route is known.
-    pub(super) fn route(&mut self, destination: Nwk) -> Vec<(SendId, Record<F, W>)> {
-        self.discoveries.remove(&destination);
-        self.take(destination)
-    }
-
-    fn take(&mut self, destination: Nwk) -> Vec<(SendId, Record<F, W>)> {
-        let ids: Vec<SendId> = self
-            .records
+    /// The id of every send to `destination`, oldest first.
+    pub(super) fn sends_to(&self, destination: Nwk) -> Vec<SendId> {
+        self.records
             .iter()
             .filter(|(_, send)| send.destination == destination)
             .map(|(id, _)| *id)
-            .collect();
-
-        ids.into_iter()
-            .map(|id| (id, self.records.remove(&id).unwrap()))
             .collect()
+    }
+
+    pub(super) fn frame_mut(&mut self, id: SendId) -> &mut F {
+        &mut self.records.get_mut(&id).unwrap().frame
+    }
+
+    /// Take a held send: it has a route, or it failed.
+    pub(super) fn take(&mut self, id: SendId) -> Record<F, W> {
+        self.records.remove(&id).unwrap()
+    }
+
+    /// A send to `destination` found a route. Its discovery is over once no send waits
+    /// on it any more.
+    pub(super) fn routed(&mut self, destination: Nwk) {
+        if self.sends_to(destination).is_empty() {
+            self.discoveries.remove(&destination);
+        }
     }
 
     fn settled(send: Record<F, W>, failure: SendFailure) -> Action<F, W, E> {
@@ -184,9 +191,9 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .and_then(|discovery| discovery.request);
 
         let actions = self
-            .take(destination)
+            .sends_to(destination)
             .into_iter()
-            .map(|(_, send)| Self::settled(send, SendFailure::RouteDiscoveryTimeout))
+            .map(|id| Self::settled(self.take(id), SendFailure::RouteDiscoveryTimeout))
             .collect();
 
         (request, actions)

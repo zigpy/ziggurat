@@ -440,44 +440,47 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         actions
     }
 
-    /// A route to `destination` is known: move every unrouted send to it to the unicasts,
-    /// keeping the deadline it was admitted with. `resolve` finds each frame's next hop
-    /// (rewriting the frame for a source route) and the address the device polls under
-    /// if the frame must wait for its poll, or fails the send.
+    /// Move the unrouted sends to `destination` that `resolve` finds a next hop for.
     pub fn route_unicasts(
         &mut self,
         destination: Nwk,
         now: Instant,
         tunables: &Tunables,
-        mut resolve: impl FnMut(&mut F) -> Result<(Nwk, Option<Ieee802154Address>), E>,
+        mut resolve: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
     ) -> Actions<F, W, E> {
         // Fail the sends past their deadline first, so routing never revives one
-        let mut actions = self.unrouted_unicasts.tick(now);
+        let actions = self.unrouted_unicasts.tick(now);
+        let mut routed = false;
 
-        for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
-            match resolve(&mut unrouted.frame) {
-                Ok((next_hop, poll_address)) => self.unicasts.enqueue(
-                    id,
-                    Unicast {
-                        frame: unrouted.frame,
-                        priority: unrouted.priority,
-                        waiter: unrouted.waiter,
-                        confirm: unrouted.confirm,
-                        next_hop,
-                        poll_address,
-                    },
-                    now,
-                    Some(unrouted.deadline),
-                    None,
-                    tunables,
-                ),
-                Err(err) => actions.push(Action::Settled {
-                    waiter: unrouted.waiter,
-                    result: Err(err),
+        for id in self.unrouted_unicasts.sends_to(destination) {
+            // `resolve` may rewrite the frame for a source route. Without a next hop
+            // the send stays held.
+            let Some((next_hop, poll_address)) = resolve(self.unrouted_unicasts.frame_mut(id))
+            else {
+                continue;
+            };
+
+            let unrouted = self.unrouted_unicasts.take(id);
+            self.unicasts.enqueue(
+                id,
+                Unicast {
                     frame: unrouted.frame,
-                    failed_hop: None,
-                }),
-            }
+                    priority: unrouted.priority,
+                    waiter: unrouted.waiter,
+                    confirm: unrouted.confirm,
+                    next_hop,
+                    poll_address,
+                },
+                now,
+                Some(unrouted.deadline),
+                None,
+                tunables,
+            );
+            routed = true;
+        }
+
+        if routed {
+            self.unrouted_unicasts.routed(destination);
         }
 
         actions
