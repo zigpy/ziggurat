@@ -1035,40 +1035,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 });
             }
             ApsUpdateDeviceStatus::DeviceLeft => {
-                // An end device has one parent. If it is our child now, it left the
-                // router before it joined us: the report is late and its state is
-                // current. A device that moved to another router is not detected
-                // because we do not track its parent.
-                let is_our_child = self
-                    .core()
-                    .nib
-                    .neighbors
-                    .end_device_children()
-                    .contains(&update.device_address);
-
-                if is_our_child {
-                    tracing::debug!(
-                        "Ignoring late leave report for our child {:?} from {router_nwk:?}",
-                        update.device_address
-                    );
-                    return;
-                }
-
-                // The report names the device by both addresses. A short address that
-                // another device holds is not this report's to clear.
-                let claimed_by_other = self
-                    .core()
-                    .nib
-                    .address_map
-                    .claimed_by_other(update.device_short_address, update.device_address);
-
-                if !claimed_by_other {
-                    // Spec 4.4.3.2.3 calls this report informative, not authoritative,
-                    // and asks for no further processing. We still forget, but only
-                    // state that rebuilds itself: keys and the address map are kept.
-                    self.forget_nwk_state(Some(update.device_address), update.device_short_address);
-                }
-
+                // Spec 4.4.3.2.3: informative only, no action is taken beyond
+                // notifying the client
                 let router_ieee = nwk_frame
                     .nwk_header
                     .source_ieee
