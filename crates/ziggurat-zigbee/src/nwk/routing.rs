@@ -332,6 +332,18 @@ impl Routing {
         self.route_record_table.remove(&destination).is_some()
     }
 
+    /// Spec 3.6.4.8.1: a router reported it could not deliver a frame we originated
+    /// toward `destination` (`LinkFailure`, `SourceRouteFailure` or a legacy
+    /// equivalent). Both the routing entry and the stored route record go: a record
+    /// that reached the failing router as a plain next hop, such as a direct record
+    /// (no relays) for a device that moved away, is as stale as a broken source route,
+    /// and only its removal lets the next transmission discover a fresh route.
+    /// Returns whether a route record was removed.
+    pub fn forget_route_to(&mut self, destination: Nwk) -> bool {
+        self.route_table.remove(&destination);
+        self.route_record_table.remove(&destination).is_some()
+    }
+
     /// Spec 3.6.4.3.2: relaying a source-routed frame proves the concentrator that
     /// originated it holds a route record for the frame's source; no route record
     /// has to precede the next frame toward it (unless it keeps no route cache).
@@ -697,5 +709,59 @@ impl Routing {
                 self.route_table.remove(&destination);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use alloc::vec;
+
+    const DESTINATION: Nwk = Nwk(0x0391);
+    const RELAY: Nwk = Nwk(0xEF2F);
+    const MAX_SOURCE_ROUTE: u8 = 12;
+
+    #[test]
+    fn test_forget_route_to_drops_a_direct_route_record() {
+        let mut routing = Routing::default();
+        routing.store_route_record(DESTINATION, vec![]);
+        assert_eq!(
+            routing.route_to(DESTINATION, MAX_SOURCE_ROUTE),
+            Some(Route::NextHop(DESTINATION))
+        );
+
+        assert!(routing.forget_route_to(DESTINATION));
+        assert_eq!(routing.route_to(DESTINATION, MAX_SOURCE_ROUTE), None);
+    }
+
+    #[test]
+    fn test_forget_route_to_drops_a_source_route_record() {
+        let mut routing = Routing::default();
+        routing.store_route_record(DESTINATION, vec![RELAY]);
+
+        assert!(routing.forget_route_to(DESTINATION));
+        assert_eq!(routing.route_to(DESTINATION, MAX_SOURCE_ROUTE), None);
+    }
+
+    #[test]
+    fn test_forget_route_to_drops_the_routing_entry() {
+        let mut routing = Routing::default();
+        routing.restore_route(DESTINATION, RELAY, 1);
+        assert_eq!(routing.next_hop(DESTINATION), Some(RELAY));
+
+        assert!(!routing.forget_route_to(DESTINATION));
+        assert_eq!(routing.next_hop(DESTINATION), None);
+    }
+
+    #[test]
+    fn test_forget_route_to_keeps_other_destinations() {
+        let mut routing = Routing::default();
+        routing.store_route_record(DESTINATION, vec![RELAY]);
+
+        routing.forget_route_to(DESTINATION);
+        assert_eq!(
+            routing.route_to(RELAY, MAX_SOURCE_ROUTE),
+            Some(Route::NextHop(RELAY))
+        );
     }
 }
