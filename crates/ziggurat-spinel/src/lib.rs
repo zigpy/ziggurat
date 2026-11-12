@@ -1,10 +1,16 @@
+#![no_std]
+
+extern crate alloc;
+
+#[cfg(test)]
+extern crate std;
+
 pub mod client;
 
+use alloc::vec::Vec;
 use crc_all::CrcAlgo;
 use num_enum::TryFromPrimitive;
-use std::collections::HashMap;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
 
 const CRC_KERMIT: CrcAlgo<u16> = CrcAlgo::<u16>::new(0x1021, 16, 0xFFFF, 0xFFFF, true);
 const U21_MAX: u32 = 1 << 21;
@@ -12,6 +18,10 @@ const U21_MAX: u32 = 1 << 21;
 /// No valid HDLC frame comes close to this size; a buffer this large without a flag
 /// byte means we have desynced from the stream.
 const MAX_HDLC_BUFFER_SIZE: usize = 4096;
+
+/// Consecutive command timeouts before the RCP is presumed wedged and the
+/// reset-recovery path is triggered.
+const MAX_CONSECUTIVE_TIMEOUTS: u32 = 4;
 
 /// OpenThread's `SPINEL_FRAME_MAX_SIZE`: no spinel frame exceeds this unescaped.
 pub const SPINEL_FRAME_MAX_SIZE: usize = 1300;
@@ -551,7 +561,7 @@ impl SpinelFrame {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpinelFramePropValueIs {
     pub property_id: SpinelPropertyId,
     pub value: Vec<u8>,
@@ -577,6 +587,17 @@ impl SpinelFramePropValueIs {
     }
 }
 
+/// Something the RCP link produced that the caller must act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpinelEvent {
+    /// The response to a pending request, matched by its transaction id.
+    Response(SpinelFrame),
+    /// An unsolicited property update.
+    PropertyUpdate(SpinelFramePropValueIs),
+    /// The RCP reset, or is presumed wedged. Every pending request was cancelled.
+    Reset(SpinelStatus),
+}
+
 #[derive(Debug)]
 pub struct SpinelProtocol {
     pub buffer: Vec<u8>,
@@ -585,10 +606,9 @@ pub struct SpinelProtocol {
     unescape_scratch: Vec<u8>,
     pub ignoring_until_next_flag: bool,
     pub next_tid: u8,
-    pub pending_frames: HashMap<u8, oneshot::Sender<SpinelFrame>>,
-    pub unsolicited_frame_receiver: Option<mpsc::Sender<SpinelFrame>>,
-    pub property_update_receivers: HashMap<SpinelPropertyId, mpsc::Sender<SpinelFramePropValueIs>>,
-    pub reset_notification_receiver: Option<mpsc::Sender<SpinelStatus>>,
+    /// Bit `tid` is set while that transaction awaits its response.
+    pending_tids: u8,
+    consecutive_timeouts: u32,
 }
 
 impl Default for SpinelProtocol {
@@ -604,40 +624,8 @@ impl SpinelProtocol {
             unescape_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
             ignoring_until_next_flag: true,
             next_tid: 1,
-            pending_frames: HashMap::new(),
-            unsolicited_frame_receiver: None,
-            property_update_receivers: HashMap::new(),
-            reset_notification_receiver: None,
-        }
-    }
-
-    pub fn set_unsolicited_frame_receiver(&mut self, tx: mpsc::Sender<SpinelFrame>) {
-        self.unsolicited_frame_receiver = Some(tx);
-    }
-
-    pub fn set_property_update_receiver(
-        &mut self,
-        property_id: SpinelPropertyId,
-        tx: mpsc::Sender<SpinelFramePropValueIs>,
-    ) {
-        self.property_update_receivers.insert(property_id, tx);
-    }
-
-    pub fn set_reset_notification_receiver(&mut self, tx: mpsc::Sender<SpinelStatus>) {
-        self.reset_notification_receiver = Some(tx);
-    }
-
-    /// Dropping the senders resolves every in-flight `send_command` immediately with
-    /// `CancelledByReset` instead of stranding it until the timeout.
-    pub fn fail_all_pending_requests(&mut self) {
-        self.pending_frames.clear();
-    }
-
-    pub fn notify_reset(&mut self, status: SpinelStatus) {
-        self.fail_all_pending_requests();
-
-        if let Some(tx) = &self.reset_notification_receiver {
-            let _ = tx.try_send(status);
+            pending_tids: 0,
+            consecutive_timeouts: 0,
         }
     }
 
@@ -681,7 +669,7 @@ impl SpinelProtocol {
     pub fn parse_frames_from_bytes(&mut self, bytes: &[u8]) -> Vec<SpinelFrame> {
         self.buffer.extend(bytes);
 
-        let mut scratch = std::mem::take(&mut self.unescape_scratch);
+        let mut scratch = core::mem::take(&mut self.unescape_scratch);
         let mut frames = Vec::new();
 
         while self.next_frame_into(&mut scratch) {
@@ -694,18 +682,19 @@ impl SpinelProtocol {
         frames
     }
 
-    pub fn handle_inbound_bytes(&mut self, bytes: &[u8]) {
+    /// Consume bytes read from the RCP, appending what they produced to `events`.
+    pub fn handle_inbound_bytes(&mut self, bytes: &[u8], events: &mut Vec<SpinelEvent>) {
         tracing::trace!("RX bytes: {bytes:?}");
         self.buffer.extend(bytes);
 
         // The scratch is moved out of `self` so the routing below can borrow the
         // payload from it while still mutating protocol state
-        let mut scratch = std::mem::take(&mut self.unescape_scratch);
+        let mut scratch = core::mem::take(&mut self.unescape_scratch);
 
         while self.next_frame_into(&mut scratch) {
             match parse_spinel_parts(&scratch) {
                 Ok((header, command_id, payload)) => {
-                    self.handle_inbound_frame(header, command_id, payload);
+                    self.handle_inbound_frame(header, command_id, payload, events);
                 }
                 Err(err) => {
                     tracing::warn!("Failed to parse Spinel frame: {err:?}");
@@ -717,12 +706,13 @@ impl SpinelProtocol {
     }
 
     /// Route one inbound frame. The payload is borrowed from the read scratch and is
-    /// only copied at the boundary where a frame is actually handed to a consumer.
+    /// only copied once the frame is known to produce an event.
     pub fn handle_inbound_frame(
         &mut self,
         header: SpinelHeader,
         command_id: SpinelCommandId,
         payload: &[u8],
+        events: &mut Vec<SpinelEvent>,
     ) {
         tracing::trace!("RX: {header:?} {command_id:?} {payload:02X?}");
         let tid = header.transaction_id;
@@ -738,22 +728,13 @@ impl SpinelProtocol {
 
                 match property {
                     Some((SpinelPropertyId::LastStatus, value)) => {
-                        self.handle_unsolicited_last_status(value);
+                        self.handle_unsolicited_last_status(value, events);
                     }
                     Some((property_id, value)) => {
-                        match self.property_update_receivers.get(&property_id) {
-                            Some(sender) => {
-                                let _ = sender.try_send(SpinelFramePropValueIs {
-                                    property_id,
-                                    value: value.to_vec(),
-                                });
-                            }
-                            None => {
-                                // Expected for e.g. the MacScanState=IDLE update at
-                                // the end of each scanned channel
-                                tracing::debug!("No receiver for property update: {property_id:?}");
-                            }
-                        }
+                        events.push(SpinelEvent::PropertyUpdate(SpinelFramePropValueIs {
+                            property_id,
+                            value: value.to_vec(),
+                        }));
                     }
                     None => {
                         tracing::warn!("Failed to parse PropValueIs frame: {payload:02X?}");
@@ -762,12 +743,14 @@ impl SpinelProtocol {
             } else {
                 tracing::warn!("Unhandled unsolicited frame: {command_id:?} {payload:02X?}");
             }
-        } else if let Some(sender) = self.pending_frames.remove(&tid) {
-            let _ = sender.send(SpinelFrame {
+        } else if self.pending_tids & (1 << tid) != 0 {
+            self.pending_tids &= !(1 << tid);
+            self.consecutive_timeouts = 0;
+            events.push(SpinelEvent::Response(SpinelFrame {
                 header,
                 command_id,
                 payload: payload.to_vec(),
-            });
+            }));
         } else {
             tracing::warn!("Unsolicited or unmatched frame: {command_id:?} {payload:02X?}");
         }
@@ -775,9 +758,9 @@ impl SpinelProtocol {
 
     /// The RCP announces a reset (brownout, watchdog, firmware assert, our own
     /// `CMD_RESET`) with an unsolicited `LastStatus = RESET_*` notification. The reset
-    /// wipes the radio configuration, so every in-flight command is failed and the
-    /// reset is forwarded for recovery.
-    fn handle_unsolicited_last_status(&mut self, value: &[u8]) {
+    /// wipes the radio configuration, so every in-flight command is cancelled and the
+    /// reset is reported for recovery.
+    fn handle_unsolicited_last_status(&mut self, value: &[u8], events: &mut Vec<SpinelEvent>) {
         let status = match packed_uint21_deserialize(value) {
             Ok((status_int, _)) => {
                 match u8::try_from(status_int)
@@ -799,54 +782,66 @@ impl SpinelProtocol {
 
         if status.is_reset() {
             tracing::error!("RCP announced a reset: {status:?}");
-            self.notify_reset(status);
+            self.pending_tids = 0;
+            events.push(SpinelEvent::Reset(status));
         } else {
             tracing::warn!("Unsolicited status notification: {status:?}");
         }
     }
 
+    /// Allocate a transaction id for a new request and build its frame.
     pub fn prepare_request(
         &mut self,
         command_id: SpinelCommandId,
         payload: Vec<u8>,
-    ) -> (SpinelFrame, oneshot::Receiver<SpinelFrame>) {
+    ) -> SpinelFrame {
         // Cycle TIDs from 1..7, skipping ones still awaiting a response: if a live TID
-        // were reused, the older command's timeout cancellation would remove the newer
-        // command's pending entry and orphan its response
+        // were reused, the older command's timeout would cancel the newer command and
+        // orphan its response
         let mut tid = self.next_tid;
-        while self.pending_frames.contains_key(&tid) {
+        while self.pending_tids & (1 << tid) != 0 {
             tid = 1 + (tid % 7);
             assert_ne!(tid, self.next_tid, "All Spinel TIDs are in flight");
         }
         self.next_tid = 1 + (tid % 7);
+        self.pending_tids |= 1 << tid;
 
-        let header = SpinelHeader {
-            flag: 0b10,
-            network_link_id: 0,
-            transaction_id: tid,
-        };
-
-        let frame = SpinelFrame {
-            header,
+        SpinelFrame {
+            header: SpinelHeader {
+                flag: 0b10,
+                network_link_id: 0,
+                transaction_id: tid,
+            },
             command_id,
             payload,
-        };
-
-        // Create a one-shot channel for the response
-        let (tx, rx) = oneshot::channel();
-        self.pending_frames.insert(tid, tx);
-
-        (frame, rx)
+        }
     }
 
-    pub fn cancel_request(&mut self, tid: u8) {
-        self.pending_frames.remove(&tid);
+    /// The request `tid` got no response in time. Returns the reset to recover from
+    /// once enough consecutive requests have timed out.
+    pub fn request_timed_out(&mut self, tid: u8) -> Option<SpinelEvent> {
+        self.pending_tids &= !(1 << tid);
+        self.consecutive_timeouts += 1;
+
+        if self.consecutive_timeouts < MAX_CONSECUTIVE_TIMEOUTS {
+            return None;
+        }
+
+        tracing::error!(
+            "RCP unresponsive after {} consecutive command timeouts, triggering reset recovery",
+            self.consecutive_timeouts
+        );
+        self.consecutive_timeouts = 0;
+        self.pending_tids = 0;
+
+        Some(SpinelEvent::Reset(SpinelStatus::ResponseTimeout))
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::vec;
     use hex_literal::hex;
     use rand::Rng;
     use rand::RngExt;
@@ -1045,7 +1040,7 @@ mod test {
         // session with a real device.
         protocol.next_tid = 3;
 
-        let (request, mut rx) = protocol.prepare_request(
+        let request = protocol.prepare_request(
             SpinelCommandId::PropValueGet,
             packed_uint21_to_bytes(SpinelPropertyId::NcpVersion as u32),
         );
@@ -1063,15 +1058,16 @@ mod test {
         );
 
         // Receive a response
+        let mut events = Vec::new();
         protocol.handle_inbound_bytes(
             b"~\x83\x06\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 1",
+            &mut events,
         );
-        protocol.handle_inbound_bytes(b"4:40:57\x00\x81\xf7~");
+        protocol.handle_inbound_bytes(b"4:40:57\x00\x81\xf7~", &mut events);
 
-        let response = rx.try_recv().unwrap();
         assert_eq!(
-            response,
-            SpinelFrame {
+            events,
+            [SpinelEvent::Response(SpinelFrame {
                 header: SpinelHeader {
                     flag: 0b10,
                     network_link_id: 0,
@@ -1081,7 +1077,7 @@ mod test {
                 payload:
                     b"\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 14:40:57\x00"
                         .to_vec()
-            }
+            })]
         );
     }
 }

@@ -1,72 +1,201 @@
 //! [`RadioPhy`] implemented over an OpenThread RCP via Spinel.
 
-use std::sync::Arc;
-use std::time::Duration;
+#![no_std]
 
-use parking_lot::Mutex;
-use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::mpsc;
-use tokio::time::timeout;
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::time::Duration;
+
+use embedded_io_async::{Read, Write};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{FrameBytes, Ieee802154Frame};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
 };
+use ziggurat_runtime::runtime::{DefaultRuntime, Runtime};
+use ziggurat_runtime::sync::{Mutex, Notify};
 use ziggurat_spinel::client::{
     ExclusiveRadio as SpinelRadioGuard, SpinelClient, SpinelError, SpinelRxFrame, SpinelTxFrame,
 };
 use ziggurat_spinel::{
-    SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelMacScanState, SpinelPropertyId,
-    SpinelResetReason, SpinelStatus,
+    SpinelEvent, SpinelFramePropValueIs, SpinelMacPromiscuousMode, SpinelMacScanState,
+    SpinelPropertyId, SpinelResetReason, SpinelStatus,
 };
 
 const ENERGY_SCAN_RESULT_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub struct SpinelPhy {
-    client: Arc<SpinelClient>,
-    home_channel: Mutex<u8>,
-    rx_slot: Slot<RxFrame>,
-    reset_slot: Slot<ResetEvent>,
-    energy_rx: AsyncMutex<mpsc::Receiver<SpinelFramePropValueIs>>,
+/// A bounded queue with one consumer. A push onto a full queue drops the item.
+struct Queue<T> {
+    state: Mutex<QueueState<T>>,
+    ready: Notify,
+    capacity: usize,
 }
 
-/// The sender half of the currently-subscribed stream. `subscribe_*` swaps a fresh
-/// channel in here; the forwarder tasks read it each time they have an item to deliver.
-type Slot<T> = Arc<Mutex<Option<mpsc::Sender<T>>>>;
+struct QueueState<T> {
+    items: VecDeque<T>,
+    closed: bool,
+}
+
+impl<T> Queue<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(QueueState {
+                items: VecDeque::with_capacity(capacity),
+                closed: false,
+            }),
+            ready: Notify::new(),
+            capacity,
+        }
+    }
+
+    fn push(&self, item: T) {
+        {
+            let mut state = self.state.lock();
+            if state.items.len() == self.capacity {
+                return;
+            }
+            state.items.push_back(item);
+        }
+        self.ready.notify_one();
+    }
+
+    fn clear(&self) {
+        self.state.lock().items.clear();
+    }
+
+    /// End the stream: `recv` returns `None` once the queued items are consumed.
+    fn close(&self) {
+        self.state.lock().closed = true;
+        self.ready.notify_one();
+    }
+
+    async fn recv(&self) -> Option<T> {
+        loop {
+            {
+                let mut state = self.state.lock();
+                if let Some(item) = state.items.pop_front() {
+                    return Some(item);
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            self.ready.notified().await;
+        }
+    }
+}
 
 /// A subscribed stream, returned by `subscribe_*` and pulled by the driver.
-pub struct TokioRx<T>(mpsc::Receiver<T>);
+pub struct QueueRx<T>(Arc<Queue<T>>);
 
-impl<T: Send> Receiver<T> for TokioRx<T> {
+impl<T: Send> Receiver<T> for QueueRx<T> {
     async fn recv(&mut self) -> Option<T> {
         self.0.recv().await
     }
 }
 
-impl SpinelPhy {
-    pub fn new(client: Arc<SpinelClient>) -> Self {
-        let (raw_tx, raw_rx) = mpsc::channel(64);
-        let (energy_tx, energy_rx) = mpsc::channel(8);
-        let (reset_tx, reset_rx) = mpsc::channel(8);
+/// The queue of the currently-subscribed stream. `subscribe_*` swaps a fresh queue in
+/// here and closes the previous one.
+type Slot<T> = Mutex<Option<Arc<Queue<T>>>>;
 
-        client.set_property_update_receiver(SpinelPropertyId::StreamRaw, raw_tx);
-        client.set_property_update_receiver(SpinelPropertyId::MacEnergyScanResult, energy_tx);
-        client.set_reset_notification_receiver(reset_tx);
-        client.spawn_reader();
+fn subscribe<T>(slot: &Slot<T>, capacity: usize) -> QueueRx<T> {
+    let queue = Arc::new(Queue::new(capacity));
+    let previous = slot.lock().replace(Arc::clone(&queue));
+    if let Some(previous) = previous {
+        previous.close();
+    }
+    QueueRx(queue)
+}
 
-        let rx_slot: Slot<RxFrame> = Arc::new(Mutex::new(None));
-        let reset_slot: Slot<ResetEvent> = Arc::new(Mutex::new(None));
-        spawn_rx_forwarder(raw_rx, Arc::clone(&rx_slot));
-        spawn_reset_forwarder(reset_rx, Arc::clone(&reset_slot));
+/// Where the Spinel client's unsolicited events land.
+struct Streams {
+    rx: Slot<RxFrame>,
+    reset: Slot<ResetEvent>,
+    energy: Queue<SpinelFramePropValueIs>,
+}
+
+impl Streams {
+    fn deliver(&self, event: SpinelEvent) {
+        match event {
+            SpinelEvent::PropertyUpdate(update) => match update.property_id {
+                SpinelPropertyId::StreamRaw => self.deliver_rx(&update.value),
+                SpinelPropertyId::MacEnergyScanResult => self.energy.push(update),
+                // Expected for e.g. the MacScanState=IDLE update at the end of each
+                // scanned channel
+                property_id => tracing::debug!("Ignoring property update: {property_id:?}"),
+            },
+            SpinelEvent::Reset(status) => {
+                let queue = self.reset.lock().clone();
+                if let Some(queue) = queue {
+                    queue.push(ResetEvent {
+                        reason: format!("{status:?}"),
+                    });
+                }
+            }
+            SpinelEvent::Response(_) => unreachable!("responses stay inside the client"),
+        }
+    }
+
+    fn deliver_rx(&self, value: &[u8]) {
+        let Ok(frame) = SpinelRxFrame::from_bytes(value) else {
+            return;
+        };
+        if frame.psdu.len() < 2 {
+            return;
+        }
+        let queue = self.rx.lock().clone();
+        if let Some(queue) = queue {
+            queue.push(RxFrame {
+                psdu: frame.psdu[..frame.psdu.len() - 2].to_vec(),
+                channel: frame.channel,
+                rssi: frame.rssi,
+                lqi: frame.lqi,
+                timestamp_us: frame.timestamp_us,
+            });
+        }
+    }
+}
+
+pub struct SpinelPhy<R: Runtime = DefaultRuntime> {
+    client: SpinelClient<R>,
+    home_channel: Mutex<u8>,
+    streams: Arc<Streams>,
+}
+
+impl<R: Runtime> Default for SpinelPhy<R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R: Runtime> SpinelPhy<R> {
+    pub fn new() -> Self {
+        let streams = Arc::new(Streams {
+            rx: Mutex::new(None),
+            reset: Mutex::new(None),
+            energy: Queue::new(8),
+        });
+        let client_streams = Arc::clone(&streams);
 
         Self {
-            client,
+            client: SpinelClient::new(Box::new(move |event| client_streams.deliver(event))),
             home_channel: Mutex::new(11),
-            rx_slot,
-            reset_slot,
-            energy_rx: AsyncMutex::new(energy_rx),
+            streams,
         }
+    }
+
+    /// Drive the RCP link over its transport. Returns only when the transport fails;
+    /// nothing else on this PHY makes progress unless this is running.
+    pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> RadioError {
+        map_err(self.client.run(reader, writer).await)
     }
 
     /// The radio's factory-programmed EUI64, readable before any network is configured.
@@ -76,12 +205,12 @@ impl SpinelPhy {
 }
 
 /// Exclusive radio access over the Spinel client.
-pub struct SpinelExclusive<'a> {
-    phy: &'a SpinelPhy,
-    guard: SpinelRadioGuard<'a>,
+pub struct SpinelExclusive<'a, R: Runtime = DefaultRuntime> {
+    phy: &'a SpinelPhy<R>,
+    guard: SpinelRadioGuard<'a, R>,
 }
 
-impl ExclusiveRadio for SpinelExclusive<'_> {
+impl<R: Runtime> ExclusiveRadio for SpinelExclusive<'_, R> {
     async fn set_channel(&self, channel: u8) -> Result<(), RadioError> {
         let (response, value) =
             set_spinel_prop(&self.phy.client, SpinelPropertyId::PhyChan, vec![channel]).await?;
@@ -106,44 +235,6 @@ impl ExclusiveRadio for SpinelExclusive<'_> {
     }
 }
 
-fn spawn_rx_forwarder(mut raw: mpsc::Receiver<SpinelFramePropValueIs>, slot: Slot<RxFrame>) {
-    tokio::spawn(async move {
-        while let Some(update) = raw.recv().await {
-            let Ok(frame) = SpinelRxFrame::from_bytes(&update.value) else {
-                continue;
-            };
-            if frame.psdu.len() < 2 {
-                continue;
-            }
-            let rx = RxFrame {
-                psdu: frame.psdu[..frame.psdu.len() - 2].to_vec(),
-                channel: frame.channel,
-                rssi: frame.rssi,
-                lqi: frame.lqi,
-                timestamp_us: frame.timestamp_us,
-            };
-            let tx = slot.lock().clone();
-            if let Some(tx) = tx {
-                let _ = tx.try_send(rx);
-            }
-        }
-    });
-}
-
-fn spawn_reset_forwarder(mut reset: mpsc::Receiver<SpinelStatus>, slot: Slot<ResetEvent>) {
-    tokio::spawn(async move {
-        while let Some(status) = reset.recv().await {
-            let event = ResetEvent {
-                reason: format!("{status:?}"),
-            };
-            let tx = slot.lock().clone();
-            if let Some(tx) = tx {
-                let _ = tx.try_send(event);
-            }
-        }
-    });
-}
-
 fn map_err(err: SpinelError) -> RadioError {
     match err {
         SpinelError::Timeout => RadioError::Timeout,
@@ -161,16 +252,16 @@ const fn map_status(status: SpinelStatus) -> TxResult {
     }
 }
 
-async fn set_spinel_prop(
-    client: &SpinelClient,
+async fn set_spinel_prop<R: Runtime>(
+    client: &SpinelClient<R>,
     id: SpinelPropertyId,
     value: Vec<u8>,
 ) -> Result<(SpinelPropertyId, Vec<u8>), RadioError> {
     client.prop_value_set(id, value).await.map_err(map_err)
 }
 
-async fn write_frame_pending(
-    client: &SpinelClient,
+async fn write_frame_pending<R: Runtime>(
+    client: &SpinelClient<R>,
     short: &[Nwk],
     extended: &[Eui64],
 ) -> Result<(), RadioError> {
@@ -195,7 +286,10 @@ async fn write_frame_pending(
     Ok(())
 }
 
-async fn apply_config(client: &SpinelClient, config: &RadioConfig) -> Result<(), RadioError> {
+async fn apply_config<R: Runtime>(
+    client: &SpinelClient<R>,
+    config: &RadioConfig,
+) -> Result<(), RadioError> {
     set_spinel_prop(client, SpinelPropertyId::PhyEnabled, vec![1]).await?;
     set_spinel_prop(client, SpinelPropertyId::PhyChan, vec![config.channel]).await?;
     set_spinel_prop(
@@ -273,16 +367,14 @@ fn tx_frame_to_spinel(frame: TxFrame, channel: u8) -> SpinelTxFrame {
     }
 }
 
-impl RadioPhy for SpinelPhy {
-    type Exclusive<'a> = SpinelExclusive<'a>;
-    type RxStream = TokioRx<RxFrame>;
-    type ResetStream = TokioRx<ResetEvent>;
+impl<R: Runtime> RadioPhy for SpinelPhy<R> {
+    type Exclusive<'a> = SpinelExclusive<'a, R>;
+    type RxStream = QueueRx<RxFrame>;
+    type ResetStream = QueueRx<ResetEvent>;
 
     async fn reset(&self) -> Result<(), RadioError> {
-        self.client
-            .send_reset(SpinelResetReason::Stack)
-            .await
-            .map_err(map_err)
+        self.client.send_reset(SpinelResetReason::Stack);
+        Ok(())
     }
 
     async fn reconfigure(&self, config: &RadioConfig) -> Result<(), RadioError> {
@@ -292,7 +384,7 @@ impl RadioPhy for SpinelPhy {
         Ok(())
     }
 
-    async fn lock(&self) -> SpinelExclusive<'_> {
+    async fn lock(&self) -> SpinelExclusive<'_, R> {
         let guard = self.client.lock_radio().await;
         SpinelExclusive { phy: self, guard }
     }
@@ -316,16 +408,13 @@ impl RadioPhy for SpinelPhy {
         Ok(map_status(status))
     }
 
-    #[allow(clippy::significant_drop_tightening)]
     async fn energy_detect(&self, channel: u8, duration: Duration) -> Result<i8, RadioError> {
-        let mut energy_rx = self.energy_rx.lock().await;
-        while energy_rx.try_recv().is_ok() {}
-
         let scan_period_ms = u16::try_from(duration.as_millis()).unwrap_or(u16::MAX);
 
         let max_rssi = {
             // Lock the radio for the duration of the energy detect scan
             let _radio = self.client.lock_radio().await;
+            self.streams.energy.clear();
 
             set_spinel_prop(&self.client, SpinelPropertyId::MacScanMask, vec![channel]).await?;
             set_spinel_prop(
@@ -347,10 +436,13 @@ impl RadioPhy for SpinelPhy {
                 )));
             }
 
-            let update = timeout(duration + ENERGY_SCAN_RESULT_TIMEOUT, energy_rx.recv())
-                .await
-                .map_err(|_| RadioError::Timeout)?
-                .ok_or(RadioError::TransportClosed)?;
+            let update = R::timeout(
+                duration + ENERGY_SCAN_RESULT_TIMEOUT,
+                self.streams.energy.recv(),
+            )
+            .await
+            .map_err(|_| RadioError::Timeout)?
+            .ok_or(RadioError::TransportClosed)?;
 
             let [scanned_channel, max_rssi] = update.value[..] else {
                 return Err(RadioError::Other(format!(
@@ -373,15 +465,11 @@ impl RadioPhy for SpinelPhy {
         Ok(max_rssi)
     }
 
-    fn subscribe_rx(&self) -> TokioRx<RxFrame> {
-        let (tx, rx) = mpsc::channel(32);
-        *self.rx_slot.lock() = Some(tx);
-        TokioRx(rx)
+    fn subscribe_rx(&self) -> QueueRx<RxFrame> {
+        subscribe(&self.streams.rx, 32)
     }
 
-    fn subscribe_reset(&self) -> TokioRx<ResetEvent> {
-        let (tx, rx) = mpsc::channel(8);
-        *self.reset_slot.lock() = Some(tx);
-        TokioRx(rx)
+    fn subscribe_reset(&self) -> QueueRx<ResetEvent> {
+        subscribe(&self.streams.reset, 8)
     }
 }

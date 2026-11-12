@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
+use embedded_io_adapters::tokio_1::FromTokio;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
@@ -22,7 +23,6 @@ use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_protocol::{self as proto};
-use ziggurat_spinel::client::{RcpTransport, SpinelClient};
 
 /// Outbound frames a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -161,8 +161,20 @@ impl ZigguratServer {
             return Ok(phy.clone());
         }
 
-        let transport = open_transport(&self.serial).await?;
-        let new_phy = Arc::new(SpinelPhy::new(Arc::new(SpinelClient::new(transport))));
+        let (reader, writer) = tokio::io::split(open_transport(&self.serial).await?);
+        let new_phy = Arc::new(SpinelPhy::new());
+
+        // Link death (USB yank, EOF) exits the whole process: the supervisor (Docker)
+        // restarts us. A half-dead process with a deaf radio is the worst failure mode.
+        let link_phy = new_phy.clone();
+        tokio::spawn(async move {
+            let error = link_phy
+                .run(FromTokio::new(reader), FromTokio::new(writer))
+                .await;
+            tracing::error!("RCP link failed ({error}), exiting");
+            std::process::exit(1);
+        });
+
         *phy = Some(new_phy.clone());
         drop(phy);
 
@@ -939,6 +951,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The TCP path is meant for a wired (Ethernet) link. Wi-Fi's latency variance is not
 /// supported: a spike can spuriously trip `MAX_CONSECUTIVE_TIMEOUTS` and force a
 /// reset-recovery against a perfectly healthy radio.
+/// A link to the RCP: a serial port or a TCP socket.
+trait RcpTransport: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> RcpTransport for T {}
+
 async fn open_transport(serial: &SerialConfig) -> std::io::Result<Box<dyn RcpTransport>> {
     let tcp_addr = serial
         .device

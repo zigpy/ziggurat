@@ -5,6 +5,7 @@
 mod imp {
     pub use parking_lot::{Mutex, MutexGuard};
     pub use tokio::sync::Mutex as AsyncMutex;
+    pub use tokio::sync::MutexGuard as AsyncMutexGuard;
     pub use tokio::sync::Notify;
 }
 
@@ -20,6 +21,8 @@ mod imp {
     /// The async mutex, for guards held across an `.await` (the radio stream + reset
     /// receivers). Pinned to the critical-section raw mutex.
     pub type AsyncMutex<T> = embassy_sync::mutex::Mutex<CriticalSectionRawMutex, T>;
+    pub type AsyncMutexGuard<'a, T> =
+        embassy_sync::mutex::MutexGuard<'a, CriticalSectionRawMutex, T>;
 
     /// A parameterless wake matching `tokio::sync::Notify`'s surface.
     ///
