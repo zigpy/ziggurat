@@ -1229,8 +1229,7 @@ impl Backbone {
                         .peers
                         .iter()
                         .filter_map(|(eui64, p)| {
-                            p.quic_port
-                                .map(|qp| (*eui64, with_port(p.addr, qp)))
+                            p.quic_port.map(|qp| (*eui64, with_port(p.addr, qp)))
                         })
                         .collect();
                     for (peer, addr) in targets {

@@ -109,18 +109,6 @@ pub fn resolve(
         return NextHop::Resolved(destination);
     }
 
-    // SPIKE (#84 bench, workaround for zigpy/ziggurat#88; real fix in #89): a router
-    // that just associated with us is one hop away, but
-    // has no route and no outgoing cost until its first Link Status (~15 s). ZBOSS
-    // routers unicast Node_Desc_req to the TC right after joining and leave when the
-    // reply (and APS ack) never arrives, so deliver to router children directly too.
-    if neighbors
-        .entries()
-        .any(|entry| entry.network_address == destination && entry.is_child())
-    {
-        return NextHop::Resolved(destination);
-    }
-
     // A stored source route (concentrator behavior) wins over the routing table.
     if policy.is_concentrator && !policy.force_route_discovery {
         match routing.route_to(destination, policy.max_source_route) {
