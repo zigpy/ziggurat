@@ -1,3 +1,4 @@
+use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -10,7 +11,9 @@ use super::*;
 
 type TestSends = Sends<&'static str, u8, SendFailure>;
 type TestActions = Actions<&'static str, u8, SendFailure>;
-type TestTick = Tick<&'static str, u8, SendFailure>;
+
+/// A send's waiter and how it settled.
+type Verdict = (u8, Result<(), SendFailure>);
 
 const DESTINATION: Nwk = Nwk(0x1234);
 const NEXT_HOP: Nwk = Nwk(0x5678);
@@ -20,10 +23,55 @@ const HELD_UNICAST: u8 = 1;
 const ROUTE_REQUEST: u8 = 2;
 const SECOND_ROUTE_REQUEST: u8 = 3;
 
+const HELD_TIMED_OUT: Verdict = (HELD_UNICAST, Err(SendFailure::RouteDiscoveryTimeout));
+const REQUEST_CANCELLED: Verdict = (ROUTE_REQUEST, Err(SendFailure::Cancelled));
+
 /// What the driver's routing table answers about `DESTINATION` during a timer pass.
-struct DriverTables {
-    next_hop: Option<Nwk>,
-    discovery_live: bool,
+#[derive(Clone, Copy)]
+enum Tables {
+    /// No route yet, and a discovery toward it is running.
+    Discovering,
+    /// No route, and no discovery is running: the last one lapsed.
+    Lapsed,
+    /// A route through `NEXT_HOP`.
+    Routed,
+}
+
+/// What a timer pass did. The default is a pass that did nothing.
+#[derive(Debug, Default, PartialEq)]
+struct Pass {
+    settled: Vec<Verdict>,
+    /// The driver is asked to restart `DESTINATION`'s discovery.
+    restarts_discovery: bool,
+    /// `DESTINATION`'s discovery is reported as failed.
+    fails_discovery: bool,
+}
+
+impl Pass {
+    /// A pass that settled these sends and did nothing else.
+    fn settling(settled: impl Into<Vec<Verdict>>) -> Self {
+        Self {
+            settled: settled.into(),
+            ..Self::default()
+        }
+    }
+
+    /// A pass that asked for the discovery to be restarted.
+    fn restarting() -> Self {
+        Self {
+            restarts_discovery: true,
+            ..Self::default()
+        }
+    }
+
+    /// A pass that gave up on the discovery and failed the held unicast.
+    fn failing() -> Self {
+        Self {
+            settled: vec![HELD_TIMED_OUT],
+            fails_discovery: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// The send tables, with the tunables and the clock a test drives them with.
@@ -40,6 +88,17 @@ impl Fixture {
             tunables: Tunables::default(),
             now: Instant::from_micros(0),
         }
+    }
+
+    /// Tables that allow a route discovery to be restarted once.
+    fn with_one_restart() -> Self {
+        let fixture = Self::new();
+        fixture
+            .tunables
+            .set("pending_route_discovery_attempts", 2)
+            .unwrap();
+
+        fixture
     }
 
     fn advance(&mut self, duration: Duration) {
@@ -64,18 +123,20 @@ impl Fixture {
         id
     }
 
-    /// Cancel a held unicast.
-    fn cancel(&mut self, id: SendId) {
-        let actions = self.sends.cancel(id).unwrap();
-        assert_eq!(
-            settled(actions),
-            [(HELD_UNICAST, Err(SendFailure::Cancelled))]
-        );
+    /// Whether the tables still track a discovery toward `DESTINATION`.
+    fn discovering(&self) -> bool {
+        self.sends.has_unrouted(DESTINATION)
+    }
+
+    /// Fail every unicast held for `DESTINATION`, as the driver does when the device
+    /// leaves or joins again.
+    fn fail_held(&mut self) -> Vec<Verdict> {
+        settled(self.sends.fail_unrouted(DESTINATION))
     }
 
     /// Broadcast the route request of `DESTINATION`'s discovery, as the driver does:
     /// four copies, the first due now. Returns what registering the request settles.
-    fn broadcast_route_request(&mut self, waiter: u8) -> Vec<(u8, Result<(), SendFailure>)> {
+    fn broadcast_route_request(&mut self, waiter: u8) -> Vec<Verdict> {
         let (request, actions) = self.sends.enqueue_broadcast(
             Broadcast {
                 frame: "route request",
@@ -96,17 +157,23 @@ impl Fixture {
     }
 
     /// Run a timer pass.
-    fn tick(&mut self, tables: DriverTables) -> TestTick {
-        let discovery_deadline = tables
-            .discovery_live
-            .then_some(self.now + Duration::from_secs(10));
+    fn pass(&mut self, tables: Tables) -> Pass {
+        let next_hop = matches!(tables, Tables::Routed).then_some(NEXT_HOP);
+        let discovery_deadline =
+            (!matches!(tables, Tables::Lapsed)).then_some(self.now + Duration::from_secs(10));
 
-        self.sends.tick(
+        let tick = self.sends.tick(
             self.now,
             &self.tunables,
-            |_| tables.next_hop.map(|next_hop| (next_hop, None)),
+            |_| next_hop.map(|next_hop| (next_hop, None)),
             |_| discovery_deadline,
-        )
+        );
+
+        Pass {
+            settled: settled(tick.actions),
+            restarts_discovery: tick.restart_discovery == [DESTINATION],
+            fails_discovery: tick.failed_discovery == [DESTINATION],
+        }
     }
 
     fn dequeue(&mut self) -> Option<InFlight<&'static str>> {
@@ -114,19 +181,22 @@ impl Fixture {
     }
 
     /// Report a successful transmit. Returns what it settles.
-    fn transmitted(
-        &mut self,
-        in_flight: InFlight<&'static str>,
-    ) -> Vec<(u8, Result<(), SendFailure>)> {
+    fn transmitted(&mut self, in_flight: InFlight<&'static str>) -> Vec<Verdict> {
         settled(
             self.sends
                 .transmitted(in_flight, Ok(()), self.now, Duration::ZERO, Duration::ZERO),
         )
     }
+
+    /// Transmit the next frame that is due. Returns what that settles.
+    fn transmit_next(&mut self) -> Vec<Verdict> {
+        let in_flight = self.dequeue().unwrap();
+        self.transmitted(in_flight)
+    }
 }
 
 /// The waiter and verdict of every send the actions settle.
-fn settled(actions: TestActions) -> Vec<(u8, Result<(), SendFailure>)> {
+fn settled(actions: TestActions) -> Vec<Verdict> {
     actions
         .into_iter()
         .filter_map(|action| match action {
@@ -141,15 +211,8 @@ fn test_held_unicast_waits_while_its_discovery_is_live() {
     let mut fixture = Fixture::new();
     fixture.hold_unicast();
 
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: true,
-    });
-
-    assert!(settled(tick.actions).is_empty());
-    assert!(tick.restart_discovery.is_empty());
-    assert!(tick.failed_discovery.is_empty());
-    assert!(fixture.sends.has_unrouted(DESTINATION));
+    assert_eq!(fixture.pass(Tables::Discovering), Pass::default());
+    assert!(fixture.discovering());
     assert!(fixture.dequeue().is_none());
 }
 
@@ -160,15 +223,8 @@ fn test_held_unicast_is_routed_once_a_next_hop_is_found() {
     let mut fixture = Fixture::new();
     fixture.hold_unicast();
 
-    let tick = fixture.tick(DriverTables {
-        next_hop: Some(NEXT_HOP),
-        discovery_live: true,
-    });
-
-    assert!(settled(tick.actions).is_empty());
-    assert!(tick.restart_discovery.is_empty());
-    assert!(tick.failed_discovery.is_empty());
-    assert!(!fixture.sends.has_unrouted(DESTINATION));
+    assert_eq!(fixture.pass(Tables::Routed), Pass::default());
+    assert!(!fixture.discovering());
 
     let in_flight = fixture.dequeue().unwrap();
     assert_eq!(in_flight.frame, "held unicast");
@@ -183,51 +239,49 @@ fn test_lapsed_discovery_without_a_restart_fails_its_unicasts() {
     let mut fixture = Fixture::new();
     fixture.hold_unicast();
 
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
-
-    assert_eq!(
-        settled(tick.actions),
-        [(HELD_UNICAST, Err(SendFailure::RouteDiscoveryTimeout))]
-    );
-    assert!(tick.restart_discovery.is_empty());
-    assert_eq!(tick.failed_discovery, [DESTINATION]);
-    assert!(!fixture.sends.has_unrouted(DESTINATION));
+    assert_eq!(fixture.pass(Tables::Lapsed), Pass::failing());
+    assert!(!fixture.discovering());
 }
 
 #[test]
 fn test_lapsed_discovery_with_a_restart_left_is_restarted_once() {
-    let mut fixture = Fixture::new();
-    fixture
-        .tunables
-        .set("pending_route_discovery_attempts", 2)
-        .unwrap();
+    let mut fixture = Fixture::with_one_restart();
     fixture.hold_unicast();
 
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
-
-    assert!(settled(tick.actions).is_empty());
-    assert_eq!(tick.restart_discovery, [DESTINATION]);
-    assert!(tick.failed_discovery.is_empty());
-    assert!(fixture.sends.has_unrouted(DESTINATION));
+    assert_eq!(fixture.pass(Tables::Lapsed), Pass::restarting());
+    assert!(fixture.discovering());
 
     // The restarted discovery lapses too, and no restart is left
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
+    assert_eq!(fixture.pass(Tables::Lapsed), Pass::failing());
+}
 
+// A discovery whose sends are all gone has nothing left to fail, or to restart for.
+// Reporting it as failed makes the driver mark the route `DiscoveryFailed`, which
+// discards a route the reply produced after the sends were gone.
+#[test]
+fn test_discovery_ends_quietly_after_its_unicast_is_cancelled() {
+    let mut fixture = Fixture::with_one_restart();
+    let id = fixture.hold_unicast();
+
+    let cancelled = settled(fixture.sends.cancel(id).unwrap());
+    assert_eq!(cancelled, [(HELD_UNICAST, Err(SendFailure::Cancelled))]);
+
+    assert_eq!(fixture.pass(Tables::Lapsed), Pass::default());
+    assert!(!fixture.discovering());
+}
+
+#[test]
+fn test_discovery_ends_quietly_after_its_unicast_times_out() {
+    let mut fixture = Fixture::new();
+    fixture.hold_unicast();
+
+    // The unicast passes its deadline in the same pass that finds the discovery lapsed
+    fixture.advance(fixture.tunables.handoff_timeout());
     assert_eq!(
-        settled(tick.actions),
-        [(HELD_UNICAST, Err(SendFailure::RouteDiscoveryTimeout))]
+        fixture.pass(Tables::Lapsed),
+        Pass::settling([(HELD_UNICAST, Err(SendFailure::HandoffTimeout))])
     );
-    assert!(tick.restart_discovery.is_empty());
-    assert_eq!(tick.failed_discovery, [DESTINATION]);
+    assert!(!fixture.discovering());
 }
 
 // Issue #88: a device that joins again never heard the route request sent before it
@@ -238,13 +292,8 @@ fn test_failing_held_unicasts_frees_the_destination_for_a_new_discovery() {
     let mut fixture = Fixture::new();
     fixture.hold_unicast();
 
-    let actions = fixture.sends.fail_unrouted(DESTINATION);
-
-    assert_eq!(
-        settled(actions),
-        [(HELD_UNICAST, Err(SendFailure::RouteDiscoveryTimeout))]
-    );
-    assert!(!fixture.sends.has_unrouted(DESTINATION));
+    assert_eq!(fixture.fail_held(), [HELD_TIMED_OUT]);
+    assert!(!fixture.discovering());
 }
 
 // An abandoned discovery must not keep broadcasting its route request.
@@ -255,31 +304,14 @@ fn test_failing_held_unicasts_stops_their_route_request() {
     assert!(fixture.broadcast_route_request(ROUTE_REQUEST).is_empty());
 
     // The first of the four copies goes out
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: true,
-    });
-    assert!(settled(tick.actions).is_empty());
-    let first_copy = fixture.dequeue().unwrap();
-    assert!(fixture.transmitted(first_copy).is_empty());
+    assert_eq!(fixture.pass(Tables::Discovering), Pass::default());
+    assert!(fixture.transmit_next().is_empty());
 
-    let actions = fixture.sends.fail_unrouted(DESTINATION);
-
-    assert_eq!(
-        settled(actions),
-        [
-            (HELD_UNICAST, Err(SendFailure::RouteDiscoveryTimeout)),
-            (ROUTE_REQUEST, Err(SendFailure::Cancelled)),
-        ]
-    );
+    assert_eq!(fixture.fail_held(), [HELD_TIMED_OUT, REQUEST_CANCELLED]);
 
     // The other three copies are never queued
     fixture.advance(Duration::from_secs(1));
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
-    assert!(settled(tick.actions).is_empty());
+    assert_eq!(fixture.pass(Tables::Lapsed), Pass::default());
     assert!(fixture.dequeue().is_none());
 }
 
@@ -290,29 +322,19 @@ fn test_stopped_route_request_in_the_radio_sends_no_further_copy() {
     fixture.hold_unicast();
     assert!(fixture.broadcast_route_request(ROUTE_REQUEST).is_empty());
 
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: true,
-    });
-    assert!(settled(tick.actions).is_empty());
+    assert_eq!(fixture.pass(Tables::Discovering), Pass::default());
     let first_copy = fixture.dequeue().unwrap();
 
     // Only the held unicast settles: the route request is on loan to the radio
-    let actions = fixture.sends.fail_unrouted(DESTINATION);
-    assert_eq!(
-        settled(actions),
-        [(HELD_UNICAST, Err(SendFailure::RouteDiscoveryTimeout))]
-    );
-
+    assert_eq!(fixture.fail_held(), [HELD_TIMED_OUT]);
     assert!(fixture.transmitted(first_copy).is_empty());
 
     // One copy reached the air, which completes a route request
     fixture.advance(Duration::from_secs(1));
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
-    assert_eq!(settled(tick.actions), [(ROUTE_REQUEST, Ok(()))]);
+    assert_eq!(
+        fixture.pass(Tables::Lapsed),
+        Pass::settling([(ROUTE_REQUEST, Ok(()))])
+    );
     assert!(fixture.dequeue().is_none());
 }
 
@@ -323,81 +345,13 @@ fn test_new_route_request_stops_the_one_it_replaces() {
     fixture.hold_unicast();
     assert!(fixture.broadcast_route_request(ROUTE_REQUEST).is_empty());
 
-    let stopped = fixture.broadcast_route_request(SECOND_ROUTE_REQUEST);
-
-    assert_eq!(stopped, [(ROUTE_REQUEST, Err(SendFailure::Cancelled))]);
+    assert_eq!(
+        fixture.broadcast_route_request(SECOND_ROUTE_REQUEST),
+        [REQUEST_CANCELLED]
+    );
 
     // Only the new request has a copy to send
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: true,
-    });
-    assert!(settled(tick.actions).is_empty());
-    let only_copy = fixture.dequeue().unwrap();
-    assert!(fixture.transmitted(only_copy).is_empty());
+    assert_eq!(fixture.pass(Tables::Discovering), Pass::default());
+    assert!(fixture.transmit_next().is_empty());
     assert!(fixture.dequeue().is_none());
-}
-
-// A discovery whose sends are all gone has nothing left to fail. Reporting it as failed
-// makes the driver mark the route `DiscoveryFailed`, which discards a route the reply
-// produced after the sends were gone.
-#[test]
-fn test_discovery_ends_quietly_after_its_unicast_is_cancelled() {
-    let mut fixture = Fixture::new();
-    let id = fixture.hold_unicast();
-    fixture.cancel(id);
-
-    // The discovery lapses with nothing waiting on it
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
-
-    assert!(settled(tick.actions).is_empty());
-    assert!(tick.restart_discovery.is_empty());
-    assert!(tick.failed_discovery.is_empty());
-    assert!(!fixture.sends.has_unrouted(DESTINATION));
-}
-
-#[test]
-fn test_discovery_ends_quietly_after_its_unicast_times_out() {
-    let mut fixture = Fixture::new();
-    fixture.hold_unicast();
-
-    // The unicast passes its deadline in the same pass that finds the discovery lapsed
-    fixture.advance(fixture.tunables.handoff_timeout());
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
-
-    assert_eq!(
-        settled(tick.actions),
-        [(HELD_UNICAST, Err(SendFailure::HandoffTimeout))]
-    );
-    assert!(tick.restart_discovery.is_empty());
-    assert!(tick.failed_discovery.is_empty());
-    assert!(!fixture.sends.has_unrouted(DESTINATION));
-}
-
-// A restart is for a send that still waits. A discovery nothing waits on is not
-// restarted, however many restarts it has left.
-#[test]
-fn test_discovery_nothing_waits_on_is_not_restarted() {
-    let mut fixture = Fixture::new();
-    fixture
-        .tunables
-        .set("pending_route_discovery_attempts", 2)
-        .unwrap();
-    let id = fixture.hold_unicast();
-    fixture.cancel(id);
-
-    let tick = fixture.tick(DriverTables {
-        next_hop: None,
-        discovery_live: false,
-    });
-
-    assert!(tick.restart_discovery.is_empty());
-    assert!(tick.failed_discovery.is_empty());
-    assert!(!fixture.sends.has_unrouted(DESTINATION));
 }

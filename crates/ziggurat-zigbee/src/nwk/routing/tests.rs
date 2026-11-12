@@ -166,27 +166,22 @@ fn test_relayed_discovery_still_expires_after_its_originator_is_forgotten() {
 
 // Most route records repeat what is stored. Only a changed one is reported.
 #[test]
-fn test_route_record_reports_a_new_source_route_once() {
+fn test_route_record_reports_only_a_changed_source_route() {
     let mut routing = Routing::default();
+    let changed = RouteRecordChange {
+        source: true,
+        any: true,
+    };
+    let unchanged = RouteRecordChange {
+        source: false,
+        any: false,
+    };
 
-    let change = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
-    assert!(change.source);
-    assert!(change.any);
+    let first = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
+    let repeat = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
+    let new_path = routing.store_route_record(DEVICE, vec![NEIGHBOR]);
 
-    let change = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
-    assert!(!change.source);
-    assert!(!change.any);
-}
-
-#[test]
-fn test_route_record_reports_a_changed_path() {
-    let mut routing = Routing::default();
-    routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
-
-    let change = routing.store_route_record(DEVICE, vec![NEIGHBOR]);
-
-    assert!(change.source);
-    assert!(change.any);
+    assert_eq!([first, repeat, new_path], [changed, unchanged, changed]);
 }
 
 // A record also carries the routes to its relays. An unchanged record restores a relay
@@ -197,12 +192,16 @@ fn test_unchanged_route_record_reports_a_relay_route_it_restores() {
     let mut routing = Routing::default();
     routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
     assert!(routing.remove_route_record(ROUTER));
-    assert_eq!(routing.route_to(ROUTER, MAX_SOURCE_ROUTE), None);
 
     let change = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
 
-    assert!(!change.source);
-    assert!(change.any);
+    assert_eq!(
+        change,
+        RouteRecordChange {
+            source: false,
+            any: true,
+        }
+    );
     assert_eq!(
         routing.route_to(ROUTER, MAX_SOURCE_ROUTE),
         Some(Route::SourceRouted(vec![NEIGHBOR]))

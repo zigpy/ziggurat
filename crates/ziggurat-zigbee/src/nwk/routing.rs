@@ -106,7 +106,7 @@ impl TableEntry {
 }
 
 /// What storing a route record changed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteRecordChange {
     /// The source route to the record's sender changed. Only these are worth the
     /// client persisting.
