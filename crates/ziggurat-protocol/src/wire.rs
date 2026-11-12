@@ -713,7 +713,6 @@ pub enum SendStatus {
     Success = 0,
     RouteDiscoveryTimeout = 1,
     RouteDiscoveryNoEntry = 2,
-    RouteInactiveAfterDiscovery = 3,
     NwkNoAck = 4,
     CcaFailure = 5,
     TransmitFailed = 6,

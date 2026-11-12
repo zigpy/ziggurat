@@ -98,8 +98,6 @@ pub enum EnqueueError {
 pub enum DeliveryError {
     #[error("route discovery timed out")]
     RouteDiscoveryTimeout,
-    #[error("route not active after discovery completed")]
-    RouteInactiveAfterDiscovery,
     #[error("next hop {next_hop:?} did not ACK")]
     NwkNoAck { next_hop: Ieee802154Address },
     #[error("transmit rejected due to CCA failure")]

@@ -420,7 +420,6 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
         Ok(()) => SendStatus::Success,
         Err(err) => match err {
             DeliveryError::RouteDiscoveryTimeout => SendStatus::RouteDiscoveryTimeout,
-            DeliveryError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
             DeliveryError::NwkNoAck { .. } => SendStatus::NwkNoAck,
             DeliveryError::CcaFailure => SendStatus::CcaFailure,
             DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
