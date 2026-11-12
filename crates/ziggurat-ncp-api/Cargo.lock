@@ -1005,7 +1005,6 @@ name = "ziggurat-runtime"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
- "embassy-sync",
  "embassy-time",
  "futures",
  "spin",

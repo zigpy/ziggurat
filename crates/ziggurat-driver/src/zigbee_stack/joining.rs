@@ -231,7 +231,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core.nib.address_map.allocate(
             eui64,
             &core.nib.neighbors,
-            core::iter::repeat_with(|| Nwk(crate::rng::random_u16())),
+            core::iter::repeat_with(|| Nwk(crate::rng::random_u16::<R>())),
         )
     }
 
@@ -240,7 +240,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         core.nib.address_map.generate_unused(
             &core.nib.neighbors,
-            core::iter::repeat_with(|| Nwk(crate::rng::random_u16())),
+            core::iter::repeat_with(|| Nwk(crate::rng::random_u16::<R>())),
         )
     }
 
@@ -756,7 +756,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .core()
             .aib
             .aps_security
-            .issue_device_key(source_ieee, Key(crate::rng::random_array()));
+            .issue_device_key(source_ieee, Key(crate::rng::random_array::<R, 16>()));
 
         // The key is persisted only once the device proves possession via Verify-Key
         // (see `handle_verify_key`); a device that never completes the exchange must not

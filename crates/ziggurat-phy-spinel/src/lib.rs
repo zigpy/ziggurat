@@ -20,7 +20,7 @@ use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
 };
-use ziggurat_runtime::runtime::{DefaultRuntime, Runtime};
+use ziggurat_runtime::runtime::Runtime;
 use ziggurat_runtime::sync::{Mutex, Notify};
 use ziggurat_spinel::client::{
     ExclusiveRadio as SpinelRadioGuard, SpinelClient, SpinelError, SpinelRxFrame, SpinelTxFrame,
@@ -164,7 +164,7 @@ impl Streams {
     }
 }
 
-pub struct SpinelPhy<R: Runtime = DefaultRuntime> {
+pub struct SpinelPhy<R: Runtime> {
     client: SpinelClient<R>,
     home_channel: Mutex<u8>,
     streams: Arc<Streams>,
@@ -205,7 +205,7 @@ impl<R: Runtime> SpinelPhy<R> {
 }
 
 /// Exclusive radio access over the Spinel client.
-pub struct SpinelExclusive<'a, R: Runtime = DefaultRuntime> {
+pub struct SpinelExclusive<'a, R: Runtime> {
     phy: &'a SpinelPhy<R>,
     guard: SpinelRadioGuard<'a, R>,
 }

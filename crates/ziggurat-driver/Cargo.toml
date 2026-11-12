@@ -20,15 +20,8 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
 
-# Host (tokio) runtime backend.
-rand = { version = "0.10.2", optional = true }
-
 [features]
 default = ["tokio"]
-# The host runtime: tokio executor, parking_lot locks, OS randomness.
-tokio = ["ziggurat-runtime/tokio", "dep:rand"]
-# The embassy runtime adapter (and its no_std-friendly sync primitives), for the MCU.
-# Mutually exclusive with `tokio` at the `sync`/`runtime`/`rng` seam.
+tokio = ["ziggurat-runtime/tokio"]
 embassy = ["ziggurat-runtime/embassy"]
-# Run the embassy adapter on the host, bridged to a tokio reactor (for tests).
 embassy-host = ["embassy", "ziggurat-runtime/embassy-host"]

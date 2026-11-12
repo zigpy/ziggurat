@@ -16,7 +16,7 @@ use futures::future::{Either, select};
 use thiserror::Error;
 use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::Eui64;
-use ziggurat_runtime::runtime::{DefaultRuntime, Runtime};
+use ziggurat_runtime::runtime::Runtime;
 use ziggurat_runtime::sync::{AsyncMutex, AsyncMutexGuard, Mutex, Notify};
 
 /// A local RCP link — serial, or Ethernet to a network-attached RCP — answers in
@@ -256,7 +256,7 @@ pub type EventHandler = Box<dyn Fn(SpinelEvent) + Send + Sync>;
 
 /// The RCP link. Commands queue frames and wait for their responses; [`Self::run`] does
 /// all the transport IO.
-pub struct SpinelClient<R: Runtime = DefaultRuntime> {
+pub struct SpinelClient<R: Runtime> {
     state: Mutex<State>,
     /// Indexed by transaction id; woken when that transaction's outcome is set.
     outcome_ready: [Notify; 8],
@@ -594,7 +594,7 @@ impl<R: Runtime> SpinelClient<R> {
 }
 
 /// Functional ownership of the radio, handed out by [`SpinelClient::lock_radio`].
-pub struct ExclusiveRadio<'a, R: Runtime = DefaultRuntime> {
+pub struct ExclusiveRadio<'a, R: Runtime> {
     client: &'a SpinelClient<R>,
     _guard: AsyncMutexGuard<'a, ()>,
 }

@@ -522,20 +522,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fc328bf943af66b80b98755db9106bf7e7471b0cf47dc8559cd9a6be504cc9c"
 
 [[package]]
-name = "embassy-sync"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bbd85cf5a5ae56bdf26f618364af642d1d0a4e245cdd75cd9aabda382f65a81"
-dependencies = [
- "cfg-if",
- "critical-section",
- "embedded-io-async",
- "futures-core",
- "futures-sink",
- "heapless",
-]
-
-[[package]]
 name = "embassy-time"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1775,7 +1761,6 @@ dependencies = [
  "abstract-bits",
  "arbitrary-int",
  "futures",
- "rand",
  "thiserror 2.0.21",
  "tracing",
  "ziggurat-ieee-802154",
@@ -1836,10 +1821,10 @@ name = "ziggurat-runtime"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
- "embassy-sync",
  "embassy-time",
  "futures",
  "parking_lot",
+ "rand",
  "spin",
  "thiserror 2.0.21",
  "tokio",

@@ -496,7 +496,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(config: &NetworkConfig) -> Self {
+    pub fn new(config: &NetworkConfig, aps_counter: u8) -> Self {
         Self {
             core: Mutex::new(ZigbeeCore {
                 nib: Nib {
@@ -515,7 +515,7 @@ impl State {
                     address_map: AddressMap::new(config.network_address, config.ieee_address),
                 },
                 aib: Aib {
-                    aps_counter: crate::rng::random_u8(),
+                    aps_counter,
                     aps_security: ApsSecurity::new(
                         config.tc_link_key.clone(),
                         config.ieee_address,
@@ -677,7 +677,7 @@ pub struct NetworkBeacon {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime> {
+pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     self_weak: Weak<Self>,
 
     /// The runtime clock baseline. `now` is converted to the sans-io [`CoreInstant`]
@@ -807,7 +807,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
             start_time: R::now(),
-            state: State::new(&config),
+            state: State::new(&config, crate::rng::random_u8::<R>()),
             config,
             tunables,
             radio,

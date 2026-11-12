@@ -133,7 +133,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn broadcast_jitter(&self) -> Duration {
         self.tunables
             .max_broadcast_jitter()
-            .mul_f32(crate::rng::random_f32())
+            .mul_f32(crate::rng::random_f32::<R>())
     }
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience
