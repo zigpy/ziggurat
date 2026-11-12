@@ -47,8 +47,8 @@ impl Fixture {
     }
 
     /// Hold a unicast to `DESTINATION` until a route to it is known.
-    fn hold_unicast(&mut self) {
-        let (_, actions) = self.sends.enqueue_unrouted_unicast(
+    fn hold_unicast(&mut self) -> SendId {
+        let (id, actions) = self.sends.enqueue_unrouted_unicast(
             UnroutedUnicast {
                 frame: "held unicast",
                 priority: TxPriority::UserNormal,
@@ -60,6 +60,17 @@ impl Fixture {
             &self.tunables,
         );
         assert!(settled(actions).is_empty());
+
+        id
+    }
+
+    /// Cancel a held unicast.
+    fn cancel(&mut self, id: SendId) {
+        let actions = self.sends.cancel(id).unwrap();
+        assert_eq!(
+            settled(actions),
+            [(HELD_UNICAST, Err(SendFailure::Cancelled))]
+        );
     }
 
     /// Broadcast the route request of `DESTINATION`'s discovery, as the driver does:
@@ -325,4 +336,68 @@ fn test_new_route_request_stops_the_one_it_replaces() {
     let only_copy = fixture.dequeue().unwrap();
     assert!(fixture.transmitted(only_copy).is_empty());
     assert!(fixture.dequeue().is_none());
+}
+
+// A discovery whose sends are all gone has nothing left to fail. Reporting it as failed
+// makes the driver mark the route `DiscoveryFailed`, which discards a route the reply
+// produced after the sends were gone.
+#[test]
+fn test_discovery_ends_quietly_after_its_unicast_is_cancelled() {
+    let mut fixture = Fixture::new();
+    let id = fixture.hold_unicast();
+    fixture.cancel(id);
+
+    // The discovery lapses with nothing waiting on it
+    let tick = fixture.tick(DriverTables {
+        next_hop: None,
+        discovery_live: false,
+    });
+
+    assert!(settled(tick.actions).is_empty());
+    assert!(tick.restart_discovery.is_empty());
+    assert!(tick.failed_discovery.is_empty());
+    assert!(!fixture.sends.has_unrouted(DESTINATION));
+}
+
+#[test]
+fn test_discovery_ends_quietly_after_its_unicast_times_out() {
+    let mut fixture = Fixture::new();
+    fixture.hold_unicast();
+
+    // The unicast passes its deadline in the same pass that finds the discovery lapsed
+    fixture.advance(fixture.tunables.handoff_timeout());
+    let tick = fixture.tick(DriverTables {
+        next_hop: None,
+        discovery_live: false,
+    });
+
+    assert_eq!(
+        settled(tick.actions),
+        [(HELD_UNICAST, Err(SendFailure::HandoffTimeout))]
+    );
+    assert!(tick.restart_discovery.is_empty());
+    assert!(tick.failed_discovery.is_empty());
+    assert!(!fixture.sends.has_unrouted(DESTINATION));
+}
+
+// A restart is for a send that still waits. A discovery nothing waits on is not
+// restarted, however many restarts it has left.
+#[test]
+fn test_discovery_nothing_waits_on_is_not_restarted() {
+    let mut fixture = Fixture::new();
+    fixture
+        .tunables
+        .set("pending_route_discovery_attempts", 2)
+        .unwrap();
+    let id = fixture.hold_unicast();
+    fixture.cancel(id);
+
+    let tick = fixture.tick(DriverTables {
+        next_hop: None,
+        discovery_live: false,
+    });
+
+    assert!(tick.restart_discovery.is_empty());
+    assert!(tick.failed_discovery.is_empty());
+    assert!(!fixture.sends.has_unrouted(DESTINATION));
 }

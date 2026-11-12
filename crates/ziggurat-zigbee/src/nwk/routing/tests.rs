@@ -163,3 +163,48 @@ fn test_relayed_discovery_still_expires_after_its_originator_is_forgotten() {
 
     assert_eq!(routing.route_status(OTHER_DEVICE), None);
 }
+
+// Most route records repeat what is stored. Only a changed one is reported.
+#[test]
+fn test_route_record_reports_a_new_source_route_once() {
+    let mut routing = Routing::default();
+
+    let change = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
+    assert!(change.source);
+    assert!(change.any);
+
+    let change = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
+    assert!(!change.source);
+    assert!(!change.any);
+}
+
+#[test]
+fn test_route_record_reports_a_changed_path() {
+    let mut routing = Routing::default();
+    routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
+
+    let change = routing.store_route_record(DEVICE, vec![NEIGHBOR]);
+
+    assert!(change.source);
+    assert!(change.any);
+}
+
+// A record also carries the routes to its relays. An unchanged record restores a relay
+// route that was dropped: the device's own route is the same, but a send held for the
+// relay can be routed again.
+#[test]
+fn test_unchanged_route_record_reports_a_relay_route_it_restores() {
+    let mut routing = Routing::default();
+    routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
+    assert!(routing.remove_route_record(ROUTER));
+    assert_eq!(routing.route_to(ROUTER, MAX_SOURCE_ROUTE), None);
+
+    let change = routing.store_route_record(DEVICE, vec![ROUTER, NEIGHBOR]);
+
+    assert!(!change.source);
+    assert!(change.any);
+    assert_eq!(
+        routing.route_to(ROUTER, MAX_SOURCE_ROUTE),
+        Some(Route::SourceRouted(vec![NEIGHBOR]))
+    );
+}
