@@ -351,9 +351,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         actions
     }
 
-    /// Fail every frame awaiting a device's poll: it is no longer a child. This
-    /// includes a frame a poll extracted that is not in the radio yet. One in the radio
-    /// cannot be recalled.
+    /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub(super) fn drop_indirect(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Actions<F, W, E> {
         let mut actions = Actions::new();
 
@@ -361,7 +359,7 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             .records
             .iter()
             .filter_map(|(id, record)| match (record.poll_address, record.stage) {
-                (Some(address), Stage::AwaitingPoll | Stage::Queued)
+                (Some(address), Stage::AwaitingPoll)
                     if address == Ieee802154Address::Nwk(nwk)
                         || eui64.is_some_and(|e| address == Ieee802154Address::Eui64(e)) =>
                 {

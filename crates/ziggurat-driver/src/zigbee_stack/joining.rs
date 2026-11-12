@@ -1306,7 +1306,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The address map entry and any negotiated link key are kept around so that the
         // device can rejoin later
-        self.forget_nwk_state(source_ieee, source);
+        self.drop_indirect_transactions(source_ieee, source);
+        self.forget_nwk_state(source);
 
         self.push_notification(ZigbeeNotification::DeviceLeft {
             nwk: source,
