@@ -1,11 +1,12 @@
 //! The synchronization primitives the stack rests on: a blocking [`Mutex`], an async
 //! [`AsyncMutex`], and a [`Notify`]. None of them depends on an executor.
 
-use alloc::vec::Vec;
+use alloc::collections::VecDeque;
 use core::cell::UnsafeCell;
 use core::future::{Future, poll_fn};
 use core::ops::{Deref, DerefMut};
-use core::task::{Poll, Waker};
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
 
 #[cfg(feature = "std")]
 pub use parking_lot::{Mutex, MutexGuard};
@@ -80,8 +81,6 @@ impl core::fmt::Debug for Notify {
 }
 
 /// A mutex whose guard may be held across an `.await`.
-///
-/// Not fair: an unlock wakes every waiter and the first one polled takes the lock.
 pub struct AsyncMutex<T> {
     state: Mutex<AsyncMutexState>,
     value: UnsafeCell<T>,
@@ -89,7 +88,11 @@ pub struct AsyncMutex<T> {
 
 struct AsyncMutexState {
     locked: bool,
-    waiters: Vec<Waker>,
+    next_waiter: u64,
+    /// Oldest first.
+    waiters: VecDeque<(u64, Waker)>,
+    /// The waiter an unlock handed the lock to, until that waiter collects it.
+    handed_to: Option<u64>,
 }
 
 // SAFETY: `value` is only reached through an `AsyncMutexGuard`, and `locked` admits one
@@ -102,7 +105,9 @@ impl<T> AsyncMutex<T> {
         Self {
             state: Mutex::new(AsyncMutexState {
                 locked: false,
-                waiters: Vec::new(),
+                next_waiter: 0,
+                waiters: VecDeque::new(),
+                handed_to: None,
             }),
             value: UnsafeCell::new(value),
         }
@@ -121,25 +126,105 @@ impl<T> AsyncMutex<T> {
         Some(AsyncMutexGuard { mutex: self })
     }
 
-    pub fn lock(&self) -> impl Future<Output = AsyncMutexGuard<'_, T>> + Send + '_
-    where
-        T: Send,
-    {
-        poll_fn(|cx| {
+    pub const fn lock(&self) -> AsyncMutexLock<'_, T> {
+        AsyncMutexLock {
+            mutex: self,
+            waiter: None,
+        }
+    }
+
+    /// Hand the lock to the oldest waiter, or release it when nobody waits. The lock
+    /// stays `locked` across a handoff, so nothing can take it in between.
+    fn unlock(&self) {
+        let waker = {
             let mut state = self.state.lock();
 
-            if state.locked {
-                if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
-                    state.waiters.push(cx.waker().clone());
+            match state.waiters.pop_front() {
+                Some((waiter, waker)) => {
+                    state.handed_to = Some(waiter);
+                    Some(waker)
+                }
+                None => {
+                    state.locked = false;
+                    None
+                }
+            }
+        };
+
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+/// The future returned by [`AsyncMutex::lock`].
+pub struct AsyncMutexLock<'a, T> {
+    mutex: &'a AsyncMutex<T>,
+    /// Our place in the queue, once the first poll found the mutex locked.
+    waiter: Option<u64>,
+}
+
+impl<'a, T> Future for AsyncMutexLock<'a, T> {
+    type Output = AsyncMutexGuard<'a, T>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mutex = self.mutex;
+        let mut state = mutex.state.lock();
+
+        match self.waiter {
+            None if !state.locked => {
+                state.locked = true;
+            }
+            None => {
+                let waiter = state.next_waiter;
+                state.next_waiter += 1;
+                state.waiters.push_back((waiter, cx.waker().clone()));
+                drop(state);
+
+                self.waiter = Some(waiter);
+                return Poll::Pending;
+            }
+            Some(waiter) if state.handed_to == Some(waiter) => {
+                state.handed_to = None;
+            }
+            Some(waiter) => {
+                for (queued, waker) in &mut state.waiters {
+                    if *queued == waiter {
+                        waker.clone_from(cx.waker());
+                    }
                 }
                 return Poll::Pending;
             }
+        }
+        drop(state);
 
-            state.locked = true;
-            drop(state);
+        self.waiter = None;
+        Poll::Ready(AsyncMutexGuard { mutex })
+    }
+}
 
-            Poll::Ready(AsyncMutexGuard { mutex: self })
-        })
+impl<T> Drop for AsyncMutexLock<'_, T> {
+    /// A waiter that gives up leaves the queue, and passes on a lock it was already handed.
+    fn drop(&mut self) {
+        let Some(waiter) = self.waiter else {
+            return;
+        };
+
+        let handed = {
+            let mut state = self.mutex.state.lock();
+
+            if state.handed_to == Some(waiter) {
+                state.handed_to = None;
+                true
+            } else {
+                state.waiters.retain(|(queued, _)| *queued != waiter);
+                false
+            }
+        };
+
+        if handed {
+            self.mutex.unlock();
+        }
     }
 }
 
@@ -175,14 +260,6 @@ impl<T> DerefMut for AsyncMutexGuard<'_, T> {
 
 impl<T> Drop for AsyncMutexGuard<'_, T> {
     fn drop(&mut self) {
-        let waiters = {
-            let mut state = self.mutex.state.lock();
-            state.locked = false;
-            core::mem::take(&mut state.waiters)
-        };
-
-        for waiter in waiters {
-            waiter.wake();
-        }
+        self.mutex.unlock();
     }
 }
