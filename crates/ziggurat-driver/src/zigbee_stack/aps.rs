@@ -153,7 +153,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 return;
             };
 
-            self.maybe_notify_aps_frame_counter();
+            self.persist_aps_frame_counter();
             encrypted.to_bytes()
         } else {
             ack_frame.to_bytes()
@@ -246,7 +246,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .encrypt_data(destination_eui64, &aps_frame);
             match encrypted {
                 Some(encrypted) => {
-                    self.maybe_notify_aps_frame_counter();
+                    self.persist_aps_frame_counter();
                     encrypted.to_bytes()
                 }
                 None => return Err(EnqueueError::SecurityUnavailable),

@@ -108,6 +108,11 @@ pub struct ApsSecurity {
     /// The outgoing security frame counter shared by all frames encrypted with keys
     /// derived from link keys
     outgoing_frame_counter: u32,
+    /// Every this many outgoing frames, the counter asks to be persisted
+    persist_interval: u32,
+    /// A counter value the client has not been asked to persist yet. A rollback after
+    /// a restart would make every device silently reject our frames.
+    counter_to_persist: Option<u32>,
 }
 
 impl ApsSecurity {
@@ -115,6 +120,7 @@ impl ApsSecurity {
         global_link_key: Key,
         local_eui64: Eui64,
         tclk_seed: Option<TclkSeed>,
+        persist_interval: u32,
     ) -> Self {
         Self {
             global_link_key,
@@ -122,6 +128,8 @@ impl ApsSecurity {
             devices: FlatMap::new(),
             tclk_seed,
             outgoing_frame_counter: 0,
+            persist_interval,
+            counter_to_persist: None,
         }
     }
 
@@ -303,7 +311,22 @@ impl ApsSecurity {
     /// Security frame counters must never wrap: that would reuse a CCM* nonce.
     const fn next_outgoing_frame_counter(&mut self) -> u32 {
         self.outgoing_frame_counter = self.outgoing_frame_counter.checked_add(1).unwrap();
+
+        if self
+            .outgoing_frame_counter
+            .is_multiple_of(self.persist_interval)
+        {
+            self.counter_to_persist = Some(self.outgoing_frame_counter);
+        }
+
         self.outgoing_frame_counter
+    }
+
+    /// The outgoing frame counter value the client should persist now, if encryption
+    /// has advanced it far enough since the last one. Every encryption can owe one.
+    #[must_use]
+    pub const fn take_counter_to_persist(&mut self) -> Option<u32> {
+        self.counter_to_persist.take()
     }
 
     /// The key a given key identifier selects, derived from a device link key.

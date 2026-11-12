@@ -475,11 +475,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             core.aib.aps_security.device_link_key(destination_eui64)
         };
 
-        core.aib.aps_security.encrypt_command_with_link_key(
+        let encrypted = core.aib.aps_security.encrypt_command_with_link_key(
             &link_key,
             NwkSecurityHeaderKeyId::KeyTransportKey,
             &transport_key_command,
-        )
+        );
+        drop(core);
+
+        self.persist_aps_frame_counter();
+        encrypted
     }
 
     /// Zigbee spec 4.6.3.2: deliver the network key to a joining device. The NWK frame
@@ -752,6 +756,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         };
 
+        self.persist_aps_frame_counter();
         self.send_secured_aps_payload(nwk_frame.nwk_header.source, encrypted_command.to_bytes())
             .map_err(|err| tracing::warn!("Failed to send transport key to {source_ieee:?}: {err}"))
             .ok();
@@ -858,15 +863,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let payload = if encrypted {
             // Confirm key commands are APS encrypted with the link key itself, i.e. the
             // "data key" (spec 4.4.1.3)
-            self.core()
-                .aib
-                .aps_security
-                .encrypt_command(
-                    destination_eui64,
-                    NwkSecurityHeaderKeyId::DataKey,
-                    &confirm_key_command,
-                )
-                .to_bytes()
+            let encrypted = self.core().aib.aps_security.encrypt_command(
+                destination_eui64,
+                NwkSecurityHeaderKeyId::DataKey,
+                &confirm_key_command,
+            );
+
+            self.persist_aps_frame_counter();
+            encrypted.to_bytes()
         } else {
             confirm_key_command.to_bytes()
         };

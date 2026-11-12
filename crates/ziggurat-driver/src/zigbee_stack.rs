@@ -499,6 +499,7 @@ impl State {
                         config.tc_link_key.clone(),
                         config.ieee_address,
                         config.tclk_seed.clone(),
+                        FRAME_COUNTER_NOTIFY_INTERVAL,
                     ),
                 },
                 mac: MacState {
@@ -714,9 +715,6 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     pub(crate) send_wake: Notify,
     /// Wakes the send timer task when the send table's next deadline may have moved.
     pub(crate) send_timer_wake: Notify,
-    /// The outgoing APS frame counter last streamed to the client, so a persist
-    /// notification only fires every `FRAME_COUNTER_NOTIFY_INTERVAL` frames.
-    last_persisted_aps_counter: AtomicU32,
 
     /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
     /// stopped: a leaked background task would keep the replaced stack processing frames
@@ -811,7 +809,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             )),
             send_wake: Notify::new(),
             send_timer_wake: Notify::new(),
-            last_persisted_aps_counter: AtomicU32::new(0),
             spawner,
             cancels: Mutex::new(FlatMap::new()),
             next_task_id: AtomicU32::new(0),
@@ -851,20 +848,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Stream the outgoing APS frame counter every `FRAME_COUNTER_NOTIFY_INTERVAL`
-    /// frames so a restart can't roll it back. Called after each APS encryption.
-    fn maybe_notify_aps_frame_counter(&self) {
-        let counter = self.core().aib.aps_security.outgoing_frame_counter();
-        let last = self
-            .last_persisted_aps_counter
-            .load(AtomicOrdering::Relaxed);
+    /// Stream the outgoing APS frame counter when the key table asks for it, so a
+    /// restart can't roll it back. Called after each APS encryption.
+    fn persist_aps_frame_counter(&self) {
+        let counter = self.core().aib.aps_security.take_counter_to_persist();
 
-        if counter.wrapping_sub(last) >= FRAME_COUNTER_NOTIFY_INTERVAL {
-            self.last_persisted_aps_counter
-                .store(counter, AtomicOrdering::Relaxed);
-            self.push_notification(ZigbeeNotification::ApsFrameCounterUpdate {
-                frame_counter: counter,
-            });
+        if let Some(frame_counter) = counter {
+            self.push_notification(ZigbeeNotification::ApsFrameCounterUpdate { frame_counter });
         }
     }
 
