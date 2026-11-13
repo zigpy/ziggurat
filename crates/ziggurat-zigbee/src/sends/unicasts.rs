@@ -14,7 +14,7 @@ use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
 use super::{
-    Action, Actions, ApsAckData, Confirm, InFlight, SendFailure, SendFrame, SendId, SrcMatchTable,
+    Action, ApsAckData, Confirm, InFlight, Outbox, SendFailure, SendFrame, SendId, SrcMatchTable,
     Transmit, TxPriority,
 };
 
@@ -202,9 +202,8 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
-    ) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-
+        outbox: &mut Outbox<F, W, E>,
+    ) {
         let record = self
             .records
             .get_mut(&id)
@@ -215,18 +214,18 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         record.frame = Some(frame);
 
         match result {
-            Ok(()) => self.handed_off(id, now, acked, &mut actions),
+            Ok(()) => self.handed_off(id, now, acked, outbox),
             // The destination acked end to end while the radio reported a failure: the
             // frame got through
-            Err(_) if acked => self.handed_off(id, now, acked, &mut actions),
+            Err(_) if acked => self.handed_off(id, now, acked, outbox),
             Err(err) => match record.poll_address {
                 // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
                 // so a failed transmit awaits the device's next poll, keeping its deadline
                 Some(_) if now < record.deadline => record.stage = Stage::AwaitingPoll,
-                Some(_) => self.settle(id, Err(err), None, &mut actions),
+                Some(_) => self.settle(id, Err(err), None, outbox),
                 None if record.attempts_remaining == 0 => {
                     let next_hop = record.next_hop;
-                    self.settle(id, Err(err), Some(next_hop), &mut actions);
+                    self.settle(id, Err(err), Some(next_hop), outbox);
                 }
                 None => {
                     record.attempts_remaining -= 1;
@@ -236,19 +235,11 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 }
             },
         }
-
-        actions
     }
 
     /// The frame reached its next hop: settle the send, or start waiting for its ack
     /// unless `acked` says it already arrived.
-    fn handed_off(
-        &mut self,
-        id: SendId,
-        now: Instant,
-        acked: bool,
-        actions: &mut Actions<F, W, E>,
-    ) {
+    fn handed_off(&mut self, id: SendId, now: Instant, acked: bool, outbox: &mut Outbox<F, W, E>) {
         let record = self.records.get_mut(&id).unwrap();
 
         let wait = match record.confirm {
@@ -257,14 +248,14 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         };
 
         let Some(wait) = wait else {
-            self.settle(id, Ok(()), None, actions);
+            self.settle(id, Ok(()), None, outbox);
             return;
         };
 
         record.stage = Stage::AwaitingApsAck;
         record.deadline = now + wait;
 
-        actions.push(Action::HandedOff(record.waiter.clone()));
+        outbox.push_back(Action::HandedOff(record.waiter.clone()));
     }
 
     /// Remove a record and report its verdict. The only way a record leaves the table.
@@ -273,20 +264,15 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         id: SendId,
         result: Result<(), E>,
         failed_hop: Option<Nwk>,
-        actions: &mut Actions<F, W, E>,
+        outbox: &mut Outbox<F, W, E>,
     ) {
         let record = self.records.remove(&id).unwrap();
-
-        // Repeat the handoff: its own action may not have reached the waiter yet
-        if record.stage == Stage::AwaitingApsAck {
-            actions.push(Action::HandedOff(record.waiter.clone()));
-        }
 
         let frame = record
             .frame
             .expect("a transmitting send is never settled from outside");
 
-        actions.push(Action::Settled {
+        outbox.push_back(Action::Settled {
             waiter: record.waiter,
             result,
             failed_hop: failed_hop.map(|next_hop| (next_hop, frame.failure())),
@@ -326,9 +312,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
     /// An end-to-end APS ack arrived. It settles the oldest send waiting for it; the
     /// ack carries no way to tell two frames sharing a key apart.
-    pub(super) fn ack_received(&mut self, ack: &ApsAckData) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-
+    pub(super) fn ack_received(&mut self, ack: &ApsAckData, outbox: &mut Outbox<F, W, E>) {
         let matched = self
             .records
             .iter()
@@ -338,7 +322,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             });
 
         let Some(id) = matched else {
-            return actions;
+            return;
         };
 
         let record = self.records.get_mut(&id).unwrap();
@@ -346,16 +330,17 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             // Faster than the radio's own report: `transmitted` settles it
             record.stage = Stage::Transmitting { acked: true };
         } else {
-            self.settle(id, Ok(()), None, &mut actions);
+            self.settle(id, Ok(()), None, outbox);
         }
-
-        actions
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
-    pub(super) fn drop_indirect(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-
+    pub(super) fn drop_indirect(
+        &mut self,
+        eui64: Option<Eui64>,
+        nwk: Nwk,
+        outbox: &mut Outbox<F, W, E>,
+    ) {
         let dropped: Vec<(SendId, Ieee802154Address)> = self
             .records
             .iter()
@@ -375,11 +360,9 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                 id,
                 Err(SendFailure::IndirectExpired { destination }.into()),
                 None,
-                &mut actions,
+                outbox,
             );
         }
-
-        actions
     }
 
     /// Drop every record and return its waiter: the stack is shutting down and no
@@ -392,16 +375,16 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         waiters
     }
 
-    /// `None` if the send is in the radio right now, or unknown.
-    pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
-        let record = self.records.get(&id)?;
+    /// Whether the send was cancelled: not if it is in the radio right now, or unknown.
+    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, W, E>) -> bool {
+        let Some(record) = self.records.get(&id) else {
+            return false;
+        };
         if matches!(record.stage, Stage::Transmitting { .. }) {
-            return None;
+            return false;
         }
-
-        let mut actions = Actions::new();
-        self.settle(id, Err(SendFailure::Cancelled.into()), None, &mut actions);
-        Some(actions)
+        self.settle(id, Err(SendFailure::Cancelled.into()), None, outbox);
+        true
     }
 
     pub(super) fn is_transmitting(&self, id: SendId) -> bool {
@@ -421,8 +404,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     /// Re-queue retries that are due and fail records past their deadline.
-    pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
+    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, W, E>) {
         let mut lapsed: Vec<(SendId, SendFailure)> = Vec::new();
 
         for (id, record) in self.records.iter_mut() {
@@ -440,10 +422,8 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         }
 
         for (id, failure) in lapsed {
-            self.settle(id, Err(failure.into()), None, &mut actions);
+            self.settle(id, Err(failure.into()), None, outbox);
         }
-
-        actions
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {

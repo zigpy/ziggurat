@@ -298,8 +298,6 @@ impl SendFrame for Frame {
 
 /// The send table, specialised to the driver's types. See [`Sends`].
 pub type SendTable = Sends<Frame, Arc<SendSlot>, DeliveryError>;
-pub type SendAction = ziggurat_zigbee::sends::Action<Frame, Arc<SendSlot>, DeliveryError>;
-pub type SendActions = ziggurat_zigbee::sends::Actions<Frame, Arc<SendSlot>, DeliveryError>;
 
 /// A unicast handed to [`ZigbeeStack::send_unicast`].
 #[derive(Debug)]

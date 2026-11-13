@@ -15,8 +15,8 @@ use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendActions, SendHandle, SendMode,
-    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
+    TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -260,9 +260,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let attempts = self.tunables.rreq_retries() + 1;
         let mut core = self.core();
-        let (_, actions) =
-            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
-        self.commit_sends(core, actions);
+        self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        self.commit_sends(core);
     }
 
     /// Zigbee spec 3.6.4.5.1: advertise a many-to-one route to ourselves so that every
@@ -444,7 +443,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core: &mut ZigbeeCore,
         destination: Nwk,
         route_request_identifier: u8,
-    ) -> SendActions {
+    ) {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
 
         // If we know the EUI64 corresponding to the NWK, use it
@@ -467,14 +466,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.4.5.1: the initial broadcast is repeated `nwkcInitialRREQRetries`
         // times, separated by the retry interval
-        let (request, mut actions) = self.broadcast_route_request(
+        let request = self.broadcast_route_request(
             core,
             route_request_frame,
             self.tunables.initial_rreq_retries() + 1,
             Duration::ZERO,
         );
-        actions.extend(core.sends.route_request_sent(destination, request));
-
-        actions
+        core.sends.route_request_sent(destination, request);
     }
 }

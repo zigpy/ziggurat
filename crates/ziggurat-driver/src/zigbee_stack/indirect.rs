@@ -50,8 +50,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let now = self.core_now();
         let delivered = fp_advertised && {
             let mut core = self.core();
-            let (queued, actions) = core.sends.poll(source_eui64, source_nwk, now);
-            self.commit_sends(core, actions);
+            let queued = core.sends.poll(source_eui64, source_nwk, now);
+            self.commit_sends(core);
             queued
         };
 
@@ -73,8 +73,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
         let mut core = self.core();
-        let actions = core.sends.drop_indirect_unicasts(eui64, nwk);
-        self.commit_sends(core, actions);
+        core.sends.drop_indirect_unicasts(eui64, nwk);
+        self.commit_sends(core);
     }
 
     /// Spec 3.6.10.4: a poll from a device with no neighbor table entry is answered

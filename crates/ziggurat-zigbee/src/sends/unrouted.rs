@@ -12,7 +12,7 @@ use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Actions, Confirm, SendFailure, SendFrame, SendId, TxPriority};
+use super::{Action, Confirm, Outbox, SendFailure, SendFrame, SendId, TxPriority};
 
 /// What an unrouted unicast is enqueued with.
 #[derive(Debug)]
@@ -107,7 +107,7 @@ impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
     }
 
     /// Fail every send to `destination`: no route to it will be found.
-    pub(super) fn fail(&mut self, destination: Nwk) -> Actions<F, W, E> {
+    pub(super) fn fail(&mut self, destination: Nwk, outbox: &mut Outbox<F, W, E>) {
         let ids: Vec<SendId> = self
             .records
             .iter()
@@ -115,9 +115,12 @@ impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .map(|(id, _)| *id)
             .collect();
 
-        ids.into_iter()
-            .map(|id| Self::settled(self.take(id), SendFailure::RouteDiscoveryTimeout))
-            .collect()
+        for id in ids {
+            outbox.push_back(Self::settled(
+                self.take(id),
+                SendFailure::RouteDiscoveryTimeout,
+            ));
+        }
     }
 
     /// Drop every record and return its waiter: the stack is shutting down.
@@ -129,15 +132,13 @@ impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         waiters
     }
 
-    pub(super) fn cancel(&mut self, id: SendId) -> Actions<F, W, E> {
+    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, W, E>) {
         let send = self.records.remove(&id).unwrap();
-        let mut actions = Actions::new();
-        actions.push(Self::settled(send, SendFailure::Cancelled));
-        actions
+        outbox.push_back(Self::settled(send, SendFailure::Cancelled));
     }
 
     /// Fail sends past their deadline.
-    pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
+    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, W, E>) {
         let lapsed: Vec<SendId> = self
             .records
             .iter()
@@ -145,13 +146,10 @@ impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             .map(|(id, _)| *id)
             .collect();
 
-        lapsed
-            .into_iter()
-            .map(|id| {
-                let send = self.records.remove(&id).unwrap();
-                Self::settled(send, SendFailure::HandoffTimeout)
-            })
-            .collect()
+        for id in lapsed {
+            let send = self.records.remove(&id).unwrap();
+            outbox.push_back(Self::settled(send, SendFailure::HandoffTimeout));
+        }
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {

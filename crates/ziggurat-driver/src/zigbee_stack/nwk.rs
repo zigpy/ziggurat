@@ -26,8 +26,8 @@ use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 use super::{
     AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError,
     FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective,
-    Schedule, SendActions, SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast,
-    ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    Schedule, SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore,
+    ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -56,8 +56,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     pub(super) fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
         core.nib.routing.forget(self.state.network_address, nwk);
-        let actions = core.sends.fail_unrouted(nwk);
-        self.commit_sends(core, actions);
+        core.sends.fail_unrouted(nwk);
+        self.commit_sends(core);
     }
 
     /// Filter broadcast frames based on the NWK broadcast transaction table
@@ -109,8 +109,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         attempts: u8,
         initial_delay: Duration,
-    ) -> (SendId, SendActions) {
-        let (handle, actions) = self.enqueue_broadcast_in(
+    ) -> SendId {
+        self.enqueue_broadcast_in(
             core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -122,9 +122,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 copies_remaining: attempts,
                 next_attempt: self.core_now() + initial_delay,
             },
-        );
-
-        (handle.id(), actions)
+        )
+        .id()
     }
 
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
@@ -402,7 +401,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             now,
         );
 
-        let (handle, actions) = match resolved {
+        let handle = match resolved {
             NextHop::Resolved(next_hop) => {
                 let poll_address = Self::poll_address(&core.nib, next_hop);
                 self.enqueue_unicast_in(
@@ -418,7 +417,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 tracing::debug!("Holding frame until a route to {destination:?} is known");
                 let slot = Arc::new(SendSlot::default());
 
-                let (id, mut actions) = core.sends.enqueue_unrouted_unicast(
+                let id = core.sends.enqueue_unrouted_unicast(
                     UnroutedUnicast {
                         frame: Frame::nwk(nwk_frame, security),
                         priority: policy.priority,
@@ -440,14 +439,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     self.tunables.pending_route_discovery_attempts(),
                 );
                 if let Some(route_request_identifier) = route_request_identifier {
-                    actions.extend(self.broadcast_discovery_request(
+                    self.broadcast_discovery_request(
                         &mut core,
                         destination,
                         route_request_identifier,
-                    ));
+                    );
                 }
 
-                (SendHandle::new(id, slot), actions)
+                SendHandle::new(id, slot)
             }
             NextHop::Discard => {
                 tracing::debug!(
@@ -457,7 +456,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        self.commit_sends(core, actions);
+        self.commit_sends(core);
         Ok(handle)
     }
 
@@ -630,10 +629,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         class: TrafficClass,
         copy_of: Option<SendId>,
-    ) -> SendActions {
-        let mut actions = SendActions::new();
+    ) {
         if nwk_frame.nwk_header.destination != BROADCAST_ALL_DEVICES {
-            return actions;
+            return;
         }
 
         let sleepy_children: Vec<(Eui64, Nwk)> = core
@@ -658,7 +656,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 next_hop: child_nwk,
                 poll_address: Some(Ieee802154Address::Eui64(child_eui64)),
             };
-            let (_, copy_actions) = match copy_of {
+            match copy_of {
                 Some(broadcast) => core.sends.enqueue_broadcast_copy(
                     broadcast,
                     unicast,
@@ -669,10 +667,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .sends
                     .enqueue_unicast(unicast, self.core_now(), &self.tunables),
             };
-            actions.extend(copy_actions);
         }
-
-        actions
     }
 
     /// Send a broadcast, retransmitted until its passive-ack quorum is heard or its
@@ -726,7 +721,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
         // is the send's handoff; the end of the retransmissions is its delivery.
-        let (handle, mut actions) = self.enqueue_broadcast_in(
+        let handle = self.enqueue_broadcast_in(
             &mut core,
             Frame::nwk(nwk_frame.clone(), security),
             policy,
@@ -739,14 +734,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
         // for each (spec 3.6.6)
-        actions.extend(self.maybe_fan_out_broadcast_to_sleepy_children(
+        self.maybe_fan_out_broadcast_to_sleepy_children(
             &mut core,
             &nwk_frame,
             security,
             policy.class,
             Some(handle.id()),
-        ));
-        self.commit_sends(core, actions);
+        );
+        self.commit_sends(core);
         Ok(handle)
     }
 
@@ -1026,14 +1021,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec 3.6.6: deliver another device's 0xFFFF broadcast to our own sleepy
         // children as MAC unicasts (a no-op for non-0xFFFF destinations).
         let mut core = self.core();
-        let actions = self.maybe_fan_out_broadcast_to_sleepy_children(
+        self.maybe_fan_out_broadcast_to_sleepy_children(
             &mut core,
             &relayed_frame,
             NwkSecurityMode::NetworkKey,
             TrafficClass::Forwarding,
             None,
         );
-        self.commit_sends(core, actions);
+        self.commit_sends(core);
 
         relayed_frame.nwk_header.radius = relayed_frame.nwk_header.radius.saturating_sub(1);
         if relayed_frame.nwk_header.radius == 0 {

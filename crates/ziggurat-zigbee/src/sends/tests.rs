@@ -15,7 +15,6 @@ impl SendFrame for &'static str {
 }
 
 type TestSends = Sends<&'static str, u8, SendFailure>;
-type TestActions = Actions<&'static str, u8, SendFailure>;
 
 /// A send's waiter and how it settled.
 type Verdict = (u8, Result<(), SendFailure>);
@@ -53,7 +52,7 @@ impl Fixture {
 
     /// Hold a unicast to `DESTINATION` until a route to it is known.
     fn hold_unicast(&mut self) -> SendId {
-        let (id, actions) = self.sends.enqueue_unrouted_unicast(
+        let id = self.sends.enqueue_unrouted_unicast(
             UnroutedUnicast {
                 frame: "held unicast",
                 priority: TxPriority::UserNormal,
@@ -64,7 +63,7 @@ impl Fixture {
             self.now,
             &self.tunables,
         );
-        assert!(settled(actions).is_empty());
+        assert!(self.settled().is_empty());
 
         id
     }
@@ -77,13 +76,14 @@ impl Fixture {
     /// Fail every unicast held for `DESTINATION`, as the driver does when the device
     /// leaves or joins again.
     fn fail_held(&mut self) -> Vec<Verdict> {
-        settled(self.sends.fail_unrouted(DESTINATION))
+        self.sends.fail_unrouted(DESTINATION);
+        self.settled()
     }
 
     /// Broadcast the route request of `DESTINATION`'s discovery, as the driver does:
     /// four copies, the first due now. Returns what registering the request settles.
     fn broadcast_route_request(&mut self, waiter: u8) -> Vec<Verdict> {
-        let (request, actions) = self.sends.enqueue_broadcast(
+        let request = self.sends.enqueue_broadcast(
             Broadcast {
                 frame: "route request",
                 priority: TxPriority::UserNormal,
@@ -97,17 +97,19 @@ impl Fixture {
             self.now,
             &self.tunables,
         );
-        assert!(settled(actions).is_empty());
+        assert!(self.settled().is_empty());
 
-        settled(self.sends.route_request_sent(DESTINATION, request))
+        self.sends.route_request_sent(DESTINATION, request);
+        self.settled()
     }
 
     /// Run a timer pass in which the routing table offers this next hop toward
     /// `DESTINATION`. Returns what the pass settles.
     fn pass(&mut self, next_hop: Option<Nwk>) -> Vec<Verdict> {
-        settled(self.sends.tick(self.now, &self.tunables, |_| {
+        self.sends.tick(self.now, &self.tunables, |_| {
             next_hop.map(|next_hop| (next_hop, None))
-        }))
+        });
+        self.settled()
     }
 
     fn dequeue(&mut self) -> Option<InFlight<&'static str>> {
@@ -116,10 +118,9 @@ impl Fixture {
 
     /// Report a successful transmit. Returns what it settles.
     fn transmitted(&mut self, in_flight: InFlight<&'static str>) -> Vec<Verdict> {
-        settled(
-            self.sends
-                .transmitted(in_flight, Ok(()), self.now, Duration::ZERO, Duration::ZERO),
-        )
+        self.sends
+            .transmitted(in_flight, Ok(()), self.now, Duration::ZERO, Duration::ZERO);
+        self.settled()
     }
 
     /// Transmit the next frame that is due. Returns what that settles.
@@ -127,17 +128,18 @@ impl Fixture {
         let in_flight = self.dequeue().unwrap();
         self.transmitted(in_flight)
     }
-}
 
-/// The waiter and verdict of every send the actions settle.
-fn settled(actions: TestActions) -> Vec<Verdict> {
-    actions
-        .into_iter()
-        .filter_map(|action| match action {
-            Action::Settled { waiter, result, .. } => Some((waiter, result)),
-            Action::HandedOff(_) => None,
-        })
-        .collect()
+    /// Take the queued actions. Returns the waiter and verdict of every send they
+    /// settle.
+    fn settled(&mut self) -> Vec<Verdict> {
+        let mut verdicts = Vec::new();
+        while let Some(action) = self.sends.next_action() {
+            if let Action::Settled { waiter, result, .. } = action {
+                verdicts.push((waiter, result));
+            }
+        }
+        verdicts
+    }
 }
 
 #[test]
@@ -188,7 +190,8 @@ fn test_held_unicast_can_be_cancelled() {
     let mut fixture = Fixture::new();
     let id = fixture.hold_unicast();
 
-    let cancelled = settled(fixture.sends.cancel(id).unwrap());
+    assert!(fixture.sends.cancel(id));
+    let cancelled = fixture.settled();
 
     assert_eq!(cancelled, [(HELD_UNICAST, Err(SendFailure::Cancelled))]);
     assert!(!fixture.holding());
