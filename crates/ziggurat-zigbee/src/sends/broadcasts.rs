@@ -225,10 +225,14 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         }
     }
 
-    /// Remove a record and report its verdict. The only way a record leaves the table.
+    /// Remove a record and report its verdict.
     fn settle(&mut self, id: SendId, result: Result<(), E>, outbox: &mut Outbox<F, W, E>) {
         let record = self.records.remove(&id).unwrap();
+        Self::settled(record, result, outbox);
+    }
 
+    /// Report the verdict of a record removed from the table.
+    fn settled(record: Record<F, W, E>, result: Result<(), E>, outbox: &mut Outbox<F, W, E>) {
         drop(
             record
                 .frame
@@ -330,11 +334,9 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     /// Queue copies that are due, complete or fail schedules that ran out, and fail
     /// records past their deadline.
     pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, W, E>) {
-        let mut settle: Vec<(SendId, Result<(), E>)> = Vec::new();
-
-        for (id, record) in self.records.iter_mut() {
+        let over = self.records.extract_map(|_, record| {
             if record.copy == CopyState::Transmitting {
-                continue;
+                return None;
             }
 
             if record.copy == CopyState::Idle
@@ -343,29 +345,28 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 match due {
                     Due::Copy => record.copy = CopyState::Queued,
                     Due::Over => {
-                        let verdict = if record.handed_off {
+                        return Some(if record.handed_off {
                             Ok(())
                         } else {
                             Err(record.last_error.take().unwrap())
-                        };
-                        settle.push((*id, verdict));
-                        continue;
+                        });
                     }
                 }
             }
 
             if record.deadline <= now {
-                let verdict = if record.handed_off {
+                return Some(if record.handed_off {
                     Ok(())
                 } else {
                     Err(SendFailure::HandoffTimeout.into())
-                };
-                settle.push((*id, verdict));
+                });
             }
-        }
 
-        for (id, result) in settle {
-            self.settle(id, result, outbox);
+            None
+        });
+
+        for (_, record, result) in over {
+            Self::settled(record, result, outbox);
         }
     }
 

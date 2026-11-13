@@ -258,7 +258,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         outbox.push_back(Action::HandedOff(record.waiter.clone()));
     }
 
-    /// Remove a record and report its verdict. The only way a record leaves the table.
+    /// Remove a record and report its verdict.
     fn settle(
         &mut self,
         id: SendId,
@@ -267,7 +267,16 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         outbox: &mut Outbox<F, W, E>,
     ) {
         let record = self.records.remove(&id).unwrap();
+        Self::settled(record, result, failed_hop, outbox);
+    }
 
+    /// Report the verdict of a record removed from the table.
+    fn settled(
+        record: Record<F, W>,
+        result: Result<(), E>,
+        failed_hop: Option<Nwk>,
+        outbox: &mut Outbox<F, W, E>,
+    ) {
         let frame = record
             .frame
             .expect("a transmitting send is never settled from outside");
@@ -341,23 +350,21 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         nwk: Nwk,
         outbox: &mut Outbox<F, W, E>,
     ) {
-        let dropped: Vec<(SendId, Ieee802154Address)> = self
-            .records
-            .iter()
-            .filter_map(|(id, record)| match (record.poll_address, record.stage) {
-                (Some(address), Stage::AwaitingPoll)
-                    if address == Ieee802154Address::Nwk(nwk)
-                        || eui64.is_some_and(|e| address == Ieee802154Address::Eui64(e)) =>
-                {
-                    Some((*id, address))
-                }
-                _ => None,
-            })
-            .collect();
+        let dropped =
+            self.records
+                .extract_map(|_, record| match (record.poll_address, record.stage) {
+                    (Some(address), Stage::AwaitingPoll)
+                        if address == Ieee802154Address::Nwk(nwk)
+                            || eui64.is_some_and(|e| address == Ieee802154Address::Eui64(e)) =>
+                    {
+                        Some(address)
+                    }
+                    _ => None,
+                });
 
-        for (id, destination) in dropped {
-            self.settle(
-                id,
+        for (_, record, destination) in dropped {
+            Self::settled(
+                record,
                 Err(SendFailure::IndirectExpired { destination }.into()),
                 None,
                 outbox,
@@ -387,42 +394,43 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         true
     }
 
-    pub(super) fn is_transmitting(&self, id: SendId) -> bool {
-        matches!(
-            self.records.get(&id).unwrap().stage,
-            Stage::Transmitting { .. }
-        )
+    /// Whether a copy of a broadcast to one of its sleepy children is in the radio.
+    pub(super) fn copy_transmitting(&self, broadcast: SendId) -> bool {
+        self.records.values().any(|record| {
+            record.copy_of == Some(broadcast) && matches!(record.stage, Stage::Transmitting { .. })
+        })
     }
 
-    /// The live copies of a broadcast to its sleepy children.
-    pub(super) fn copies_of(&self, broadcast: SendId) -> Vec<SendId> {
-        self.records
-            .iter()
-            .filter(|(_, record)| record.copy_of == Some(broadcast))
-            .map(|(id, _)| *id)
-            .collect()
+    /// Cancel the copies of a broadcast to its sleepy children. None may be in the radio.
+    pub(super) fn cancel_copies(&mut self, broadcast: SendId, outbox: &mut Outbox<F, W, E>) {
+        let copies = self
+            .records
+            .extract_if(|_, record| record.copy_of == Some(broadcast));
+
+        for (_, record) in copies {
+            assert!(!matches!(record.stage, Stage::Transmitting { .. }));
+            Self::settled(record, Err(SendFailure::Cancelled.into()), None, outbox);
+        }
     }
 
     /// Re-queue retries that are due and fail records past their deadline.
     pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, W, E>) {
-        let mut lapsed: Vec<(SendId, SendFailure)> = Vec::new();
-
-        for (id, record) in self.records.iter_mut() {
+        let lapsed = self.records.extract_map(|_, record| {
             if let Stage::Retrying { at } = record.stage
                 && at <= now
             {
                 record.stage = Stage::Queued;
             }
 
-            if record.deadline <= now
-                && let Some(failure) = record.deadline_failure()
-            {
-                lapsed.push((*id, failure));
+            if record.deadline <= now {
+                record.deadline_failure()
+            } else {
+                None
             }
-        }
+        });
 
-        for (id, failure) in lapsed {
-            self.settle(id, Err(failure.into()), None, outbox);
+        for (_, record, failure) in lapsed {
+            Self::settled(record, Err(failure.into()), None, outbox);
         }
     }
 

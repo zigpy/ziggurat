@@ -108,6 +108,51 @@ impl<K, V> FlatMap<K, V> {
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.entries.iter_mut().map(|(_, v)| v)
     }
+
+    /// Remove every entry `f` returns true for and yield them in key order. `f` may
+    /// change the entries it keeps. Entries the iterator has not reached when it is
+    /// dropped are kept.
+    pub fn extract_if<F: FnMut(&K, &mut V) -> bool>(
+        &mut self,
+        mut f: F,
+    ) -> impl Iterator<Item = (K, V)> {
+        self.entries.extract_if(.., move |(k, v)| f(k, v))
+    }
+
+    /// [`Self::extract_if`], for an `f` that also returns a value for each entry it
+    /// removes. Each removal moves the entries after it.
+    pub const fn extract_map<T, F: FnMut(&K, &mut V) -> Option<T>>(
+        &mut self,
+        f: F,
+    ) -> ExtractMap<'_, K, V, F> {
+        ExtractMap {
+            entries: &mut self.entries,
+            index: 0,
+            f,
+        }
+    }
+}
+
+pub struct ExtractMap<'a, K, V, F> {
+    entries: &'a mut Vec<(K, V)>,
+    index: usize,
+    f: F,
+}
+
+impl<K, V, T, F: FnMut(&K, &mut V) -> Option<T>> Iterator for ExtractMap<'_, K, V, F> {
+    type Item = (K, V, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.entries.len() {
+            let (key, value) = &mut self.entries[self.index];
+            if let Some(extra) = (self.f)(key, value) {
+                let (key, value) = self.entries.remove(self.index);
+                return Some((key, value, extra));
+            }
+            self.index += 1;
+        }
+        None
+    }
 }
 
 impl<K: Ord, V> Default for FlatMap<K, V> {
@@ -412,6 +457,19 @@ mod test {
         }
 
         map.retain(|&k, _| k == 5);
+        assert_eq!(map.len(), 1);
+
+        map.extend([(6, "six"), (7, "seven"), (8, "eight")]);
+        assert_eq!(
+            map.extract_if(|&k, _| k % 2 == 0)
+                .collect::<alloc::vec::Vec<_>>(),
+            [(6, "six"), (8, "eight")]
+        );
+        assert_eq!(
+            map.extract_map(|&k, v| (k == 7).then_some(v.len()))
+                .collect::<alloc::vec::Vec<_>>(),
+            [(7, "seven", 5)]
+        );
         assert_eq!(map.len(), 1);
 
         map.clear();

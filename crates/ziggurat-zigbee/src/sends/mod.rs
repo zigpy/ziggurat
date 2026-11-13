@@ -418,15 +418,10 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         tunables: &Tunables,
         mut next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
     ) {
-        for id in self.unrouted_unicasts.ids() {
-            // `next_hop` may rewrite the frame for a source route. Without a next hop
-            // the send stays held.
-            let Some((next_hop, poll_address)) = next_hop(self.unrouted_unicasts.frame_mut(id))
-            else {
-                continue;
-            };
-
-            let unrouted = self.unrouted_unicasts.take(id);
+        // A send without a next hop stays held
+        for (id, unrouted, (next_hop, poll_address)) in
+            self.unrouted_unicasts.take_routed(&mut next_hop)
+        {
             self.unicasts.enqueue(
                 id,
                 Unicast {
@@ -487,20 +482,14 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
 
     /// Cancel a broadcast with its sleepy child copies, or nothing if any is in the radio.
     fn cancel_broadcast(&mut self, id: SendId) -> bool {
-        let copies = self.unicasts.copies_of(id);
-        if copies
-            .iter()
-            .any(|copy| self.unicasts.is_transmitting(*copy))
-        {
+        if self.unicasts.copy_transmitting(id) {
             return false;
         }
 
         if !self.broadcasts.cancel(id, &mut self.outbox) {
             return false;
         }
-        for copy in copies {
-            assert!(self.unicasts.cancel(copy, &mut self.outbox));
-        }
+        self.unicasts.cancel_copies(id, &mut self.outbox);
         true
     }
 

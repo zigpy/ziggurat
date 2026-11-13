@@ -84,18 +84,14 @@ impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         );
     }
 
-    /// The id of every held send, oldest first.
-    pub(super) fn ids(&self) -> Vec<SendId> {
-        self.records.keys().copied().collect()
-    }
-
-    pub(super) fn frame_mut(&mut self, id: SendId) -> &mut F {
-        &mut self.records.get_mut(&id).unwrap().frame
-    }
-
-    /// Take a held send: it has a route.
-    pub(super) fn take(&mut self, id: SendId) -> Record<F, W> {
-        self.records.remove(&id).unwrap()
+    /// Take every held send `next_hop` finds a next hop for, oldest first, with that
+    /// next hop. `next_hop` may rewrite the frame, for a source route.
+    pub(super) fn take_routed<T>(
+        &mut self,
+        mut next_hop: impl FnMut(&mut F) -> Option<T>,
+    ) -> impl Iterator<Item = (SendId, Record<F, W>, T)> {
+        self.records
+            .extract_map(move |_, send| next_hop(&mut send.frame))
     }
 
     fn settled(send: Record<F, W>, failure: SendFailure) -> Action<F, W, E> {
@@ -108,18 +104,12 @@ impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
 
     /// Fail every send to `destination`: no route to it will be found.
     pub(super) fn fail(&mut self, destination: Nwk, outbox: &mut Outbox<F, W, E>) {
-        let ids: Vec<SendId> = self
+        let failed = self
             .records
-            .iter()
-            .filter(|(_, send)| send.destination == destination)
-            .map(|(id, _)| *id)
-            .collect();
+            .extract_if(|_, send| send.destination == destination);
 
-        for id in ids {
-            outbox.push_back(Self::settled(
-                self.take(id),
-                SendFailure::RouteDiscoveryTimeout,
-            ));
+        for (_, send) in failed {
+            outbox.push_back(Self::settled(send, SendFailure::RouteDiscoveryTimeout));
         }
     }
 
@@ -139,15 +129,9 @@ impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
 
     /// Fail sends past their deadline.
     pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, W, E>) {
-        let lapsed: Vec<SendId> = self
-            .records
-            .iter()
-            .filter(|(_, send)| send.deadline <= now)
-            .map(|(id, _)| *id)
-            .collect();
+        let lapsed = self.records.extract_if(|_, send| send.deadline <= now);
 
-        for id in lapsed {
-            let send = self.records.remove(&id).unwrap();
+        for (_, send) in lapsed {
             outbox.push_back(Self::settled(send, SendFailure::HandoffTimeout));
         }
     }
