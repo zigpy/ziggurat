@@ -11,6 +11,9 @@ use crate::aps::frame::{
 use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
 use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
+#[cfg(test)]
+mod tests;
+
 /// Which stack's seed-to-key transformation a TCLK seed uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TclkFlavor {
@@ -108,6 +111,12 @@ pub struct ApsSecurity {
     /// The outgoing security frame counter shared by all frames encrypted with keys
     /// derived from link keys
     outgoing_frame_counter: u32,
+    /// The counter asks to be persisted once it is this far past the last value the
+    /// client was given
+    persist_interval: u32,
+    /// The last counter value the client was asked to persist. A rollback after a
+    /// restart would make every device silently reject our frames.
+    persisted_frame_counter: u32,
 }
 
 impl ApsSecurity {
@@ -115,6 +124,7 @@ impl ApsSecurity {
         global_link_key: Key,
         local_eui64: Eui64,
         tclk_seed: Option<TclkSeed>,
+        persist_interval: u32,
     ) -> Self {
         Self {
             global_link_key,
@@ -122,6 +132,8 @@ impl ApsSecurity {
             devices: FlatMap::new(),
             tclk_seed,
             outgoing_frame_counter: 0,
+            persist_interval,
+            persisted_frame_counter: 0,
         }
     }
 
@@ -304,6 +316,19 @@ impl ApsSecurity {
     const fn next_outgoing_frame_counter(&mut self) -> u32 {
         self.outgoing_frame_counter = self.outgoing_frame_counter.checked_add(1).unwrap();
         self.outgoing_frame_counter
+    }
+
+    /// The outgoing frame counter value the client should persist now, if it is far
+    /// enough past the last one. The distance is checked, not an exact value, so no
+    /// jump of the counter and no missed call can skip a persist: the next call owes it.
+    #[must_use]
+    pub const fn take_counter_to_persist(&mut self) -> Option<u32> {
+        if self.outgoing_frame_counter - self.persisted_frame_counter < self.persist_interval {
+            return None;
+        }
+
+        self.persisted_frame_counter = self.outgoing_frame_counter;
+        Some(self.outgoing_frame_counter)
     }
 
     /// The key a given key identifier selects, derived from a device link key.

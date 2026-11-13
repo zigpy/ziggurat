@@ -288,7 +288,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// The NWK retry delay with a random jitter of up to one delay period.
     fn unicast_retry_delay(&self) -> Duration {
         let delay = self.tunables.unicast_retry_delay();
-        delay + delay.mul_f32(crate::rng::random_f32())
+        delay + delay.mul_f32(crate::rng::random_f32::<R>())
     }
 
     /// The timer task: runs the table's timed transitions whenever its next deadline is

@@ -1,5 +1,4 @@
-use super::TrafficClass;
-use crate::broadcast_budget::BroadcastAdmission;
+use super::{BroadcastAdmission, TrafficClass};
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
@@ -133,7 +132,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn broadcast_jitter(&self) -> Duration {
         self.tunables
             .max_broadcast_jitter()
-            .mul_f32(crate::rng::random_f32())
+            .mul_f32(crate::rng::random_f32::<R>())
     }
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience

@@ -45,7 +45,11 @@ pub use ziggurat_zigbee::constants::{
     MAX_DEPTH, PROTOCOL_VERSION, STACK_PROFILE, TunableError, Tunables, WELL_KNOWN_LINK_KEY,
 };
 pub use ziggurat_zigbee::nwk::NwkDeviceType;
+pub use ziggurat_zigbee::nwk::address_conflicts::{AddrConflictSource, AddressConflicts};
 pub use ziggurat_zigbee::nwk::addresses::AddressMap;
+pub use ziggurat_zigbee::nwk::broadcast_budget::{
+    BroadcastAdmission, BroadcastBudget, TrafficClass,
+};
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
 pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
 pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
@@ -130,20 +134,6 @@ impl From<SendFailure> for DeliveryError {
     }
 }
 
-/// Which tier of the broadcast budget admits a broadcast.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrafficClass {
-    /// A frame we originate on the host's behalf: refused first under pressure, the
-    /// host is told and can pace itself.
-    Host,
-    /// A transit frame relayed for another device: dropping one degrades the mesh but
-    /// the originator retries end-to-end.
-    Forwarding,
-    /// Stack machinery the mesh cannot function without: joins, APS acks, NWK
-    /// commands, indirect deliveries. Always admitted.
-    Critical,
-}
-
 /// How a transmit is treated under contention.
 ///
 /// The axes are independent: `priority` orders the send queue (who transmits first),
@@ -195,14 +185,6 @@ pub type ApsCounter = u8;
 pub enum JoinKind {
     New,
     Rejoin,
-}
-
-/// How an address conflict (spec 3.6.1.10.5) came to our attention: detected locally
-/// from a received frame, or reported by another device's network status command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddrConflictSource {
-    Local,
-    Network,
 }
 
 #[derive(Debug)]
@@ -268,21 +250,6 @@ pub struct NetworkConfig {
     /// The radio transmit power in dBm
     pub tx_power: i8,
     pub source_routing: bool,
-}
-
-/// Bookkeeping for a network address conflict (spec 3.6.1.10.5).
-///
-/// Detection re-triggers on every frame from the conflicted devices, so a conflict
-/// is handled once per delivery window, and our own notification broadcast is
-/// cancelled when another device reported the same conflict first.
-#[derive(Debug, Clone, Copy)]
-pub struct AddressConflict {
-    pub handled_at: CoreInstant,
-    pub heard_from_network: bool,
-    /// When our own jittered Network Status broadcast is due, acted on by the
-    /// address-conflict report reactor. `None` once sent, or when no report is owed
-    /// (the conflict was learned from the network).
-    pub report_at: Option<CoreInstant>,
 }
 
 /// The frame a send holds, as enqueued.
@@ -398,6 +365,10 @@ pub struct ZigbeeCore {
     /// became active or a broadcast's quorum was heard.
     pub sends: SendTable,
 
+    /// Address conflicts being handled, and the reports we owe for them. Under the core
+    /// lock because resolving one reads the address map and the routing table.
+    pub address_conflicts: AddressConflicts,
+
     /// Deadline until which the coordinator advertises `association_permit` in its
     /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
     /// renewals extend the window. `None` or past means direct joins are denied.
@@ -437,8 +408,6 @@ impl DerefMut for CoreGuard<'_> {
 pub struct State {
     /// All mutable protocol state, behind one lock
     pub core: Mutex<ZigbeeCore>,
-
-    pub address_conflicts: Mutex<FlatMap<Nwk, AddressConflict>>,
 
     /// Spec 2.2.8.4.2: APS duplicate rejection. Keyed by (originator, APS counter) with
     /// the receipt time; an inbound data frame matching a live entry is a retransmission
@@ -496,7 +465,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(config: &NetworkConfig) -> Self {
+    pub fn new(config: &NetworkConfig, aps_counter: u8) -> Self {
         Self {
             core: Mutex::new(ZigbeeCore {
                 nib: Nib {
@@ -515,11 +484,12 @@ impl State {
                     address_map: AddressMap::new(config.network_address, config.ieee_address),
                 },
                 aib: Aib {
-                    aps_counter: crate::rng::random_u8(),
+                    aps_counter,
                     aps_security: ApsSecurity::new(
                         config.tc_link_key.clone(),
                         config.ieee_address,
                         config.tclk_seed.clone(),
+                        FRAME_COUNTER_NOTIFY_INTERVAL,
                     ),
                 },
                 mac: MacState {
@@ -528,11 +498,11 @@ impl State {
                     pan_id: config.pan_id,
                 },
                 sends: SendTable::default(),
+                address_conflicts: AddressConflicts::default(),
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
             }),
-            address_conflicts: Mutex::new(FlatMap::new()),
             aps_duplicates: Mutex::new(FlatMap::new()),
 
             hack_ignore_broadcast_startup_wait_period: true,
@@ -677,7 +647,7 @@ pub struct NetworkBeacon {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime> {
+pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     self_weak: Weak<Self>,
 
     /// The runtime clock baseline. `now` is converted to the sans-io [`CoreInstant`]
@@ -695,6 +665,8 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Whether a network scan is collecting. The receive loop only queues beacons while
     /// this is set, so stray beacons outside a scan are dropped.
     scan_active: AtomicBool,
+    /// A scan request holds the scan state, until it has taken its last beacons.
+    scan_claimed: AtomicBool,
     /// Diagnostic: beacon frames that reached [`Self::handle_beacon`] during a scan.
     pub scan_beacon_frames: AtomicU32,
     pub scan_beacons: Mutex<VecDeque<NetworkBeacon>>,
@@ -730,15 +702,12 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
 
     /// Admission budget for outgoing broadcasts: a token bucket with per-class reserves
     /// so a host broadcast flood cannot starve stack-critical broadcasts.
-    pub(crate) broadcast_budget: Mutex<crate::broadcast_budget::BroadcastBudget>,
+    pub(crate) broadcast_budget: Mutex<BroadcastBudget>,
 
     /// Wakes the sender task when a frame may have become ready to transmit.
     pub(crate) send_wake: Notify,
     /// Wakes the send timer task when the send table's next deadline may have moved.
     pub(crate) send_timer_wake: Notify,
-    /// The outgoing APS frame counter last streamed to the client, so a persist
-    /// notification only fires every `FRAME_COUNTER_NOTIFY_INTERVAL` frames.
-    last_persisted_aps_counter: AtomicU32,
 
     /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
     /// stopped: a leaked background task would keep the replaced stack processing frames
@@ -752,6 +721,19 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime = crate::runtime::DefaultRuntime>
     /// Woken whenever a task removes itself from `cancels`, so `shutdown` can await the
     /// set draining to empty.
     tasks_drained: Notify,
+}
+
+/// A scan request's hold on the stack's scan state, from
+/// [`ZigbeeStack::begin_network_scan`] until it is dropped. Keep it until the last
+/// beacons are taken.
+pub struct NetworkScan<'a> {
+    claimed: &'a AtomicBool,
+}
+
+impl Drop for NetworkScan<'_> {
+    fn drop(&mut self) {
+        self.claimed.store(false, AtomicOrdering::Release);
+    }
 }
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -807,7 +789,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Arc::new_cyclic(|weak_self| Self {
             self_weak: weak_self.clone(),
             start_time: R::now(),
-            state: State::new(&config),
+            state: State::new(&config, crate::rng::random_u8::<R>()),
             config,
             tunables,
             radio,
@@ -816,6 +798,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
             scan_active: AtomicBool::new(false),
+            scan_claimed: AtomicBool::new(false),
             scan_beacon_frames: AtomicU32::new(0),
             scan_beacons: Mutex::new(VecDeque::new()),
             scan_beacon_wake: Notify::new(),
@@ -828,12 +811,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
             tasklets: tasklets::Tasklets::default(),
-            broadcast_budget: Mutex::new(crate::broadcast_budget::BroadcastBudget::new(
-                initial_broadcast_tokens,
-            )),
+            broadcast_budget: Mutex::new(BroadcastBudget::new(initial_broadcast_tokens)),
             send_wake: Notify::new(),
             send_timer_wake: Notify::new(),
-            last_persisted_aps_counter: AtomicU32::new(0),
             spawner,
             cancels: Mutex::new(FlatMap::new()),
             next_task_id: AtomicU32::new(0),
@@ -873,20 +853,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Stream the outgoing APS frame counter every `FRAME_COUNTER_NOTIFY_INTERVAL`
-    /// frames so a restart can't roll it back. Called after each APS encryption.
-    fn maybe_notify_aps_frame_counter(&self) {
-        let counter = self.core().aib.aps_security.outgoing_frame_counter();
-        let last = self
-            .last_persisted_aps_counter
-            .load(AtomicOrdering::Relaxed);
+    /// Stream the outgoing APS frame counter when the key table asks for it, so a
+    /// restart can't roll it back. Called after each APS encryption.
+    fn persist_aps_frame_counter(&self) {
+        let counter = self.core().aib.aps_security.take_counter_to_persist();
 
-        if counter.wrapping_sub(last) >= FRAME_COUNTER_NOTIFY_INTERVAL {
-            self.last_persisted_aps_counter
-                .store(counter, AtomicOrdering::Relaxed);
-            self.push_notification(ZigbeeNotification::ApsFrameCounterUpdate {
-                frame_counter: counter,
-            });
+        if let Some(frame_counter) = counter {
+            self.push_notification(ZigbeeNotification::ApsFrameCounterUpdate { frame_counter });
         }
     }
 
@@ -1278,10 +1251,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.scan_beacon_wake.notify_one();
     }
 
-    /// Open the beacon-collection window for an active scan.
-    pub fn begin_network_scan(&self) {
+    /// Open the beacon-collection window for an active scan. The scan state serves one
+    /// scan at a time, so this returns `None` while another request holds it, or while
+    /// the sweep of a request that was dropped still runs.
+    pub fn begin_network_scan(&self) -> Option<NetworkScan<'_>> {
+        if self.scan_claimed.swap(true, AtomicOrdering::AcqRel) {
+            return None;
+        }
+        let scan = NetworkScan {
+            claimed: &self.scan_claimed,
+        };
+
+        if self.scan_active.swap(true, AtomicOrdering::AcqRel) {
+            return None;
+        }
         self.scan_beacons.lock().clear();
-        self.scan_active.store(true, AtomicOrdering::Relaxed);
+
+        Some(scan)
     }
 
     /// Active scan: broadcast a beacon request on each channel and dwell to collect

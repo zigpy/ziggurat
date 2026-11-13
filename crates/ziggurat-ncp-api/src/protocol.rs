@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use ziggurat_driver::runtime::Spawn;
+use ziggurat_driver::runtime::{EmbassyRuntime, Spawn};
 use ziggurat_driver::zigbee_stack::{Tunables, ZigbeeStack};
 use ziggurat_phy::{RadioPhy, Receiver};
 use ziggurat_protocol::{
@@ -15,11 +15,11 @@ use ziggurat_protocol::{
     Response, ScanCountPayload, ScanRequestPayload, Status,
 };
 
-use crate::{App, CaptureStop, capture_config, push_outbound, send_outbound, spawn_stack_pumps};
+use crate::{capture_config, push_outbound, send_outbound, spawn_stack_pumps, App, CaptureStop};
 
 // Re-exported for the transport shell (`crate::lib`) and downstream firmware.
 pub use ziggurat_protocol::{
-    HelloPayload, LastResetPayload, Notification, PROTOCOL_VERSION, notification_frame,
+    notification_frame, HelloPayload, LastResetPayload, Notification, PROTOCOL_VERSION,
 };
 
 async fn send_event(request_id: RequestId, event: Event) {
@@ -164,9 +164,7 @@ async fn dispatch<P: RadioPhy>(
         Request::EnergyScan(payload) => handle_energy_scan(app, request_id, payload).await,
         Request::NetworkScan(payload) => handle_network_scan(app, request_id, payload).await,
         Request::PacketCapture(payload) => handle_packet_capture(app, request_id, payload).await,
-        Request::PacketCaptureChannel(payload) => {
-            handle_packet_capture_channel(app, payload).await
-        }
+        Request::PacketCaptureChannel(payload) => handle_packet_capture_channel(app, payload).await,
         Request::SetTunable(payload) => {
             proto::set_tunable(&**configured(app)?, &payload)?;
             Ok(Response::Empty)
@@ -184,12 +182,14 @@ async fn dispatch<P: RadioPhy>(
 // -- guards ------------------------------------------------------------------------
 
 /// The stack, in any state after `configure`.
-fn configured<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
-    app.stack.as_ref().ok_or(Error::Status(Status::NotConfigured))
+fn configured<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, EmbassyRuntime>>, Error> {
+    app.stack
+        .as_ref()
+        .ok_or(Error::Status(Status::NotConfigured))
 }
 
 /// The stack, if it is in the load window (configured but not started).
-fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
+fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, EmbassyRuntime>>, Error> {
     match app.stack.as_ref() {
         Some(stack) if !app.started => Ok(stack),
         Some(_) => Err(Status::AlreadyStarted.into()),
@@ -198,7 +198,7 @@ fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
 }
 
 /// The stack, if it is running.
-fn running<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P>>, Error> {
+fn running<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, EmbassyRuntime>>, Error> {
     match app.stack.as_ref() {
         Some(stack) if app.started => Ok(stack),
         Some(_) => Err(Status::NotStarted.into()),
@@ -283,7 +283,7 @@ async fn handle_start_network<P: RadioPhy>(app: &mut App<P>) -> Result<Response,
 async fn scan_table<P: RadioPhy>(
     app: &App<P>,
     request_id: RequestId,
-    snapshot: impl FnOnce(&ZigbeeStack<P>) -> Vec<Event>,
+    snapshot: impl FnOnce(&ZigbeeStack<P, EmbassyRuntime>) -> Vec<Event>,
 ) -> Result<Response, Error> {
     let stack = configured(app)?;
 
@@ -352,10 +352,7 @@ async fn handle_energy_scan<P: RadioPhy>(
             Ok(rssi) => {
                 send_event(
                     request_id,
-                    Event::EnergyResult(EnergyResultPayload {
-                        channel,
-                        rssi,
-                    }),
+                    Event::EnergyResult(EnergyResultPayload { channel, rssi }),
                 )
                 .await;
             }
@@ -376,7 +373,10 @@ async fn handle_network_scan<P: RadioPhy>(
 ) -> Result<Response, Error> {
     let stack = running(app)?.clone();
 
-    stack.begin_network_scan();
+    let Some(_scan) = stack.begin_network_scan() else {
+        tracing::warn!("Network scan refused: another scan is running");
+        return Err(Status::ScanFailed.into());
+    };
     let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
     let result = stack.run_network_scan(&request.channels, duration).await;
 

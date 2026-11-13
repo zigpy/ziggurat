@@ -5,6 +5,8 @@ use core::future::Future;
 use core::ops::Add;
 use core::pin::Pin;
 use core::time::Duration;
+#[cfg(feature = "tokio")]
+use rand::RngExt;
 
 /// A detached background task, boxed so one spawn path serves every runtime.
 ///
@@ -59,6 +61,9 @@ pub trait Runtime: Send + Sync + 'static {
 
     /// The current monotonic instant.
     fn now() -> Self::Instant;
+
+    /// Fill `buf` with random bytes fit for key material.
+    fn fill_random(buf: &mut [u8]);
 
     /// Sleep for `duration`.
     fn sleep(duration: Duration) -> impl Future<Output = ()> + Send;
@@ -119,6 +124,10 @@ impl Runtime for TokioRuntime {
         tokio::time::Instant::now()
     }
 
+    fn fill_random(buf: &mut [u8]) {
+        rand::rng().fill(buf);
+    }
+
     fn sleep(duration: Duration) -> impl Future<Output = ()> + Send {
         tokio::time::sleep(duration)
     }
@@ -132,7 +141,7 @@ impl Runtime for TokioRuntime {
 #[cfg(feature = "tokio")]
 #[derive(Default)]
 pub struct TokioSpawner {
-    tasks: parking_lot::Mutex<tokio::task::JoinSet<()>>,
+    tasks: crate::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 #[cfg(feature = "tokio")]
@@ -163,22 +172,15 @@ impl Spawn for TokioSpawner {
 /// The embassy runtime adapter. Drives the MCU directly; host-runnable through
 /// `embassy-host` (`arch-std`) so it can stand in for tokio in tests.
 #[cfg(feature = "embassy")]
-pub use embassy_impl::{EmbassyRuntime, EmbassySpawner};
+pub use embassy_impl::{EmbassyRuntime, EmbassySpawner, install_random_source};
 
 #[cfg(feature = "embassy-host")]
 pub use embassy_impl::start_embassy_executor;
 
-/// The runtime the stack defaults to when no `R` type parameter is given. Resolves to
-/// whichever backend feature is enabled.
-#[cfg(feature = "tokio")]
-pub type DefaultRuntime = TokioRuntime;
-#[cfg(all(feature = "embassy", not(feature = "tokio")))]
-pub type DefaultRuntime = EmbassyRuntime;
-
 #[cfg(feature = "embassy")]
 mod embassy_impl {
     use super::{RtInstant, Runtime, Spawn, SpawnedTask};
-    #[cfg(feature = "embassy-host")]
+    use crate::sync::Mutex;
     use alloc::boxed::Box;
     use core::future::Future;
     use core::ops::Add;
@@ -211,6 +213,16 @@ mod embassy_impl {
         }
     }
 
+    type RandomSource = Box<dyn FnMut(&mut [u8]) + Send>;
+
+    static RANDOM_SOURCE: Mutex<Option<RandomSource>> = Mutex::new(None);
+
+    /// Install the byte source behind [`EmbassyRuntime::fill_random`]. The MCU binary
+    /// backs this with the SoC hardware RNG.
+    pub fn install_random_source(source: RandomSource) {
+        *RANDOM_SOURCE.lock() = Some(source);
+    }
+
     pub struct EmbassyRuntime;
 
     impl Runtime for EmbassyRuntime {
@@ -219,6 +231,13 @@ mod embassy_impl {
 
         fn now() -> Self::Instant {
             EmbassyInstant(embassy_time::Instant::now())
+        }
+
+        fn fill_random(buf: &mut [u8]) {
+            RANDOM_SOURCE
+                .lock()
+                .as_mut()
+                .expect("install_random_source was never called")(buf);
         }
 
         fn sleep(duration: Duration) -> impl Future<Output = ()> + Send {

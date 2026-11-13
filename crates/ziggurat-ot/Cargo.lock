@@ -1395,15 +1395,12 @@ version = "0.1.0"
 dependencies = [
  "abstract-bits",
  "arbitrary-int",
- "embassy-executor",
- "embassy-sync",
- "embassy-time",
  "futures",
- "spin",
  "thiserror",
  "tracing",
  "ziggurat-ieee-802154",
  "ziggurat-phy",
+ "ziggurat-runtime",
  "ziggurat-zigbee",
 ]
 
@@ -1471,6 +1468,7 @@ dependencies = [
  "embassy-sync",
  "ziggurat-ieee-802154",
  "ziggurat-phy",
+ "ziggurat-runtime",
 ]
 
 [[package]]
@@ -1485,6 +1483,19 @@ dependencies = [
  "ziggurat-ieee-802154",
  "ziggurat-phy",
  "ziggurat-zigbee",
+]
+
+[[package]]
+name = "ziggurat-runtime"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embassy-executor",
+ "embassy-time",
+ "futures",
+ "spin",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

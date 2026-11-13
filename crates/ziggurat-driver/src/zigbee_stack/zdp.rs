@@ -358,7 +358,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let jitter = self
                 .tunables
                 .parent_annce_jitter_max()
-                .mul_f32(crate::rng::random_f32());
+                .mul_f32(crate::rng::random_f32::<R>());
 
             let slept_at = self.core_now();
             R::sleep((self.tunables.parent_annce_base_timer() + jitter).saturating_sub(send_time))

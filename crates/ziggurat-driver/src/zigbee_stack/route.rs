@@ -255,7 +255,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let jitter = (min_jitter
             + max_jitter
                 .saturating_sub(min_jitter)
-                .mul_f32(crate::rng::random_f32()))
+                .mul_f32(crate::rng::random_f32::<R>()))
             * 2;
 
         let attempts = self.tunables.rreq_retries() + 1;

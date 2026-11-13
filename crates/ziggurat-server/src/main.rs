@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
+use embedded_io_adapters::tokio_1::FromTokio;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
@@ -16,13 +17,15 @@ use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use ziggurat_driver::runtime::TokioSpawner;
+use ziggurat_driver::runtime::{TokioRuntime, TokioSpawner};
 use ziggurat_driver::zigbee_stack::{SendHandle, Tunables, ZigbeeNotification, ZigbeeStack};
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_protocol::{self as proto};
-use ziggurat_spinel::client::{RcpTransport, SpinelClient};
+
+type Phy = SpinelPhy<TokioRuntime>;
+type Stack = ZigbeeStack<Phy, TokioRuntime>;
 
 /// Outbound frames a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -75,8 +78,8 @@ pub struct ZigguratServer {
     /// opened lazily by the first command that needs it and never reopened, so stack
     /// replacement cannot race a straggling handle — a serial port re-open failing
     /// with `EBUSY`, or a second concurrent connection to the same TCP endpoint
-    phy: AsyncMutex<Option<Arc<SpinelPhy>>>,
-    stack: Mutex<Option<Arc<ZigbeeStack<SpinelPhy>>>>,
+    phy: AsyncMutex<Option<Arc<Phy>>>,
+    stack: Mutex<Option<Arc<Stack>>>,
     started: AtomicBool,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
     notification_forwarder: Mutex<Option<JoinHandle<()>>>,
@@ -149,20 +152,32 @@ impl ZigguratServer {
         });
     }
 
-    fn current_stack(&self) -> Option<Arc<ZigbeeStack<SpinelPhy>>> {
+    fn current_stack(&self) -> Option<Arc<Stack>> {
         self.stack.lock().unwrap().clone()
     }
 
     /// The process-lifetime radio transport, opening the RCP link on first use.
-    async fn phy(&self) -> std::io::Result<Arc<SpinelPhy>> {
+    async fn phy(&self) -> std::io::Result<Arc<Phy>> {
         let mut phy = self.phy.lock().await;
 
         if let Some(phy) = &*phy {
             return Ok(phy.clone());
         }
 
-        let transport = open_transport(&self.serial).await?;
-        let new_phy = Arc::new(SpinelPhy::new(Arc::new(SpinelClient::new(transport))));
+        let (reader, writer) = tokio::io::split(open_transport(&self.serial).await?);
+        let new_phy = Arc::new(Phy::new());
+
+        // Link death (USB yank, EOF) exits the whole process: the supervisor (Docker)
+        // restarts us. A half-dead process with a deaf radio is the worst failure mode.
+        let link_phy = new_phy.clone();
+        tokio::spawn(async move {
+            let error = link_phy
+                .run(FromTokio::new(reader), FromTokio::new(writer))
+                .await;
+            tracing::error!("RCP link failed ({error}), exiting");
+            std::process::exit(1);
+        });
+
         *phy = Some(new_phy.clone());
         drop(phy);
 
@@ -468,13 +483,13 @@ impl ZigguratServer {
     // -- guards --------------------------------------------------------------------
 
     /// The stack, in any state after `configure`.
-    fn configured(&self) -> Result<Arc<ZigbeeStack<SpinelPhy>>, proto::Error> {
+    fn configured(&self) -> Result<Arc<Stack>, proto::Error> {
         self.current_stack()
             .ok_or(proto::Error::Status(proto::Status::NotConfigured))
     }
 
     /// The stack, if it is in the load window (configured but not started).
-    fn loadable(&self) -> Result<Arc<ZigbeeStack<SpinelPhy>>, proto::Error> {
+    fn loadable(&self) -> Result<Arc<Stack>, proto::Error> {
         match self.current_stack() {
             Some(_) if self.started.load(Ordering::SeqCst) => {
                 Err(proto::Status::AlreadyStarted.into())
@@ -485,7 +500,7 @@ impl ZigguratServer {
     }
 
     /// The stack, if it is running.
-    fn running(&self) -> Result<Arc<ZigbeeStack<SpinelPhy>>, proto::Error> {
+    fn running(&self) -> Result<Arc<Stack>, proto::Error> {
         match self.current_stack() {
             Some(stack) if self.started.load(Ordering::SeqCst) => Ok(stack),
             Some(_) => Err(proto::Status::NotStarted.into()),
@@ -812,7 +827,10 @@ impl ZigguratServer {
         // Open the collection window before spawning, so the drain loop below cannot
         // race ahead of the scan starting. The scan runs on its own task so it always
         // reaches its channel restore even if this request's task is dropped.
-        stack.begin_network_scan();
+        let Some(_scan) = stack.begin_network_scan() else {
+            tracing::warn!("Network scan refused: another scan is running");
+            return Err(proto::Status::ScanFailed.into());
+        };
         let duration = Duration::from_millis(u64::from(payload.duration_per_channel_ms));
         let scan_stack = stack.clone();
         let channels = payload.channels;
@@ -939,6 +957,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The TCP path is meant for a wired (Ethernet) link. Wi-Fi's latency variance is not
 /// supported: a spike can spuriously trip `MAX_CONSECUTIVE_TIMEOUTS` and force a
 /// reset-recovery against a perfectly healthy radio.
+/// A link to the RCP: a serial port or a TCP socket.
+trait RcpTransport: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> RcpTransport for T {}
+
 async fn open_transport(serial: &SerialConfig) -> std::io::Result<Box<dyn RcpTransport>> {
     let tcp_addr = serial
         .device
