@@ -30,7 +30,7 @@ struct Watch {
     handed_off_waker: Option<Waker>,
     delivered_waker: Option<Waker>,
     /// Also notified on any stage resolution, so a poller (the wire `SendTracker`) can
-    /// sweep without occupying the handle's wakers. Set via
+    /// check its sends without occupying the handle's wakers. Set via
     /// [`SendHandle::set_completion_wake`].
     completion_wake: Option<Arc<Notify>>,
 }
@@ -96,7 +96,7 @@ impl SendWatches {
     }
 }
 
-/// A non-blocking snapshot of a send's two verdicts, taken by the wire tracker's sweep.
+/// A non-blocking snapshot of a send's two verdicts, taken by the wire tracker.
 #[derive(Debug, Clone)]
 pub struct SendProgress {
     pub handed_off: Option<Result<(), DeliveryError>>,
@@ -169,7 +169,7 @@ impl SendHandle {
         .await
     }
 
-    /// A non-blocking snapshot of both stages, what the wire tracker sweeps with. Never
+    /// A non-blocking snapshot of both stages, what the wire tracker polls. Never
     /// occupies the wakers.
     pub fn status(&self) -> SendProgress {
         self.watches
