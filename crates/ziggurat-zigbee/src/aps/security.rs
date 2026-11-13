@@ -1,5 +1,4 @@
 use crate::flat_map::FlatMap;
-use alloc::vec;
 
 use subtle::ConstantTimeEq;
 use ziggurat_ieee_802154::types::{Eui64, Key};
@@ -268,10 +267,18 @@ impl ApsSecurity {
     /// Only joining devices share the well-known key: fresh joins use
     /// [`Self::join_link_key`] instead.
     pub fn device_link_key(&self, eui64: Eui64) -> Key {
-        self.device_key(eui64).map_or_else(
-            || self.unkeyed_link_key(eui64),
-            |link_key| link_key.key.clone(),
-        )
+        self.device_link_key_with_entry(eui64).0
+    }
+
+    /// [`Self::device_link_key`], with the key-pair entry it belongs to.
+    fn device_link_key_with_entry(&self, eui64: Eui64) -> (Key, AppliedKey) {
+        match (self.device_key(eui64), &self.tclk_seed) {
+            // A stored key equal to the global key would also count as the device's
+            // own. No device is ever issued the global key, so this never happens.
+            (Some(entry), _) => (entry.key.clone(), AppliedKey::Device),
+            (None, Some(seed)) => (seed.derive(eui64), AppliedKey::Device),
+            (None, None) => (self.global_link_key.clone(), AppliedKey::Global),
+        }
     }
 
     /// The key a factory-new joiner shares with us before any key exchange: its
@@ -470,19 +477,18 @@ impl ApsSecurity {
             return decrypt(network_key).map(|frame| (frame, AppliedKey::Network));
         }
 
-        let mut candidate_keys = vec![self.device_link_key(source)];
-        if candidate_keys[0] != self.global_link_key {
-            candidate_keys.push(self.global_link_key.clone());
-        }
+        let decrypt_with = |link_key: &Key| {
+            decrypt(&Self::select_key(link_key, key_id).expect("NetworkKey is handled above"))
+        };
 
-        let (link_key, frame) = candidate_keys.iter().find_map(|link_key| {
-            let key = Self::select_key(link_key, key_id).expect("NetworkKey is handled above");
-            decrypt(&key).map(|frame| (link_key, frame))
-        })?;
-        let applied = if *link_key == self.global_link_key {
-            AppliedKey::Global
-        } else {
-            AppliedKey::Device
+        let (link_key, entry) = self.device_link_key_with_entry(source);
+        let (frame, applied) = match decrypt_with(&link_key) {
+            Some(frame) => (frame, entry),
+            // Devices encrypt with the well-known key until their key exchange completes
+            None if entry == AppliedKey::Device => {
+                (decrypt_with(&self.global_link_key)?, AppliedKey::Global)
+            }
+            None => return None,
         };
 
         // Spec 4.4.1.2 steps 4 and 9: replay protection applies to unique link keys
