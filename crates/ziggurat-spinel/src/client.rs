@@ -205,6 +205,8 @@ pub enum SpinelError {
     CancelledByReset,
     #[error("the spinel transport closed")]
     TransportClosed,
+    #[error("the spinel transport stopped accepting bytes")]
+    WriteStalled,
     #[error("timeout")]
     Timeout,
     #[error("spinel U21 parsing error")]
@@ -238,6 +240,10 @@ struct State {
     outcomes: [Option<Outcome>; 8],
     /// Frames waiting for the write loop.
     outbound: VecDeque<SpinelFrame>,
+    /// Bit `tid` is set once the write loop has written that request.
+    written: u8,
+    /// [`SpinelClient::run`] returned: nothing is read or written any more.
+    closed: bool,
 }
 
 impl State {
@@ -267,6 +273,7 @@ impl Drop for Transaction<'_> {
             .outbound
             .retain(|frame| frame.header.transaction_id != self.tid);
         state.outcomes[usize::from(self.tid)] = None;
+        state.written &= !(1 << self.tid);
         state.protocol.release_request(self.tid);
         drop(state);
 
@@ -281,7 +288,8 @@ pub type EventHandler = Box<dyn Fn(SpinelEvent) + Send + Sync>;
 /// all the transport IO.
 pub struct SpinelClient<R: Runtime> {
     state: Mutex<State>,
-    /// Indexed by transaction id; woken when that transaction's outcome is set.
+    /// Indexed by transaction id; woken when that transaction's request is written,
+    /// when its outcome is set, and when the link closes.
     outcome_ready: [Notify; 8],
     outbound_ready: Notify,
     /// Commands that found all seven transaction ids in use wait here, in order. Only
@@ -302,6 +310,8 @@ impl<R: Runtime> SpinelClient<R> {
                 protocol: SpinelProtocol::new(),
                 outcomes: [const { None }; 8],
                 outbound: VecDeque::new(),
+                written: 0,
+                closed: false,
             }),
             outcome_ready: core::array::from_fn(|_| Notify::new()),
             outbound_ready: Notify::new(),
@@ -314,14 +324,23 @@ impl<R: Runtime> SpinelClient<R> {
     }
 
     /// Drive the link: parse inbound bytes and write queued frames. Returns only when
-    /// the transport fails.
+    /// the transport fails. Commands that wait then fail with `TransportClosed`.
     pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> SpinelError {
-        let read = pin!(self.read_loop(reader));
-        let write = pin!(self.write_loop(writer));
+        self.state.lock().closed = false;
 
-        match select(read, write).await {
-            Either::Left((error, _)) | Either::Right((error, _)) => error,
-        }
+        let error = {
+            let read = pin!(self.read_loop(reader));
+            let write = pin!(self.write_loop(writer));
+
+            match select(read, write).await {
+                Either::Left((error, _)) | Either::Right((error, _)) => error,
+            }
+        };
+
+        self.state.lock().closed = true;
+        self.wake_all_waiters();
+
+        error
     }
 
     // The state lock is held across parsing and delivery on purpose (see below), and
@@ -395,8 +414,20 @@ impl<R: Runtime> SpinelClient<R> {
 
             tracing::trace!("Writing {hdlc_scratch:02X?}");
 
-            if let Err(e) = writer.write_all(&hdlc_scratch).await {
-                return SpinelError::Io(e.kind());
+            // A transport that takes this long to accept one frame is dead
+            let write = pin!(writer.write_all(&hdlc_scratch));
+            let stalled = pin!(R::sleep(TIMEOUT));
+            match select(write, stalled).await {
+                Either::Left((Ok(()), _)) => {}
+                Either::Left((Err(e), _)) => return SpinelError::Io(e.kind()),
+                Either::Right(_) => return SpinelError::WriteStalled,
+            }
+
+            // The command's response timeout starts here. Resets carry no transaction
+            let tid = frame.header.transaction_id;
+            if tid != 0 {
+                self.state.lock().written |= 1 << tid;
+                self.outcome_ready[usize::from(tid)].notify_one();
             }
         }
     }
@@ -456,16 +487,49 @@ impl<R: Runtime> SpinelClient<R> {
 
         {
             let mut state = self.state.lock();
+            if state.closed {
+                return Err(SpinelError::TransportClosed);
+            }
             state.outcomes[usize::from(tid)] = None;
             state.outbound.push_back(frame);
         }
         self.outbound_ready.notify_one();
 
+        // The timeout is for the RCP to answer, so it starts once the request is
+        // written. A request reported as timed out must not go out afterwards: the
+        // caller may send it again, and a transmit would then reach the air twice
+        if R::timeout(TIMEOUT, self.request_written(tid))
+            .await
+            .is_err()
+        {
+            let unsent = {
+                let mut state = self.state.lock();
+                let queued = state.outbound.len();
+                state
+                    .outbound
+                    .retain(|frame| frame.header.transaction_id != tid);
+                state.outbound.len() != queued
+            };
+
+            if unsent {
+                return Err(self.request_timed_out(tid));
+            }
+
+            // The write loop is writing it. It finishes, or gives up and closes the
+            // link, within its own timeout
+            self.request_written(tid).await;
+        }
+
         let outcome = R::timeout(TIMEOUT, async {
             loop {
-                let outcome = self.state.lock().outcomes[usize::from(tid)].take();
-                if let Some(outcome) = outcome {
-                    return outcome;
+                {
+                    let mut state = self.state.lock();
+                    if let Some(outcome) = state.outcomes[usize::from(tid)].take() {
+                        return Ok(outcome);
+                    }
+                    if state.closed {
+                        return Err(SpinelError::TransportClosed);
+                    }
                 }
                 self.outcome_ready[usize::from(tid)].notified().await;
             }
@@ -473,26 +537,47 @@ impl<R: Runtime> SpinelClient<R> {
         .await;
 
         match outcome {
-            Ok(Outcome::Response(frame)) => Ok(frame),
-            Ok(Outcome::CancelledByReset) => Err(SpinelError::CancelledByReset),
-            Err(_) => {
-                let reset = {
-                    let mut state = self.state.lock();
-                    let reset = state.protocol.request_timed_out(tid);
-                    if reset.is_some() {
-                        state.cancel_waiting();
-                    }
-                    reset
-                };
-
-                if let Some(reset) = reset {
-                    self.wake_all_waiters();
-                    (self.on_event)(reset);
-                }
-
-                Err(SpinelError::Timeout)
-            }
+            Ok(Ok(Outcome::Response(frame))) => Ok(frame),
+            Ok(Ok(Outcome::CancelledByReset)) => Err(SpinelError::CancelledByReset),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(self.request_timed_out(tid)),
         }
+    }
+
+    /// Wait until the write loop has written the request `tid`, or there is no point
+    /// in waiting for that: a reset cancelled the request, or the link closed.
+    async fn request_written(&self, tid: u8) {
+        loop {
+            {
+                let state = self.state.lock();
+                if state.written & (1 << tid) != 0
+                    || state.outcomes[usize::from(tid)].is_some()
+                    || state.closed
+                {
+                    return;
+                }
+            }
+            self.outcome_ready[usize::from(tid)].notified().await;
+        }
+    }
+
+    /// Count a request that timed out, and start reset recovery once enough have.
+    fn request_timed_out(&self, tid: u8) -> SpinelError {
+        let reset = {
+            let mut state = self.state.lock();
+            let reset = state.protocol.request_timed_out(tid);
+            if reset.is_some() {
+                state.cancel_waiting();
+            }
+            reset
+        };
+
+        if let Some(reset) = reset {
+            self.wake_all_waiters();
+            (self.on_event)(reset);
+        }
+
+        SpinelError::Timeout
     }
 
     pub async fn prop_value_get(
