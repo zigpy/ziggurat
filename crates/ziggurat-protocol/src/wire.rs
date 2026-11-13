@@ -79,6 +79,7 @@ pub enum RequestCommand {
     SetNwkUpdateId = 0x36,
     SetProvisionalKey = 0x37,
     SetTunable = 0x38,
+    SendGpdf = 0x39,
     // Radio scans and packet capture.
     EnergyScan = 0x40,
     NetworkScan = 0x41,
@@ -536,6 +537,41 @@ pub struct SendGroupcastPayload {
     pub asdu: Vec<u8>,
 }
 
+/// Who a GPDF is for. A Maintenance frame carries no GPD ID, so it reaches whichever
+/// GPD listens.
+#[abstract_bits(bits = 2)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
+#[repr(u8)]
+pub enum GpdfTargetKind {
+    SrcId = 0,
+    Ieee = 1,
+    Maintenance = 2,
+}
+
+/// A GPDF held until its GPD listens, then sent unprotected 20-25 ms after the GPDF
+/// that said so. It replaces the GPDF still held for the same GPD. Its verdict is a
+/// `SendConfirm`.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SendGpdfPayload {
+    pub target: GpdfTargetKind,
+    pub reserved: u6,
+    #[abstract_bits(presence_from = matches!(target, GpdfTargetKind::SrcId))]
+    pub src_id: Option<u32>,
+    #[abstract_bits(presence_from = matches!(target, GpdfTargetKind::Ieee))]
+    pub gpd_ieee: Option<Eui64>,
+    #[abstract_bits(presence_from = matches!(target, GpdfTargetKind::Ieee))]
+    pub endpoint: Option<u8>,
+    /// Channel Configuration is sent on the GPD's next channel, not the operational one
+    pub channel: u8,
+    /// How long the GPDF waits for its GPD to listen
+    pub lifetime_ms: u32,
+    pub command_id: u8,
+    pub payload_len: u8,
+    #[abstract_bits(length_from = payload_len)]
+    pub payload: Vec<u8>,
+}
+
 /// Cancels an in-flight send by the `request_id` it was issued under. If the send has no
 /// final status yet and is not in the radio at that moment, it fails with `Cancelled`
 /// and its frame is never transmitted again. The reply reports whether that happened.
@@ -843,6 +879,7 @@ pub enum Request {
     PacketCaptureChannel(ChannelPayload),
     SetTunable(SetTunablePayload),
     CancelRequest(CancelRequestPayload),
+    SendGpdf(SendGpdfPayload),
 }
 
 impl Request {
@@ -877,6 +914,7 @@ impl Request {
             RequestCommand::PacketCaptureChannel => Self::PacketCaptureChannel(require(payload)?),
             RequestCommand::SetTunable => Self::SetTunable(require(payload)?),
             RequestCommand::CancelRequest => Self::CancelRequest(require(payload)?),
+            RequestCommand::SendGpdf => Self::SendGpdf(require(payload)?),
         })
     }
 }

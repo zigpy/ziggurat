@@ -157,6 +157,11 @@ async fn dispatch<P: RadioPhy>(
             crate::track_send(&app.sends, request_id, handle, confirm_kind);
             Ok(Response::Empty)
         }
+        Request::SendGpdf(payload) => {
+            let (handle, confirm_kind) = proto::send_gpdf(&**running(app)?, payload)?;
+            crate::track_send(&app.sends, request_id, handle, confirm_kind);
+            Ok(Response::Empty)
+        }
         Request::PermitJoins(payload) => handle_permit_joins(app, payload),
         Request::SetChannel(payload) => handle_set_channel(app, payload).await,
         Request::SetNwkUpdateId(payload) => handle_set_nwk_update_id(app, payload),

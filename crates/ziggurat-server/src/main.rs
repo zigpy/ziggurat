@@ -606,6 +606,11 @@ impl ZigguratServer {
                 self.register_send(request_id, sends, tracked);
                 Ok(proto::Response::Empty)
             }
+            R::SendGpdf(payload) => {
+                let tracked = proto::send_gpdf(&*self.running()?, payload)?;
+                self.register_send(request_id, sends, tracked);
+                Ok(proto::Response::Empty)
+            }
             R::PermitJoins(payload) => {
                 self.running()?
                     .permit_joins(u64::from(payload.duration), payload.accept_direct_joins);

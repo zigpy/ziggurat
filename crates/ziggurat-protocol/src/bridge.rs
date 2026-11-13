@@ -10,8 +10,8 @@ use core::time::Duration;
 use ziggurat_driver::runtime::Runtime;
 use ziggurat_driver::zigbee_stack::aps_security::TclkFlavor;
 use ziggurat_driver::zigbee_stack::{
-    ApsAck, DeliveryError, DeviceLeaveReason, EnqueueError, HostRoute, NetworkBeacon,
-    NetworkConfig, NwkDeviceType, RouteDirective, SendHandle, TclkSeed, TxPriority,
+    ApsAck, DeliveryError, DeviceLeaveReason, EnqueueError, GpdId, GpdfTarget, HostRoute,
+    NetworkBeacon, NetworkConfig, NwkDeviceType, RouteDirective, SendHandle, TclkSeed, TxPriority,
     ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
@@ -322,6 +322,33 @@ pub fn send_broadcast<P: RadioPhy, R: Runtime>(
             TxPriority::from_host(payload.priority),
         )
         .map(|handle| (handle, ConfirmKind::Broadcast))
+        .map_err(|e| enqueue_error(&e))
+}
+
+/// Hand a GPDF to the stack, held until its GPD listens. Its confirm frame is a
+/// `SendConfirm`: transmitted, or why not.
+pub fn send_gpdf<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: SendGpdfPayload,
+) -> Result<(SendHandle, ConfirmKind), Error> {
+    let target = match payload.target {
+        GpdfTargetKind::SrcId => GpdfTarget::Gpd(GpdId::SrcId(payload.src_id.unwrap())),
+        GpdfTargetKind::Ieee => GpdfTarget::Gpd(GpdId::Ieee {
+            ieee: payload.gpd_ieee.unwrap(),
+            endpoint: payload.endpoint.unwrap(),
+        }),
+        GpdfTargetKind::Maintenance => GpdfTarget::Maintenance,
+    };
+
+    stack
+        .send_gpdf(
+            target,
+            payload.channel,
+            payload.command_id,
+            &payload.payload,
+            Duration::from_millis(u64::from(payload.lifetime_ms)),
+        )
+        .map(|handle| (handle, ConfirmKind::UnicastNoAck))
         .map_err(|e| enqueue_error(&e))
 }
 
