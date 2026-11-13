@@ -517,6 +517,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return Ok(());
         }
 
+        // TODO: the sender idles ~20 ms here; hand the GPDF over `gp_tx_lead_time`
+        // before its start instead (OT would replace a waiting timed frame)
         let result = self
             .radio
             .transmit(TxFrame {
