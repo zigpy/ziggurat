@@ -9,7 +9,6 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154CommandFrame, Ieee802154CommandPayload, Ieee802154Frame, Ieee802154FrameControl,
     Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_zigbee::aps::frame::{
     APS_STATUS_SECURITY_FAIL, APS_STATUS_SUCCESS, ApsCommandFrame, ApsCommandFrameCommand,
@@ -21,7 +20,8 @@ use ziggurat_zigbee::aps::frame::{
 };
 use ziggurat_zigbee::aps::security::AppliedKey;
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
+    BROADCAST_RX_ON_WHEN_IDLE, Nsdu, NwkFrame, NwkPayload, NwkRouteDiscovery,
+    NwkSecurityHeaderKeyId,
 };
 
 use core::time::Duration;
@@ -434,7 +434,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         destination_eui64: Eui64,
         join_kind: JoinKind,
-    ) -> FrameBytes {
+    ) -> Nsdu {
         let (network_key, key_seq_number) = {
             let core = self.core();
 
@@ -632,7 +632,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn send_secured_aps_payload(
         &self,
         destination: Nwk,
-        payload: FrameBytes,
+        payload: Nsdu,
     ) -> Result<SendHandle, EnqueueError> {
         // Routed delivery to a non-neighbor must be allowed to discover a route (NWK data
         // frames default to suppressing discovery).

@@ -13,7 +13,7 @@ use core::time::Duration;
 use embedded_io_async::{Error as _, Read, Write};
 use futures::future::{Either, select};
 use thiserror::Error;
-use ziggurat_ieee_802154::FrameBytes;
+use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::Eui64;
 use ziggurat_runtime::runtime::{RtInstant, Runtime};
 use ziggurat_runtime::sync::{AsyncMutex, AsyncMutexGuard, Mutex, Notify};
@@ -26,7 +26,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelTxFrame {
-    pub psdu: FrameBytes,
+    pub psdu: Psdu,
     pub channel: Option<u8>,
     pub max_csma_backoffs: Option<u8>,
     pub max_frame_retries: Option<u8>,
@@ -98,7 +98,7 @@ impl SpinelTxFrame {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelRxFrame {
-    pub psdu: FrameBytes,
+    pub psdu: Psdu,
     pub rssi: i8,
     pub noise_floor: i8,
     pub flags: u32,
@@ -141,7 +141,7 @@ impl SpinelRxFrame {
             });
         }
 
-        let psdu = FrameBytes::from_slice(&bytes[offset..offset + psdu_len])
+        let psdu = Psdu::from_slice(&bytes[offset..offset + psdu_len])
             .map_err(|_| SpinelRxFrameError::PsduTooLong { got: psdu_len })?;
         offset += psdu_len;
 

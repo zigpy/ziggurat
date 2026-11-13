@@ -14,7 +14,7 @@ use pcap_file::pcapng::{Block, PcapNgReader, PcapNgWriter};
 
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_ieee_802154::{
-    FrameBytes, Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
+    Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
 use ziggurat_zigbee::aps::frame::{
@@ -24,8 +24,8 @@ use ziggurat_zigbee::aps::frame::{
 };
 use ziggurat_zigbee::crypto::key_transport_key;
 use ziggurat_zigbee::nwk::frame::{
-    EncryptedNwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload, NwkRouteDiscovery,
-    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    EncryptedNwkFrame, Nsdu, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload,
+    NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
 /// The well-known default global Trust Center link key ("ZigBeeAlliance09"), which
@@ -325,7 +325,7 @@ fn rekey_phy(
             && let Some(new_aps) = rewrite_transport_key(aps, old_key, new_key, aps_transport_key)
         {
             *aps_rewrites += 1;
-            decrypted.payload = NwkPayload::Opaque(FrameBytes::from_slice(&new_aps).ok()?);
+            decrypted.payload = NwkPayload::Opaque(Nsdu::from_slice(&new_aps).ok()?);
         }
 
         decrypted.encrypt(new_key)
@@ -348,7 +348,7 @@ fn rekey_phy(
 
     let new_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
         header: data_frame.header,
-        payload: FrameBytes::from_slice(&new_nwk_bytes).ok()?,
+        payload: new_nwk_bytes,
         fcs: 0,
     });
 
@@ -503,7 +503,7 @@ fn transport_key_packet(
             src_pan_id: Some(pan_id),
             src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
         },
-        payload: FrameBytes::from_slice(&nwk_frame.to_bytes()).expect("NWK frame is frame-bounded"),
+        payload: nwk_frame.to_bytes(),
         fcs: 0,
     });
 

@@ -7,7 +7,6 @@ use crate::ziggurat_ieee_802154::{
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
@@ -17,7 +16,7 @@ use ziggurat_zigbee::nwk::commands::{
 };
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_DEVICES, BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS,
-    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload,
+    Nsdu, NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload,
     NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
     OutgoingNwkFrame,
 };
@@ -338,7 +337,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// A NWK data frame originated by us; same defaults as [`Self::nwk_command_frame`]
     /// except data frames carry no extended source.
-    pub(super) const fn nwk_data_frame(&self, destination: Nwk, payload: FrameBytes) -> NwkFrame {
+    pub(super) const fn nwk_data_frame(&self, destination: Nwk, payload: Nsdu) -> NwkFrame {
         NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {

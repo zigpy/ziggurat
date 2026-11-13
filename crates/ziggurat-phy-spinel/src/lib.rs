@@ -15,7 +15,7 @@ use core::time::Duration;
 
 use embedded_io_async::{Read, Write};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_ieee_802154::{FCS_LENGTH, FrameBytes, Ieee802154Frame};
+use ziggurat_ieee_802154::{FCS_LENGTH, Ieee802154Frame, Msdu};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
@@ -421,7 +421,7 @@ async fn apply_config<R: Runtime>(
 fn tx_frame_to_spinel(frame: TxFrame, channel: u8) -> SpinelTxFrame {
     // The RCP's frame length must include the FCS.
     let mut psdu = frame.psdu;
-    let fcs = Ieee802154Frame::<FrameBytes>::compute_fcs(&psdu).to_le_bytes();
+    let fcs = Ieee802154Frame::<Msdu>::compute_fcs(&psdu).to_le_bytes();
     psdu.extend_from_slice(&fcs)
         .expect("the driver leaves room for the FCS");
 

@@ -1,9 +1,9 @@
 use crate::runtime::Runtime;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_ieee_802154::{FrameBytes, TooLong, write_frame};
+use ziggurat_ieee_802154::{TooLong, write_frame};
 use ziggurat_zigbee::aps::frame::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType,
-    EncryptedApsAckFrame, EncryptedApsDataFrame,
+    Asdu, EncryptedApsAckFrame, EncryptedApsDataFrame,
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
@@ -214,7 +214,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
         route: RouteDirective,
     ) -> Result<(SendHandle, ApsCounter), EnqueueError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let asdu = Asdu::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
         let aps_seq = aps_counter.unwrap_or_else(|| self.next_aps_counter());
 
         let aps_frame = ApsDataFrame {
@@ -309,7 +309,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let asdu = Asdu::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
@@ -364,7 +364,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let asdu = Asdu::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {

@@ -9,14 +9,14 @@ use crate::ziggurat_ieee_802154::{
 use abstract_bits::{AbstractBits, BitReader};
 use ziggurat_ieee_802154::types::{Nwk, PanId};
 use ziggurat_ieee_802154::{
-    FCS_LENGTH, FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
+    FCS_LENGTH, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
 };
 use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use ziggurat_zigbee::constants::GP_PROTOCOL_VERSION;
 use ziggurat_zigbee::gp::GpNwkFrameControl;
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, Nsdu, NwkFrame, NwkPayload,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
@@ -319,8 +319,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if !nwk_frame.nwk_header.frame_control.security {
             let payload = NwkPayload::from_bytes(
                 nwk_frame.nwk_header.frame_control.frame_type,
-                FrameBytes::from_slice(nwk_frame.ciphertext)
-                    .expect("a parsed NWK frame is frame-bounded"),
+                Nsdu::from_slice(nwk_frame.ciphertext).expect("the parser bounds the payload"),
             );
             self.handle_unsecured_nwk_frame(&NwkFrame {
                 nwk_header: nwk_frame.nwk_header,

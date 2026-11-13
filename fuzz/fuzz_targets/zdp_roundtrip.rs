@@ -3,6 +3,7 @@
 use core::fmt::Debug;
 use libfuzzer_sys::fuzz_target;
 use ziggurat_ieee_802154::write_frame;
+use ziggurat_zigbee::aps::frame::Asdu;
 use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, ParentAnnce, ParentAnnceRsp,
     ZdpCommand,
@@ -10,7 +11,7 @@ use ziggurat_zigbee::zdp::{
 
 fn roundtrip<T: ZdpCommand + PartialEq + Debug>(data: &[u8]) {
     if let Ok((tsn, command)) = T::deserialize(data)
-        && let Ok(bytes) = write_frame(|writer| command.serialize(tsn, writer))
+        && let Ok::<Asdu, _>(bytes) = write_frame(|writer| command.serialize(tsn, writer))
     {
         let (tsn2, reparsed) = T::deserialize(&bytes).expect("re-parsing our own serialization");
         assert_eq!((tsn, command), (tsn2, reparsed), "round-trip changed the command");

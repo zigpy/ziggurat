@@ -1888,6 +1888,7 @@ dependencies = [
  "arbitrary-int",
  "ccm",
  "educe",
+ "heapless",
  "hex",
  "hex-literal",
  "num_enum",

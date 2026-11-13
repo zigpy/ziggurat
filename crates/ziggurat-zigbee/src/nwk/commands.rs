@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 use abstract_bits::{AbstractBits, abstract_bits};
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
-use ziggurat_ieee_802154::{FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, TooLong};
+use ziggurat_ieee_802154::{FrameWriter, TooLong, write_frame};
+
+use crate::nwk::frame::Nsdu;
 
 /// Zigbee spec 3.4
 #[abstract_bits(bits = 8)]
@@ -452,7 +454,7 @@ pub enum NwkCommand {
     NetworkCommissioningRequest(NwkNetworkCommissioningRequestCommand),
     NetworkCommissioningResponse(NwkNetworkCommissioningResponseCommand),
     /// An undecodable command frame payload, kept verbatim (command id byte included).
-    Unparsed(FrameBytes),
+    Unparsed(Nsdu),
 }
 
 impl NwkCommand {
@@ -486,9 +488,7 @@ impl NwkCommand {
     /// is preserved verbatim as [`NwkCommand::Unparsed`].
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self::try_parse(bytes).unwrap_or_else(|| {
-            Self::Unparsed(
-                FrameBytes::from_slice(bytes).expect("a NWK command payload is frame-bounded"),
-            )
+            Self::Unparsed(Nsdu::from_slice(bytes).expect("a NWK command fits in an NSDU"))
         })
     }
 
@@ -554,11 +554,8 @@ impl NwkCommand {
         }
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("a NWK command is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("a NWK command fits in an NSDU")
     }
 }
 
@@ -623,7 +620,7 @@ mod test {
         let command = NwkCommand::from_bytes(&bytes);
         assert_eq!(
             command,
-            NwkCommand::Unparsed(FrameBytes::from_slice(&bytes).unwrap())
+            NwkCommand::Unparsed(Nsdu::from_slice(&bytes).unwrap())
         );
         assert_eq!(command.command_id(), None);
         assert_eq!(command.to_bytes(), bytes);
@@ -638,7 +635,7 @@ mod test {
         let command = NwkCommand::from_bytes(&bytes);
         assert_eq!(
             command,
-            NwkCommand::Unparsed(FrameBytes::from_slice(&bytes).unwrap())
+            NwkCommand::Unparsed(Nsdu::from_slice(&bytes).unwrap())
         );
         assert_eq!(command.command_id(), Some(NwkCommandId::RejoinResponse));
         assert_eq!(command.to_bytes(), bytes);

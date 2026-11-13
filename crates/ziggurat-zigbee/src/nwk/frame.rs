@@ -6,7 +6,8 @@ use abstract_bits::abstract_bits;
 use abstract_bits::{BitReader, BitWriter};
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, format_hex};
 use ziggurat_ieee_802154::{
-    FrameBytes, FramePayload, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong,
+    FramePayload, FrameWriter, MAX_MAC_PAYLOAD_SIZE, MAX_PHY_PACKET_SIZE, Msdu, Psdu, TooLong,
+    write_frame,
 };
 
 use num_enum::TryFromPrimitive;
@@ -16,7 +17,20 @@ use educe::Educe;
 use crate::ParseError;
 use crate::nwk::commands::NwkCommand;
 
-use crate::crypto::{DecryptionError, decrypt_ccm, encrypt_ccm, split_mic};
+use crate::crypto::{DecryptionError, MIC_LENGTH, decrypt_ccm, encrypt_ccm, split_mic};
+
+/// `nwkcMACFrameOverhead`: the MAC header and FCS around a NWK frame
+pub const MAC_FRAME_OVERHEAD: usize = 11;
+
+/// `nwkcMinHeaderOverhead`: the smallest NWK header
+pub const MIN_HEADER_OVERHEAD: usize = 8;
+
+/// The largest NWK payload (`NsduLength`): what a PSDU has left after the smallest MAC
+/// and NWK headers
+pub const MAX_NSDU_SIZE: usize = MAX_PHY_PACKET_SIZE - (MAC_FRAME_OVERHEAD + MIN_HEADER_OVERHEAD);
+
+/// The payload of a NWK frame, unencrypted.
+pub type Nsdu = heapless::Vec<u8, MAX_NSDU_SIZE>;
 
 pub const BROADCAST_ALL_DEVICES: Nwk = Nwk(0xFFFF);
 pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
@@ -185,11 +199,8 @@ impl NwkHeader {
         Ok(())
     }
 
-    pub fn to_bytes(&self) -> Psdu {
-        let mut bytes = Psdu::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("a NWK header is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Msdu {
+        write_frame(|writer| self.serialize(writer)).expect("a NWK header fits in an MSDU")
     }
 }
 
@@ -320,7 +331,7 @@ pub struct EncryptedNwkFrame<'a> {
 #[derive(Clone, PartialEq, Eq)]
 pub enum NwkPayload {
     /// A payload the NWK layer does not interpret, forwarded verbatim.
-    Opaque(FrameBytes),
+    Opaque(Nsdu),
     /// A NWK command the NWK layer owns.
     Command(NwkCommand),
 }
@@ -347,16 +358,13 @@ impl NwkPayload {
         }
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("a NWK payload is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("a NWK payload fits in an NSDU")
     }
 
     /// Decode a decrypted frame body, using the frame type to decide whether it is a NWK
     /// command or a payload the NWK layer forwards without interpreting.
-    pub fn from_bytes(frame_type: NwkFrameType, bytes: FrameBytes) -> Self {
+    pub fn from_bytes(frame_type: NwkFrameType, bytes: Nsdu) -> Self {
         match frame_type {
             NwkFrameType::Command => Self::Command(NwkCommand::from_bytes(&bytes)),
             // Data and inter-PAN payloads are opaque to the NWK layer
@@ -366,7 +374,7 @@ impl NwkPayload {
 
     /// The forwarded payload bytes (an APS frame for a data frame), or `None` for a NWK
     /// command.
-    pub const fn as_opaque(&self) -> Option<&FrameBytes> {
+    pub const fn as_opaque(&self) -> Option<&Nsdu> {
         match self {
             Self::Opaque(bytes) => Some(bytes),
             Self::Command(_) => None,
@@ -455,9 +463,8 @@ impl<'a> EncryptedNwkFrame<'a> {
 
     #[allow(clippy::useless_let_if_seq)]
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
-        // A NWK frame rides inside a MAC frame, so it cannot exceed the PHY packet
-        // size; a longer input parses into a frame too large to re-serialize
-        if bytes.len() > MAX_PHY_PACKET_SIZE {
+        // A NWK frame is the payload of a MAC frame
+        if bytes.len() > MAX_MAC_PAYLOAD_SIZE {
             return Err(ParseError::TooLong { ty: "NwkFrame" });
         }
 
@@ -473,6 +480,15 @@ impl<'a> EncryptedNwkFrame<'a> {
             aux_header = Some(unwrapped_aux_header);
         }
 
+        // An encrypted payload carries its MIC
+        let max_ciphertext_len = match aux_header {
+            Some(_) => MAX_NSDU_SIZE + MIC_LENGTH,
+            None => MAX_NSDU_SIZE,
+        };
+        if remaining.len() > max_ciphertext_len {
+            return Err(ParseError::TooLong { ty: "NWK payload" });
+        }
+
         Ok(Self {
             nwk_header,
             aux_header,
@@ -480,11 +496,8 @@ impl<'a> EncryptedNwkFrame<'a> {
         })
     }
 
-    pub fn to_bytes(&self) -> Psdu {
-        let mut bytes = Psdu::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("a parsed NWK frame is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Msdu {
+        write_frame(|writer| self.serialize(writer)).expect("a parsed NWK frame fits in an MSDU")
     }
 
     /// The ciphertext is copied into the payload of the decrypted frame and decrypted
@@ -501,8 +514,7 @@ impl<'a> EncryptedNwkFrame<'a> {
             .expect("a parsed NWK header is frame-bounded");
 
         let (ciphertext, mic) = split_mic(self.ciphertext)?;
-        let mut plaintext =
-            FrameBytes::from_slice(ciphertext).expect("a parsed NWK frame is frame-bounded");
+        let mut plaintext = Nsdu::from_slice(ciphertext).expect("the parser bounds the payload");
         decrypt_ccm(key, &nonce, &auth_data, &mut plaintext, mic)?;
         let payload = NwkPayload::from_bytes(self.nwk_header.frame_control.frame_type, plaintext);
 
@@ -590,14 +602,9 @@ impl NwkFrame {
     }
 
     /// The encrypted frame's bytes.
-    pub fn encrypt(&self, key: &Key) -> Psdu {
-        let mut bytes = Psdu::new();
-        self.serialize(
-            &mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE),
-            Some(key),
-        )
-        .expect("the NWK frame fits in a PSDU");
-        bytes
+    pub fn encrypt(&self, key: &Key) -> Msdu {
+        write_frame(|writer| self.serialize(writer, Some(key)))
+            .expect("the NWK frame fits in an MSDU")
     }
 }
 
@@ -675,9 +682,7 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: NwkPayload::Opaque(
-                FrameBytes::from_slice(&hex!("00010600040101a9015701")).unwrap(),
-            ),
+            payload: NwkPayload::Opaque(Nsdu::from_slice(&hex!("00010600040101a9015701")).unwrap()),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
@@ -741,7 +746,7 @@ mod test {
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
             aux_header: expected_nwk_frame.aux_header,
-            payload: NwkPayload::Opaque(FrameBytes::from_slice(&hex!("020106000401405b")).unwrap()),
+            payload: NwkPayload::Opaque(Nsdu::from_slice(&hex!("020106000401405b")).unwrap()),
         };
 
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);

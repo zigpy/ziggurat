@@ -2,13 +2,23 @@ use abstract_bits::{AbstractBits, abstract_bits};
 use educe::Educe;
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, format_hex};
-use ziggurat_ieee_802154::{
-    FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
-};
+use ziggurat_ieee_802154::{FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame};
 
 use crate::ParseError;
 use crate::crypto::{decrypt_ccm, encrypt_ccm, split_mic};
-use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
+use crate::nwk::frame::{
+    MAX_NSDU_SIZE, Nsdu, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+};
+
+/// `apscMinHeaderOverhead`: the smallest APS header
+pub const MIN_HEADER_OVERHEAD: usize = 12;
+
+/// The largest ASDU (`ASDULength` without fragmentation): what an NSDU has left after
+/// the smallest APS header
+pub const MAX_ASDU_SIZE: usize = MAX_NSDU_SIZE - MIN_HEADER_OVERHEAD;
+
+/// The payload of an APS data frame, unencrypted.
+pub type Asdu = heapless::Vec<u8, MAX_ASDU_SIZE>;
 
 #[abstract_bits(bits = 2)]
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
@@ -157,11 +167,8 @@ impl ApsAckFrame {
         writer.push(self.counter)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("an APS ack is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("an APS ack fits in an NSDU")
     }
 }
 
@@ -187,7 +194,7 @@ pub struct ApsDataFrame {
     pub profile_id: u16,
     pub source_endpoint: u8,
     pub counter: u8,
-    pub asdu: FrameBytes,
+    pub asdu: Asdu,
 }
 
 impl ApsDataHeader {
@@ -288,14 +295,11 @@ impl ApsDataHeader {
         writer.push(self.counter)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("an APS header is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("an APS header fits in an NSDU")
     }
 
-    pub const fn into_frame(self, asdu: FrameBytes) -> ApsDataFrame {
+    pub const fn into_frame(self, asdu: Asdu) -> ApsDataFrame {
         ApsDataFrame {
             frame_control: self.frame_control,
             group_id: self.group_id,
@@ -312,8 +316,7 @@ impl ApsDataHeader {
 impl ApsDataFrame {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
         let (header, remaining) = ApsDataHeader::deserialize(bytes)?;
-        let asdu =
-            FrameBytes::from_slice(remaining).map_err(|_| ParseError::TooLong { ty: "ASDU" })?;
+        let asdu = Asdu::from_slice(remaining).map_err(|_| ParseError::TooLong { ty: "ASDU" })?;
 
         Ok(header.into_frame(asdu))
     }
@@ -335,11 +338,8 @@ impl ApsDataFrame {
         writer.extend(&self.asdu)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("an APS data frame is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("an APS data frame fits in an NSDU")
     }
 }
 
@@ -552,7 +552,7 @@ pub struct ApsTunnelCommandFrame {
     /// The complete APS frame to relay: APS header, auxiliary header, encrypted
     /// command, and MIC
     #[educe(Debug(method(format_hex)))]
-    pub tunneled_frame: FrameBytes,
+    pub tunneled_frame: Nsdu,
 }
 
 impl ApsTunnelCommandFrame {
@@ -561,7 +561,7 @@ impl ApsTunnelCommandFrame {
 
         Ok(Self {
             destination_address,
-            tunneled_frame: FrameBytes::from_slice(remaining).map_err(|_| ParseError::TooLong {
+            tunneled_frame: Nsdu::from_slice(remaining).map_err(|_| ParseError::TooLong {
                 ty: "tunneled frame",
             })?,
         })
@@ -707,14 +707,11 @@ impl ApsCommandFrame {
         self.serialize_payload(writer)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("an APS command is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("an APS command fits in an NSDU")
     }
 
-    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> FrameBytes {
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> Nsdu {
         SecuredApsFrame::new(self, key, aux_header).to_bytes()
     }
 }
@@ -874,8 +871,8 @@ impl<'a, F: ApsSecuredFrame> SecuredApsFrame<'a, F> {
         writer.extend(&mic)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        write_frame(|writer| self.serialize(writer)).expect("a secured APS frame is frame-bounded")
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("a secured APS frame fits in an NSDU")
     }
 }
 
@@ -893,19 +890,20 @@ fn aps_auth_data(header: &[u8], aux_header: &ApsAuxHeader) -> Psdu {
 /// Reverse of [`SecuredApsFrame`]: verify the MIC and return the decrypted payload.
 /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
 /// carries no extended nonce.
-fn decrypt_aps_payload(
+fn decrypt_aps_payload<const N: usize>(
     key: &Key,
     aux_header: &ApsAuxHeader,
     source: Eui64,
     header: &[u8],
     tagged_ciphertext: &[u8],
-) -> Result<FrameBytes, ParseError> {
+) -> Result<heapless::Vec<u8, N>, ParseError> {
     let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
     let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
     let auth_data = aps_auth_data(header, &modified_aux_header);
 
     let (ciphertext, mic) = split_mic(tagged_ciphertext)?;
-    let mut plaintext = FrameBytes::from_slice(ciphertext).expect("ciphertext is frame-bounded");
+    let mut plaintext = heapless::Vec::from_slice(ciphertext)
+        .map_err(|_| ParseError::TooLong { ty: "APS payload" })?;
     decrypt_ccm(key, &nonce, &auth_data, &mut plaintext, mic)?;
     Ok(plaintext)
 }
@@ -949,11 +947,8 @@ impl<'a> EncryptedApsCommandFrame<'a> {
         writer.extend(self.ciphertext)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("an APS command is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("an APS command fits in an NSDU")
     }
 
     pub fn decrypt(&self, key: &Key) -> Result<ApsCommandFrame, ParseError> {
@@ -965,15 +960,20 @@ impl<'a> EncryptedApsCommandFrame<'a> {
                 "APS command frames without an extended nonce",
             ))?;
 
-        let mut frame_bytes = FrameBytes::new();
-        let mut writer = FrameWriter::new(&mut frame_bytes, MAX_PHY_PACKET_SIZE);
+        let mut frame_bytes = Nsdu::new();
+        let mut writer = FrameWriter::new(&mut frame_bytes, MAX_NSDU_SIZE);
         writer
             .bits(&self.frame_control)
             .and_then(|()| writer.push(self.counter))
             .expect("an APS header is frame-bounded");
 
-        let plaintext =
-            decrypt_aps_payload(key, &self.aux_header, source, &frame_bytes, self.ciphertext)?;
+        let plaintext = decrypt_aps_payload::<MAX_NSDU_SIZE>(
+            key,
+            &self.aux_header,
+            source,
+            &frame_bytes,
+            self.ciphertext,
+        )?;
         frame_bytes
             .extend_from_slice(&plaintext)
             .map_err(|_| ParseError::TooLong {
@@ -1006,7 +1006,7 @@ impl ApsSecuredFrame for ApsDataFrame {
 }
 
 impl ApsDataFrame {
-    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> FrameBytes {
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> Nsdu {
         SecuredApsFrame::new(self, key, aux_header).to_bytes()
     }
 }
@@ -1029,11 +1029,8 @@ impl<'a> EncryptedApsDataFrame<'a> {
         writer.extend(self.ciphertext)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("an APS data frame is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("an APS data frame fits in an NSDU")
     }
 
     /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
@@ -1074,7 +1071,7 @@ impl ApsSecuredFrame for ApsAckFrame {
 }
 
 impl ApsAckFrame {
-    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> FrameBytes {
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> Nsdu {
         SecuredApsFrame::new(self, key, aux_header).to_bytes()
     }
 }
@@ -1105,17 +1102,15 @@ impl<'a> EncryptedApsAckFrame<'a> {
         writer.extend(self.ciphertext)
     }
 
-    pub fn to_bytes(&self) -> FrameBytes {
-        let mut bytes = FrameBytes::new();
-        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
-            .expect("an APS ack is frame-bounded");
-        bytes
+    pub fn to_bytes(&self) -> Nsdu {
+        write_frame(|writer| self.serialize(writer)).expect("an APS ack fits in an NSDU")
     }
 
     /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
     /// carries no extended nonce.
     pub fn decrypt(&self, key: &Key, source: Eui64) -> Result<ApsAckFrame, ParseError> {
-        decrypt_aps_payload(
+        // An ACK has no payload
+        decrypt_aps_payload::<0>(
             key,
             &self.aux_header,
             source,
@@ -1193,7 +1188,7 @@ mod test {
             profile_id: 0x0104,
             source_endpoint: 1,
             counter: 3,
-            asdu: FrameBytes::from_slice(&hex!("01 5a 00")).unwrap(),
+            asdu: Asdu::from_slice(&hex!("01 5a 00")).unwrap(),
         };
 
         assert_eq!(aps_frame, expected_aps_frame);
@@ -1220,7 +1215,7 @@ mod test {
             profile_id: 0x0000,
             source_endpoint: 0,
             counter: 0,
-            asdu: FrameBytes::from_slice(&hex!("00426b4fdeb726004b12008e")).unwrap(),
+            asdu: Asdu::from_slice(&hex!("00426b4fdeb726004b12008e")).unwrap(),
         };
 
         assert_eq!(aps_frame, expected_aps_frame);
@@ -1337,7 +1332,7 @@ mod test {
             profile_id: 0x0104,
             source_endpoint: 1,
             counter: 77,
-            asdu: FrameBytes::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]).unwrap(),
+            asdu: Asdu::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]).unwrap(),
         };
 
         let key = Key::from_hex("5a6967426565416c6c69616e63653039");
