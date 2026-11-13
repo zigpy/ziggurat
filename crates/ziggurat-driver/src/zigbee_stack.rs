@@ -1017,7 +1017,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         profile_id: aps_frame.profile_id,
                         cluster_id: aps_frame.cluster_id,
                         src_ep: aps_frame.source_endpoint,
-                        dst_ep: aps_frame.destination_endpoint.unwrap_or(0),
+                        // A group frame has no destination endpoint: it is for every
+                        // endpoint in the group, so report the broadcast endpoint
+                        dst_ep: aps_frame.destination_endpoint.unwrap_or(0xFF),
                         lqi: packet.lqi,
                         rssi: packet.rssi,
                         aps_encrypted,
