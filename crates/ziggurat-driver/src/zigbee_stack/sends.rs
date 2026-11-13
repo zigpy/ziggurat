@@ -317,11 +317,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // A plain `&mut ZigbeeCore`, so the closures below borrow `nib` beside `sends`
         let core = &mut *guard;
 
-        for key in core.sends.broadcasts_awaiting_quorum() {
-            if self.passive_ack_quorum_heard(&core.nib, key) {
-                core.sends.broadcast_delivered(key);
-            }
-        }
+        core.sends
+            .deliver_broadcasts(|key| self.passive_ack_quorum_heard(&core.nib, key));
 
         core.sends.tick(now, &self.tunables, |frame| {
             self.resolve_unrouted_unicast(&core.nib, frame, now)

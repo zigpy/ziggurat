@@ -136,14 +136,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Whether the broadcast's passive ack quorum has been heard from the audience
     /// members that are still good neighbors.
     pub(super) fn passive_ack_quorum_heard(&self, nib: &Nib, key: (Nwk, u8)) -> bool {
-        let live_relayers = nib
-            .neighbors
-            .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost());
+        let max_link_cost = self.tunables.broadcast_relayer_max_link_cost();
 
         let acked = nib.broadcasts.passively_acked(
             key.0,
             key.1,
-            &live_relayers,
+            |nwk| {
+                nib.neighbors
+                    .is_expected_broadcast_relayer(nwk, max_link_cost)
+            },
             self.tunables.broadcast_passive_ack_quorum(),
         );
 

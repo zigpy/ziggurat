@@ -440,14 +440,10 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         }
     }
 
-    /// The key of every broadcast awaiting its passive-ack quorum.
-    pub fn broadcasts_awaiting_quorum(&self) -> Vec<(Nwk, u8)> {
-        self.broadcasts.awaiting_quorum()
-    }
-
-    /// The passive-ack quorum for a broadcast was heard: the send is delivered.
-    pub fn broadcast_delivered(&mut self, key: (Nwk, u8)) {
-        self.broadcasts.delivered(key, &mut self.outbox);
+    /// Deliver every broadcast whose passive-ack quorum `heard` says was heard. `heard`
+    /// is asked about each broadcast still waiting for its quorum, by its key.
+    pub fn deliver_broadcasts(&mut self, heard: impl FnMut((Nwk, u8)) -> bool) {
+        self.broadcasts.deliver(heard, &mut self.outbox);
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.

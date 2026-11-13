@@ -246,37 +246,31 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         });
     }
 
-    pub(super) fn awaiting_quorum(&self) -> Vec<(Nwk, u8)> {
-        self.records
-            .values()
-            .filter_map(|record| match record.schedule {
-                Schedule::PassiveAck { key, .. } if !record.quorum_heard => Some(key),
-                _ => None,
-            })
-            .collect()
-    }
+    /// Deliver every broadcast whose passive-ack quorum `heard` says was heard: the send
+    /// is delivered once a copy was handed off. Until then (no copy handed off yet, or
+    /// one in the radio right now) the first successful report settles it instead.
+    pub(super) fn deliver(
+        &mut self,
+        mut heard: impl FnMut((Nwk, u8)) -> bool,
+        outbox: &mut Outbox<F, W, E>,
+    ) {
+        let delivered = self.records.extract_if(|_, record| {
+            let Schedule::PassiveAck { key, .. } = record.schedule else {
+                return false;
+            };
+            if record.quorum_heard || !heard(key) {
+                return false;
+            }
 
-    /// The passive-ack quorum for a broadcast was heard: the send is delivered once a
-    /// copy was handed off. Until then (no copy handed off yet, or one in the radio
-    /// right now) the first successful report settles it instead.
-    pub(super) fn delivered(&mut self, key: (Nwk, u8), outbox: &mut Outbox<F, W, E>) {
-        let found = self
-            .records
-            .iter()
-            .find_map(|(id, record)| match record.schedule {
-                Schedule::PassiveAck { key: k, .. } if k == key => Some(*id),
-                _ => None,
-            });
+            if record.copy == CopyState::Transmitting || !record.handed_off {
+                record.quorum_heard = true;
+                return false;
+            }
+            true
+        });
 
-        let Some(id) = found else {
-            return;
-        };
-
-        let record = self.records.get_mut(&id).unwrap();
-        if record.copy == CopyState::Transmitting || !record.handed_off {
-            record.quorum_heard = true;
-        } else {
-            self.settle(id, Ok(()), outbox);
+        for (_, record) in delivered {
+            Self::settled(record, Ok(()), outbox);
         }
     }
 

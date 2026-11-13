@@ -92,25 +92,22 @@ impl Broadcasts {
         &self,
         source: Nwk,
         sequence_number: u8,
-        live_relayers: &[Nwk],
+        is_live_relayer: impl Fn(Nwk) -> bool,
         quorum: usize,
     ) -> bool {
         self.table
             .get(&(source, sequence_number))
             .is_none_or(|transaction| {
-                let audience: Vec<Nwk> = transaction
-                    .expected_relayers
-                    .iter()
-                    .filter(|nwk| live_relayers.contains(nwk))
-                    .copied()
-                    .collect();
+                let mut audience = 0;
+                let mut heard = 0;
+                for &nwk in &transaction.expected_relayers {
+                    if is_live_relayer(nwk) {
+                        audience += 1;
+                        heard += usize::from(transaction.heard_from.contains(&nwk));
+                    }
+                }
 
-                let heard = audience
-                    .iter()
-                    .filter(|nwk| transaction.heard_from.contains(nwk))
-                    .count();
-
-                !audience.is_empty() && heard >= audience.len().min(quorum)
+                audience > 0 && heard >= audience.min(quorum)
             })
     }
 }

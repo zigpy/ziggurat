@@ -579,13 +579,22 @@ impl Neighbors {
     pub fn expected_broadcast_relayers(&self, max_link_cost: u8) -> Vec<Nwk> {
         self.table
             .values()
-            .filter(|entry| {
-                entry.device_type == NwkDeviceType::Router
-                    && (1..=max_link_cost).contains(&entry.outgoing_cost)
-                    && (1..=max_link_cost).contains(&entry.incoming_link_cost())
-            })
+            .filter(|entry| Self::relays_broadcasts(entry, max_link_cost))
             .map(|entry| entry.network_address)
             .collect()
+    }
+
+    /// Whether `nwk` is one of the [`Self::expected_broadcast_relayers`].
+    pub fn is_expected_broadcast_relayer(&self, nwk: Nwk, max_link_cost: u8) -> bool {
+        self.table.values().any(|entry| {
+            entry.network_address == nwk && Self::relays_broadcasts(entry, max_link_cost)
+        })
+    }
+
+    fn relays_broadcasts(entry: &TableEntry, max_link_cost: u8) -> bool {
+        entry.device_type == NwkDeviceType::Router
+            && (1..=max_link_cost).contains(&entry.outgoing_cost)
+            && (1..=max_link_cost).contains(&entry.incoming_link_cost())
     }
 
     /// Reset link costs of neighbors that have been silent for `max_age` (stopped
