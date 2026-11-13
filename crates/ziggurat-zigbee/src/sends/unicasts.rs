@@ -213,6 +213,8 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
             Ok(()) => self.handed_off(id, now, acked, outbox),
             // The destination acked end to end while the radio reported a failure: the
             // frame got through
+            // TODO: the ack can only be for an earlier attempt, but it overrides any
+            // error from this one, `Rejected` included
             Err(_) if acked => self.handed_off(id, now, acked, outbox),
             // Nothing reached the air, so the next hop is not to blame
             Err(TransmitError::Rejected(err)) => self.settle(id, Err(err), None, outbox),
