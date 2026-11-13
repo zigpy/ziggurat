@@ -19,6 +19,14 @@ fn main() {
             let path = git(&["rev-parse", "--path-format=absolute", "--git-path", path])?;
             println!("cargo:rerun-if-changed={path}");
         }
+
+        // An unstaged edit to a tracked file changes `--dirty` but none of the Git
+        // files above
+        let root = git(&["rev-parse", "--show-toplevel"])?;
+        for file in git(&["-C", &root, "ls-files", "-z"])?.split_terminator('\0') {
+            println!("cargo:rerun-if-changed={root}/{file}");
+        }
+
         git(&["describe", "--always", "--dirty"])
     });
 
