@@ -48,13 +48,14 @@ pub struct TableEntry {
     pub end_device_configuration: u16,
 
     /// The end device child is evicted once this deadline passes without a keepalive
-    /// (the spec's "Timeout Counter", kept as a deadline instead of a countdown)
-    pub timeout_at: Instant,
+    /// (the spec's "Timeout Counter", kept as a deadline instead of a countdown).
+    /// `None` for a router, which is not aged by keepalives.
+    pub timeout_at: Option<Instant>,
 
     /// The keepalive period that refreshes `timeout_at`, defaulted from
     /// `nwkEndDeviceTimeoutDefault` and renegotiable via the End Device Timeout
-    /// Request command (the spec's "Device Timeout")
-    pub device_timeout: Duration,
+    /// Request command (the spec's "Device Timeout"). `None` for a router.
+    pub device_timeout: Option<Duration>,
     pub relationship: Relationship,
 
     /// A value indicating if previous transmissions to the device were successful or
@@ -158,7 +159,7 @@ pub struct ChildDescriptor {
     pub network_address: Nwk,
     pub device_type: NwkDeviceType,
     pub rx_on_when_idle: bool,
-    pub device_timeout: Duration,
+    pub device_timeout: Option<Duration>,
     pub relationship: Relationship,
 }
 
@@ -332,7 +333,7 @@ impl Neighbors {
         if let Some(eui64) = eui64
             && let Some(entry) = self.table.get_mut(&eui64)
         {
-            entry.timeout_at = now + entry.device_timeout;
+            entry.timeout_at = entry.device_timeout.map(|timeout| now + timeout);
             entry.keepalive_received = true;
             return true;
         }
@@ -343,7 +344,7 @@ impl Neighbors {
                 .values_mut()
                 .find(|entry| entry.network_address == nwk)
         {
-            entry.timeout_at = now + entry.device_timeout;
+            entry.timeout_at = entry.device_timeout.map(|timeout| now + timeout);
             entry.keepalive_received = true;
             return true;
         }
@@ -368,8 +369,8 @@ impl Neighbors {
             return false;
         };
 
-        entry.device_timeout = timeout;
-        entry.timeout_at = now + timeout;
+        entry.device_timeout = Some(timeout);
+        entry.timeout_at = Some(now + timeout);
         entry.end_device_configuration = configuration;
         entry.keepalive_received = true;
 
@@ -487,7 +488,7 @@ impl Neighbors {
             .filter(|entry| {
                 entry.is_child()
                     && entry.device_type == NwkDeviceType::EndDevice
-                    && entry.timeout_at <= now
+                    && entry.timeout_at.is_some_and(|timeout_at| timeout_at <= now)
             })
             .map(|entry| (entry.extended_address, entry.network_address))
             .collect();
@@ -521,7 +522,7 @@ impl Neighbors {
             device_type: child.device_type,
             rx_on_when_idle: child.rx_on_when_idle,
             end_device_configuration: 0x0000,
-            timeout_at: now + child.device_timeout,
+            timeout_at: child.device_timeout.map(|timeout| now + timeout),
             device_timeout: child.device_timeout,
             relationship: Relationship::Child,
             transmit_failure: 0,
@@ -547,7 +548,7 @@ impl Neighbors {
         entry.device_type = child.device_type;
         entry.rx_on_when_idle = child.rx_on_when_idle;
         entry.device_timeout = child.device_timeout;
-        entry.timeout_at = now + child.device_timeout;
+        entry.timeout_at = child.device_timeout.map(|timeout| now + timeout);
         entry.relationship = child.relationship;
     }
 
@@ -569,7 +570,7 @@ impl Neighbors {
         self.table
             .values()
             .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
-            .map(|entry| entry.timeout_at)
+            .filter_map(|entry| entry.timeout_at)
             .min()
     }
 
@@ -720,8 +721,8 @@ impl Neighbors {
                 device_type: NwkDeviceType::Router,
                 rx_on_when_idle: true,
                 end_device_configuration: 0x0000,
-                timeout_at: now + Duration::from_secs(0xFFFFFFFF),
-                device_timeout: Duration::from_secs(0xFFFFFFFF),
+                timeout_at: None,
+                device_timeout: None,
                 relationship: Relationship::Sibling,
                 transmit_failure: 0,
                 lqas: LqaSamples::default(),
@@ -817,7 +818,7 @@ mod test {
                 network_address: CHILD_NWK,
                 device_type,
                 rx_on_when_idle: false,
-                device_timeout: Duration::from_secs(60),
+                device_timeout: Some(Duration::from_secs(60)),
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),
@@ -877,7 +878,7 @@ mod test {
                 network_address: Nwk(0x5678),
                 device_type: NwkDeviceType::Router,
                 rx_on_when_idle: true,
-                device_timeout: Duration::from_secs(30),
+                device_timeout: Some(Duration::from_secs(30)),
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),
