@@ -233,6 +233,8 @@ struct State {
     outbound: VecDeque<SpinelFrame>,
     /// The transaction id of the request the write loop is writing right now.
     writing: Option<u8>,
+    /// [`SpinelClient::run`] was called. It runs once per client.
+    started: bool,
     /// [`SpinelClient::run`] returned: nothing is read or written any more.
     closed: bool,
 }
@@ -329,6 +331,7 @@ impl<R: Runtime> SpinelClient<R> {
                 protocol: SpinelProtocol::new(),
                 outbound: VecDeque::new(),
                 writing: None,
+                started: false,
                 closed: false,
             }),
             transaction_changed: core::array::from_fn(|_| Notify::new()),
@@ -347,11 +350,14 @@ impl<R: Runtime> SpinelClient<R> {
 
     /// Drive the link: parse inbound bytes and write queued frames. Returns only when
     /// the transport fails. Commands that wait then fail with `TransportClosed`.
+    ///
+    /// Runs once per client. A link that comes back may lead to another radio, so it
+    /// needs a new client.
     pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> SpinelError {
         {
             let mut state = self.state.lock();
-            state.closed = false;
-            state.writing = None;
+            assert!(!state.started, "the Spinel link runs once per client");
+            state.started = true;
         }
         let _closing = CloseOnDrop(self);
 
