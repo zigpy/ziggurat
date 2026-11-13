@@ -598,6 +598,9 @@ pub enum SpinelEvent {
     Reset(SpinelStatus),
 }
 
+/// The bits of transaction ids 1 to 7. Id 0 marks unsolicited frames.
+const ALL_TIDS: u8 = 0b1111_1110;
+
 #[derive(Debug)]
 pub struct SpinelProtocol {
     pub buffer: Vec<u8>,
@@ -793,24 +796,32 @@ impl SpinelProtocol {
         }
     }
 
-    /// Allocate a transaction id for a new request and build its frame.
-    pub fn prepare_request(
-        &mut self,
-        command_id: SpinelCommandId,
-        payload: Vec<u8>,
-    ) -> SpinelFrame {
+    /// Take a transaction id for a new request, or `None` while all seven are in use.
+    pub const fn allocate_tid(&mut self) -> Option<u8> {
+        if self.allocated_tids == ALL_TIDS {
+            return None;
+        }
+
         // Cycle TIDs from 1..7, skipping ones still in use: if a live TID were reused,
         // the older command would take the newer command's response, or its timeout
         // would cancel the newer command
         let mut tid = self.next_tid;
         while self.allocated_tids & (1 << tid) != 0 {
             tid = 1 + (tid % 7);
-            assert_ne!(tid, self.next_tid, "All Spinel TIDs are in flight");
         }
         self.next_tid = 1 + (tid % 7);
         self.allocated_tids |= 1 << tid;
         self.pending_tids |= 1 << tid;
 
+        Some(tid)
+    }
+
+    /// The frame of a request under a transaction id from [`Self::allocate_tid`].
+    pub const fn request_frame(
+        tid: u8,
+        command_id: SpinelCommandId,
+        payload: Vec<u8>,
+    ) -> SpinelFrame {
         SpinelFrame {
             header: SpinelHeader {
                 flag: 0b10,
@@ -861,37 +872,48 @@ mod test {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
-    fn request(protocol: &mut SpinelProtocol) -> SpinelHeader {
-        protocol
-            .prepare_request(SpinelCommandId::PropValueGet, vec![])
-            .header
-    }
-
     // A parsed response waits in the client until its command runs. Another request
     // made in between must not get the same transaction id.
     #[test]
     fn test_transaction_id_is_not_reused_until_its_request_is_released() {
         let mut protocol = SpinelProtocol::new();
-        let header = request(&mut protocol);
-        let tid = header.transaction_id;
+        let tid = protocol.allocate_tid().unwrap();
+        let header = SpinelHeader {
+            flag: 0b10,
+            network_link_id: 0,
+            transaction_id: tid,
+        };
 
         let mut events = Vec::new();
         protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &[], &mut events);
         assert!(matches!(events[..], [SpinelEvent::Response(_)]));
 
         for _ in 0..12 {
-            let other = request(&mut protocol).transaction_id;
+            let other = protocol.allocate_tid().unwrap();
             assert_ne!(other, tid);
             protocol.release_request(other);
         }
 
         protocol.release_request(tid);
         let reused = (0..7).any(|_| {
-            let other = request(&mut protocol).transaction_id;
+            let other = protocol.allocate_tid().unwrap();
             protocol.release_request(other);
             other == tid
         });
         assert!(reused);
+    }
+
+    #[test]
+    fn test_no_transaction_id_is_given_while_all_seven_are_in_use() {
+        let mut protocol = SpinelProtocol::new();
+        let mut tids: Vec<u8> = (0..7).map(|_| protocol.allocate_tid().unwrap()).collect();
+        tids.sort_unstable();
+        assert_eq!(tids, [1, 2, 3, 4, 5, 6, 7]);
+
+        assert_eq!(protocol.allocate_tid(), None);
+
+        protocol.release_request(4);
+        assert_eq!(protocol.allocate_tid(), Some(4));
     }
 
     #[test]
@@ -1086,7 +1108,8 @@ mod test {
         // session with a real device.
         protocol.next_tid = 3;
 
-        let request = protocol.prepare_request(
+        let request = SpinelProtocol::request_frame(
+            protocol.allocate_tid().unwrap(),
             SpinelCommandId::PropValueGet,
             packed_uint21_to_bytes(SpinelPropertyId::NcpVersion as u32),
         );

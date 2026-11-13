@@ -256,6 +256,7 @@ impl State {
 /// future is dropped.
 struct Transaction<'a> {
     state: &'a Mutex<State>,
+    released: &'a Notify,
     tid: u8,
 }
 
@@ -267,6 +268,9 @@ impl Drop for Transaction<'_> {
             .retain(|frame| frame.header.transaction_id != self.tid);
         state.outcomes[usize::from(self.tid)] = None;
         state.protocol.release_request(self.tid);
+        drop(state);
+
+        self.released.notify_one();
     }
 }
 
@@ -280,6 +284,10 @@ pub struct SpinelClient<R: Runtime> {
     /// Indexed by transaction id; woken when that transaction's outcome is set.
     outcome_ready: [Notify; 8],
     outbound_ready: Notify,
+    /// Commands that found all seven transaction ids in use wait here, in order. Only
+    /// the first of them waits on `tid_released`.
+    tid_queue: AsyncMutex<()>,
+    tid_released: Notify,
     on_event: EventHandler,
     /// Functional ownership of the radio (scan, reset recovery, channel retune), taken via
     /// [`Self::lock_radio`].
@@ -297,6 +305,8 @@ impl<R: Runtime> SpinelClient<R> {
             }),
             outcome_ready: core::array::from_fn(|_| Notify::new()),
             outbound_ready: Notify::new(),
+            tid_queue: AsyncMutex::new(()),
+            tid_released: Notify::new(),
             on_event,
             exclusive_lock: AsyncMutex::new(()),
             runtime: PhantomData,
@@ -416,25 +426,39 @@ impl<R: Runtime> SpinelClient<R> {
         });
     }
 
+    /// Take a transaction id, waiting for one while all seven are in use.
+    async fn allocate_tid(&self) -> u8 {
+        let _queue = self.tid_queue.lock().await;
+
+        loop {
+            let tid = self.state.lock().protocol.allocate_tid();
+            if let Some(tid) = tid {
+                return tid;
+            }
+            self.tid_released.notified().await;
+        }
+    }
+
     pub async fn send_command(
         &self,
         command_id: SpinelCommandId,
         payload: Vec<u8>,
     ) -> Result<SpinelFrame, SpinelError> {
-        let tid = {
-            let mut state = self.state.lock();
-            let frame = state.protocol.prepare_request(command_id, payload);
-            tracing::trace!("Sending frame {frame:?}");
-
-            let tid = frame.header.transaction_id;
-            state.outcomes[usize::from(tid)] = None;
-            state.outbound.push_back(frame);
-            tid
-        };
+        let tid = self.allocate_tid().await;
         let _transaction = Transaction {
             state: &self.state,
+            released: &self.tid_released,
             tid,
         };
+
+        let frame = SpinelProtocol::request_frame(tid, command_id, payload);
+        tracing::trace!("Sending frame {frame:?}");
+
+        {
+            let mut state = self.state.lock();
+            state.outcomes[usize::from(tid)] = None;
+            state.outbound.push_back(frame);
+        }
         self.outbound_ready.notify_one();
 
         let outcome = R::timeout(TIMEOUT, async {
