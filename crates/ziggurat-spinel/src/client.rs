@@ -1,7 +1,7 @@
 use crate::{
     HdlcSpecial, SPINEL_FRAME_MAX_SIZE, SpinelCommandId, SpinelEvent, SpinelFrame,
     SpinelFrameParsingError, SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelResetReason,
-    SpinelStatus, hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
+    SpinelStatus, Transaction, hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
 };
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -228,56 +228,49 @@ pub enum SpinelError {
     InvalidStatus { status: u8 },
 }
 
-/// How a request ended, left in its transaction's slot for the waiting command.
-enum Outcome {
-    Response(SpinelFrame),
-    CancelledByReset,
-}
-
 struct State {
     protocol: SpinelProtocol,
-    /// Indexed by transaction id.
-    outcomes: [Option<Outcome>; 8],
     /// Frames waiting for the write loop.
     outbound: VecDeque<SpinelFrame>,
-    /// Bit `tid` is set once the write loop has written that request.
-    written: u8,
     /// [`SpinelClient::run`] returned: nothing is read or written any more.
     closed: bool,
 }
 
-impl State {
-    /// Cancel every request still waiting for its response.
-    fn cancel_waiting(&mut self) {
-        for outcome in &mut self.outcomes {
-            if outcome.is_none() {
-                *outcome = Some(Outcome::CancelledByReset);
-            }
-        }
-    }
-}
-
-/// A command's hold on its transaction id. The id, its outcome slot and a frame the
-/// write loop has not reached yet are given back when the command returns or its
-/// future is dropped.
-struct Transaction<'a> {
+/// A command's hold on its transaction id. The id and a frame the write loop has not
+/// reached yet are given back when the command returns or its future is dropped.
+struct HeldTransaction<'a> {
     state: &'a Mutex<State>,
     released: &'a Notify,
     tid: u8,
 }
 
-impl Drop for Transaction<'_> {
-    fn drop(&mut self) {
-        let mut state = self.state.lock();
-        state
-            .outbound
-            .retain(|frame| frame.header.transaction_id != self.tid);
-        state.outcomes[usize::from(self.tid)] = None;
-        state.written &= !(1 << self.tid);
-        state.protocol.release_request(self.tid);
-        drop(state);
-
+impl HeldTransaction<'_> {
+    fn release(&self) -> Transaction {
+        let transaction = {
+            let mut state = self.state.lock();
+            state
+                .outbound
+                .retain(|frame| frame.header.transaction_id != self.tid);
+            state.protocol.release_request(self.tid)
+        };
         self.released.notify_one();
+
+        transaction
+    }
+
+    /// Give the id back and return where its transaction stood.
+    fn finish(self) -> Transaction {
+        let transaction = self.release();
+        // The id may already belong to another command: it must not be released twice
+        core::mem::forget(self);
+
+        transaction
+    }
+}
+
+impl Drop for HeldTransaction<'_> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -288,9 +281,9 @@ pub type EventHandler = Box<dyn Fn(SpinelEvent) + Send + Sync>;
 /// all the transport IO.
 pub struct SpinelClient<R: Runtime> {
     state: Mutex<State>,
-    /// Indexed by transaction id; woken when that transaction's request is written,
-    /// when its outcome is set, and when the link closes.
-    outcome_ready: [Notify; 8],
+    /// Indexed by transaction id; woken when that transaction changes and when the
+    /// link closes.
+    transaction_changed: [Notify; 8],
     outbound_ready: Notify,
     /// Commands that found all seven transaction ids in use wait here, in order. Only
     /// the first of them waits on `tid_released`.
@@ -308,12 +301,10 @@ impl<R: Runtime> SpinelClient<R> {
         Self {
             state: Mutex::new(State {
                 protocol: SpinelProtocol::new(),
-                outcomes: [const { None }; 8],
                 outbound: VecDeque::new(),
-                written: 0,
                 closed: false,
             }),
-            outcome_ready: core::array::from_fn(|_| Notify::new()),
+            transaction_changed: core::array::from_fn(|_| Notify::new()),
             outbound_ready: Notify::new(),
             tid_queue: AsyncMutex::new(()),
             tid_released: Notify::new(),
@@ -343,9 +334,8 @@ impl<R: Runtime> SpinelClient<R> {
         error
     }
 
-    // The state lock is held across parsing and delivery on purpose (see below), and
     // `drain` keeps the event buffers' capacity across reads
-    #[allow(clippy::significant_drop_tightening, clippy::iter_with_drain)]
+    #[allow(clippy::iter_with_drain)]
     async fn read_loop<Rd: Read>(&self, mut reader: Rd) -> SpinelError {
         let mut buffer = [0u8; 2048];
         let mut events = Vec::new();
@@ -358,26 +348,18 @@ impl<R: Runtime> SpinelClient<R> {
                 Err(e) => return SpinelError::Io(e.kind()),
             };
 
-            {
-                // Outcomes are set under the same lock that parsed them, so a response
-                // never lands in the slot of a later request
-                let mut state = self.state.lock();
-                state
-                    .protocol
-                    .handle_inbound_bytes(&buffer[..n], &mut events);
+            self.state
+                .lock()
+                .protocol
+                .handle_inbound_bytes(&buffer[..n], &mut events);
 
-                for event in events.drain(..) {
-                    match event {
-                        SpinelEvent::Response(frame) => {
-                            let tid = usize::from(frame.header.transaction_id);
-                            state.outcomes[tid] = Some(Outcome::Response(frame));
-                            self.outcome_ready[tid].notify_one();
-                        }
-                        SpinelEvent::Reset(_) => {
-                            state.cancel_waiting();
-                            unsolicited.push(event);
-                        }
-                        SpinelEvent::PropertyUpdate(_) => unsolicited.push(event),
+            for event in events.drain(..) {
+                match event {
+                    SpinelEvent::Response(tid) => {
+                        self.transaction_changed[usize::from(tid)].notify_one();
+                    }
+                    SpinelEvent::Reset(_) | SpinelEvent::PropertyUpdate(_) => {
+                        unsolicited.push(event);
                     }
                 }
             }
@@ -426,15 +408,15 @@ impl<R: Runtime> SpinelClient<R> {
             // The command's response timeout starts here. Resets carry no transaction
             let tid = frame.header.transaction_id;
             if tid != 0 {
-                self.state.lock().written |= 1 << tid;
-                self.outcome_ready[usize::from(tid)].notify_one();
+                self.state.lock().protocol.request_written(tid);
+                self.transaction_changed[usize::from(tid)].notify_one();
             }
         }
     }
 
     fn wake_all_waiters(&self) {
-        for ready in &self.outcome_ready {
-            ready.notify_one();
+        for changed in &self.transaction_changed {
+            changed.notify_one();
         }
     }
 
@@ -476,7 +458,7 @@ impl<R: Runtime> SpinelClient<R> {
         payload: Vec<u8>,
     ) -> Result<SpinelFrame, SpinelError> {
         let tid = self.allocate_tid().await;
-        let _transaction = Transaction {
+        let transaction = HeldTransaction {
             state: &self.state,
             released: &self.tid_released,
             tid,
@@ -490,7 +472,6 @@ impl<R: Runtime> SpinelClient<R> {
             if state.closed {
                 return Err(SpinelError::TransportClosed);
             }
-            state.outcomes[usize::from(tid)] = None;
             state.outbound.push_back(frame);
         }
         self.outbound_ready.notify_one();
@@ -498,10 +479,12 @@ impl<R: Runtime> SpinelClient<R> {
         // The timeout is for the RCP to answer, so it starts once the request is
         // written. A request reported as timed out must not go out afterwards: the
         // caller may send it again, and a transmit would then reach the air twice
-        if R::timeout(TIMEOUT, self.request_written(tid))
+        if R::timeout(TIMEOUT, self.request_left_queue(tid))
             .await
             .is_err()
         {
+            // Removed under the lock that finds it, so the write loop cannot take it
+            // in between
             let unsent = {
                 let mut state = self.state.lock();
                 let queued = state.outbound.len();
@@ -512,65 +495,66 @@ impl<R: Runtime> SpinelClient<R> {
             };
 
             if unsent {
-                return Err(self.request_timed_out(tid));
+                return Err(self.request_timed_out());
             }
 
             // The write loop is writing it. It finishes, or gives up and closes the
             // link, within its own timeout
-            self.request_written(tid).await;
+            self.request_left_queue(tid).await;
         }
 
-        let outcome = R::timeout(TIMEOUT, async {
-            loop {
-                {
-                    let mut state = self.state.lock();
-                    if let Some(outcome) = state.outcomes[usize::from(tid)].take() {
-                        return Ok(outcome);
-                    }
-                    if state.closed {
-                        return Err(SpinelError::TransportClosed);
-                    }
-                }
-                self.outcome_ready[usize::from(tid)].notified().await;
-            }
-        })
-        .await;
+        if R::timeout(TIMEOUT, self.request_settled(tid))
+            .await
+            .is_err()
+        {
+            return Err(self.request_timed_out());
+        }
 
-        match outcome {
-            Ok(Ok(Outcome::Response(frame))) => Ok(frame),
-            Ok(Ok(Outcome::CancelledByReset)) => Err(SpinelError::CancelledByReset),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(self.request_timed_out(tid)),
+        match transaction.finish() {
+            Transaction::Answered(frame) => Ok(frame),
+            Transaction::Cancelled => Err(SpinelError::CancelledByReset),
+            // The link closed first
+            Transaction::Queued | Transaction::AwaitingResponse | Transaction::Free => {
+                Err(SpinelError::TransportClosed)
+            }
         }
     }
 
-    /// Wait until the write loop has written the request `tid`, or there is no point
-    /// in waiting for that: a reset cancelled the request, or the link closed.
-    async fn request_written(&self, tid: u8) {
+    /// Wait until the request `tid` is no longer queued: it was written or a reset
+    /// cancelled it. Also returns when the link closes.
+    async fn request_left_queue(&self, tid: u8) {
         loop {
             {
                 let state = self.state.lock();
-                if state.written & (1 << tid) != 0
-                    || state.outcomes[usize::from(tid)].is_some()
-                    || state.closed
+                if *state.protocol.transaction(tid) != Transaction::Queued || state.closed {
+                    return;
+                }
+            }
+            self.transaction_changed[usize::from(tid)].notified().await;
+        }
+    }
+
+    /// Wait until the request `tid` has its response or a reset cancelled it. Also
+    /// returns when the link closes.
+    async fn request_settled(&self, tid: u8) {
+        loop {
+            {
+                let state = self.state.lock();
+                if matches!(
+                    state.protocol.transaction(tid),
+                    Transaction::Answered(_) | Transaction::Cancelled
+                ) || state.closed
                 {
                     return;
                 }
             }
-            self.outcome_ready[usize::from(tid)].notified().await;
+            self.transaction_changed[usize::from(tid)].notified().await;
         }
     }
 
     /// Count a request that timed out, and start reset recovery once enough have.
-    fn request_timed_out(&self, tid: u8) -> SpinelError {
-        let reset = {
-            let mut state = self.state.lock();
-            let reset = state.protocol.request_timed_out(tid);
-            if reset.is_some() {
-                state.cancel_waiting();
-            }
-            reset
-        };
+    fn request_timed_out(&self) -> SpinelError {
+        let reset = self.state.lock().protocol.request_timed_out();
 
         if let Some(reset) = reset {
             self.wake_all_waiters();

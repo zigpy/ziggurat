@@ -590,16 +590,33 @@ impl SpinelFramePropValueIs {
 /// Something the RCP link produced that the caller must act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpinelEvent {
-    /// The response to a pending request, matched by its transaction id.
-    Response(SpinelFrame),
+    /// The response to the request with this transaction id arrived. It waits in
+    /// its [`Transaction`] for the command to take it.
+    Response(u8),
     /// An unsolicited property update.
     PropertyUpdate(SpinelFramePropValueIs),
     /// The RCP reset, or is presumed wedged. Every pending request was cancelled.
     Reset(SpinelStatus),
 }
 
-/// The bits of transaction ids 1 to 7. Id 0 marks unsolicited frames.
-const ALL_TIDS: u8 = 0b1111_1110;
+/// Where a transaction stands.
+///
+/// A command holds its transaction id from [`SpinelProtocol::allocate_tid`] to
+/// [`SpinelProtocol::release_request`]. An id that is not `Free` is never given to
+/// another command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Transaction {
+    /// No command holds the id.
+    Free,
+    /// The request waits to be written to the RCP.
+    Queued,
+    /// The request is written and the RCP has not answered.
+    AwaitingResponse,
+    /// The RCP answered. The command has yet to take the response.
+    Answered(SpinelFrame),
+    /// An RCP reset cancelled the request.
+    Cancelled,
+}
 
 #[derive(Debug)]
 pub struct SpinelProtocol {
@@ -609,11 +626,9 @@ pub struct SpinelProtocol {
     unescape_scratch: Vec<u8>,
     pub ignoring_until_next_flag: bool,
     pub next_tid: u8,
-    /// Bit `tid` is set from the request until [`Self::release_request`]. A
-    /// transaction id in use is not given to another request.
-    allocated_tids: u8,
-    /// Bit `tid` is set while that transaction awaits its response.
-    pending_tids: u8,
+    /// Indexed by transaction id. We use ids 1 to 7; id 0 marks unsolicited frames
+    /// and stays `Free`.
+    transactions: [Transaction; 8],
     consecutive_timeouts: u32,
 }
 
@@ -630,8 +645,7 @@ impl SpinelProtocol {
             unescape_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
             ignoring_until_next_flag: true,
             next_tid: 1,
-            allocated_tids: 0,
-            pending_tids: 0,
+            transactions: [const { Transaction::Free }; 8],
             consecutive_timeouts: 0,
         }
     }
@@ -750,14 +764,17 @@ impl SpinelProtocol {
             } else {
                 tracing::warn!("Unhandled unsolicited frame: {command_id:?} {payload:02X?}");
             }
-        } else if self.pending_tids & (1 << tid) != 0 {
-            self.pending_tids &= !(1 << tid);
-            self.consecutive_timeouts = 0;
-            events.push(SpinelEvent::Response(SpinelFrame {
+        } else if let Some(transaction @ (Transaction::Queued | Transaction::AwaitingResponse)) =
+            self.transactions.get_mut(usize::from(tid))
+        {
+            // `Queued` too: the response can be read before the write is reported
+            *transaction = Transaction::Answered(SpinelFrame {
                 header,
                 command_id,
                 payload: payload.to_vec(),
-            }));
+            });
+            self.consecutive_timeouts = 0;
+            events.push(SpinelEvent::Response(tid));
         } else {
             tracing::warn!("Unsolicited or unmatched frame: {command_id:?} {payload:02X?}");
         }
@@ -789,7 +806,7 @@ impl SpinelProtocol {
 
         if status.is_reset() {
             tracing::error!("RCP announced a reset: {status:?}");
-            self.pending_tids = 0;
+            self.cancel_requests();
             events.push(SpinelEvent::Reset(status));
         } else {
             tracing::warn!("Unsolicited status notification: {status:?}");
@@ -797,21 +814,15 @@ impl SpinelProtocol {
     }
 
     /// Take a transaction id for a new request, or `None` while all seven are in use.
-    pub const fn allocate_tid(&mut self) -> Option<u8> {
-        if self.allocated_tids == ALL_TIDS {
-            return None;
-        }
+    pub fn allocate_tid(&mut self) -> Option<u8> {
+        // Ids cycle from 1 to 7, so a released id is the last to be given out again.
+        // A late response to a request that timed out then finds its id free
+        let tid = (0..7)
+            .map(|offset| 1 + (self.next_tid - 1 + offset) % 7)
+            .find(|&tid| self.transactions[usize::from(tid)] == Transaction::Free)?;
 
-        // Cycle TIDs from 1..7, skipping ones still in use: if a live TID were reused,
-        // the older command would take the newer command's response, or its timeout
-        // would cancel the newer command
-        let mut tid = self.next_tid;
-        while self.allocated_tids & (1 << tid) != 0 {
-            tid = 1 + (tid % 7);
-        }
         self.next_tid = 1 + (tid % 7);
-        self.allocated_tids |= 1 << tid;
-        self.pending_tids |= 1 << tid;
+        self.transactions[usize::from(tid)] = Transaction::Queued;
 
         Some(tid)
     }
@@ -833,18 +844,40 @@ impl SpinelProtocol {
         }
     }
 
-    /// The command that made the request `tid` is done with it, whatever the outcome.
-    /// A response that is parsed frees nothing by itself: its command has yet to take
-    /// it.
-    pub const fn release_request(&mut self, tid: u8) {
-        self.allocated_tids &= !(1 << tid);
-        self.pending_tids &= !(1 << tid);
+    pub fn transaction(&self, tid: u8) -> &Transaction {
+        &self.transactions[usize::from(tid)]
     }
 
-    /// The request `tid` got no response in time. Returns the reset to recover from
-    /// once enough consecutive requests have timed out.
-    pub fn request_timed_out(&mut self, tid: u8) -> Option<SpinelEvent> {
-        self.pending_tids &= !(1 << tid);
+    /// The request `tid` was written to the RCP.
+    pub fn request_written(&mut self, tid: u8) {
+        let transaction = &mut self.transactions[usize::from(tid)];
+
+        if *transaction == Transaction::Queued {
+            *transaction = Transaction::AwaitingResponse;
+        }
+    }
+
+    /// The command that holds `tid` is done with it. Returns where the transaction
+    /// stood: the response, if one arrived.
+    pub fn release_request(&mut self, tid: u8) -> Transaction {
+        core::mem::replace(&mut self.transactions[usize::from(tid)], Transaction::Free)
+    }
+
+    /// Cancel every request that has no response yet.
+    fn cancel_requests(&mut self) {
+        for transaction in &mut self.transactions {
+            if matches!(
+                transaction,
+                Transaction::Queued | Transaction::AwaitingResponse
+            ) {
+                *transaction = Transaction::Cancelled;
+            }
+        }
+    }
+
+    /// A request got no response in time. Returns the reset to recover from once
+    /// enough consecutive requests have timed out; that reset cancels the others.
+    pub fn request_timed_out(&mut self) -> Option<SpinelEvent> {
         self.consecutive_timeouts += 1;
 
         if self.consecutive_timeouts < MAX_CONSECUTIVE_TIMEOUTS {
@@ -856,7 +889,7 @@ impl SpinelProtocol {
             self.consecutive_timeouts
         );
         self.consecutive_timeouts = 0;
-        self.pending_tids = 0;
+        self.cancel_requests();
 
         Some(SpinelEvent::Reset(SpinelStatus::ResponseTimeout))
     }
@@ -886,7 +919,7 @@ mod test {
 
         let mut events = Vec::new();
         protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &[], &mut events);
-        assert!(matches!(events[..], [SpinelEvent::Response(_)]));
+        assert_eq!(events, [SpinelEvent::Response(tid)]);
 
         for _ in 0..12 {
             let other = protocol.allocate_tid().unwrap();
@@ -894,7 +927,10 @@ mod test {
             protocol.release_request(other);
         }
 
-        protocol.release_request(tid);
+        assert!(matches!(
+            protocol.release_request(tid),
+            Transaction::Answered(_)
+        ));
         let reused = (0..7).any(|_| {
             let other = protocol.allocate_tid().unwrap();
             protocol.release_request(other);
@@ -914,6 +950,67 @@ mod test {
 
         protocol.release_request(4);
         assert_eq!(protocol.allocate_tid(), Some(4));
+    }
+
+    /// A status notification that announces a reset.
+    fn reset_notification() -> (SpinelHeader, Vec<u8>) {
+        let header = SpinelHeader {
+            flag: 0b10,
+            network_link_id: 0,
+            transaction_id: 0,
+        };
+        let mut payload = packed_uint21_to_bytes(SpinelPropertyId::LastStatus as u32);
+        payload.extend(packed_uint21_to_bytes(SpinelStatus::ResetPowerOn as u32));
+
+        (header, payload)
+    }
+
+    // A response that already arrived survives the reset: its command still takes it.
+    #[test]
+    fn test_reset_cancels_the_requests_without_a_response() {
+        let mut protocol = SpinelProtocol::new();
+        let queued = protocol.allocate_tid().unwrap();
+        let written = protocol.allocate_tid().unwrap();
+        let answered = protocol.allocate_tid().unwrap();
+        protocol.request_written(written);
+        protocol.request_written(answered);
+
+        let mut events = Vec::new();
+        let response =
+            SpinelProtocol::request_frame(answered, SpinelCommandId::PropValueIs, vec![]);
+        protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut events);
+
+        let (header, payload) = reset_notification();
+        protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &payload, &mut events);
+        assert_eq!(
+            events,
+            [
+                SpinelEvent::Response(answered),
+                SpinelEvent::Reset(SpinelStatus::ResetPowerOn)
+            ]
+        );
+
+        assert_eq!(protocol.release_request(queued), Transaction::Cancelled);
+        assert_eq!(protocol.release_request(written), Transaction::Cancelled);
+        assert!(matches!(
+            protocol.release_request(answered),
+            Transaction::Answered(_)
+        ));
+    }
+
+    #[test]
+    fn test_response_to_no_request_is_dropped() {
+        let mut protocol = SpinelProtocol::new();
+        let mut events = Vec::new();
+
+        // Transaction ids 8 to 15 fit the header but we never use them
+        for tid in [1, 15] {
+            let response = SpinelProtocol::request_frame(tid, SpinelCommandId::PropValueIs, vec![]);
+            protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut events);
+        }
+
+        assert_eq!(events, []);
+        assert_eq!(*protocol.transaction(1), Transaction::Free);
     }
 
     #[test]
@@ -1134,9 +1231,10 @@ mod test {
         );
         protocol.handle_inbound_bytes(b"4:40:57\x00\x81\xf7~", &mut events);
 
+        assert_eq!(events, [SpinelEvent::Response(3)]);
         assert_eq!(
-            events,
-            [SpinelEvent::Response(SpinelFrame {
+            protocol.release_request(3),
+            Transaction::Answered(SpinelFrame {
                 header: SpinelHeader {
                     flag: 0b10,
                     network_link_id: 0,
@@ -1146,7 +1244,7 @@ mod test {
                 payload:
                     b"\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 14:40:57\x00"
                         .to_vec()
-            })]
+            })
         );
     }
 }
