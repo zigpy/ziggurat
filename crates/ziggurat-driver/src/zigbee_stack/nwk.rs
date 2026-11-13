@@ -49,14 +49,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.forget_nwk_state_in(core, nwk);
     }
 
-    /// The device at `nwk` left or joined again, so what we know about the address
-    /// belongs to its previous session. Held sends fail: they wait on a route request
-    /// the device never heard, and forgetting the address drops that discovery.
+    /// The device at `nwk` left or joined again, or two devices claim the address, so
+    /// what we know about it no longer holds. Held sends fail: they wait on a route
+    /// request the device never heard, and forgetting the address drops that discovery.
     pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
         self.forget_nwk_state_in(self.core(), nwk);
     }
 
-    fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
+    pub(super) fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
         core.nib.routing.forget(self.state.network_address, nwk);
         let actions = core.sends.fail_unrouted(nwk);
         self.commit_sends(core, actions);
