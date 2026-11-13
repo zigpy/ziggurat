@@ -10,7 +10,6 @@
 
 extern crate alloc;
 
-use alloc::format;
 use alloc::string::String;
 
 pub mod bridge;
@@ -22,9 +21,13 @@ pub use send_tracker::*;
 pub use wire::*;
 
 pub fn version_string(platform: &str) -> String {
-    format!(
-        "ziggurat/{}; {platform}; {}",
+    [
+        "ziggurat/",
         env!("ZIGGURAT_VERSION"),
-        env!("ZIGGURAT_BUILD_DATETIME")
-    )
+        "; ",
+        platform,
+        "; ",
+        env!("ZIGGURAT_BUILD_DATETIME"),
+    ]
+    .concat()
 }
