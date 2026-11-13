@@ -373,7 +373,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        tracing::debug!("Decrypted frame: {decrypted_nwk_frame:?}");
+        tracing::trace!("Decrypted frame: {decrypted_nwk_frame:?}");
 
         // NWK frames are always relayed with 16-bit MAC addressing; anything else is
         // malformed and dropped rather than panicking on remote input

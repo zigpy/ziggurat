@@ -1462,7 +1462,7 @@ fn parse_802154_frame(psdu: &[u8]) -> Option<Ieee802154Frame<&[u8]>> {
             None
         }
         Err(e) => {
-            tracing::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");
+            tracing::debug!("Error parsing IEEE 802.15.4 frame: {e:?}");
             None
         }
     }

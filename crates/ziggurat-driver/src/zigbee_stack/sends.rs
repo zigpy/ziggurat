@@ -139,7 +139,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         drop(core);
 
         if let Some((failed, next_hop, id, result)) = failed_unicast {
-            tracing::error!("Failed to send unicast frame after all attempts");
+            let destination_eui64 = self.core().nib.address_map.eui64_for(failed.destination);
+            tracing::error!(
+                "Failed to send unicast frame to {:?} ({destination_eui64:?}) via {next_hop:?} \
+                 after all attempts",
+                failed.destination
+            );
             self.handle_unicast_send_failure(failed, next_hop);
             self.send_watches.settled(id, result);
         }
