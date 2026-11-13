@@ -687,8 +687,8 @@ impl Routing {
         }
     }
 
-    /// Before relaying a route request: track that discovery toward the destination is
-    /// underway, so frames for it are held off until it completes.
+    /// Before relaying a route request: mark the destination's entry as
+    /// `DiscoveryUnderway`, so the reply we relay back finds it (spec 3.6.4.5.1.2).
     pub fn note_relayed_discovery(&mut self, destination: Nwk) {
         self.route_table
             .entry(destination)

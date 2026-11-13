@@ -7,9 +7,9 @@
 //! - [`Unicasts`](unicasts::Unicasts): a frame with a known next hop, delivered directly
 //!   (with retries) or to a sleepy child when it polls.
 //! - [`UnroutedUnicasts`](unrouted::UnroutedUnicasts): a unicast with no route yet, held
-//!   until its destination's route discovery ends. The driver runs the discovery against its
-//!   routing table and reports when the route is known or the discovery lapsed; the
-//!   send then moves to the unicasts or fails.
+//!   until a timer pass finds a next hop for it. The routing table decides when a route
+//!   discovery is started or given up on; the driver reports a destination it gave up
+//!   on, and the sends held for it fail.
 //! - [`Broadcasts`](broadcasts::Broadcasts): a frame sent once, or rebroadcast on a
 //!   schedule until its passive-ack quorum is heard.
 //!
