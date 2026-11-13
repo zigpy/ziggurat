@@ -152,7 +152,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         acked
     }
 
-    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, lqi: u8, rssi: i8) {
+    /// Process a decrypted NWK frame. False when the frame must not reach the APS layer.
+    #[must_use = "a filtered frame must not be delivered to the APS layer"]
+    pub fn handle_decrypted_frame(
+        &self,
+        nwk_frame: &NwkFrame,
+        sender_nwk: Nwk,
+        lqi: u8,
+        rssi: i8,
+    ) -> bool {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
@@ -212,7 +220,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         {
             if self.filter_broadcast(nwk_frame, sender_nwk) {
                 tracing::debug!("Filtering broadcast, stopping further processing");
-                return;
+                return false;
             }
 
             // Spec 3.6.1.10.2: a fresh broadcast claiming our address as its source
@@ -228,7 +236,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         AddrConflictSource::Local,
                     );
                 }
-                return;
+                return false;
             }
 
             // A fresh broadcast is relayed onward to the rest of the mesh
@@ -294,6 +302,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
         }
+
+        true
     }
 
     /// A NWK command frame originated by us, with stack-wide defaults: secured, route

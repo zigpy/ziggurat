@@ -393,9 +393,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return None;
         }
 
-        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, lqi, rssi);
-
-        Some(decrypted_nwk_frame)
+        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, lqi, rssi)
+            .then_some(decrypted_nwk_frame)
     }
 
     fn process_gpdf(
