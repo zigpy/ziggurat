@@ -488,16 +488,13 @@ impl Routing {
         self.route_record_table.remove(&destination).is_some()
     }
 
-    /// Spec 3.6.4.8.1: a router reported it could not deliver a frame we originated
-    /// toward `destination` (`LinkFailure`, `SourceRouteFailure` or a legacy
-    /// equivalent). Both the routing entry and the stored route record go: a record
-    /// that reached the failing router as a plain next hop, such as a direct record
-    /// (no relays) for a device that moved away, is as stale as a broken source route,
-    /// and only its removal lets the next transmission discover a fresh route.
-    /// Returns whether a route record was removed.
+    /// Spec 3.6.4.8.1: a router could not deliver a frame of ours toward `destination`.
+    /// The route record goes with the routing entry: it wins over the routing table, so
+    /// a stale one would keep the broken path in use. Returns whether a route record
+    /// was removed.
     pub fn forget_route_to(&mut self, destination: Nwk) -> bool {
-        self.route_table.remove(&destination);
-        self.route_record_table.remove(&destination).is_some()
+        self.remove_route(destination);
+        self.remove_route_record(destination)
     }
 
     /// Spec 3.6.4.3.2: relaying a source-routed frame proves the concentrator that
