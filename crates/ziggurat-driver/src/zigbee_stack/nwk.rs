@@ -5,7 +5,6 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -634,13 +633,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        let sleepy_children: Vec<(Eui64, Nwk)> = core
+        // The source already has the frame
+        let sleepy_children = core
             .nib
             .neighbors
             .sleepy_children()
-            .into_iter()
-            .filter(|(_, child_nwk)| *child_nwk != nwk_frame.nwk_header.source)
-            .collect();
+            .filter(|(_, child_nwk)| *child_nwk != nwk_frame.nwk_header.source);
 
         let policy = TxPolicy {
             priority: TxPriority::UserNormal,
