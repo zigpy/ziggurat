@@ -1425,7 +1425,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Whether the trust center authorizes new joins through a router right now.
-    pub(super) fn trust_center_permitting_joins(&self) -> bool {
+    pub fn trust_center_permitting_joins(&self) -> bool {
         self.core()
             .trust_center_joins_until
             .is_some_and(|deadline| deadline > self.core_now())
