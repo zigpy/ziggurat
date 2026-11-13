@@ -606,6 +606,9 @@ pub struct SpinelProtocol {
     unescape_scratch: Vec<u8>,
     pub ignoring_until_next_flag: bool,
     pub next_tid: u8,
+    /// Bit `tid` is set from the request until [`Self::release_request`]. A
+    /// transaction id in use is not given to another request.
+    allocated_tids: u8,
     /// Bit `tid` is set while that transaction awaits its response.
     pending_tids: u8,
     consecutive_timeouts: u32,
@@ -624,6 +627,7 @@ impl SpinelProtocol {
             unescape_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
             ignoring_until_next_flag: true,
             next_tid: 1,
+            allocated_tids: 0,
             pending_tids: 0,
             consecutive_timeouts: 0,
         }
@@ -795,15 +799,16 @@ impl SpinelProtocol {
         command_id: SpinelCommandId,
         payload: Vec<u8>,
     ) -> SpinelFrame {
-        // Cycle TIDs from 1..7, skipping ones still awaiting a response: if a live TID
-        // were reused, the older command's timeout would cancel the newer command and
-        // orphan its response
+        // Cycle TIDs from 1..7, skipping ones still in use: if a live TID were reused,
+        // the older command would take the newer command's response, or its timeout
+        // would cancel the newer command
         let mut tid = self.next_tid;
-        while self.pending_tids & (1 << tid) != 0 {
+        while self.allocated_tids & (1 << tid) != 0 {
             tid = 1 + (tid % 7);
             assert_ne!(tid, self.next_tid, "All Spinel TIDs are in flight");
         }
         self.next_tid = 1 + (tid % 7);
+        self.allocated_tids |= 1 << tid;
         self.pending_tids |= 1 << tid;
 
         SpinelFrame {
@@ -815,6 +820,14 @@ impl SpinelProtocol {
             command_id,
             payload,
         }
+    }
+
+    /// The command that made the request `tid` is done with it, whatever the outcome.
+    /// A response that is parsed frees nothing by itself: its command has yet to take
+    /// it.
+    pub const fn release_request(&mut self, tid: u8) {
+        self.allocated_tids &= !(1 << tid);
+        self.pending_tids &= !(1 << tid);
     }
 
     /// The request `tid` got no response in time. Returns the reset to recover from
@@ -847,6 +860,39 @@ mod test {
     use rand::RngExt;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    fn request(protocol: &mut SpinelProtocol) -> SpinelHeader {
+        protocol
+            .prepare_request(SpinelCommandId::PropValueGet, vec![])
+            .header
+    }
+
+    // A parsed response waits in the client until its command runs. Another request
+    // made in between must not get the same transaction id.
+    #[test]
+    fn test_transaction_id_is_not_reused_until_its_request_is_released() {
+        let mut protocol = SpinelProtocol::new();
+        let header = request(&mut protocol);
+        let tid = header.transaction_id;
+
+        let mut events = Vec::new();
+        protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &[], &mut events);
+        assert!(matches!(events[..], [SpinelEvent::Response(_)]));
+
+        for _ in 0..12 {
+            let other = request(&mut protocol).transaction_id;
+            assert_ne!(other, tid);
+            protocol.release_request(other);
+        }
+
+        protocol.release_request(tid);
+        let reused = (0..7).any(|_| {
+            let other = request(&mut protocol).transaction_id;
+            protocol.release_request(other);
+            other == tid
+        });
+        assert!(reused);
+    }
 
     #[test]
     fn test_uint21_to_bytes() {

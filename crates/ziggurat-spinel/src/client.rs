@@ -251,6 +251,25 @@ impl State {
     }
 }
 
+/// A command's hold on its transaction id. The id, its outcome slot and a frame the
+/// write loop has not reached yet are given back when the command returns or its
+/// future is dropped.
+struct Transaction<'a> {
+    state: &'a Mutex<State>,
+    tid: u8,
+}
+
+impl Drop for Transaction<'_> {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        state
+            .outbound
+            .retain(|frame| frame.header.transaction_id != self.tid);
+        state.outcomes[usize::from(self.tid)] = None;
+        state.protocol.release_request(self.tid);
+    }
+}
+
 /// Receives the unsolicited events: property updates and resets.
 pub type EventHandler = Box<dyn Fn(SpinelEvent) + Send + Sync>;
 
@@ -311,8 +330,8 @@ impl<R: Runtime> SpinelClient<R> {
             };
 
             {
-                // Outcomes are set under the same lock that parsed them, so a transaction
-                // id cannot be reused before its response is delivered
+                // Outcomes are set under the same lock that parsed them, so a response
+                // never lands in the slot of a later request
                 let mut state = self.state.lock();
                 state
                     .protocol
@@ -412,6 +431,10 @@ impl<R: Runtime> SpinelClient<R> {
             state.outbound.push_back(frame);
             tid
         };
+        let _transaction = Transaction {
+            state: &self.state,
+            tid,
+        };
         self.outbound_ready.notify_one();
 
         let outcome = R::timeout(TIMEOUT, async {
@@ -431,11 +454,6 @@ impl<R: Runtime> SpinelClient<R> {
             Err(_) => {
                 let reset = {
                     let mut state = self.state.lock();
-                    // A frame the write loop has not reached yet must not go out late
-                    state
-                        .outbound
-                        .retain(|frame| frame.header.transaction_id != tid);
-
                     let reset = state.protocol.request_timed_out(tid);
                     if reset.is_some() {
                         state.cancel_waiting();
