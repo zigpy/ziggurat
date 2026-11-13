@@ -32,13 +32,14 @@ impl Broadcasts {
     /// Digest a received broadcast. Returns true for a known transaction, which also
     /// records the sender's passive acknowledgment: the frame is a duplicate and must
     /// be filtered. An unknown broadcast creates a transaction expecting passive acks
-    /// from `audience` and returns false: the frame is fresh and must be processed.
+    /// from the routers `audience` returns, and returns false: the frame is fresh and
+    /// must be processed.
     pub fn filter_received(
         &mut self,
         source: Nwk,
         sequence_number: u8,
         sender: Nwk,
-        audience: Vec<Nwk>,
+        audience: impl FnOnce() -> Vec<Nwk>,
         now: Instant,
         delivery_time: Duration,
     ) -> bool {
@@ -55,7 +56,7 @@ impl Broadcasts {
             (source, sequence_number),
             Transaction {
                 expiration_time: now + delivery_time,
-                expected_relayers: audience,
+                expected_relayers: audience(),
                 // Whoever delivered the frame to us has already broadcast it
                 heard_from: FlatSet::from([sender]),
             },

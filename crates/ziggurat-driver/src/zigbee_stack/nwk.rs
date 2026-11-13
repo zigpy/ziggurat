@@ -76,16 +76,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The passive ack contract is formed when the transaction is created: only
         // routers that were good neighbors at that point are expected to relay
         let mut core = self.core();
-        let audience = core
-            .nib
-            .neighbors
-            .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost());
-
-        let duplicate = core.nib.broadcasts.filter_received(
+        let nib = &mut core.nib;
+        let duplicate = nib.broadcasts.filter_received(
             nwk_frame.nwk_header.source,
             nwk_frame.nwk_header.sequence_number,
             sender_nwk,
-            audience,
+            || {
+                nib.neighbors
+                    .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost())
+            },
             now,
             self.tunables.broadcast_delivery_time(),
         );
