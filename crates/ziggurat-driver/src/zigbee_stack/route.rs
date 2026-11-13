@@ -400,26 +400,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             | NwkNetworkStatus::LegacyLinkFailure
             | NwkNetworkStatus::LinkFailure
             | NwkNetworkStatus::SourceRouteFailure => {
-                let mut core = self.core();
-
-                core.nib
+                // The reported path is broken whatever it was: a source route, or a
+                // next hop or direct route record gone stale when the device moved.
+                // The next transmission discovers until a fresh route record arrives
+                let removed_record = self
+                    .core()
+                    .nib
                     .routing
-                    .remove_route(network_status_cmd.network_address);
-
-                // A relay reported the stored path broken; the next transmission
-                // falls back to discovery until a fresh route record arrives
-                let removed_record = network_status_cmd.status_code
-                    == NwkNetworkStatus::SourceRouteFailure
-                    && core
-                        .nib
-                        .routing
-                        .remove_route_record(network_status_cmd.network_address);
-
-                drop(core);
+                    .forget_route_to(network_status_cmd.network_address);
 
                 if removed_record {
                     tracing::info!(
-                        "Removed failed source route to {:?}",
+                        "Removed failed route record to {:?}",
                         network_status_cmd.network_address
                     );
                 }
