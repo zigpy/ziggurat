@@ -495,26 +495,21 @@ enum Step {
     Tick,
     /// The device answers the latest discovery.
     Reply,
-    /// The route to the device is lost.
-    Break,
     /// We relay another router's route request toward the device.
     Relay,
-    /// A router reports that it could not deliver a frame of ours to the device.
+    /// A router reports that it could not deliver a frame of ours to the device: a
+    /// route we had is lost.
     ForgetRoute,
-    /// The device leaves or joins again.
-    Forget,
 }
 
-const STEPS: [Step; 9] = [
+const STEPS: [Step; 7] = [
     Step::Hold,
     Step::Release,
     Step::Lapse,
     Step::Tick,
     Step::Reply,
-    Step::Break,
     Step::Relay,
     Step::ForgetRoute,
-    Step::Forget,
 ];
 
 /// What `Routing` should hold about `DEVICE`.
@@ -671,13 +666,6 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                 model.replied = true;
             }
             Step::Reply => {}
-            Step::Break => {
-                routing.invalidate_via(NEIGHBOR);
-
-                if model.status == Some(Status::Active) {
-                    model.status = Some(Status::Inactive);
-                }
-            }
             Step::Relay => {
                 let request = RouteRequest {
                     originator: ROUTER,
@@ -700,16 +688,6 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                 if model.status != Some(Status::DiscoveryUnderway) {
                     model.status = None;
                 }
-            }
-            Step::Forget => {
-                routing.forget(OWN, DEVICE);
-
-                // Discoveries we relay stay. The driver fails the frames held for the
-                // device
-                model.status = None;
-                model.live = false;
-                model.discoveries_left = None;
-                model.wanted = false;
             }
         }
 
