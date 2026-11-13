@@ -16,7 +16,7 @@ use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Actions, InFlight, SendFailure, SendId, Transmit, TxPriority};
+use super::{Action, Actions, InFlight, SendFailure, SendFrame, SendId, Transmit, TxPriority};
 
 /// How a broadcast is retransmitted and when it is done.
 ///
@@ -123,7 +123,7 @@ impl<F, W, E> Default for Broadcasts<F, W, E> {
     }
 }
 
-impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
+impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     /// The send fails if still not over within the handoff timeout.
     pub(super) fn enqueue(
         &mut self,
@@ -236,12 +236,15 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             actions.push(Action::HandedOff(record.waiter.clone()));
         }
 
+        drop(
+            record
+                .frame
+                .expect("a transmitting send is never settled from outside"),
+        );
+
         actions.push(Action::Settled {
             waiter: record.waiter,
             result,
-            frame: record
-                .frame
-                .expect("a transmitting send is never settled from outside"),
             failed_hop: None,
         });
     }

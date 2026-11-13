@@ -12,7 +12,7 @@ use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Actions, Confirm, SendFailure, SendId, TxPriority};
+use super::{Action, Actions, Confirm, SendFailure, SendFrame, SendId, TxPriority};
 
 /// What an unrouted unicast is enqueued with.
 #[derive(Debug)]
@@ -51,7 +51,7 @@ impl<F, W, E> Default for UnroutedUnicasts<F, W, E> {
     }
 }
 
-impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
+impl<F: SendFrame, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }
@@ -102,7 +102,6 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         Action::Settled {
             waiter: send.waiter,
             result: Err(failure.into()),
-            frame: send.frame,
             failed_hop: None,
         }
     }

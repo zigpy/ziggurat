@@ -125,14 +125,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 Action::Settled {
                     waiter,
                     result,
-                    frame,
                     failed_hop,
                 } => {
-                    if let Some(next_hop) = failed_hop
-                        && let Frame::Nwk { nwk_frame, .. } = &frame
-                    {
+                    if let Some((next_hop, Some(failed))) = failed_hop {
                         tracing::error!("Failed to send unicast frame after all attempts");
-                        self.handle_unicast_send_failure(nwk_frame, next_hop);
+                        self.handle_unicast_send_failure(failed, next_hop);
                     }
 
                     waiter.settled(result);

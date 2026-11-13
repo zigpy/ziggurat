@@ -57,7 +57,8 @@ pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
 pub use ziggurat_zigbee::sends::{
-    ApsAckData, Confirm, Schedule, SendFailure, SendId, Sends, SrcMatchTable, Transmit, TxPriority,
+    ApsAckData, Confirm, Schedule, SendFailure, SendFrame, SendId, Sends, SrcMatchTable, Transmit,
+    TxPriority,
 };
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
@@ -269,6 +270,30 @@ pub enum Frame {
     /// An already-finished 802.15.4 frame (a beacon, an association response),
     /// transmitted as-is but for its MAC sequence number.
     Raw(Ieee802154Frame),
+}
+
+/// What failure handling reads from a NWK frame whose unicast failed at its next hop.
+#[derive(Debug, Clone, Copy)]
+pub struct FailedNwkUnicast {
+    pub source: Nwk,
+    pub destination: Nwk,
+    pub source_routed: bool,
+}
+
+impl SendFrame for Frame {
+    /// `None` for a raw 802.15.4 frame: it has no NWK routes to repair
+    type Failure = Option<FailedNwkUnicast>;
+
+    fn failure(&self) -> Self::Failure {
+        match self {
+            Self::Nwk { nwk_frame, .. } => Some(FailedNwkUnicast {
+                source: nwk_frame.nwk_header.source,
+                destination: nwk_frame.nwk_header.destination,
+                source_routed: nwk_frame.nwk_header.source_route.is_some(),
+            }),
+            Self::Raw(_) => None,
+        }
+    }
 }
 
 /// The send table, specialised to the driver's types. See [`Sends`].

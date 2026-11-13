@@ -14,8 +14,8 @@ use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
 use super::{
-    Action, Actions, ApsAckData, Confirm, InFlight, SendFailure, SendId, SrcMatchTable, Transmit,
-    TxPriority,
+    Action, Actions, ApsAckData, Confirm, InFlight, SendFailure, SendFrame, SendId, SrcMatchTable,
+    Transmit, TxPriority,
 };
 
 /// What a unicast is enqueued with.
@@ -115,7 +115,7 @@ impl<F, W, E> Default for Unicasts<F, W, E> {
     }
 }
 
-impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
+impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }
@@ -282,13 +282,14 @@ impl<F, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             actions.push(Action::HandedOff(record.waiter.clone()));
         }
 
+        let frame = record
+            .frame
+            .expect("a transmitting send is never settled from outside");
+
         actions.push(Action::Settled {
             waiter: record.waiter,
             result,
-            frame: record
-                .frame
-                .expect("a transmitting send is never settled from outside"),
-            failed_hop,
+            failed_hop: failed_hop.map(|next_hop| (next_hop, frame.failure())),
         });
     }
 

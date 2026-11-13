@@ -24,10 +24,10 @@ use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError, Frame,
-    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
-    SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore,
-    ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError,
+    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective,
+    Schedule, SendActions, SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast,
+    ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -599,13 +599,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// routes through it. A frame we originated also drops any stored source route and
     /// pushes the MTORR scheduler; a frame we were relaying reports the failure back
     /// to its originator (spec 3.6.4.8.1).
-    pub(super) fn handle_unicast_send_failure(&self, nwk_frame: &NwkFrame, next_hop: Nwk) {
-        if nwk_frame.nwk_header.source != self.state.network_address {
-            self.handle_relay_failure(nwk_frame, next_hop);
+    pub(super) fn handle_unicast_send_failure(&self, failed: FailedNwkUnicast, next_hop: Nwk) {
+        if failed.source != self.state.network_address {
+            self.handle_relay_failure(failed, next_hop);
             return;
         }
 
-        let destination = nwk_frame.nwk_header.destination;
+        let destination = failed.destination;
         self.invalidate_routes_via(next_hop);
 
         if self.core().nib.routing.remove_route_record(destination) {
@@ -954,16 +954,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Zigbee spec 3.6.4.8.1: when relaying fails, the routes through the dead link are
     /// invalidated and the failure is reported back to the frame's originator.
-    fn handle_relay_failure(&self, nwk_frame: &NwkFrame, next_hop: Nwk) {
+    fn handle_relay_failure(&self, failed: FailedNwkUnicast, next_hop: Nwk) {
         self.invalidate_routes_via(next_hop);
 
-        let source = nwk_frame.nwk_header.source;
+        let source = failed.source;
 
         let destination_ieee = self.core().nib.address_map.eui64_for(source);
 
         // Spec 3.6.4.8.1: failures while relaying along a source route are reported
         // as such, so the concentrator can drop the stored route
-        let status_code = if nwk_frame.nwk_header.source_route.is_some() {
+        let status_code = if failed.source_routed {
             NwkNetworkStatus::SourceRouteFailure
         } else {
             NwkNetworkStatus::LinkFailure
@@ -976,7 +976,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 source,
                 NwkCommand::NetworkStatus(NwkNetworkStatusCommand {
                     status_code,
-                    network_address: nwk_frame.nwk_header.destination,
+                    network_address: failed.destination,
                 }),
             )
             .with_destination_ieee(destination_ieee)

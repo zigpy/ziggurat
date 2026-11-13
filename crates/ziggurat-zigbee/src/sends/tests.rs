@@ -8,6 +8,12 @@ use crate::constants::Tunables;
 
 use super::*;
 
+impl SendFrame for &'static str {
+    type Failure = ();
+
+    fn failure(&self) {}
+}
+
 type TestSends = Sends<&'static str, u8, SendFailure>;
 type TestActions = Actions<&'static str, u8, SendFailure>;
 

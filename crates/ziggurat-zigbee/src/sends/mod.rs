@@ -171,19 +171,26 @@ impl<F> InFlight<F> {
     }
 }
 
+/// A frame the send tables hold.
+pub trait SendFrame {
+    /// What the driver reads from a unicast's frame once the unicast fails at its next
+    /// hop.
+    type Failure: core::fmt::Debug;
+
+    fn failure(&self) -> Self::Failure;
+}
+
 /// What the driver must do after a mutation.
 #[derive(Debug)]
-pub enum Action<F, W, E> {
+pub enum Action<F: SendFrame, W, E> {
     /// The mesh accepted the send's frame; its waiter learns so.
     HandedOff(W),
-    /// The send is over. The frame is handed back so the driver drops it (and whatever
-    /// budget it holds). `failed_hop` names the next hop a unicast exhausted its
-    /// attempts at.
+    /// The send is over and its frame is dropped. `failed_hop` names the next hop a
+    /// unicast exhausted its attempts at, with what the driver needs from its frame.
     Settled {
         waiter: W,
         result: Result<(), E>,
-        frame: F,
-        failed_hop: Option<Nwk>,
+        failed_hop: Option<(Nwk, F::Failure)>,
     },
 }
 
@@ -191,15 +198,15 @@ pub enum Action<F, W, E> {
 /// so a mutation whose consequences are dropped is a compile-time warning.
 #[must_use = "actions resolve waiters; dropping them loses sends"]
 #[derive(Debug)]
-pub struct Actions<F, W, E>(Vec<Action<F, W, E>>);
+pub struct Actions<F: SendFrame, W, E>(Vec<Action<F, W, E>>);
 
-impl<F, W, E> Default for Actions<F, W, E> {
+impl<F: SendFrame, W, E> Default for Actions<F, W, E> {
     fn default() -> Self {
         Self(Vec::new())
     }
 }
 
-impl<F, W, E> Actions<F, W, E> {
+impl<F: SendFrame, W, E> Actions<F, W, E> {
     pub const fn new() -> Self {
         Self(Vec::new())
     }
@@ -209,19 +216,19 @@ impl<F, W, E> Actions<F, W, E> {
     }
 }
 
-impl<F, W, E> Extend<Action<F, W, E>> for Actions<F, W, E> {
+impl<F: SendFrame, W, E> Extend<Action<F, W, E>> for Actions<F, W, E> {
     fn extend<I: IntoIterator<Item = Action<F, W, E>>>(&mut self, actions: I) {
         self.0.extend(actions);
     }
 }
 
-impl<F, W, E> FromIterator<Action<F, W, E>> for Actions<F, W, E> {
+impl<F: SendFrame, W, E> FromIterator<Action<F, W, E>> for Actions<F, W, E> {
     fn from_iter<I: IntoIterator<Item = Action<F, W, E>>>(actions: I) -> Self {
         Self(actions.into_iter().collect())
     }
 }
 
-impl<F, W, E> IntoIterator for Actions<F, W, E> {
+impl<F: SendFrame, W, E> IntoIterator for Actions<F, W, E> {
     type Item = Action<F, W, E>;
     type IntoIter = alloc::vec::IntoIter<Action<F, W, E>>;
 
@@ -272,7 +279,7 @@ impl<F, W, E> Default for Sends<F, W, E> {
     }
 }
 
-impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
+impl<F: SendFrame, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     const fn next_id(&mut self) -> SendId {
         let id = SendId(self.next_id);
         self.next_id += 1;
