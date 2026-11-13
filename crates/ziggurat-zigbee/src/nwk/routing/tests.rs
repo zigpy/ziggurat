@@ -497,15 +497,18 @@ enum Step {
     Reply,
     /// The route to the device is lost.
     Break,
+    /// We relay another router's route request toward the device.
+    Relay,
 }
 
-const STEPS: [Step; 6] = [
+const STEPS: [Step; 7] = [
     Step::Hold,
     Step::Release,
     Step::Lapse,
     Step::Tick,
     Step::Reply,
     Step::Break,
+    Step::Relay,
 ];
 
 /// What `Routing` should hold about `DEVICE`.
@@ -520,19 +523,27 @@ struct Model {
     status: Option<Status>,
     /// A discovery we started has not lapsed.
     live: bool,
+    /// A discovery we relay has not lapsed.
+    relayed_live: bool,
     /// The device answered the latest discovery.
     replied: bool,
 }
 
 impl Model {
-    fn underway(&self) -> bool {
-        self.live && self.status == Some(Status::DiscoveryUnderway)
+    /// A route request of ours is on the network and may still be answered. This is
+    /// what a waiting frame needs, whatever the routing entry says.
+    const fn request_pending(&self) -> bool {
+        self.live && !self.replied
     }
 
-    /// Lapsed discoveries are only cleaned up by a pass or by the next discovery. An
-    /// unanswered one takes its routing entry with it.
+    fn underway(&self) -> bool {
+        self.request_pending() && self.status == Some(Status::DiscoveryUnderway)
+    }
+
+    /// Lapsed discoveries are only cleaned up by a pass, a received route request or
+    /// the next discovery. The last one to go takes an unanswered routing entry with it.
     fn expire(&mut self) {
-        if !self.live && self.status == Some(Status::DiscoveryUnderway) {
+        if !self.live && !self.relayed_live && self.status == Some(Status::DiscoveryUnderway) {
             self.status = None;
         }
     }
@@ -564,6 +575,14 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                 let starts = model.discoveries_left.is_none() && !model.underway();
                 assert_eq!(started.is_some(), starts, "{steps:?}");
 
+                // The first frame to wait is never left to a request that is spent
+                assert!(
+                    started.is_some()
+                        || model.discoveries_left.is_some()
+                        || model.request_pending(),
+                    "{steps:?}"
+                );
+
                 if model.discoveries_left.is_none() {
                     model.discoveries_left = Some(attempts - 1);
                 }
@@ -577,6 +596,7 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
             Step::Lapse => {
                 now = now + ROUTE_DISCOVERY_TIME;
                 model.live = false;
+                model.relayed_live = false;
             }
             Step::Tick => {
                 // The send tables go first: a held frame leaves once it has a next hop
@@ -623,10 +643,15 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                     request_id = Some(restart.1);
                 }
 
-                // A pass leaves every waiting frame with a discovery underway
-                assert!(!model.wanted || model.underway(), "{steps:?}");
+                // A pass leaves every waiting frame with a request that may still be
+                // answered, and with a wake for when it lapses
+                assert!(!model.wanted || model.request_pending(), "{steps:?}");
+                assert!(
+                    !model.wanted || routing.next_discovery_lapse(OWN, now).is_some(),
+                    "{steps:?}"
+                );
             }
-            Step::Reply if model.live && !model.replied => {
+            Step::Reply if model.request_pending() => {
                 let reply =
                     routing.accept_route_reply(OWN, OWN, request_id.unwrap(), DEVICE, NEIGHBOR, 3);
                 assert_eq!(
@@ -647,6 +672,21 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                     model.status = Some(Status::Inactive);
                 }
             }
+            Step::Relay => {
+                let request = RouteRequest {
+                    originator: ROUTER,
+                    destination: DEVICE,
+                    path_cost: 3,
+                };
+                assert!(receive(&mut routing, request, now), "{steps:?}");
+                routing.note_relayed_discovery(DEVICE);
+
+                model.expire();
+                model.relayed_live = true;
+                if model.status != Some(Status::Active) {
+                    model.status = Some(Status::DiscoveryUnderway);
+                }
+            }
         }
 
         assert_eq!(routing.route_status(DEVICE), model.status, "{steps:?}");
@@ -665,20 +705,27 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
     }
 }
 
-// Every sequence of seven events, with one and with two discovery attempts.
-#[test]
-fn test_own_discovery_matches_the_model_over_every_short_sequence() {
+/// Check every sequence of seven events.
+fn check_every_short_sequence(attempts: u8) {
     const LENGTH: u32 = 7;
 
-    for attempts in [1, 2] {
-        for mut sequence in 0..STEPS.len().pow(LENGTH) {
-            let mut steps = Vec::new();
-            for _ in 0..LENGTH {
-                steps.push(STEPS[sequence % STEPS.len()]);
-                sequence /= STEPS.len();
-            }
-
-            check_own_discovery(&steps, attempts);
+    for mut sequence in 0..STEPS.len().pow(LENGTH) {
+        let mut steps = Vec::new();
+        for _ in 0..LENGTH {
+            steps.push(STEPS[sequence % STEPS.len()]);
+            sequence /= STEPS.len();
         }
+
+        check_own_discovery(&steps, attempts);
     }
+}
+
+#[test]
+fn test_own_discovery_matches_the_model_with_one_attempt() {
+    check_every_short_sequence(1);
+}
+
+#[test]
+fn test_own_discovery_matches_the_model_with_two_attempts() {
+    check_every_short_sequence(2);
 }
