@@ -412,7 +412,18 @@ impl<R: Runtime> SpinelClient<R> {
         loop {
             let frame = {
                 let mut state = self.state.lock();
-                let frame = state.outbound.pop_front();
+
+                // A reset cancels the queued requests. Their commands remove the frames
+                // only when they next run, and the reset RCP must not get them before then
+                let frame = loop {
+                    let frame = state.outbound.pop_front();
+                    match &frame {
+                        Some(frame)
+                            if *state.protocol.transaction(frame.header.transaction_id)
+                                == Transaction::Cancelled => {}
+                        _ => break frame,
+                    }
+                };
                 // Resets carry no transaction
                 state.writing = frame
                     .as_ref()
