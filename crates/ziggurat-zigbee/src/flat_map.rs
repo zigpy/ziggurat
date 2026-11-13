@@ -317,45 +317,57 @@ impl<'a, K, V> VacantEntry<'a, K, V> {
 }
 
 pub struct FlatSet<T> {
-    map: FlatMap<T, ()>,
+    values: Vec<T>,
 }
 
 impl<T: Ord> FlatSet<T> {
     pub const fn new() -> Self {
-        Self {
-            map: FlatMap::new(),
-        }
+        Self { values: Vec::new() }
     }
 
     /// Returns whether the value was newly inserted.
     pub fn insert(&mut self, value: T) -> bool {
-        self.map.insert(value, ()).is_none()
+        match self.values.binary_search(&value) {
+            Ok(_) => false,
+            Err(i) => {
+                self.values.insert(i, value);
+                true
+            }
+        }
     }
 
     pub fn contains(&self, value: &T) -> bool {
-        self.map.contains_key(value)
+        self.values.binary_search(value).is_ok()
     }
 
     pub fn remove(&mut self, value: &T) -> bool {
-        self.map.remove(value).is_some()
+        self.values
+            .binary_search(value)
+            .map(|i| self.values.remove(i))
+            .is_ok()
     }
 }
 
 impl<T> FlatSet<T> {
     pub const fn len(&self) -> usize {
-        self.map.len()
+        self.values.len()
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.values.is_empty()
     }
 
     pub fn clear(&mut self) {
-        self.map.clear();
+        self.values.clear();
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.map.keys()
+        self.values.iter()
+    }
+
+    /// The values in sorted order.
+    pub fn as_slice(&self) -> &[T] {
+        &self.values
     }
 }
 
@@ -368,14 +380,14 @@ impl<T: Ord> Default for FlatSet<T> {
 impl<T: Clone> Clone for FlatSet<T> {
     fn clone(&self) -> Self {
         Self {
-            map: self.map.clone(),
+            values: self.values.clone(),
         }
     }
 }
 
 impl<T: PartialEq> PartialEq for FlatSet<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.map == other.map
+        self.values == other.values
     }
 }
 
@@ -411,11 +423,10 @@ impl<T: Ord> Extend<T> for FlatSet<T> {
 
 impl<'a, T> IntoIterator for &'a FlatSet<T> {
     type Item = &'a T;
-    type IntoIter = core::iter::Map<core::slice::Iter<'a, (T, ())>, fn(&'a (T, ())) -> &'a T>;
+    type IntoIter = core::slice::Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        let project: fn(&'a (T, ())) -> &'a T = |(v, ())| v;
-        self.map.entries.iter().map(project)
+        self.values.iter()
     }
 }
 
@@ -486,5 +497,6 @@ mod test {
         assert!(set.remove(&3));
         assert!(!set.remove(&3));
         assert_eq!(set.len(), 2);
+        assert_eq!(set.as_slice(), [1, 2]);
     }
 }

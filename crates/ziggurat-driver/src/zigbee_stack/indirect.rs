@@ -1,6 +1,5 @@
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame};
-use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioError, RadioPhy};
 
@@ -148,10 +147,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             table.extended_addresses
         );
 
-        let short: Vec<Nwk> = table.short_addresses.iter().copied().collect();
-        let extended: Vec<Eui64> = table.extended_addresses.iter().copied().collect();
         self.radio
-            .set_frame_pending_table(&short, &extended)
+            .set_frame_pending_table(
+                table.short_addresses.as_slice(),
+                table.extended_addresses.as_slice(),
+            )
             .await?;
 
         *self.src_match_written.lock() = table;
