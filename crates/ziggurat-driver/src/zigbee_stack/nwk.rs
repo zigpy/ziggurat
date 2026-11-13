@@ -51,7 +51,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// The device at `nwk` left or joined again, so what we know about the address
     /// belongs to its previous session. Held sends fail: they wait on a route request
-    /// the device never heard, and would block a new one until it expires.
+    /// the device never heard, and forgetting the address drops that discovery.
     pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
         self.forget_nwk_state_in(self.core(), nwk);
     }
