@@ -37,22 +37,28 @@ struct Queue<T> {
     state: Mutex<QueueState<T>>,
     ready: Notify,
     capacity: usize,
+    /// What the items are, for the log.
+    name: &'static str,
 }
 
 struct QueueState<T> {
     items: VecDeque<T>,
     closed: bool,
+    /// Items dropped since the consumer last took one.
+    dropped: u32,
 }
 
 impl<T> Queue<T> {
-    fn new(capacity: usize) -> Self {
+    fn new(name: &'static str, capacity: usize) -> Self {
         Self {
             state: Mutex::new(QueueState {
                 items: VecDeque::with_capacity(capacity),
                 closed: false,
+                dropped: 0,
             }),
             ready: Notify::new(),
             capacity,
+            name,
         }
     }
 
@@ -60,6 +66,7 @@ impl<T> Queue<T> {
         {
             let mut state = self.state.lock();
             if state.items.len() == self.capacity {
+                state.dropped += 1;
                 return;
             }
             state.items.push_back(item);
@@ -68,7 +75,9 @@ impl<T> Queue<T> {
     }
 
     fn clear(&self) {
-        self.state.lock().items.clear();
+        let mut state = self.state.lock();
+        state.items.clear();
+        state.dropped = 0;
     }
 
     /// End the stream: `recv` returns `None` once the queued items are consumed.
@@ -79,14 +88,27 @@ impl<T> Queue<T> {
 
     async fn recv(&self) -> Option<T> {
         loop {
-            {
+            let dropped = {
                 let mut state = self.state.lock();
                 if let Some(item) = state.items.pop_front() {
-                    return Some(item);
-                }
-                if state.closed {
+                    Some((item, core::mem::take(&mut state.dropped)))
+                } else if state.closed {
                     return None;
+                } else {
+                    None
                 }
+            };
+
+            // Logged once per burst, when the consumer catches up, not once per item
+            if let Some((item, dropped)) = dropped {
+                if dropped > 0 {
+                    tracing::warn!(
+                        "Dropped {dropped} {}: the queue of {} was full",
+                        self.name,
+                        self.capacity
+                    );
+                }
+                return Some(item);
             }
             self.ready.notified().await;
         }
@@ -106,8 +128,8 @@ impl<T: Send> Receiver<T> for QueueRx<T> {
 /// here and closes the previous one.
 type Slot<T> = Mutex<Option<Arc<Queue<T>>>>;
 
-fn subscribe<T>(slot: &Slot<T>, capacity: usize) -> QueueRx<T> {
-    let queue = Arc::new(Queue::new(capacity));
+fn subscribe<T>(slot: &Slot<T>, name: &'static str, capacity: usize) -> QueueRx<T> {
+    let queue = Arc::new(Queue::new(name, capacity));
     let previous = slot.lock().replace(Arc::clone(&queue));
     if let Some(previous) = previous {
         previous.close();
@@ -181,7 +203,7 @@ impl<R: Runtime> SpinelPhy<R> {
         let streams = Arc::new(Streams {
             rx: Mutex::new(None),
             reset: Mutex::new(None),
-            energy: Queue::new(8),
+            energy: Queue::new("energy scan results", 8),
         });
         let client_streams = Arc::clone(&streams);
 
@@ -466,10 +488,27 @@ impl<R: Runtime> RadioPhy for SpinelPhy<R> {
     }
 
     fn subscribe_rx(&self) -> QueueRx<RxFrame> {
-        subscribe(&self.streams.rx, 32)
+        subscribe(&self.streams.rx, "received frames", 32)
     }
 
     fn subscribe_reset(&self) -> QueueRx<ResetEvent> {
-        subscribe(&self.streams.reset, 8)
+        subscribe(&self.streams.reset, "reset events", 8)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_full_queue_counts_what_it_drops() {
+        let queue = Queue::new("items", 2);
+        for item in 0..5 {
+            queue.push(item);
+        }
+
+        let state = queue.state.lock();
+        assert_eq!(state.items, [0, 1]);
+        assert_eq!(state.dropped, 3);
     }
 }
