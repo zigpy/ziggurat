@@ -14,6 +14,9 @@ tracing = { version = "0.1", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
 
 spin = { version = "0.12", default-features = false, features = ["spin_mutex"] }
+# Without `std`, `Notify` and `AsyncMutex` guard their bookkeeping with a critical
+# section, so an interrupt can wake a task. The firmware provides the implementation.
+critical-section = "1.2"
 
 # With `std`, the blocking mutex is parking_lot's instead of a spinlock.
 parking_lot = { version = "0.12.5", optional = true }

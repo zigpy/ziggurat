@@ -1820,6 +1820,7 @@ dependencies = [
 name = "ziggurat-runtime"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "embassy-executor",
  "embassy-time",
  "futures",
