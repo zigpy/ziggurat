@@ -126,15 +126,45 @@ impl<T: Send> Receiver<T> for QueueRx<T> {
 
 /// The queue of the currently-subscribed stream. `subscribe_*` swaps a fresh queue in
 /// here and closes the previous one.
-type Slot<T> = Mutex<Option<Arc<Queue<T>>>>;
+struct SlotState<T> {
+    queue: Option<Arc<Queue<T>>>,
+    /// The link ended. A later subscription gets a stream that has already ended.
+    closed: bool,
+}
+
+type Slot<T> = Mutex<SlotState<T>>;
+
+const fn new_slot<T>() -> Slot<T> {
+    Mutex::new(SlotState {
+        queue: None,
+        closed: false,
+    })
+}
 
 fn subscribe<T>(slot: &Slot<T>, name: &'static str, capacity: usize) -> QueueRx<T> {
     let queue = Arc::new(Queue::new(name, capacity));
-    let previous = slot.lock().replace(Arc::clone(&queue));
+    let (previous, closed) = {
+        let mut slot = slot.lock();
+        (slot.queue.replace(Arc::clone(&queue)), slot.closed)
+    };
     if let Some(previous) = previous {
         previous.close();
     }
+    if closed {
+        queue.close();
+    }
     QueueRx(queue)
+}
+
+fn close_slot<T>(slot: &Slot<T>) {
+    let queue = {
+        let mut slot = slot.lock();
+        slot.closed = true;
+        slot.queue.clone()
+    };
+    if let Some(queue) = queue {
+        queue.close();
+    }
 }
 
 /// Where the Spinel client's unsolicited events land.
@@ -145,6 +175,13 @@ struct Streams {
 }
 
 impl Streams {
+    /// The link ended: every stream ends once its queued items are consumed.
+    fn close(&self) {
+        close_slot(&self.rx);
+        close_slot(&self.reset);
+        self.energy.close();
+    }
+
     fn deliver(&self, event: SpinelEvent) {
         match event {
             SpinelEvent::PropertyUpdate(update) => match update.property_id {
@@ -155,7 +192,7 @@ impl Streams {
                 property_id => tracing::debug!("Ignoring property update: {property_id:?}"),
             },
             SpinelEvent::Reset(status) => {
-                let queue = self.reset.lock().clone();
+                let queue = self.reset.lock().queue.clone();
                 if let Some(queue) = queue {
                     queue.push(ResetEvent {
                         reason: format!("{status:?}"),
@@ -175,7 +212,7 @@ impl Streams {
         if frame.psdu.len() < 2 {
             return;
         }
-        let queue = self.rx.lock().clone();
+        let queue = self.rx.lock().queue.clone();
         if let Some(queue) = queue {
             queue.push(RxFrame {
                 psdu: frame.psdu[..frame.psdu.len() - 2].to_vec(),
@@ -185,6 +222,14 @@ impl Streams {
                 timestamp_us: frame.timestamp_us,
             });
         }
+    }
+}
+
+struct CloseStreamsOnDrop<'a>(&'a Streams);
+
+impl Drop for CloseStreamsOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
@@ -203,8 +248,8 @@ impl<R: Runtime> Default for SpinelPhy<R> {
 impl<R: Runtime> SpinelPhy<R> {
     pub fn new() -> Self {
         let streams = Arc::new(Streams {
-            rx: Mutex::new(None),
-            reset: Mutex::new(None),
+            rx: new_slot(),
+            reset: new_slot(),
             energy: Queue::new("energy scan results", 8),
         });
         let client_streams = Arc::clone(&streams);
@@ -217,8 +262,10 @@ impl<R: Runtime> SpinelPhy<R> {
     }
 
     /// Drive the RCP link over its transport. Returns only when the transport fails;
-    /// nothing else on this PHY makes progress unless this is running.
+    /// nothing else on this PHY makes progress unless this is running. Runs once per
+    /// PHY: when it ends, returned or dropped, every stream ends too.
     pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> RadioError {
+        let _closing = CloseStreamsOnDrop(&self.streams);
         map_err(self.client.run(reader, writer).await)
     }
 
