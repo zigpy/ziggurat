@@ -209,6 +209,42 @@ fn test_unchanged_route_record_reports_a_relay_route_it_restores() {
     );
 }
 
+// A route record wins over the routing table, so a reported failure must remove it
+// too, whether it is direct or a source route.
+#[test]
+fn test_forget_route_to_drops_the_route_record_and_the_routing_entry() {
+    for relays in [vec![], vec![ROUTER]] {
+        let mut routing = Routing::default();
+        routing.restore_route(DEVICE, NEIGHBOR, 3);
+        routing.store_route_record(DEVICE, relays);
+
+        assert!(routing.forget_route_to(DEVICE));
+        assert_eq!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE), None);
+    }
+}
+
+#[test]
+fn test_forget_route_to_reports_only_a_removed_route_record() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3);
+
+    assert!(!routing.forget_route_to(DEVICE));
+    assert_eq!(routing.next_hop(DEVICE), None);
+}
+
+#[test]
+fn test_forget_route_to_leaves_other_destinations_alone() {
+    let mut routing = Routing::default();
+    routing.store_route_record(DEVICE, vec![ROUTER]);
+
+    routing.forget_route_to(DEVICE);
+
+    assert_eq!(
+        routing.route_to(ROUTER, MAX_SOURCE_ROUTE),
+        Some(Route::NextHop(ROUTER))
+    );
+}
+
 /// A frame of ours wants a route to `DEVICE`. Returns whether that starts a discovery.
 fn want(routing: &mut Routing, now: Instant, attempts: u8) -> bool {
     routing
@@ -362,6 +398,7 @@ fn test_removing_the_route_keeps_a_discovery_underway() {
         .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
         .unwrap();
     assert!(!routing.remove_route(DEVICE));
+    assert!(!routing.forget_route_to(DEVICE));
 
     let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3);
     assert_eq!(reply.disposition, RouteReplyDisposition::Established);
