@@ -6,7 +6,6 @@ use aes::cipher::{
     KeyInit, KeySizeUser, ParBlocksSizeUser,
 };
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use ccm::Ccm;
 use ccm::aead::AeadInOut;
 use ccm::consts::{U4, U13};
@@ -122,22 +121,38 @@ impl BlockCipherEncrypt for BackendAes {
 /// AES-MMO (Matyas-Meyer-Oseas) cryptographic hash, Zigbee spec B.1.3/B.4. Only the
 /// short-message padding scheme is implemented (inputs below 2^16 bits).
 pub fn aes_mmo_hash(data: &[u8]) -> [u8; 16] {
-    assert!(data.len() < 8192);
+    aes_mmo_hash_parts(&[data])
+}
 
-    let mut padded = data.to_vec();
-    padded.push(0x80);
-    while padded.len() % 16 != 14 {
-        padded.push(0x00);
-    }
-    padded.extend(((data.len() * 8) as u16).to_be_bytes());
+/// [`aes_mmo_hash`] of the concatenation of `parts`, hashed block by block as it is
+/// read.
+fn aes_mmo_hash_parts(parts: &[&[u8]]) -> [u8; 16] {
+    let len: usize = parts.iter().map(|part| part.len()).sum();
+    assert!(len < 8192);
+
+    // The message, a 1 bit, zeros up to 14 bytes past a block boundary, then the
+    // message length in bits
+    let zeros = (14 + 16 - (len + 1) % 16) % 16;
+    let padded = parts
+        .iter()
+        .flat_map(|part| part.iter().copied())
+        .chain([0x80])
+        .chain(core::iter::repeat_n(0x00, zeros))
+        .chain(((len * 8) as u16).to_be_bytes());
 
     let backend = backend();
     let mut digest = [0u8; 16];
+    let mut block = [0u8; 16];
 
-    for block in padded.as_chunks::<16>().0 {
+    for (index, byte) in padded.enumerate() {
+        block[index % 16] = byte;
+        if index % 16 != 15 {
+            continue;
+        }
+
         // MMO: encrypt the message block under the running digest as the key, then XOR the
         // ciphertext with the plaintext block.
-        let mut encrypted = *block;
+        let mut encrypted = block;
         backend.aes128_encrypt_block(&digest, &mut encrypted);
 
         for (digest_byte, (encrypted_byte, block_byte)) in
@@ -152,15 +167,11 @@ pub fn aes_mmo_hash(data: &[u8]) -> [u8; 16] {
 
 /// HMAC (FIPS Pub 198) instantiated with the AES-MMO hash, Zigbee spec B.1.4.
 pub fn keyed_hash(key: &Key, input: &[u8]) -> [u8; 16] {
-    let mut inner = Vec::with_capacity(16 + input.len());
-    inner.extend(key.0.iter().map(|b| b ^ 0x36));
-    inner.extend(input);
+    let inner_pad = key.0.map(|b| b ^ 0x36);
+    let outer_pad = key.0.map(|b| b ^ 0x5C);
 
-    let mut outer = Vec::with_capacity(32);
-    outer.extend(key.0.iter().map(|b| b ^ 0x5C));
-    outer.extend(aes_mmo_hash(&inner));
-
-    aes_mmo_hash(&outer)
+    let inner = aes_mmo_hash_parts(&[&inner_pad, input]);
+    aes_mmo_hash_parts(&[&outer_pad, &inner])
 }
 
 /// Zigbee spec 4.5.3: 1-octet input strings fed to the keyed hash to derive values from
