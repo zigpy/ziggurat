@@ -373,7 +373,10 @@ async fn handle_network_scan<P: RadioPhy>(
 ) -> Result<Response, Error> {
     let stack = running(app)?.clone();
 
-    stack.begin_network_scan();
+    let Some(_scan) = stack.begin_network_scan() else {
+        tracing::warn!("Network scan refused: another scan is running");
+        return Err(Status::ScanFailed.into());
+    };
     let duration = Duration::from_millis(u64::from(request.duration_per_channel_ms));
     let result = stack.run_network_scan(&request.channels, duration).await;
 

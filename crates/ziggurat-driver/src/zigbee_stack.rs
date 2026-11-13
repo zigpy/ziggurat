@@ -665,6 +665,8 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// Whether a network scan is collecting. The receive loop only queues beacons while
     /// this is set, so stray beacons outside a scan are dropped.
     scan_active: AtomicBool,
+    /// A scan request holds the scan state, until it has taken its last beacons.
+    scan_claimed: AtomicBool,
     /// Diagnostic: beacon frames that reached [`Self::handle_beacon`] during a scan.
     pub scan_beacon_frames: AtomicU32,
     pub scan_beacons: Mutex<VecDeque<NetworkBeacon>>,
@@ -719,6 +721,19 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// Woken whenever a task removes itself from `cancels`, so `shutdown` can await the
     /// set draining to empty.
     tasks_drained: Notify,
+}
+
+/// A scan request's hold on the stack's scan state, from
+/// [`ZigbeeStack::begin_network_scan`] until it is dropped. Keep it until the last
+/// beacons are taken.
+pub struct NetworkScan<'a> {
+    claimed: &'a AtomicBool,
+}
+
+impl Drop for NetworkScan<'_> {
+    fn drop(&mut self) {
+        self.claimed.store(false, AtomicOrdering::Release);
+    }
 }
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -783,6 +798,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
             reset_rx: AsyncMutex::new(reset_rx),
             scan_active: AtomicBool::new(false),
+            scan_claimed: AtomicBool::new(false),
             scan_beacon_frames: AtomicU32::new(0),
             scan_beacons: Mutex::new(VecDeque::new()),
             scan_beacon_wake: Notify::new(),
@@ -1235,10 +1251,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.scan_beacon_wake.notify_one();
     }
 
-    /// Open the beacon-collection window for an active scan.
-    pub fn begin_network_scan(&self) {
+    /// Open the beacon-collection window for an active scan. The scan state serves one
+    /// scan at a time, so this returns `None` while another request holds it, or while
+    /// the sweep of a request that was dropped still runs.
+    pub fn begin_network_scan(&self) -> Option<NetworkScan<'_>> {
+        if self.scan_claimed.swap(true, AtomicOrdering::AcqRel) {
+            return None;
+        }
+        let scan = NetworkScan {
+            claimed: &self.scan_claimed,
+        };
+
+        if self.scan_active.swap(true, AtomicOrdering::AcqRel) {
+            return None;
+        }
         self.scan_beacons.lock().clear();
-        self.scan_active.store(true, AtomicOrdering::Relaxed);
+
+        Some(scan)
     }
 
     /// Active scan: broadcast a beacon request on each channel and dwell to collect

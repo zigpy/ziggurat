@@ -827,7 +827,10 @@ impl ZigguratServer {
         // Open the collection window before spawning, so the drain loop below cannot
         // race ahead of the scan starting. The scan runs on its own task so it always
         // reaches its channel restore even if this request's task is dropped.
-        stack.begin_network_scan();
+        let Some(_scan) = stack.begin_network_scan() else {
+            tracing::warn!("Network scan refused: another scan is running");
+            return Err(proto::Status::ScanFailed.into());
+        };
         let duration = Duration::from_millis(u64::from(payload.duration_per_channel_ms));
         let scan_stack = stack.clone();
         let channels = payload.channels;
