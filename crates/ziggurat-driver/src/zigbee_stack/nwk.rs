@@ -219,7 +219,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             && !bypasses_transaction_table
         {
             if self.filter_broadcast(nwk_frame, sender_nwk) {
-                tracing::debug!("Filtering broadcast, stopping further processing");
+                tracing::trace!("Filtering broadcast, stopping further processing");
                 return false;
             }
 
@@ -593,7 +593,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
 
-            tracing::warn!("Failed to send unicast frame: {e}");
+            tracing::warn!(
+                "Failed to send unicast frame to {:?}: {e}",
+                nwk_frame.nwk_header.destination
+            );
         }
 
         result

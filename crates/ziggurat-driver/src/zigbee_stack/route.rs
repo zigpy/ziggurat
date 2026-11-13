@@ -430,6 +430,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     AddrConflictSource::Network,
                 );
             }
+            // A frame we sent to a sleepy child expired in its parent's queue. Nothing
+            // to repair: the route is fine, the child did not poll in time.
+            NwkNetworkStatus::IndirectTransactionExpiry => {}
             _ => {
                 tracing::warn!("Unhandled network status: {network_status_cmd:?}");
             }

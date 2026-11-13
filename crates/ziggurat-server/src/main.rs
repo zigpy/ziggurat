@@ -10,6 +10,7 @@ use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_serial::{FlowControl, SerialPortBuilderExt};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::Instrument;
 use tracing_subscriber::filter::LevelFilter;
@@ -144,7 +145,16 @@ impl ZigguratServer {
         let server = self.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = server.handle_connection(socket, &addr).await {
+            // Health probes open a TCP connection and close it without a handshake
+            let websocket = match tokio_tungstenite::accept_async(socket).await {
+                Ok(websocket) => websocket,
+                Err(e) => {
+                    tracing::debug!("Connection {addr} closed before the WebSocket handshake: {e}");
+                    return;
+                }
+            };
+
+            if let Err(e) = server.handle_connection(websocket, &addr).await {
                 tracing::warn!("Connection {addr} ended with error: {e}");
             }
 
@@ -272,13 +282,12 @@ impl ZigguratServer {
 
     async fn handle_connection<S>(
         self: &Arc<Self>,
-        socket: S,
+        websocket: WebSocketStream<S>,
         addr: &str,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let websocket = tokio_tungstenite::accept_async(socket).await?;
         let (mut sink, mut stream) = websocket.split();
 
         tracing::info!("Client {addr} connected");
