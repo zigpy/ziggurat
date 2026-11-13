@@ -37,7 +37,8 @@ mod sends;
 mod tasklets;
 mod zdp;
 
-pub use send_handle::{SendHandle, SendProgress, SendSlot};
+use send_handle::SendWatches;
+pub use send_handle::{SendHandle, SendProgress};
 
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
@@ -96,8 +97,8 @@ pub enum EnqueueError {
     NotStarted,
 }
 
-/// A send's terminal verdict, resolved into its slot once the mesh has spoken. `Clone`
-/// because a slot hands copies to its awaiter(s) and the wire tracker. Maps to the wire
+/// A send's terminal verdict, resolved into its watch once the mesh has spoken. `Clone`
+/// because a watch hands copies to its awaiter(s) and the wire tracker. Maps to the wire
 /// `SendStatus` channel only.
 #[derive(Error, Debug, Clone)]
 pub enum DeliveryError {
@@ -297,7 +298,7 @@ impl SendFrame for Frame {
 }
 
 /// The send table, specialised to the driver's types. See [`Sends`].
-pub type SendTable = Sends<Frame, Arc<SendSlot>, DeliveryError>;
+pub type SendTable = Sends<Frame, DeliveryError>;
 
 /// A unicast handed to [`ZigbeeStack::send_unicast`].
 #[derive(Debug)]
@@ -733,6 +734,8 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     pub(crate) send_wake: Notify,
     /// Wakes the send timer task when the send table's next deadline may have moved.
     pub(crate) send_timer_wake: Notify,
+    /// The verdicts of the sends someone holds a handle to.
+    pub(crate) send_watches: Arc<SendWatches>,
 
     /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
     /// stopped: a leaked background task would keep the replaced stack processing frames
@@ -838,6 +841,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tasklets: tasklets::Tasklets::default(),
             broadcast_budget: Mutex::new(BroadcastBudget::new(initial_broadcast_tokens)),
             send_wake: Notify::new(),
+            send_watches: Arc::new(SendWatches::default()),
             send_timer_wake: Notify::new(),
             spawner,
             cancels: Mutex::new(FlatMap::new()),
@@ -1422,10 +1426,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // entries; on embassy it is a no-op.
         self.spawner.shutdown().await;
 
-        let waiters = self.core().sends.abandon();
-        for waiter in waiters {
-            waiter.settled(Err(DeliveryError::Cancelled));
-        }
+        let mut core = self.core();
+        core.sends.abandon();
+        self.run_send_actions(core);
     }
 
     pub fn next_aps_counter(&self) -> u8 {

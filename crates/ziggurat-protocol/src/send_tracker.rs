@@ -45,7 +45,7 @@ struct TrackedSend {
     emitted_send_confirm: bool,
 }
 
-/// The per-transport map of in-flight tracked sends. Entries resolve as their slots do
+/// The per-transport map of in-flight tracked sends. Entries resolve as their sends do
 /// and are removed by [`sweep`](Self::sweep) once every frame they owe has been emitted.
 pub struct SendTracker {
     entries: FlatMap<RequestId, TrackedSend>,
@@ -69,7 +69,7 @@ impl SendTracker {
     }
 
     /// Begin tracking a send under its wire `request_id`. Registers the shared wake on
-    /// the handle; the slot may already be resolved, so the shell must self-notify once
+    /// the handle; the send may already be resolved, so the shell must self-notify once
     /// after inserting (the sweep re-checks everything, closing the race).
     pub fn insert(&mut self, id: RequestId, handle: SendHandle, confirm_kind: ConfirmKind) {
         handle.set_completion_wake(self.wake.clone());

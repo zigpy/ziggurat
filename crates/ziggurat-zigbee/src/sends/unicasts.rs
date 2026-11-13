@@ -1,7 +1,6 @@
 //! Unicasts with a known next hop: delivered directly with NWK retries, or to a sleepy
 //! child when it polls (802.15.4 spec 6.7.3).
 
-use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::marker::PhantomData;
 use core::time::Duration;
@@ -20,10 +19,9 @@ use super::{
 
 /// What a unicast is enqueued with.
 #[derive(Debug)]
-pub struct Unicast<F, W> {
+pub struct Unicast<F> {
     pub frame: F,
     pub priority: TxPriority,
-    pub waiter: W,
     pub confirm: Confirm,
     pub next_hop: Nwk,
     /// The address the device polls under, for a frame held until it polls (802.15.4
@@ -48,11 +46,10 @@ enum Stage {
 }
 
 #[derive(Debug)]
-struct Record<F, W> {
+struct Record<F> {
     /// `None` exactly while the frame is on loan to the radio (`Stage::Transmitting`).
     frame: Option<F>,
     priority: TxPriority,
-    waiter: W,
     confirm: Confirm,
     next_hop: Nwk,
     poll_address: Option<Ieee802154Address>,
@@ -65,7 +62,7 @@ struct Record<F, W> {
     copy_of: Option<SendId>,
 }
 
-impl<F, W> Record<F, W> {
+impl<F> Record<F> {
     /// The address this send keeps a frame-pending bit set for, if any.
     const fn pending_for(&self) -> Option<Ieee802154Address> {
         match (self.poll_address, self.stage) {
@@ -101,12 +98,12 @@ impl<F, W> Record<F, W> {
 }
 
 #[derive(Debug)]
-pub(super) struct Unicasts<F, W, E> {
-    records: FlatMap<SendId, Record<F, W>>,
+pub(super) struct Unicasts<F, E> {
+    records: FlatMap<SendId, Record<F>>,
     _error: PhantomData<fn() -> E>,
 }
 
-impl<F, W, E> Default for Unicasts<F, W, E> {
+impl<F, E> Default for Unicasts<F, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
@@ -115,7 +112,7 @@ impl<F, W, E> Default for Unicasts<F, W, E> {
     }
 }
 
-impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
+impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }
@@ -127,7 +124,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
-        unicast: Unicast<F, W>,
+        unicast: Unicast<F>,
         now: Instant,
         admitted_deadline: Option<Instant>,
         copy_of: Option<SendId>,
@@ -146,7 +143,6 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             Record {
                 frame: Some(unicast.frame),
                 priority: unicast.priority,
-                waiter: unicast.waiter,
                 confirm: unicast.confirm,
                 next_hop: unicast.next_hop,
                 poll_address: unicast.poll_address,
@@ -202,7 +198,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         retry_delay: Duration,
-        outbox: &mut Outbox<F, W, E>,
+        outbox: &mut Outbox<F, E>,
     ) {
         let record = self
             .records
@@ -239,7 +235,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
     /// The frame reached its next hop: settle the send, or start waiting for its ack
     /// unless `acked` says it already arrived.
-    fn handed_off(&mut self, id: SendId, now: Instant, acked: bool, outbox: &mut Outbox<F, W, E>) {
+    fn handed_off(&mut self, id: SendId, now: Instant, acked: bool, outbox: &mut Outbox<F, E>) {
         let record = self.records.get_mut(&id).unwrap();
 
         let wait = match record.confirm {
@@ -255,7 +251,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         record.stage = Stage::AwaitingApsAck;
         record.deadline = now + wait;
 
-        outbox.push_back(Action::HandedOff(record.waiter.clone()));
+        outbox.push_back(Action::HandedOff(id));
     }
 
     /// Remove a record and report its verdict.
@@ -264,25 +260,26 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         id: SendId,
         result: Result<(), E>,
         failed_hop: Option<Nwk>,
-        outbox: &mut Outbox<F, W, E>,
+        outbox: &mut Outbox<F, E>,
     ) {
         let record = self.records.remove(&id).unwrap();
-        Self::settled(record, result, failed_hop, outbox);
+        Self::settled(id, record, result, failed_hop, outbox);
     }
 
     /// Report the verdict of a record removed from the table.
     fn settled(
-        record: Record<F, W>,
+        id: SendId,
+        record: Record<F>,
         result: Result<(), E>,
         failed_hop: Option<Nwk>,
-        outbox: &mut Outbox<F, W, E>,
+        outbox: &mut Outbox<F, E>,
     ) {
         let frame = record
             .frame
             .expect("a transmitting send is never settled from outside");
 
         outbox.push_back(Action::Settled {
-            waiter: record.waiter,
+            id,
             result,
             failed_hop: failed_hop.map(|next_hop| (next_hop, frame.failure())),
         });
@@ -321,7 +318,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
 
     /// An end-to-end APS ack arrived. It settles the oldest send waiting for it; the
     /// ack carries no way to tell two frames sharing a key apart.
-    pub(super) fn ack_received(&mut self, ack: &ApsAckData, outbox: &mut Outbox<F, W, E>) {
+    pub(super) fn ack_received(&mut self, ack: &ApsAckData, outbox: &mut Outbox<F, E>) {
         let matched = self
             .records
             .iter()
@@ -348,7 +345,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         &mut self,
         eui64: Option<Eui64>,
         nwk: Nwk,
-        outbox: &mut Outbox<F, W, E>,
+        outbox: &mut Outbox<F, E>,
     ) {
         let dropped =
             self.records
@@ -362,8 +359,9 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
                     _ => None,
                 });
 
-        for (_, record, destination) in dropped {
+        for (id, record, destination) in dropped {
             Self::settled(
+                id,
                 record,
                 Err(SendFailure::IndirectExpired { destination }.into()),
                 None,
@@ -372,18 +370,20 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
         }
     }
 
-    /// Drop every record and return its waiter: the stack is shutting down and no
-    /// frame, in the radio or not, is ever reported on again.
-    pub(super) fn abandon(&mut self) -> Vec<W> {
-        let mut waiters = Vec::new();
-        while let Some((_, record)) = self.records.pop_first() {
-            waiters.push(record.waiter);
+    /// Settle every record as cancelled: the stack is shutting down and no frame, in
+    /// the radio or not, is ever reported on again.
+    pub(super) fn abandon(&mut self, outbox: &mut Outbox<F, E>) {
+        while let Some((id, _)) = self.records.pop_first() {
+            outbox.push_back(Action::Settled {
+                id,
+                result: Err(SendFailure::Cancelled.into()),
+                failed_hop: None,
+            });
         }
-        waiters
     }
 
     /// Whether the send was cancelled: not if it is in the radio right now, or unknown.
-    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, W, E>) -> bool {
+    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, E>) -> bool {
         let Some(record) = self.records.get(&id) else {
             return false;
         };
@@ -402,19 +402,19 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
     }
 
     /// Cancel the copies of a broadcast to its sleepy children. None may be in the radio.
-    pub(super) fn cancel_copies(&mut self, broadcast: SendId, outbox: &mut Outbox<F, W, E>) {
+    pub(super) fn cancel_copies(&mut self, broadcast: SendId, outbox: &mut Outbox<F, E>) {
         let copies = self
             .records
             .extract_if(|_, record| record.copy_of == Some(broadcast));
 
-        for (_, record) in copies {
+        for (id, record) in copies {
             assert!(!matches!(record.stage, Stage::Transmitting { .. }));
-            Self::settled(record, Err(SendFailure::Cancelled.into()), None, outbox);
+            Self::settled(id, record, Err(SendFailure::Cancelled.into()), None, outbox);
         }
     }
 
     /// Re-queue retries that are due and fail records past their deadline.
-    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, W, E>) {
+    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, E>) {
         let lapsed = self.records.extract_map(|_, record| {
             if let Stage::Retrying { at } = record.stage
                 && at <= now
@@ -429,8 +429,8 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Unicasts<F, W, E> {
             }
         });
 
-        for (_, record, failure) in lapsed {
-            Self::settled(record, Err(failure.into()), None, outbox);
+        for (id, record, failure) in lapsed {
+            Self::settled(id, record, Err(failure.into()), None, outbox);
         }
     }
 

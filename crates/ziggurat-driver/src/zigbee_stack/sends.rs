@@ -7,7 +7,6 @@
 //! their verdicts in the order the table reached them. Resolving a waiter only marks
 //! its task ready: it runs once the lock is released.
 
-use alloc::sync::Arc;
 use core::time::Duration;
 
 use ziggurat_ieee_802154::Ieee802154Address;
@@ -21,12 +20,12 @@ use crate::runtime::Runtime;
 
 use super::{
     Confirm, CoreGuard, DeliveryError, Frame, Nib, NwkSecurityMode, RouteDirective, Schedule,
-    SendHandle, SendId, SendMode, SendSlot, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
+    SendHandle, SendId, SendMode, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Enqueue a unicast to `next_hop`, held until the device polls under
-    /// `poll_address` if it is given. Every send gets a slot: dropping the returned
+    /// `poll_address` if it is given. Every send gets a handle: dropping the returned
     /// handle is how a caller detaches from a send it does not await.
     pub(super) fn enqueue_unicast(
         &self,
@@ -53,12 +52,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         next_hop: Nwk,
         poll_address: Option<Ieee802154Address>,
     ) -> SendHandle {
-        let slot = Arc::new(SendSlot::default());
         let id = core.sends.enqueue_unicast(
             UnicastRecord {
                 frame,
                 priority: policy.priority,
-                waiter: slot.clone(),
                 confirm,
                 next_hop,
                 poll_address,
@@ -67,7 +64,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &self.tunables,
         );
 
-        SendHandle::new(id, slot)
+        SendHandle::new(id, &self.send_watches)
     }
 
     /// Enqueue a broadcast, or any frame transmitted on a schedule.
@@ -91,19 +88,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         policy: TxPolicy,
         schedule: Schedule,
     ) -> SendHandle {
-        let slot = Arc::new(SendSlot::default());
         let id = core.sends.enqueue_broadcast(
             BroadcastRecord {
                 frame,
                 priority: policy.priority,
-                waiter: slot.clone(),
                 schedule,
             },
             self.core_now(),
             &self.tunables,
         );
 
-        SendHandle::new(id, slot)
+        SendHandle::new(id, &self.send_watches)
     }
 
     /// Finish a mutation of the send table from any task but the timer: carry out its
@@ -120,31 +115,31 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// A unicast that failed at its next hop is handled once the core is released,
     /// since that locks the core again; its waiter learns its verdict after. Taking the
     /// guard is what guarantees the core is unlocked by then.
-    fn run_send_actions(&self, mut core: CoreGuard<'_>) {
+    pub(super) fn run_send_actions(&self, mut core: CoreGuard<'_>) {
         let mut failed_unicast = None;
 
         while let Some(action) = core.sends.next_action() {
             match action {
-                Action::HandedOff(slot) => slot.handed_off(),
+                Action::HandedOff(id) => self.send_watches.handed_off(id),
                 Action::Settled {
-                    waiter,
+                    id,
                     result,
                     failed_hop: Some((next_hop, Some(failed))),
                 } => {
                     // Only a transmit report fails a unicast at its next hop, one at a time
                     assert!(failed_unicast.is_none());
-                    failed_unicast = Some((failed, next_hop, waiter, result));
+                    failed_unicast = Some((failed, next_hop, id, result));
                 }
-                Action::Settled { waiter, result, .. } => waiter.settled(result),
+                Action::Settled { id, result, .. } => self.send_watches.settled(id, result),
             }
         }
 
         drop(core);
 
-        if let Some((failed, next_hop, waiter, result)) = failed_unicast {
+        if let Some((failed, next_hop, id, result)) = failed_unicast {
             tracing::error!("Failed to send unicast frame after all attempts");
             self.handle_unicast_send_failure(failed, next_hop);
-            waiter.settled(result);
+            self.send_watches.settled(id, result);
         }
 
         self.send_wake.notify_one();

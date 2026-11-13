@@ -253,7 +253,7 @@ impl ZigguratServer {
     }
 
     /// Register a freshly-issued send in this connection's tracker, then self-notify so
-    /// the sweep runs even if the slot resolved before registration (it re-checks
+    /// the sweep runs even if the send resolved before registration (it re-checks
     /// everything, closing the race).
     fn register_send(
         &self,

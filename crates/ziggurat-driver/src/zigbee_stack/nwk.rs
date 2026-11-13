@@ -4,7 +4,6 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
-use alloc::sync::Arc;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -25,7 +24,7 @@ use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 use super::{
     AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError,
     FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective,
-    Schedule, SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore,
+    Schedule, SendHandle, SendId, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore,
     ZigbeeNotification, ZigbeeStack,
 };
 
@@ -414,13 +413,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
             NextHop::NeedDiscovery => {
                 tracing::debug!("Holding frame until a route to {destination:?} is known");
-                let slot = Arc::new(SendSlot::default());
-
                 let id = core.sends.enqueue_unrouted_unicast(
                     UnroutedUnicast {
                         frame: Frame::nwk(nwk_frame, security),
                         priority: policy.priority,
-                        waiter: slot.clone(),
                         confirm,
                         destination,
                     },
@@ -445,7 +441,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     );
                 }
 
-                SendHandle::new(id, slot)
+                SendHandle::new(id, &self.send_watches)
             }
             NextHop::Discard => {
                 tracing::debug!(
@@ -649,7 +645,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let unicast = UnicastRecord {
                 frame: Frame::nwk(nwk_frame.clone(), security),
                 priority: policy.priority,
-                waiter: Arc::new(SendSlot::default()),
                 confirm: Confirm::OnHandoff,
                 next_hop: child_nwk,
                 poll_address: Some(Ieee802154Address::Eui64(child_eui64)),

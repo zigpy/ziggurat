@@ -5,7 +5,6 @@
 //! outstanding. Every copy, the first included, is queued by the tick its schedule
 //! makes it due on; only a `Once` schedule queues its copy at admission.
 
-use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::marker::PhantomData;
 use core::time::Duration;
@@ -44,10 +43,9 @@ pub enum Schedule {
 
 /// What a broadcast is enqueued with.
 #[derive(Debug)]
-pub struct Broadcast<F, W> {
+pub struct Broadcast<F> {
     pub frame: F,
     pub priority: TxPriority,
-    pub waiter: W,
     pub schedule: Schedule,
 }
 
@@ -69,11 +67,10 @@ enum CopyState {
 }
 
 #[derive(Debug)]
-struct Record<F, W, E> {
+struct Record<F, E> {
     /// `None` exactly while a copy is on loan to the radio (`CopyState::Transmitting`).
     frame: Option<F>,
     priority: TxPriority,
-    waiter: W,
     schedule: Schedule,
     copy: CopyState,
     handed_off: bool,
@@ -87,7 +84,7 @@ struct Record<F, W, E> {
     deadline: Instant,
 }
 
-impl<F, W, E> Record<F, W, E> {
+impl<F, E> Record<F, E> {
     const fn next_attempt(&self) -> Option<Instant> {
         match self.schedule {
             Schedule::Once => None,
@@ -109,12 +106,12 @@ impl<F, W, E> Record<F, W, E> {
 }
 
 #[derive(Debug)]
-pub(super) struct Broadcasts<F, W, E> {
-    records: FlatMap<SendId, Record<F, W, E>>,
+pub(super) struct Broadcasts<F, E> {
+    records: FlatMap<SendId, Record<F, E>>,
     _error: PhantomData<fn() -> E>,
 }
 
-impl<F, W, E> Default for Broadcasts<F, W, E> {
+impl<F, E> Default for Broadcasts<F, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
@@ -123,12 +120,12 @@ impl<F, W, E> Default for Broadcasts<F, W, E> {
     }
 }
 
-impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
+impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
     /// The send fails if still not over within the handoff timeout.
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
-        broadcast: Broadcast<F, W>,
+        broadcast: Broadcast<F>,
         now: Instant,
         tunables: &Tunables,
     ) {
@@ -137,7 +134,6 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             Record {
                 frame: Some(broadcast.frame),
                 priority: broadcast.priority,
-                waiter: broadcast.waiter,
                 schedule: broadcast.schedule,
                 copy: match broadcast.schedule {
                     Schedule::Once => CopyState::Queued,
@@ -181,7 +177,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         result: Result<(), E>,
         now: Instant,
         passive_ack_interval: Duration,
-        outbox: &mut Outbox<F, W, E>,
+        outbox: &mut Outbox<F, E>,
     ) {
         let record = self
             .records
@@ -218,7 +214,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
         let delivered = record.quorum_heard && record.handed_off;
         if first_handoff {
-            outbox.push_back(Action::HandedOff(record.waiter.clone()));
+            outbox.push_back(Action::HandedOff(id));
         }
         if delivered {
             self.settle(id, Ok(()), outbox);
@@ -226,13 +222,13 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     }
 
     /// Remove a record and report its verdict.
-    fn settle(&mut self, id: SendId, result: Result<(), E>, outbox: &mut Outbox<F, W, E>) {
+    fn settle(&mut self, id: SendId, result: Result<(), E>, outbox: &mut Outbox<F, E>) {
         let record = self.records.remove(&id).unwrap();
-        Self::settled(record, result, outbox);
+        Self::settled(id, record, result, outbox);
     }
 
     /// Report the verdict of a record removed from the table.
-    fn settled(record: Record<F, W, E>, result: Result<(), E>, outbox: &mut Outbox<F, W, E>) {
+    fn settled(id: SendId, record: Record<F, E>, result: Result<(), E>, outbox: &mut Outbox<F, E>) {
         drop(
             record
                 .frame
@@ -240,7 +236,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         );
 
         outbox.push_back(Action::Settled {
-            waiter: record.waiter,
+            id,
             result,
             failed_hop: None,
         });
@@ -252,7 +248,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     pub(super) fn deliver(
         &mut self,
         mut heard: impl FnMut((Nwk, u8)) -> bool,
-        outbox: &mut Outbox<F, W, E>,
+        outbox: &mut Outbox<F, E>,
     ) {
         let delivered = self.records.extract_if(|_, record| {
             let Schedule::PassiveAck { key, .. } = record.schedule else {
@@ -269,19 +265,21 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             true
         });
 
-        for (_, record) in delivered {
-            Self::settled(record, Ok(()), outbox);
+        for (id, record) in delivered {
+            Self::settled(id, record, Ok(()), outbox);
         }
     }
 
-    /// Drop every record and return its waiter: the stack is shutting down and no
-    /// copy, in the radio or not, is ever reported on again.
-    pub(super) fn abandon(&mut self) -> Vec<W> {
-        let mut waiters = Vec::new();
-        while let Some((_, record)) = self.records.pop_first() {
-            waiters.push(record.waiter);
+    /// Settle every record as cancelled: the stack is shutting down and no copy, in the
+    /// radio or not, is ever reported on again.
+    pub(super) fn abandon(&mut self, outbox: &mut Outbox<F, E>) {
+        while let Some((id, _)) = self.records.pop_first() {
+            outbox.push_back(Action::Settled {
+                id,
+                result: Err(SendFailure::Cancelled.into()),
+                failed_hop: None,
+            });
         }
-        waiters
     }
 
     pub(super) fn contains(&self, id: SendId) -> bool {
@@ -290,7 +288,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
     /// Whether the send was cancelled: not if a copy is in the radio right now, or the
     /// send is unknown.
-    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, W, E>) -> bool {
+    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, E>) -> bool {
         let Some(record) = self.records.get(&id) else {
             return false;
         };
@@ -305,7 +303,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
     /// radio right now cannot be recalled: its schedule is emptied instead, so the
     /// record settles when it next comes due (a `Once` schedule settles on the copy's
     /// own report).
-    pub(super) fn stop(&mut self, id: SendId, outbox: &mut Outbox<F, W, E>) {
+    pub(super) fn stop(&mut self, id: SendId, outbox: &mut Outbox<F, E>) {
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
@@ -327,7 +325,7 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
 
     /// Queue copies that are due, complete or fail schedules that ran out, and fail
     /// records past their deadline.
-    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, W, E>) {
+    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, E>) {
         let over = self.records.extract_map(|_, record| {
             if record.copy == CopyState::Transmitting {
                 return None;
@@ -359,8 +357,8 @@ impl<F: SendFrame, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             None
         });
 
-        for (_, record, result) in over {
-            Self::settled(record, result, outbox);
+        for (id, record, result) in over {
+            Self::settled(id, record, result, outbox);
         }
     }
 
