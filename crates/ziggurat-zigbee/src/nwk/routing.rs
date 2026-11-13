@@ -137,7 +137,8 @@ pub struct DiscoveryEntry {
     /// device.
     pub forward_cost: u8,
     /// The accumulated path cost from the current device to the destination device.
-    pub residual_cost: u8,
+    /// `None` until a route reply is accepted.
+    pub residual_cost: Option<u8>,
     /// A countdown timer indicating the number of milliseconds until route discovery
     /// expires. The initial value is `nwkcRouteDiscoveryTime`.
     pub expiration_time: Instant,
@@ -304,7 +305,7 @@ impl Routing {
                 entry.source_address == own_address
                     && entry.destination_address == destination
                     && entry.expiration_time > now
-                    && entry.residual_cost == u8::MAX
+                    && entry.residual_cost.is_none()
             })
     }
 
@@ -567,7 +568,7 @@ impl Routing {
                 source_address: own_address,
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
-                residual_cost: u8::MAX,
+                residual_cost: None,
                 expiration_time: now + route_discovery_time,
                 destination_address: destination,
             });
@@ -599,7 +600,7 @@ impl Routing {
                 source_address: own_address,
                 sender_address: UNKNOWN_NEXT_HOP,
                 forward_cost: 0,
-                residual_cost: u8::MAX,
+                residual_cost: None,
                 expiration_time: now + route_discovery_time,
                 destination_address: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
             },
@@ -649,7 +650,7 @@ impl Routing {
                         source_address: originator,
                         sender_address: sender,
                         forward_cost: updated_path_cost,
-                        residual_cost: u8::MAX,
+                        residual_cost: None,
                         expiration_time: now + route_discovery_time,
                         destination_address: destination,
                     },
@@ -733,10 +734,12 @@ impl Routing {
         // If we are the originator, handling is simplified
         if originator == own_address {
             if routing_entry.status == Status::Active
-                && updated_path_cost >= discovery_entry.residual_cost
+                && discovery_entry
+                    .residual_cost
+                    .is_some_and(|residual_cost| updated_path_cost >= residual_cost)
             {
                 tracing::debug!(
-                    "Ignoring route reply for us with higher cost ({} > {})",
+                    "Ignoring route reply for us with higher cost ({} > {:?})",
                     updated_path_cost,
                     discovery_entry.residual_cost
                 );
@@ -756,7 +759,7 @@ impl Routing {
             routing_entry.status = Status::Active;
             routing_entry.next_hop_address = sender;
             routing_entry.path_cost = updated_path_cost;
-            discovery_entry.residual_cost = updated_path_cost;
+            discovery_entry.residual_cost = Some(updated_path_cost);
 
             let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
                 destination: responder,
@@ -772,9 +775,12 @@ impl Routing {
 
         // Otherwise, we need to decide if we need to update our own routes and possibly
         // relay the frame
-        if updated_path_cost >= discovery_entry.residual_cost {
+        if discovery_entry
+            .residual_cost
+            .is_some_and(|residual_cost| updated_path_cost >= residual_cost)
+        {
             tracing::debug!(
-                "Ignoring unsolicited route reply with higher cost ({} > {})",
+                "Ignoring unsolicited route reply with higher cost ({} > {:?})",
                 updated_path_cost,
                 discovery_entry.residual_cost
             );
@@ -787,7 +793,7 @@ impl Routing {
         routing_entry.status = Status::Active;
         routing_entry.next_hop_address = sender;
         routing_entry.path_cost = updated_path_cost;
-        discovery_entry.residual_cost = updated_path_cost;
+        discovery_entry.residual_cost = Some(updated_path_cost);
 
         // The reply travels back along the path the request came from
         let next_hop = discovery_entry.sender_address;

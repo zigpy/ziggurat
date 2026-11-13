@@ -454,6 +454,24 @@ fn test_relayed_discovery_does_not_revive_our_answered_one() {
     assert!(want(&mut routing, START, 1));
 }
 
+// A reply can carry the highest path cost. It still answers the discovery.
+#[test]
+fn test_reply_with_the_highest_path_cost_answers_the_discovery() {
+    let mut routing = Routing::default();
+    let request_id = routing
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
+        .unwrap();
+
+    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, u8::MAX);
+    assert_eq!(reply.disposition, RouteReplyDisposition::Established);
+    assert_eq!(tick(&mut routing, START, false), DiscoveryTick::default());
+
+    routing.invalidate_via(NEIGHBOR);
+    routing.note_relayed_discovery(DEVICE);
+
+    assert!(want(&mut routing, START, 1));
+}
+
 // The route can be lost between the reply and the pass that would have released the
 // held frame. The frame must not be left waiting with no discovery behind it.
 #[test]
