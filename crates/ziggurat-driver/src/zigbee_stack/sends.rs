@@ -189,12 +189,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             unreachable!("only NWK unicasts await a route")
         };
 
+        // A forced discovery holds the frame only while it is underway. Once it is
+        // answered or has lapsed, the frame takes any route like every other frame
+        let mut policy = self.next_hop_policy();
+        policy.force_route_discovery &= nib.routing.own_discovery_underway(
+            self.state.network_address,
+            nwk_frame.nwk_header.destination,
+            now,
+        );
+
         let resolved = next_hop::resolve(
             &nib.routing,
             &nib.neighbors,
             nwk_frame,
             &SendMode::Route(RouteDirective::StackDecides),
-            self.next_hop_policy(),
+            policy,
             now,
         );
 

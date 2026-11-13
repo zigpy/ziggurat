@@ -298,7 +298,7 @@ impl Routing {
     /// it. The status alone does not say so: relaying another router's route request
     /// sets it too, even after our own discovery was answered and its route lost. So
     /// a discovery of ours must also be live and have no reply yet.
-    fn own_discovery_underway(&self, own_address: Nwk, destination: Nwk, now: Instant) -> bool {
+    pub fn own_discovery_underway(&self, own_address: Nwk, destination: Nwk, now: Instant) -> bool {
         self.route_status(destination) == Some(Status::DiscoveryUnderway)
             && self.discovery_table.values().any(|entry| {
                 entry.source_address == own_address
