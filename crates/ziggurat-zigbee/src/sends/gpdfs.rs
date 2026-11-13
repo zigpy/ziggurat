@@ -137,7 +137,7 @@ impl<F: SendFrame, E: From<SendFailure>> Gpdfs<F, E> {
             .find(|(_, record)| {
                 matches!(record.stage, Stage::Queued(trigger) if now < trigger.send_by)
             })
-            .map(|(id, _)| (*id, TxPriority::StackCritical))
+            .map(|(id, _)| (*id, TxPriority::Realtime))
     }
 
     pub(super) fn dequeue(&mut self, id: SendId) -> InFlight<F> {

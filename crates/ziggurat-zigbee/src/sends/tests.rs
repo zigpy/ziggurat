@@ -343,14 +343,14 @@ fn test_gpdf_sent_after_trigger() {
 }
 
 // A triggered GPDF must go out before its window closes, so it goes ahead of every
-// host frame, even an older one.
+// other frame, even an older stack-critical one.
 #[test]
-fn test_gpdf_goes_ahead_of_host_frames() {
+fn test_gpdf_goes_ahead_of_other_frames() {
     let mut fixture = Fixture::new();
     fixture.sends.enqueue_broadcast(
         Broadcast {
             frame: "broadcast",
-            priority: TxPriority::UserCritical,
+            priority: TxPriority::StackCritical,
             schedule: Schedule::Once,
         },
         fixture.now,

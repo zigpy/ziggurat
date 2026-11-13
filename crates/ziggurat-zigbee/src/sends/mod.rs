@@ -78,6 +78,9 @@ pub enum TxPriority {
     UserHigh,
     UserCritical,
     StackCritical,
+    /// A frame that misses its deadline if it waits behind any other, such as a GPDF
+    /// timed to its GPD's brief receive window.
+    Realtime,
 }
 
 impl TxPriority {
