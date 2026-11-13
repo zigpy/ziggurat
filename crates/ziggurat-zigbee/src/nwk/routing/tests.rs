@@ -430,6 +430,30 @@ fn test_frame_after_an_answered_discovery_starts_a_new_one() {
     assert!(want(&mut routing, START, 1));
 }
 
+// Relaying another router's route request marks the entry `DiscoveryUnderway` again.
+// Our answered discovery is still in the table, but its request is spent.
+#[test]
+fn test_relayed_discovery_does_not_revive_our_answered_one() {
+    let mut routing = Routing::default();
+    answered_discovery(&mut routing, 1);
+    assert_eq!(tick(&mut routing, START, false), DiscoveryTick::default());
+    routing.invalidate_via(NEIGHBOR);
+
+    let request = RouteRequest {
+        originator: ROUTER,
+        destination: DEVICE,
+        path_cost: 3,
+    };
+    assert!(receive(&mut routing, request, START));
+    routing.note_relayed_discovery(DEVICE);
+    assert_eq!(
+        routing.route_status(DEVICE),
+        Some(Status::DiscoveryUnderway)
+    );
+
+    assert!(want(&mut routing, START, 1));
+}
+
 // The route can be lost between the reply and the pass that would have released the
 // held frame. The frame must not be left waiting with no discovery behind it.
 #[test]

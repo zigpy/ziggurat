@@ -296,13 +296,16 @@ impl Routing {
 
     /// Spec 3.6.4.3: a frame waits on a discovery that is underway only if we started
     /// it. The status alone does not say so: relaying another router's route request
-    /// sets it too. A route that was found and lost again ends the wait, because the
-    /// status is no longer `DiscoveryUnderway`.
+    /// sets it too, even after our own discovery was answered and its route lost. So
+    /// a discovery of ours must also be live and have no reply yet.
     fn own_discovery_underway(&self, own_address: Nwk, destination: Nwk, now: Instant) -> bool {
         self.route_status(destination) == Some(Status::DiscoveryUnderway)
-            && self
-                .own_discovery_lapse(own_address, destination, now)
-                .is_some()
+            && self.discovery_table.values().any(|entry| {
+                entry.source_address == own_address
+                    && entry.destination_address == destination
+                    && entry.expiration_time > now
+                    && entry.residual_cost == u8::MAX
+            })
     }
 
     /// One of our frames needs a route to `destination`. Returns the identifier to put
