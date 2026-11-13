@@ -45,6 +45,7 @@ pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
 pub use ziggurat_zigbee::constants::{
     MAX_DEPTH, PROTOCOL_VERSION, STACK_PROFILE, TunableError, Tunables, WELL_KNOWN_LINK_KEY,
 };
+pub use ziggurat_zigbee::gp::{GpdId, GpdfTarget};
 pub use ziggurat_zigbee::nwk::NwkDeviceType;
 pub use ziggurat_zigbee::nwk::address_conflicts::{AddrConflictSource, AddressConflicts};
 pub use ziggurat_zigbee::nwk::addresses::AddressMap;
@@ -58,8 +59,8 @@ pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
 pub use ziggurat_zigbee::sends::{
-    ApsAckData, Confirm, Schedule, SendFailure, SendFrame, SendId, Sends, SrcMatchTable, Transmit,
-    TxPriority,
+    ApsAckData, Confirm, GpdfTrigger, Schedule, SendFailure, SendFrame, SendId, Sends,
+    SrcMatchTable, Transmit, TxPriority,
 };
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
@@ -124,6 +125,10 @@ pub enum DeliveryError {
     Cancelled,
     #[error("radio error: {0}")]
     Radio(#[from] RadioError),
+    #[error("GPD never listened before the GPDF expired")]
+    GpdfExpired,
+    #[error("GPDF replaced by a newer one for the same GPD")]
+    GpdfReplaced,
 }
 
 impl From<SendFailure> for DeliveryError {
@@ -134,6 +139,8 @@ impl From<SendFailure> for DeliveryError {
             SendFailure::IndirectExpired { destination } => Self::IndirectExpired { destination },
             SendFailure::RouteDiscoveryTimeout => Self::RouteDiscoveryTimeout,
             SendFailure::Cancelled => Self::Cancelled,
+            SendFailure::GpdfExpired => Self::GpdfExpired,
+            SendFailure::GpdfReplaced => Self::GpdfReplaced,
         }
     }
 }
@@ -271,6 +278,9 @@ pub enum Frame {
     /// An already-finished 802.15.4 frame (a beacon, an association response),
     /// transmitted as-is but for its MAC sequence number.
     Raw(Ieee802154Frame),
+    /// A GPDF to a GPD, transmitted like `Raw` but timed from its trigger. Channel
+    /// Configuration is sent on the GPD's next channel, not the operational one.
+    Gpdf { frame: Ieee802154Frame, channel: u8 },
 }
 
 /// What failure handling reads from a NWK frame whose unicast failed at its next hop.
@@ -282,7 +292,7 @@ pub struct FailedNwkUnicast {
 }
 
 impl SendFrame for Frame {
-    /// `None` for a raw 802.15.4 frame: it has no NWK routes to repair
+    /// `None` for a raw 802.15.4 frame or a GPDF: it has no NWK routes to repair
     type Failure = Option<FailedNwkUnicast>;
 
     fn failure(&self) -> Self::Failure {
@@ -292,7 +302,7 @@ impl SendFrame for Frame {
                 destination: nwk_frame.nwk_header.destination,
                 source_routed: nwk_frame.nwk_header.source_route.is_some(),
             }),
-            Self::Raw(_) => None,
+            Self::Raw(_) | Self::Gpdf { .. } => None,
         }
     }
 }
@@ -930,6 +940,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         &ieee802154_data_frame,
                         packet.lqi,
                         packet.rssi,
+                        packet.timestamp_us,
                     );
 
                     if maybe_nwk_frame.is_none() {

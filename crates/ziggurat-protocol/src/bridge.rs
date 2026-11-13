@@ -430,6 +430,8 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
             DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
             DeliveryError::Cancelled => SendStatus::Cancelled,
             DeliveryError::Radio(_) => SendStatus::RadioError,
+            DeliveryError::GpdfExpired => SendStatus::GpdfExpired,
+            DeliveryError::GpdfReplaced => SendStatus::GpdfReplaced,
         },
     }
 }

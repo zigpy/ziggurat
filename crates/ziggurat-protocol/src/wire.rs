@@ -727,6 +727,8 @@ pub enum SendStatus {
     RadioError = 12,
     HandoffTimeout = 13,
     FrameTooLong = 14,
+    GpdfExpired = 15,
+    GpdfReplaced = 16,
 }
 
 #[abstract_bits]

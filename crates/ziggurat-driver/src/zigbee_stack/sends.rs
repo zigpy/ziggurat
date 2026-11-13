@@ -13,16 +13,19 @@ use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
+use ziggurat_zigbee::gp::build_gpdf_to_gpd;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{
-    Action, Broadcast as BroadcastRecord, TransmitError, Unicast as UnicastRecord,
+    Action, Broadcast as BroadcastRecord, Gpdf as GpdfRecord, TransmitError,
+    Unicast as UnicastRecord,
 };
 
 use crate::runtime::Runtime;
 
 use super::{
-    Confirm, CoreGuard, DeliveryError, Frame, Nib, NwkSecurityMode, RouteDirective, Schedule,
-    SendHandle, SendId, SendMode, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
+    Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, GpdfTarget, Nib, NwkSecurityMode,
+    RouteDirective, Schedule, SendHandle, SendId, SendMode, Transmit, TxPolicy, ZigbeeCore,
+    ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -101,6 +104,33 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         SendHandle::new(id, &self.send_watches)
+    }
+
+    /// Hold a GPDF for `target` until the GPD listens, for at most `lifetime`. It
+    /// replaces the GPDF still held for the same GPD, which fails with `GpdfReplaced`.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn send_gpdf(
+        &self,
+        target: GpdfTarget,
+        channel: u8,
+        command_id: u8,
+        command_payload: &[u8],
+        lifetime: Duration,
+    ) -> Result<SendHandle, EnqueueError> {
+        let frame = build_gpdf_to_gpd(target, command_id, command_payload)
+            .map_err(|_| EnqueueError::PayloadTooLong)?;
+        let record = GpdfRecord {
+            frame: Frame::Gpdf { frame, channel },
+            target,
+            lifetime,
+        };
+        let now = self.core_now();
+
+        let mut core = self.core();
+        let handle = SendHandle::new(core.sends.enqueue_gpdf(record, now), &self.send_watches);
+        self.commit_sends(core);
+
+        Ok(handle)
     }
 
     /// Finish a mutation of the send table from any task but the timer: carry out its
@@ -290,6 +320,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 },
             ) => self.transmit_broadcast(nwk_frame, *security).await,
             (Transmit::Broadcast, Frame::Raw(raw)) => self.send_802154_frame(raw).await,
+            (Transmit::Gpdf(trigger), Frame::Gpdf { frame, channel }) => {
+                self.transmit_gpdf(frame, *channel, trigger).await
+            }
+            (Transmit::Gpdf(_), _) | (_, Frame::Gpdf { .. }) => {
+                unreachable!("GPDFs only come from the GPDF table")
+            }
         }
     }
 
