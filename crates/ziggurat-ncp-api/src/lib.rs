@@ -37,7 +37,7 @@ pub static OUTBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, OUTBOUND_DEPTH> =
 pub type CaptureStop = embassy_sync::signal::Signal<CriticalSectionRawMutex, ()>;
 
 /// One firmware's send tracker, shared between the request dispatch path and the
-/// wake-and-sweep reactor (two independent tasks, so it lives behind a shared cell rather
+/// confirm reactor (two independent tasks, so it lives behind a shared cell rather
 /// than in one task's stack). The blocking lock is held only briefly, never across an
 /// await. There is one client, so one tracker per [`App`].
 pub type SendTrackerCell = Arc<BlockingMutex<CriticalSectionRawMutex, RefCell<SendTracker>>>;
@@ -50,7 +50,7 @@ pub fn new_send_tracker() -> SendTrackerCell {
     ))))
 }
 
-/// Begin tracking a send and nudge the sweep reactor. Called by the `send_aps` handler.
+/// Begin tracking a send and nudge the confirm reactor. Called by the `send_aps` handler.
 pub(crate) fn track_send(
     sends: &SendTrackerCell,
     id: RequestId,
@@ -155,7 +155,7 @@ pub async fn handle_frame<P: RadioPhy>(app: &mut App<P>, frame: &[u8]) {
     protocol::handle_frame(app, frame).await;
 }
 
-/// Start the receive loop, the notification pump, and the send-confirm sweep reactor for
+/// Start the receive loop, the notification pump, and the send-confirm reactor for
 /// a freshly-started stack.
 pub(crate) fn spawn_stack_pumps<P: RadioPhy>(
     stack: &Arc<ZigbeeStack<P, EmbassyRuntime>>,
@@ -183,12 +183,11 @@ pub(crate) fn spawn_stack_pumps<P: RadioPhy>(
     stack.spawn_tracked(|_arc_self| async move {
         loop {
             wake.notified().await;
-            let frames: Vec<Vec<u8>> = with_send_tracker(&sends, SendTracker::sweep)
-                .into_iter()
-                .filter_map(|notification| notification.frame())
-                .collect();
-            for frame in frames {
-                push_outbound(frame);
+            while let Some(notification) = with_send_tracker(&sends, SendTracker::next_confirm)
+            {
+                if let Some(frame) = notification.frame() {
+                    push_outbound(frame);
+                }
             }
         }
     });

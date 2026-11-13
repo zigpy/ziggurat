@@ -1507,6 +1507,7 @@ dependencies = [
  "arbitrary-int",
  "ccm",
  "educe",
+ "heapless",
  "hex",
  "num_enum",
  "once_cell",

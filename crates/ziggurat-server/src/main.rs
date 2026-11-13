@@ -221,27 +221,27 @@ impl ZigguratServer {
         })
     }
 
-    /// Set up one connection's [`Sends`] and spawn its wake-and-sweep reactor: the task
-    /// waits on the tracker's shared wake, sweeps for the confirm frames now owed, and
-    /// writes them to this connection's outbound queue.
+    /// Set up one connection's [`Sends`] and spawn its confirm reactor: the task waits on
+    /// the tracker's shared wake, then writes every confirm frame now owed to this
+    /// connection's outbound queue.
     fn spawn_send_sweeper(&self, outbound: mpsc::Sender<Vec<u8>>) -> (Sends, JoinHandle<()>) {
         let wake = Arc::new(ziggurat_driver::sync::Notify::new());
         let tracker = Arc::new(Mutex::new(proto::SendTracker::new(wake.clone())));
 
-        let sweep_tracker = tracker.clone();
-        let sweep_wake = wake.clone();
+        let confirm_tracker = tracker.clone();
+        let confirm_wake = wake.clone();
         let task = tokio::spawn(async move {
             loop {
-                sweep_wake.notified().await;
-                let frames: Vec<Vec<u8>> = {
-                    let mut tracker = sweep_tracker.lock().unwrap();
-                    tracker
-                        .sweep()
-                        .into_iter()
-                        .filter_map(|n| n.frame())
-                        .collect()
-                };
-                for frame in frames {
+                confirm_wake.notified().await;
+                loop {
+                    // The lock is held for one call, never across the send
+                    let next = confirm_tracker.lock().unwrap().next_confirm();
+                    let Some(notification) = next else {
+                        break;
+                    };
+                    let Some(frame) = notification.frame() else {
+                        continue;
+                    };
                     if outbound.send(frame).await.is_err() {
                         return;
                     }
@@ -253,7 +253,7 @@ impl ZigguratServer {
     }
 
     /// Register a freshly-issued send in this connection's tracker, then self-notify so
-    /// the sweep runs even if the slot resolved before registration (it re-checks
+    /// the reactor runs even if the send resolved before registration (it re-checks
     /// everything, closing the race).
     fn register_send(
         &self,
@@ -891,7 +891,7 @@ impl ZigguratServer {
                     channel: frame.channel,
                     rssi: frame.rssi,
                     lqi: frame.lqi,
-                    psdu: frame.psdu,
+                    psdu: frame.psdu.to_vec(),
                 });
                 // A frame too large to encode is dropped; a closed queue ends the stream.
                 if let Some(bytes) = event.frame(request_id)

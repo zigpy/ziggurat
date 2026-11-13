@@ -350,33 +350,34 @@ impl Routing {
 
         self.expire_discoveries(now);
 
-        let destinations: Vec<Nwk> = self.discoveries_left.keys().copied().collect();
+        // Out of `self` for the pass, so the discovery tables can change beside it.
+        // Nothing below reads it.
+        let mut discoveries_left = core::mem::take(&mut self.discoveries_left);
 
-        for destination in destinations {
+        discoveries_left.retain(|&destination, discoveries_left| {
             if !wanted(destination) {
-                self.discoveries_left.remove(&destination);
-                continue;
+                return false;
             }
 
             if self.own_discovery_underway(own_address, destination, now) {
-                continue;
+                return true;
             }
 
             // A frame waits and no discovery of ours is underway: it lapsed, or its
             // route was lost before the frame could use it
-            let discoveries_left = self.discoveries_left.get_mut(&destination).unwrap();
-
             if *discoveries_left > 0 {
                 *discoveries_left -= 1;
                 let request_id =
                     self.begin_discovery(own_address, destination, now, route_discovery_time);
                 tick.restarted.push((destination, request_id));
+                true
             } else {
-                self.discoveries_left.remove(&destination);
                 tick.unreachable.push(destination);
+                false
             }
-        }
+        });
 
+        self.discoveries_left = discoveries_left;
         tick
     }
 
@@ -833,24 +834,18 @@ impl Routing {
     /// Spec 3.6.4.5.1.7: a discovery that never completed must not leave the routing
     /// entry stuck in DISCOVERY_UNDERWAY, which would block future discoveries.
     fn expire_discoveries(&mut self, now: Instant) {
-        let mut expired_destinations = Vec::new();
+        let expired = self
+            .discovery_table
+            .values()
+            .filter(|entry| entry.expiration_time <= now);
 
-        self.discovery_table.retain(|_, entry| {
-            if entry.expiration_time <= now {
-                tracing::debug!("Removing expired route discovery entry: {entry:?}");
-                expired_destinations.push(entry.destination_address);
-                false
-            } else {
-                true
-            }
-        });
+        for entry in expired {
+            let destination = entry.destination_address;
 
-        for destination in expired_destinations {
-            if self
-                .discovery_table
-                .values()
-                .any(|entry| entry.destination_address == destination)
-            {
+            // Another discovery toward the destination keeps its routing entry
+            if self.discovery_table.values().any(|other| {
+                other.destination_address == destination && other.expiration_time > now
+            }) {
                 continue;
             }
 
@@ -865,5 +860,14 @@ impl Routing {
                 self.route_table.remove(&destination);
             }
         }
+
+        self.discovery_table.retain(|_, entry| {
+            if entry.expiration_time <= now {
+                tracing::debug!("Removing expired route discovery entry: {entry:?}");
+                false
+            } else {
+                true
+            }
+        });
     }
 }

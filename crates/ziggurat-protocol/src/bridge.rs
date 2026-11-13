@@ -423,6 +423,7 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
             DeliveryError::NwkNoAck { .. } => SendStatus::NwkNoAck,
             DeliveryError::CcaFailure => SendStatus::CcaFailure,
             DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
+            DeliveryError::FrameTooLong => SendStatus::FrameTooLong,
             DeliveryError::ApsAckTimeout => SendStatus::ApsAckTimeout,
             DeliveryError::HandoffTimeout => SendStatus::HandoffTimeout,
             DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,

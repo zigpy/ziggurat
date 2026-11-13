@@ -37,7 +37,8 @@ mod sends;
 mod tasklets;
 mod zdp;
 
-pub use send_handle::{SendHandle, SendProgress, SendSlot};
+use send_handle::SendWatches;
+pub use send_handle::{SendHandle, SendProgress};
 
 pub use ziggurat_zigbee::aps::security as aps_security;
 pub use ziggurat_zigbee::aps::security::{ApsSecurity, TclkSeed};
@@ -57,7 +58,8 @@ pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
 pub use ziggurat_zigbee::sends::{
-    ApsAckData, Confirm, Schedule, SendFailure, SendId, Sends, SrcMatchTable, Transmit, TxPriority,
+    ApsAckData, Confirm, Schedule, SendFailure, SendFrame, SendId, Sends, SrcMatchTable, Transmit,
+    TxPriority,
 };
 
 /// How long the RCP gets to announce itself after a `CMD_RESET` before we resend.
@@ -95,8 +97,8 @@ pub enum EnqueueError {
     NotStarted,
 }
 
-/// A send's terminal verdict, resolved into its slot once the mesh has spoken. `Clone`
-/// because a slot hands copies to its awaiter(s) and the wire tracker. Maps to the wire
+/// A send's terminal verdict, resolved into its watch once the mesh has spoken. `Clone`
+/// because a watch hands copies to its awaiter(s) and the wire tracker. Maps to the wire
 /// `SendStatus` channel only.
 #[derive(Error, Debug, Clone)]
 pub enum DeliveryError {
@@ -108,6 +110,8 @@ pub enum DeliveryError {
     CcaFailure,
     #[error("unexpected transmit failure: {0:?}")]
     TransmitFailed(TxResult),
+    #[error("frame does not fit in an 802.15.4 frame")]
+    FrameTooLong,
     #[error("aps ack timeout")]
     ApsAckTimeout,
     /// The send never reached the mesh within `handoff_timeout`: a stalled sender or
@@ -269,10 +273,32 @@ pub enum Frame {
     Raw(Ieee802154Frame),
 }
 
+/// What failure handling reads from a NWK frame whose unicast failed at its next hop.
+#[derive(Debug, Clone, Copy)]
+pub struct FailedNwkUnicast {
+    pub source: Nwk,
+    pub destination: Nwk,
+    pub source_routed: bool,
+}
+
+impl SendFrame for Frame {
+    /// `None` for a raw 802.15.4 frame: it has no NWK routes to repair
+    type Failure = Option<FailedNwkUnicast>;
+
+    fn failure(&self) -> Self::Failure {
+        match self {
+            Self::Nwk { nwk_frame, .. } => Some(FailedNwkUnicast {
+                source: nwk_frame.nwk_header.source,
+                destination: nwk_frame.nwk_header.destination,
+                source_routed: nwk_frame.nwk_header.source_route.is_some(),
+            }),
+            Self::Raw(_) => None,
+        }
+    }
+}
+
 /// The send table, specialised to the driver's types. See [`Sends`].
-pub type SendTable = Sends<Frame, Arc<SendSlot>, DeliveryError>;
-pub type SendAction = ziggurat_zigbee::sends::Action<Frame, Arc<SendSlot>, DeliveryError>;
-pub type SendActions = ziggurat_zigbee::sends::Actions<Frame, Arc<SendSlot>, DeliveryError>;
+pub type SendTable = Sends<Frame, DeliveryError>;
 
 /// A unicast handed to [`ZigbeeStack::send_unicast`].
 #[derive(Debug)]
@@ -708,6 +734,8 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     pub(crate) send_wake: Notify,
     /// Wakes the send timer task when the send table's next deadline may have moved.
     pub(crate) send_timer_wake: Notify,
+    /// The verdicts of the sends someone holds a handle to.
+    pub(crate) send_watches: Arc<SendWatches>,
 
     /// Spawns and owns the stack's background tasks, so that a replaced stack can be fully
     /// stopped: a leaked background task would keep the replaced stack processing frames
@@ -813,6 +841,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tasklets: tasklets::Tasklets::default(),
             broadcast_budget: Mutex::new(BroadcastBudget::new(initial_broadcast_tokens)),
             send_wake: Notify::new(),
+            send_watches: Arc::new(SendWatches::default()),
             send_timer_wake: Notify::new(),
             spawner,
             cancels: Mutex::new(FlatMap::new()),
@@ -878,7 +907,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     // exclusive access to shared state during frame processing.
     pub async fn run(&self) {
         loop {
-            let (packet, ieee802154_frame) = self.recv_frame().await;
+            let packet = self.recv_packet().await;
+            let Some(ieee802154_frame) = parse_802154_frame(&packet.psdu) else {
+                continue;
+            };
 
             if matches!(
                 ieee802154_frame,
@@ -1004,35 +1036,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    // We intentionally hold the receiver lock for the entire duration of this function
-    // to ensure exclusive access to the raw frame receiver.
-    #[allow(clippy::significant_drop_tightening)]
-    async fn recv_frame(&self) -> (RxFrame, Ieee802154Frame) {
+    async fn recv_packet(&self) -> RxFrame {
         let mut receiver = self
             .raw_frame_rx
             .try_lock()
             .expect("Raw frame receiver is locked");
 
-        loop {
-            let Some(packet) = receiver.recv().await else {
-                panic!("Radio frame sender hung up");
-            };
-
-            match Ieee802154Frame::from_bytes_without_fcs(&packet.psdu) {
-                Ok(frame) => {
-                    tracing::trace!("Received 802.15.4 frame: {frame:?}");
-                    return (packet, frame);
-                }
-                Err(e @ ParseError::Unsupported(_)) => {
-                    tracing::debug!("Ignoring unsupported IEEE 802.15.4 frame: {e:?}");
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");
-                    continue;
-                }
-            };
-        }
+        let Some(packet) = receiver.recv().await else {
+            panic!("Radio frame sender hung up");
+        };
+        packet
     }
 
     pub async fn start_network(&self) -> Result<(), RadioError> {
@@ -1413,10 +1426,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // entries; on embassy it is a no-op.
         self.spawner.shutdown().await;
 
-        let waiters = self.core().sends.abandon();
-        for waiter in waiters {
-            waiter.settled(Err(DeliveryError::Cancelled));
-        }
+        let mut core = self.core();
+        core.sends.abandon();
+        self.run_send_actions(core);
     }
 
     pub fn next_aps_counter(&self) -> u8 {
@@ -1436,5 +1448,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         advance.value
+    }
+}
+
+fn parse_802154_frame(psdu: &[u8]) -> Option<Ieee802154Frame<&[u8]>> {
+    match Ieee802154Frame::from_bytes_without_fcs(psdu) {
+        Ok(frame) => {
+            tracing::trace!("Received 802.15.4 frame: {frame:?}");
+            Some(frame)
+        }
+        Err(e @ ParseError::Unsupported(_)) => {
+            tracing::debug!("Ignoring unsupported IEEE 802.15.4 frame: {e:?}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");
+            None
+        }
     }
 }

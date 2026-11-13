@@ -14,7 +14,7 @@ use pcap_file::pcapng::{Block, PcapNgReader, PcapNgWriter};
 
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_ieee_802154::{
-    FrameBytes, Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
+    Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
 use ziggurat_zigbee::aps::frame::{
@@ -24,8 +24,8 @@ use ziggurat_zigbee::aps::frame::{
 };
 use ziggurat_zigbee::crypto::key_transport_key;
 use ziggurat_zigbee::nwk::frame::{
-    EncryptedNwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload, NwkRouteDiscovery,
-    NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    EncryptedNwkFrame, Nsdu, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload,
+    NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
 /// The well-known default global Trust Center link key ("ZigBeeAlliance09"), which
@@ -305,7 +305,7 @@ fn rekey_phy(
         return None;
     };
 
-    let encrypted = EncryptedNwkFrame::from_bytes(&data_frame.payload).ok()?;
+    let encrypted = EncryptedNwkFrame::from_bytes(data_frame.payload).ok()?;
 
     let new_nwk_bytes = if encrypted.nwk_header.frame_control.security {
         // Network-key secured: decrypt, rewrite any transported key, re-secure under new_key.
@@ -325,34 +325,34 @@ fn rekey_phy(
             && let Some(new_aps) = rewrite_transport_key(aps, old_key, new_key, aps_transport_key)
         {
             *aps_rewrites += 1;
-            decrypted.payload = NwkPayload::Opaque(FrameBytes::from_slice(&new_aps).ok()?);
+            decrypted.payload = NwkPayload::Opaque(Nsdu::from_slice(&new_aps).ok()?);
         }
 
-        decrypted.encrypt(new_key).to_bytes()
+        decrypted.encrypt(new_key)
     } else {
         // Unsecured join frame: rewrite a cleartext Transport-Key command if it carries the key.
         if encrypted.nwk_header.frame_control.frame_type != NwkFrameType::Data {
             return None;
         }
         let new_aps =
-            rewrite_transport_key(&encrypted.ciphertext, old_key, new_key, aps_transport_key)?;
+            rewrite_transport_key(encrypted.ciphertext, old_key, new_key, aps_transport_key)?;
         *aps_rewrites += 1;
 
         EncryptedNwkFrame {
             nwk_header: encrypted.nwk_header,
             aux_header: None,
-            ciphertext: FrameBytes::from_slice(&new_aps).ok()?,
+            ciphertext: &new_aps,
         }
         .to_bytes()
     };
 
     let new_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
         header: data_frame.header,
-        payload: FrameBytes::from_slice(&new_nwk_bytes).ok()?,
+        payload: new_nwk_bytes,
         fcs: 0,
     });
 
-    Some(new_frame.to_bytes())
+    Some(new_frame.to_bytes().to_vec())
 }
 
 /// Swap `old_key` for `new_key` inside an APS Transport-Key command that transports the
@@ -399,7 +399,7 @@ fn rewrite_transport_key(
     Some(
         rewritten
             .encrypt(aps_transport_key, &encrypted.aux_header)
-            .to_bytes(),
+            .to_vec(),
     )
 }
 
@@ -451,9 +451,7 @@ fn transport_key_packet(
         key_sequence_number: None,
     };
 
-    let aps_bytes = aps_command
-        .encrypt(&key_transport_key(link_key), &aps_aux_header)
-        .to_bytes();
+    let aps_bytes = aps_command.encrypt(&key_transport_key(link_key), &aps_aux_header);
 
     // An unsecured NWK data frame carries the APS command (`EncryptedNwkFrame` with no
     // aux header and no NWK encryption is just a cleartext NWK frame on the wire).
@@ -481,7 +479,7 @@ fn transport_key_packet(
             source_route: None,
         },
         aux_header: None,
-        ciphertext: FrameBytes::from_slice(&aps_bytes).expect("APS command is frame-bounded"),
+        ciphertext: &aps_bytes,
     };
 
     let mac_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
@@ -505,14 +503,14 @@ fn transport_key_packet(
             src_pan_id: Some(pan_id),
             src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
         },
-        payload: FrameBytes::from_slice(&nwk_frame.to_bytes()).expect("NWK frame is frame-bounded"),
+        payload: nwk_frame.to_bytes(),
         fcs: 0,
     });
 
     let phy = mac_frame.to_bytes();
 
     match link_type {
-        LinkType::Raw => phy,
+        LinkType::Raw => phy.to_vec(),
         LinkType::Tap => {
             // A 12-byte TAP header: 4-byte base plus one FCS-type TLV declaring a 16-bit
             // FCS is present, so Wireshark validates the CRC we emit.

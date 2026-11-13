@@ -7,14 +7,16 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154FrameVersion,
 };
 use abstract_bits::{AbstractBits, BitReader};
-use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
+use ziggurat_ieee_802154::{
+    FCS_LENGTH, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
+};
 use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use ziggurat_zigbee::constants::GP_PROTOCOL_VERSION;
 use ziggurat_zigbee::gp::GpNwkFrameControl;
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, NwkFrame, NwkPayload,
+    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, Nsdu, NwkFrame, NwkPayload,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
 };
 
@@ -143,20 +145,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 pan_coordinator: self.state.role == NwkDeviceType::Coordinator,
                 association_permit: permitting_joins,
             },
-            beacon_payload: ZigbeeBeacon {
-                protocol_id: 0,
-                stack_profile: STACK_PROFILE,
-                protocol_version: PROTOCOL_VERSION,
-                reserved1: 0b00,
-                router_capacity: true,
-                device_depth: 0,
-                end_device_capacity,
-                extended_pan_id: self.state.extended_pan_id,
-                tx_offset: 0xFFFFFF,
-                update_id,
-            }
-            .to_abstract_bytes()
-            .unwrap(),
+            beacon_payload: write_frame(|writer| {
+                writer.bits(&ZigbeeBeacon {
+                    protocol_id: 0,
+                    stack_profile: STACK_PROFILE,
+                    protocol_version: PROTOCOL_VERSION,
+                    reserved1: 0b00,
+                    router_capacity: true,
+                    device_depth: 0,
+                    end_device_capacity,
+                    extended_pan_id: self.state.extended_pan_id,
+                    tx_offset: 0xFFFFFF,
+                    update_id,
+                })
+            })
+            .expect("a beacon payload is frame-bounded"),
             gts_specification: 0x00,
             pending_address_specification: 0x00,
             fcs: 0x0000,
@@ -201,7 +204,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    pub(super) fn beacon_request_psdu(&self) -> Vec<u8> {
+    pub(super) fn beacon_request_psdu(&self) -> Psdu {
         let sequence_number = {
             let mut core = self.core();
             core.mac.ieee802154_sequence_number =
@@ -242,7 +245,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::cognitive_complexity)]
     pub fn process_802154_data_frame(
         &self,
-        data_frame: &Ieee802154DataFrame,
+        data_frame: &Ieee802154DataFrame<&[u8]>,
         lqi: u8,
         rssi: i8,
     ) -> Option<NwkFrame> {
@@ -255,7 +258,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let pan_id = self.core().mac.pan_id;
 
         // A GPDF carries a stub NWK header instead (GP A.1.4.1), for the client to process
-        if GpNwkFrameControl::read_abstract_bits(&mut BitReader::from(&data_frame.payload[..]))
+        if GpNwkFrameControl::read_abstract_bits(&mut BitReader::from(data_frame.payload))
             .is_ok_and(|control| control.protocol_version == GP_PROTOCOL_VERSION)
         {
             self.process_gpdf(data_frame, pan_id, lqi, rssi);
@@ -292,7 +295,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         // Next, try to parse the NWK frame
-        let nwk_frame = match EncryptedNwkFrame::from_bytes(&data_frame.payload) {
+        let nwk_frame = match EncryptedNwkFrame::from_bytes(data_frame.payload) {
             Ok(nwk_frame) => nwk_frame,
             Err(_) => {
                 tracing::debug!("Ignoring frame, not a NWK frame");
@@ -316,7 +319,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if !nwk_frame.nwk_header.frame_control.security {
             let payload = NwkPayload::from_bytes(
                 nwk_frame.nwk_header.frame_control.frame_type,
-                nwk_frame.ciphertext,
+                Nsdu::from_slice(nwk_frame.ciphertext).expect("the parser bounds the payload"),
             );
             self.handle_unsecured_nwk_frame(&NwkFrame {
                 nwk_header: nwk_frame.nwk_header,
@@ -395,7 +398,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Some(decrypted_nwk_frame)
     }
 
-    fn process_gpdf(&self, data_frame: &Ieee802154DataFrame, pan_id: PanId, lqi: u8, rssi: i8) {
+    fn process_gpdf(
+        &self,
+        data_frame: &Ieee802154DataFrame<&[u8]>,
+        pan_id: PanId,
+        lqi: u8,
+        rssi: i8,
+    ) {
         // A GPD is not part of the PAN and usually sends to the broadcast PAN ID
         // (GP A.1.4.1.1)
         match data_frame.header.dest_pan_id {
@@ -445,10 +454,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         tracing::trace!("Sending 802.15.4 frame: {frame:?}");
-        tracing::trace!(
-            "Sending 802.15.4 frame bytes: {:02X?}",
-            frame.to_bytes_without_fcs()
-        );
+
+        let mut psdu = Psdu::new();
+        frame
+            .serialize(&mut FrameWriter::new(
+                &mut psdu,
+                MAX_PHY_PACKET_SIZE - FCS_LENGTH,
+            ))
+            .map_err(|TooLong| DeliveryError::FrameTooLong)?;
+
+        tracing::trace!("Sending 802.15.4 frame bytes: {:02X?}", psdu.as_slice());
 
         if self.state.hack_disable_tx {
             tracing::debug!("Not transmitting the frame, TX is disabled");
@@ -459,7 +474,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let result = self
             .radio
             .transmit(TxFrame {
-                psdu: frame.to_bytes_without_fcs(),
+                psdu,
                 channel: Some(channel),
                 csma_ca: true,
                 max_frame_retries: self.tunables.mac_max_frame_retries(),

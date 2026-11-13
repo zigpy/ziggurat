@@ -6,14 +6,12 @@ use aes::cipher::{
     KeyInit, KeySizeUser, ParBlocksSizeUser,
 };
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use ccm::Ccm;
 use ccm::aead::AeadInOut;
 use ccm::consts::{U4, U13};
 use once_cell::race::OnceBox;
 use thiserror::Error;
 
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key};
 
 static SOFTWARE_BACKEND: SoftwareBackend = SoftwareBackend;
@@ -42,28 +40,29 @@ pub trait CryptoBackend: Sync {
     /// AES-128 ECB, one block, encrypted in place.
     fn aes128_encrypt_block(&self, key: &[u8; 16], block: &mut [u8; 16]);
 
-    /// CCM*-protect a payload in place: `auth_data` is authenticated, the buffer is
-    /// encrypted, and the encrypted MIC ("MAC tag") is appended to it.
+    /// CCM*-protect a payload in place: `auth_data` is authenticated, `payload` is
+    /// encrypted, and the encrypted MIC ("MAC tag") is returned.
     fn encrypt_ccm(
         &self,
         key: &Key,
         nonce: &[u8; 13],
         auth_data: &[u8],
-        buffer: FrameBytes,
-    ) -> FrameBytes {
-        software_encrypt_ccm(key, nonce, auth_data, buffer)
+        payload: &mut [u8],
+    ) -> [u8; MIC_LENGTH] {
+        software_encrypt_ccm(key, nonce, auth_data, payload)
     }
 
-    /// Reverse of [`encrypt_ccm`](CryptoBackend::encrypt_ccm): verify the MIC and
-    /// decrypt in place, returning the buffer truncated to the plaintext.
+    /// Reverse of [`encrypt_ccm`](CryptoBackend::encrypt_ccm): verify `mic` and decrypt
+    /// `payload` in place.
     fn decrypt_ccm(
         &self,
         key: &Key,
         nonce: &[u8; 13],
         auth_data: &[u8],
-        tagged_ciphertext: FrameBytes,
-    ) -> Result<FrameBytes, DecryptionError> {
-        software_decrypt_ccm(key, nonce, auth_data, tagged_ciphertext)
+        payload: &mut [u8],
+        mic: &[u8; MIC_LENGTH],
+    ) -> Result<(), DecryptionError> {
+        software_decrypt_ccm(key, nonce, auth_data, payload, mic)
     }
 }
 
@@ -122,22 +121,38 @@ impl BlockCipherEncrypt for BackendAes {
 /// AES-MMO (Matyas-Meyer-Oseas) cryptographic hash, Zigbee spec B.1.3/B.4. Only the
 /// short-message padding scheme is implemented (inputs below 2^16 bits).
 pub fn aes_mmo_hash(data: &[u8]) -> [u8; 16] {
-    assert!(data.len() < 8192);
+    aes_mmo_hash_parts(&[data])
+}
 
-    let mut padded = data.to_vec();
-    padded.push(0x80);
-    while padded.len() % 16 != 14 {
-        padded.push(0x00);
-    }
-    padded.extend(((data.len() * 8) as u16).to_be_bytes());
+/// [`aes_mmo_hash`] of the concatenation of `parts`, hashed block by block as it is
+/// read.
+fn aes_mmo_hash_parts(parts: &[&[u8]]) -> [u8; 16] {
+    let len: usize = parts.iter().map(|part| part.len()).sum();
+    assert!(len < 8192);
+
+    // The message, a 1 bit, zeros up to 14 bytes past a block boundary, then the
+    // message length in bits
+    let zeros = (14 + 16 - (len + 1) % 16) % 16;
+    let padded = parts
+        .iter()
+        .flat_map(|part| part.iter().copied())
+        .chain([0x80])
+        .chain(core::iter::repeat_n(0x00, zeros))
+        .chain(((len * 8) as u16).to_be_bytes());
 
     let backend = backend();
     let mut digest = [0u8; 16];
+    let mut block = [0u8; 16];
 
-    for block in padded.as_chunks::<16>().0 {
+    for (index, byte) in padded.enumerate() {
+        block[index % 16] = byte;
+        if index % 16 != 15 {
+            continue;
+        }
+
         // MMO: encrypt the message block under the running digest as the key, then XOR the
         // ciphertext with the plaintext block.
-        let mut encrypted = *block;
+        let mut encrypted = block;
         backend.aes128_encrypt_block(&digest, &mut encrypted);
 
         for (digest_byte, (encrypted_byte, block_byte)) in
@@ -152,15 +167,11 @@ pub fn aes_mmo_hash(data: &[u8]) -> [u8; 16] {
 
 /// HMAC (FIPS Pub 198) instantiated with the AES-MMO hash, Zigbee spec B.1.4.
 pub fn keyed_hash(key: &Key, input: &[u8]) -> [u8; 16] {
-    let mut inner = Vec::with_capacity(16 + input.len());
-    inner.extend(key.0.iter().map(|b| b ^ 0x36));
-    inner.extend(input);
+    let inner_pad = key.0.map(|b| b ^ 0x36);
+    let outer_pad = key.0.map(|b| b ^ 0x5C);
 
-    let mut outer = Vec::with_capacity(32);
-    outer.extend(key.0.iter().map(|b| b ^ 0x5C));
-    outer.extend(aes_mmo_hash(&inner));
-
-    aes_mmo_hash(&outer)
+    let inner = aes_mmo_hash_parts(&[&inner_pad, input]);
+    aes_mmo_hash_parts(&[&outer_pad, &inner])
 }
 
 /// Zigbee spec 4.5.3: 1-octet input strings fed to the keyed hash to derive values from
@@ -220,68 +231,64 @@ pub enum DecryptionError {
     CiphertextTooShort,
 }
 
-/// CCM*-protect a payload in place: `auth_data` is authenticated, the buffer is
-/// encrypted, and the encrypted MIC ("MAC tag") is appended to it.
+/// CCM*-protect a payload in place: `auth_data` is authenticated, `payload` is
+/// encrypted, and the encrypted MIC ("MAC tag") is returned.
 pub fn encrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
-    buffer: FrameBytes,
-) -> FrameBytes {
-    backend().encrypt_ccm(key, nonce, auth_data, buffer)
+    payload: &mut [u8],
+) -> [u8; MIC_LENGTH] {
+    backend().encrypt_ccm(key, nonce, auth_data, payload)
 }
 
 fn software_encrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
-    mut buffer: FrameBytes,
-) -> FrameBytes {
-    let mic = ZigbeeCcm::new(&key.0.into())
-        .encrypt_inout_detached(&(*nonce).into(), auth_data, buffer.as_mut_slice().into())
-        .expect("frames are far below the CCM length limits");
-    buffer
-        .extend_from_slice(&mic)
-        .expect("a frame always has room for its MIC");
-    buffer
+    payload: &mut [u8],
+) -> [u8; MIC_LENGTH] {
+    ZigbeeCcm::new(&key.0.into())
+        .encrypt_inout_detached(&(*nonce).into(), auth_data, payload.into())
+        .expect("frames are far below the CCM length limits")
+        .into()
 }
 
-/// Reverse of [`encrypt_ccm`]: verify the MIC and decrypt in place, returning the
-/// buffer truncated to the plaintext.
+/// Split a received ciphertext into the encrypted payload and the MIC that ends it.
+pub fn split_mic(tagged_ciphertext: &[u8]) -> Result<(&[u8], &[u8; MIC_LENGTH]), DecryptionError> {
+    let ciphertext_len = tagged_ciphertext
+        .len()
+        .checked_sub(MIC_LENGTH)
+        .ok_or(DecryptionError::CiphertextTooShort)?;
+    let (ciphertext, mic) = tagged_ciphertext.split_at(ciphertext_len);
+
+    Ok((
+        ciphertext,
+        mic.try_into().expect("the MIC is exactly MIC_LENGTH bytes"),
+    ))
+}
+
+/// Reverse of [`encrypt_ccm`]: verify `mic` and decrypt `payload` in place.
 pub fn decrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
-    tagged_ciphertext: FrameBytes,
-) -> Result<FrameBytes, DecryptionError> {
-    backend().decrypt_ccm(key, nonce, auth_data, tagged_ciphertext)
+    payload: &mut [u8],
+    mic: &[u8; MIC_LENGTH],
+) -> Result<(), DecryptionError> {
+    backend().decrypt_ccm(key, nonce, auth_data, payload, mic)
 }
 
 fn software_decrypt_ccm(
     key: &Key,
     nonce: &[u8; 13],
     auth_data: &[u8],
-    mut tagged_ciphertext: FrameBytes,
-) -> Result<FrameBytes, DecryptionError> {
-    let ciphertext_len = tagged_ciphertext
-        .len()
-        .checked_sub(MIC_LENGTH)
-        .ok_or(DecryptionError::CiphertextTooShort)?;
-    let (ciphertext, mic) = tagged_ciphertext.split_at_mut(ciphertext_len);
-
+    payload: &mut [u8],
+    mic: &[u8; MIC_LENGTH],
+) -> Result<(), DecryptionError> {
     ZigbeeCcm::new(&key.0.into())
-        .decrypt_inout_detached(
-            &(*nonce).into(),
-            auth_data,
-            ciphertext.into(),
-            (&*mic)
-                .try_into()
-                .expect("the MIC is exactly MIC_LENGTH bytes"),
-        )
-        .map_err(|_| DecryptionError::InvalidMacTag)?;
-
-    tagged_ciphertext.truncate(ciphertext_len);
-    Ok(tagged_ciphertext)
+        .decrypt_inout_detached(&(*nonce).into(), auth_data, payload.into(), mic.into())
+        .map_err(|_| DecryptionError::InvalidMacTag)
 }
 
 #[cfg(test)]
@@ -339,22 +346,23 @@ mod test {
         let aad = hex!("aabbccdd");
         let plaintext = hex!("decafbad01020304");
 
-        let ciphertext = encrypt_ccm(
-            &key,
-            &nonce,
-            &aad,
-            FrameBytes::from_slice(&plaintext).unwrap(),
-        );
-        assert_eq!(ciphertext.len(), plaintext.len() + MIC_LENGTH);
-        assert_ne!(&ciphertext.as_slice()[..plaintext.len()], &plaintext[..]);
+        let mut ciphertext = [0u8; 12];
+        ciphertext[..8].copy_from_slice(&plaintext);
+        let mic = encrypt_ccm(&key, &nonce, &aad, &mut ciphertext[..8]);
+        ciphertext[8..].copy_from_slice(&mic);
+        assert_ne!(&ciphertext[..8], &plaintext[..]);
 
-        let decrypted = decrypt_ccm(&key, &nonce, &aad, ciphertext.clone()).unwrap();
-        assert_eq!(decrypted.as_slice(), &plaintext[..]);
+        let (encrypted, mic) = split_mic(&ciphertext).unwrap();
+        let mut decrypted = [0u8; 8];
+        decrypted.copy_from_slice(encrypted);
+        assert_eq!(decrypt_ccm(&key, &nonce, &aad, &mut decrypted, mic), Ok(()));
+        assert_eq!(decrypted, plaintext);
 
-        let mut tampered = ciphertext;
-        tampered.as_mut_slice()[0] ^= 0xff;
+        let mut tampered = [0u8; 8];
+        tampered.copy_from_slice(encrypted);
+        tampered[0] ^= 0xff;
         assert_eq!(
-            decrypt_ccm(&key, &nonce, &aad, tampered),
+            decrypt_ccm(&key, &nonce, &aad, &mut tampered, mic),
             Err(DecryptionError::InvalidMacTag)
         );
     }

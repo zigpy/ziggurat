@@ -25,6 +25,7 @@ use core::time::Duration;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
 use embassy_sync::signal::Signal;
+use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
@@ -90,7 +91,7 @@ pub fn rx_dropped() -> usize {
 /// A frame was received (PSDU without FCS). Called from the link-raw receive-done path.
 pub fn deliver_rx(psdu: &[u8], channel: u8, rssi: i8, lqi: u8, timestamp_us: u64) {
     let frame = RxFrame {
-        psdu: psdu.to_vec(),
+        psdu: Psdu::from_slice(psdu).expect("a received frame fits in a PSDU"),
         channel,
         rssi,
         lqi,

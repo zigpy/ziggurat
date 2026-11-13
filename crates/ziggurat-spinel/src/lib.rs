@@ -303,28 +303,33 @@ pub fn packed_uint21_deserialize(bytes: &[u8]) -> Result<(u32, &[u8]), SpinelFra
 }
 
 pub fn packed_uint21_to_bytes(value: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    packed_uint21_into(value, &mut bytes);
+    bytes
+}
+
+/// Append the packed form of `value` to `bytes`.
+pub fn packed_uint21_into(value: u32, bytes: &mut Vec<u8>) {
     if value == 0 {
-        return [0].to_vec();
+        bytes.push(0);
+        return;
     }
 
     if value > U21_MAX {
         panic!("Cannot serialize value, too big");
     }
 
-    let mut chunks = Vec::new();
     let mut temp = value;
 
     while temp > 0 {
         // Set the least significant bit on all other octets
-        chunks.push(((temp as u8) & 0b01111111) | 0b10000000);
+        bytes.push(((temp as u8) & 0b01111111) | 0b10000000);
         temp >>= 7;
     }
 
     // Clear the most significant bit of the most significant octet
-    let len = chunks.len();
-    chunks[len - 1] &= 0b01111111;
-
-    chunks
+    let last = bytes.len() - 1;
+    bytes[last] &= 0b01111111;
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
@@ -597,8 +602,8 @@ pub enum SpinelEvent {
     /// The response to an abandoned request arrived and was discarded. Its
     /// transaction id is free again.
     LateResponse(u8),
-    /// An unsolicited property update.
-    PropertyUpdate(SpinelFramePropValueIs),
+    /// An unsolicited update of this property. Its value is handed over beside the event.
+    PropertyUpdate(SpinelPropertyId),
     /// The RCP reset, or is presumed wedged. Every pending request was cancelled.
     Reset(SpinelStatus),
 }
@@ -616,8 +621,9 @@ pub enum Transaction {
     Queued,
     /// The request is written and the RCP has not answered.
     AwaitingResponse,
-    /// The RCP answered. The command has yet to take the response.
-    Answered(SpinelFrame),
+    /// The RCP answered. The command has yet to take the response, which waits in the
+    /// transaction's response buffer.
+    Answered,
     /// An RCP reset cancelled the request.
     Cancelled,
     /// The command left after its request was sent and before the response came. The
@@ -637,6 +643,11 @@ pub struct SpinelProtocol {
     /// Indexed by transaction id. We use ids 1 to 7; id 0 marks unsolicited frames
     /// and stays `Free`.
     transactions: [Transaction; 8],
+    /// Each transaction's request frame and response payload, indexed like
+    /// `transactions`. They keep their capacity, so a request allocates only when it is
+    /// larger than any before it under the same id.
+    requests: [Vec<u8>; 8],
+    responses: [Vec<u8>; 8],
     consecutive_timeouts: u32,
 }
 
@@ -654,6 +665,8 @@ impl SpinelProtocol {
             ignoring_until_next_flag: true,
             next_tid: 1,
             transactions: [const { Transaction::Free }; 8],
+            requests: [const { Vec::new() }; 8],
+            responses: [const { Vec::new() }; 8],
             consecutive_timeouts: 0,
         }
     }
@@ -711,86 +724,101 @@ impl SpinelProtocol {
         frames
     }
 
-    /// Consume bytes read from the RCP, appending what they produced to `events`.
-    pub fn handle_inbound_bytes(&mut self, bytes: &[u8], events: &mut Vec<SpinelEvent>) {
+    /// Buffer bytes read from the RCP. [`Self::next_event`] takes what they produce.
+    pub fn receive(&mut self, bytes: &[u8]) {
         tracing::trace!("RX bytes: {bytes:?}");
         self.buffer.extend(bytes);
+    }
 
+    /// The next event the buffered bytes produce, or `None` once they hold no complete
+    /// frame. The value of a property update is copied into `update`, cleared first.
+    pub fn next_event(&mut self, update: &mut Vec<u8>) -> Option<SpinelEvent> {
         // The scratch is moved out of `self` so the routing below can borrow the
         // payload from it while still mutating protocol state
         let mut scratch = core::mem::take(&mut self.unescape_scratch);
 
-        while self.next_frame_into(&mut scratch) {
+        let event = loop {
+            if !self.next_frame_into(&mut scratch) {
+                break None;
+            }
+
             match parse_spinel_parts(&scratch) {
                 Ok((header, command_id, payload)) => {
-                    self.handle_inbound_frame(header, command_id, payload, events);
+                    if let Some(event) =
+                        self.handle_inbound_frame(header, command_id, payload, update)
+                    {
+                        break Some(event);
+                    }
                 }
                 Err(err) => {
                     tracing::warn!("Failed to parse Spinel frame: {err:?}");
                 }
             }
-        }
+        };
 
         self.unescape_scratch = scratch;
+        event
     }
 
-    /// Route one inbound frame. The payload is borrowed from the read scratch and is
-    /// only copied once the frame is known to produce an event.
+    /// Route one inbound frame. The payload is borrowed from the read scratch: a
+    /// response is copied into its transaction's buffer, a property update's value
+    /// into `update`.
     pub fn handle_inbound_frame(
         &mut self,
         header: SpinelHeader,
         command_id: SpinelCommandId,
         payload: &[u8],
-        events: &mut Vec<SpinelEvent>,
-    ) {
+        update: &mut Vec<u8>,
+    ) -> Option<SpinelEvent> {
         tracing::trace!("RX: {header:?} {command_id:?} {payload:02X?}");
         let tid = header.transaction_id;
 
         if tid == 0 {
-            if command_id == SpinelCommandId::PropValueIs {
-                let property = match packed_uint21_deserialize(payload) {
-                    Ok((property_id, value)) => SpinelPropertyId::try_from(property_id)
-                        .ok()
-                        .map(|property_id| (property_id, value)),
-                    Err(_) => None,
-                };
-
-                match property {
-                    Some((SpinelPropertyId::LastStatus, value)) => {
-                        self.handle_unsolicited_last_status(value, events);
-                    }
-                    Some((property_id, value)) => {
-                        events.push(SpinelEvent::PropertyUpdate(SpinelFramePropValueIs {
-                            property_id,
-                            value: value.to_vec(),
-                        }));
-                    }
-                    None => {
-                        tracing::warn!("Failed to parse PropValueIs frame: {payload:02X?}");
-                    }
-                }
-            } else {
+            if command_id != SpinelCommandId::PropValueIs {
                 tracing::warn!("Unhandled unsolicited frame: {command_id:?} {payload:02X?}");
+                return None;
+            }
+
+            let property = match packed_uint21_deserialize(payload) {
+                Ok((property_id, value)) => SpinelPropertyId::try_from(property_id)
+                    .ok()
+                    .map(|property_id| (property_id, value)),
+                Err(_) => None,
+            };
+
+            match property {
+                Some((SpinelPropertyId::LastStatus, value)) => {
+                    self.handle_unsolicited_last_status(value)
+                }
+                Some((property_id, value)) => {
+                    update.clear();
+                    update.extend_from_slice(value);
+                    Some(SpinelEvent::PropertyUpdate(property_id))
+                }
+                None => {
+                    tracing::warn!("Failed to parse PropValueIs frame: {payload:02X?}");
+                    None
+                }
             }
         } else if let Some(transaction @ (Transaction::Queued | Transaction::AwaitingResponse)) =
             self.transactions.get_mut(usize::from(tid))
         {
             // `Queued` too: the response can be read before the write is reported
-            *transaction = Transaction::Answered(SpinelFrame {
-                header,
-                command_id,
-                payload: payload.to_vec(),
-            });
+            *transaction = Transaction::Answered;
+            let response = &mut self.responses[usize::from(tid)];
+            response.clear();
+            response.extend_from_slice(payload);
             self.consecutive_timeouts = 0;
-            events.push(SpinelEvent::Response(tid));
+            Some(SpinelEvent::Response(tid))
         } else if let Some(transaction @ Transaction::Abandoned { .. }) =
             self.transactions.get_mut(usize::from(tid))
         {
             tracing::debug!("Discarding the response to an abandoned request: {command_id:?}");
             *transaction = Transaction::Free;
-            events.push(SpinelEvent::LateResponse(tid));
+            Some(SpinelEvent::LateResponse(tid))
         } else {
             tracing::warn!("Unsolicited or unmatched frame: {command_id:?} {payload:02X?}");
+            None
         }
     }
 
@@ -798,7 +826,7 @@ impl SpinelProtocol {
     /// `CMD_RESET`) with an unsolicited `LastStatus = RESET_*` notification. The reset
     /// wipes the radio configuration, so every in-flight command is cancelled and the
     /// reset is reported for recovery.
-    fn handle_unsolicited_last_status(&mut self, value: &[u8], events: &mut Vec<SpinelEvent>) {
+    fn handle_unsolicited_last_status(&mut self, value: &[u8]) -> Option<SpinelEvent> {
         let status = match packed_uint21_deserialize(value) {
             Ok((status_int, _)) => {
                 match u8::try_from(status_int)
@@ -808,22 +836,23 @@ impl SpinelProtocol {
                     Some(status) => status,
                     None => {
                         tracing::warn!("Unknown unsolicited status: {status_int}");
-                        return;
+                        return None;
                     }
                 }
             }
             Err(err) => {
                 tracing::warn!("Failed to parse unsolicited status: {err:?}");
-                return;
+                return None;
             }
         };
 
         if status.is_reset() {
             tracing::error!("RCP announced a reset: {status:?}");
             self.cancel_requests();
-            events.push(SpinelEvent::Reset(status));
+            Some(SpinelEvent::Reset(status))
         } else {
             tracing::warn!("Unsolicited status notification: {status:?}");
+            None
         }
     }
 
@@ -867,6 +896,39 @@ impl SpinelProtocol {
 
     pub fn transaction(&self, tid: u8) -> &Transaction {
         &self.transactions[usize::from(tid)]
+    }
+
+    /// Write the request of a transaction id from [`Self::allocate_tid`]: its header
+    /// and command, then the payload `write` appends.
+    pub fn write_request(
+        &mut self,
+        tid: u8,
+        command_id: SpinelCommandId,
+        write: impl FnOnce(&mut Vec<u8>),
+    ) {
+        let header = SpinelHeader {
+            flag: 0b10,
+            network_link_id: 0,
+            transaction_id: tid,
+        };
+
+        let request = &mut self.requests[usize::from(tid)];
+        request.clear();
+        request.extend(header.to_bytes());
+        request.push(command_id as u8);
+        write(request);
+    }
+
+    /// The request frame of `tid`, as [`Self::write_request`] wrote it.
+    pub fn request(&self, tid: u8) -> &[u8] {
+        &self.requests[usize::from(tid)]
+    }
+
+    /// The response payload of `tid` once it is [`Transaction::Answered`]. It stays
+    /// until the id carries another response, so it can still be read under the same
+    /// borrow that released the id.
+    pub fn response(&self, tid: u8) -> &[u8] {
+        &self.responses[usize::from(tid)]
     }
 
     /// The request `tid` was written to the RCP.
@@ -914,7 +976,7 @@ impl SpinelProtocol {
                     *transaction = Transaction::Cancelled;
                 }
                 Transaction::Abandoned { .. } => *transaction = Transaction::Free,
-                Transaction::Free | Transaction::Answered(_) | Transaction::Cancelled => {}
+                Transaction::Free | Transaction::Answered | Transaction::Cancelled => {}
             }
         }
     }

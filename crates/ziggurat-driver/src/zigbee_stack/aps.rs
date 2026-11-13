@@ -1,9 +1,9 @@
 use crate::runtime::Runtime;
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_ieee_802154::{TooLong, write_frame};
 use ziggurat_zigbee::aps::frame::{
     ApsAckFrame, ApsAckFrameControl, ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType,
-    EncryptedApsAckFrame, EncryptedApsDataFrame,
+    Asdu, EncryptedApsAckFrame, EncryptedApsDataFrame,
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
@@ -82,8 +82,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::trace!("Received APS ack: {ack_data:?}");
 
         let mut core = self.core();
-        let actions = core.sends.aps_ack_received(&ack_data);
-        self.commit_sends(core, actions);
+        core.sends.aps_ack_received(&ack_data);
+        self.commit_sends(core);
     }
 
     /// Spec 2.2.8.4.2: record an inbound APS data frame and report whether it duplicates
@@ -162,7 +162,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Send our ACK back to the sender
         let aps_ack_frame = self
             .nwk_data_frame(nwk_frame.nwk_header.source, payload)
-            .expect("ACK frame is always valid")
             .with_discover_route(NwkRouteDiscovery::Enable);
 
         let send = Unicast {
@@ -215,7 +214,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         priority: TxPriority,
         route: RouteDirective,
     ) -> Result<(SendHandle, ApsCounter), EnqueueError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let asdu = Asdu::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
         let aps_seq = aps_counter.unwrap_or_else(|| self.next_aps_counter());
 
         let aps_frame = ApsDataFrame {
@@ -247,16 +246,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             match encrypted {
                 Some(encrypted) => {
                     self.persist_aps_frame_counter();
-                    encrypted.to_bytes()
+                    write_frame(|writer| encrypted.serialize(writer))
                 }
                 None => return Err(EnqueueError::SecurityUnavailable),
             }
         } else {
-            aps_frame.to_bytes()
-        };
+            write_frame(|writer| aps_frame.serialize(writer))
+        }
+        .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
 
         let nwk_frame = self
-            .nwk_data_frame(destination, aps_payload)?
+            .nwk_data_frame(destination, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 
@@ -309,7 +309,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let asdu = Asdu::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
@@ -331,9 +331,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         tracing::trace!("Prepared broadcast APS frame: {aps_frame:?}");
 
-        let aps_payload = aps_frame.to_bytes();
+        let aps_payload = write_frame(|writer| aps_frame.serialize(writer))
+            .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
         let nwk_frame = self
-            .nwk_data_frame(destination, aps_payload)?
+            .nwk_data_frame(destination, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 
@@ -363,7 +364,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         data: Vec<u8>,
         priority: TxPriority,
     ) -> Result<SendHandle, EnqueueError> {
-        let asdu = FrameBytes::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
+        let asdu = Asdu::from_slice(&data).map_err(|_| EnqueueError::PayloadTooLong)?;
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
@@ -385,9 +386,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         tracing::trace!("Prepared group broadcast APS frame: {aps_frame:?}");
 
-        let aps_payload = aps_frame.to_bytes();
+        let aps_payload = write_frame(|writer| aps_frame.serialize(writer))
+            .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
         let nwk_frame = self
-            .nwk_data_frame(BROADCAST_RX_ON_WHEN_IDLE, aps_payload)?
+            .nwk_data_frame(BROADCAST_RX_ON_WHEN_IDLE, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(cmp::max(radius, 1));
 

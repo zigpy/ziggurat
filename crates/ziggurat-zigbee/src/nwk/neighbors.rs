@@ -294,12 +294,11 @@ impl Neighbors {
     /// The (EUI64, network address) of every rx-off-when-idle end-device child. A
     /// 0xFFFF broadcast has to be delivered to each as a MAC unicast, since a sleeping
     /// radio never hears the broadcast itself (spec 3.6.6).
-    pub fn sleepy_children(&self) -> Vec<(Eui64, Nwk)> {
+    pub fn sleepy_children(&self) -> impl Iterator<Item = (Eui64, Nwk)> {
         self.table
             .values()
             .filter(|entry| !entry.rx_on_when_idle && entry.is_child())
             .map(|entry| (entry.extended_address, entry.network_address))
-            .collect()
     }
 
     pub fn contains(&self, eui64: Eui64) -> bool {
@@ -579,13 +578,22 @@ impl Neighbors {
     pub fn expected_broadcast_relayers(&self, max_link_cost: u8) -> Vec<Nwk> {
         self.table
             .values()
-            .filter(|entry| {
-                entry.device_type == NwkDeviceType::Router
-                    && (1..=max_link_cost).contains(&entry.outgoing_cost)
-                    && (1..=max_link_cost).contains(&entry.incoming_link_cost())
-            })
+            .filter(|entry| Self::relays_broadcasts(entry, max_link_cost))
             .map(|entry| entry.network_address)
             .collect()
+    }
+
+    /// Whether `nwk` is one of the [`Self::expected_broadcast_relayers`].
+    pub fn is_expected_broadcast_relayer(&self, nwk: Nwk, max_link_cost: u8) -> bool {
+        self.table.values().any(|entry| {
+            entry.network_address == nwk && Self::relays_broadcasts(entry, max_link_cost)
+        })
+    }
+
+    fn relays_broadcasts(entry: &TableEntry, max_link_cost: u8) -> bool {
+        entry.device_type == NwkDeviceType::Router
+            && (1..=max_link_cost).contains(&entry.outgoing_cost)
+            && (1..=max_link_cost).contains(&entry.incoming_link_cost())
     }
 
     /// Reset link costs of neighbors that have been silent for `max_age` (stopped
@@ -833,9 +841,7 @@ mod test {
         assert!(!header.frame_control.end_device_initiator);
 
         // Only the End Device Initiator bit changes: frame control 0x2248 -> 0x0248
-        let mut bytes = Vec::new();
-        header.serialize_into(&mut bytes);
-        assert_eq!(bytes, hex!("4802fdff34121e05"));
+        assert_eq!(header.to_bytes(), hex!("4802fdff34121e05"));
     }
 
     #[test]

@@ -1,12 +1,12 @@
 //! The async shell around the send table ([`Sends`]): enqueueing, the sender task that
 //! feeds the radio, the timer task that drives everything waiting on time, and the
-//! execution of the actions the table returns.
+//! execution of the actions the table queues.
 //!
 //! The table lives in the core, so one lock covers a mutation and the core facts it
-//! reads. The lock is released before the actions are carried out, since resolving a
-//! waiter can wake a task that sends again.
+//! reads. The actions are carried out before the lock is released, so waiters learn
+//! their verdicts in the order the table reached them. Resolving a waiter only marks
+//! its task ready: it runs once the lock is released.
 
-use alloc::sync::Arc;
 use core::time::Duration;
 
 use ziggurat_ieee_802154::Ieee802154Address;
@@ -14,19 +14,20 @@ use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
-use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as UnicastRecord};
+use ziggurat_zigbee::sends::{
+    Action, Broadcast as BroadcastRecord, TransmitError, Unicast as UnicastRecord,
+};
 
 use crate::runtime::Runtime;
 
 use super::{
     Confirm, CoreGuard, DeliveryError, Frame, Nib, NwkSecurityMode, RouteDirective, Schedule,
-    SendActions, SendHandle, SendId, SendMode, SendSlot, Transmit, TxPolicy, ZigbeeCore,
-    ZigbeeStack,
+    SendHandle, SendId, SendMode, Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Enqueue a unicast to `next_hop`, held until the device polls under
-    /// `poll_address` if it is given. Every send gets a slot: dropping the returned
+    /// `poll_address` if it is given. Every send gets a handle: dropping the returned
     /// handle is how a caller detaches from a send it does not await.
     pub(super) fn enqueue_unicast(
         &self,
@@ -37,9 +38,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         poll_address: Option<Ieee802154Address>,
     ) -> SendHandle {
         let mut core = self.core();
-        let (handle, actions) =
+        let handle =
             self.enqueue_unicast_in(&mut core, frame, policy, confirm, next_hop, poll_address);
-        self.commit_sends(core, actions);
+        self.commit_sends(core);
         handle
     }
 
@@ -52,13 +53,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         confirm: Confirm,
         next_hop: Nwk,
         poll_address: Option<Ieee802154Address>,
-    ) -> (SendHandle, SendActions) {
-        let slot = Arc::new(SendSlot::default());
-        let (id, actions) = core.sends.enqueue_unicast(
+    ) -> SendHandle {
+        let id = core.sends.enqueue_unicast(
             UnicastRecord {
                 frame,
                 priority: policy.priority,
-                waiter: slot.clone(),
                 confirm,
                 next_hop,
                 poll_address,
@@ -67,7 +66,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &self.tunables,
         );
 
-        (SendHandle::new(id, slot), actions)
+        SendHandle::new(id, &self.send_watches)
     }
 
     /// Enqueue a broadcast, or any frame transmitted on a schedule.
@@ -78,8 +77,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         schedule: Schedule,
     ) -> SendHandle {
         let mut core = self.core();
-        let (handle, actions) = self.enqueue_broadcast_in(&mut core, frame, policy, schedule);
-        self.commit_sends(core, actions);
+        let handle = self.enqueue_broadcast_in(&mut core, frame, policy, schedule);
+        self.commit_sends(core);
         handle
     }
 
@@ -90,54 +89,59 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         frame: Frame,
         policy: TxPolicy,
         schedule: Schedule,
-    ) -> (SendHandle, SendActions) {
-        let slot = Arc::new(SendSlot::default());
-        let (id, actions) = core.sends.enqueue_broadcast(
+    ) -> SendHandle {
+        let id = core.sends.enqueue_broadcast(
             BroadcastRecord {
                 frame,
                 priority: policy.priority,
-                waiter: slot.clone(),
                 schedule,
             },
             self.core_now(),
             &self.tunables,
         );
 
-        (SendHandle::new(id, slot), actions)
+        SendHandle::new(id, &self.send_watches)
     }
 
-    /// Finish a mutation of the send table from any task but the timer: carry out the
+    /// Finish a mutation of the send table from any task but the timer: carry out its
     /// actions and wake the timer, whose next deadline may have moved.
-    pub(super) fn commit_sends(&self, core: CoreGuard<'_>, actions: SendActions) {
-        self.run_send_actions(core, actions);
+    pub(super) fn commit_sends(&self, core: CoreGuard<'_>) {
+        self.run_send_actions(core);
         self.send_timer_wake.notify_one();
     }
 
-    /// Release the core, carry out the actions a mutation returned, and wake the sender
-    /// and the source-match sync, which diffs the poll set itself. Taking the guard is
-    /// what guarantees the core is unlocked before an action locks it again.
-    fn run_send_actions(&self, core: CoreGuard<'_>, actions: SendActions) {
+    /// Carry out the actions the table queued, release the core, and wake the sender
+    /// and the source-match sync, which diffs the poll set itself. Every mutation is
+    /// followed by this under the same lock, so no action waits for a later mutation.
+    ///
+    /// A unicast that failed at its next hop is handled once the core is released,
+    /// since that locks the core again; its waiter learns its verdict after. Taking the
+    /// guard is what guarantees the core is unlocked by then.
+    pub(super) fn run_send_actions(&self, mut core: CoreGuard<'_>) {
+        let mut failed_unicast = None;
+
+        while let Some(action) = core.sends.next_action() {
+            match action {
+                Action::HandedOff(id) => self.send_watches.handed_off(id),
+                Action::Settled {
+                    id,
+                    result,
+                    failed_hop: Some((next_hop, Some(failed))),
+                } => {
+                    // Only a transmit report fails a unicast at its next hop, one at a time
+                    assert!(failed_unicast.is_none());
+                    failed_unicast = Some((failed, next_hop, id, result));
+                }
+                Action::Settled { id, result, .. } => self.send_watches.settled(id, result),
+            }
+        }
+
         drop(core);
 
-        for action in actions {
-            match action {
-                Action::HandedOff(slot) => slot.handed_off(),
-                Action::Settled {
-                    waiter,
-                    result,
-                    frame,
-                    failed_hop,
-                } => {
-                    if let Some(next_hop) = failed_hop
-                        && let Frame::Nwk { nwk_frame, .. } = &frame
-                    {
-                        tracing::error!("Failed to send unicast frame after all attempts");
-                        self.handle_unicast_send_failure(nwk_frame, next_hop);
-                    }
-
-                    waiter.settled(result);
-                }
-            }
+        if let Some((failed, next_hop, id, result)) = failed_unicast {
+            tracing::error!("Failed to send unicast frame after all attempts");
+            self.handle_unicast_send_failure(failed, next_hop);
+            self.send_watches.settled(id, result);
         }
 
         self.send_wake.notify_one();
@@ -147,16 +151,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Cancel a send. Returns whether it was still pending and is now settled with
     /// `Cancelled`. A send in the radio right now is refused: its own report settles it
     /// within the radio's timeout.
-    #[allow(clippy::option_if_let_else)]
     pub fn cancel_send(&self, id: SendId) -> bool {
         let mut core = self.core();
-        match core.sends.cancel(id) {
-            Some(actions) => {
-                self.commit_sends(core, actions);
-                true
-            }
-            None => false,
+        if !core.sends.cancel(id) {
+            return false;
         }
+
+        self.commit_sends(core);
+        true
     }
 
     /// The stack settings next-hop resolution reads.
@@ -231,21 +233,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 };
 
                 let transmit = in_flight.transmit();
-                let result = self.transmit(in_flight.frame_mut(), transmit).await;
+                let result = self
+                    .transmit(in_flight.frame_mut(), transmit)
+                    .await
+                    .map_err(|err| match err {
+                        DeliveryError::FrameTooLong => TransmitError::Rejected(err),
+                        err => TransmitError::Failed(err),
+                    });
 
                 let now = self.core_now();
                 let retry_delay = self.unicast_retry_delay();
                 let passive_ack_interval =
                     self.tunables.passive_ack_timeout() + self.broadcast_jitter();
                 let mut core = self.core();
-                let actions = core.sends.transmitted(
-                    in_flight,
-                    result,
-                    now,
-                    retry_delay,
-                    passive_ack_interval,
-                );
-                self.commit_sends(core, actions);
+                core.sends
+                    .transmitted(in_flight, result, now, retry_delay, passive_ack_interval);
+                self.commit_sends(core);
             }
 
             self.send_wake.notified().await;
@@ -316,17 +319,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let mut guard = self.core();
         // A plain `&mut ZigbeeCore`, so the closures below borrow `nib` beside `sends`
         let core = &mut *guard;
-        let mut actions = SendActions::new();
 
-        for key in core.sends.broadcasts_awaiting_quorum() {
-            if self.passive_ack_quorum_heard(&core.nib, key) {
-                actions.extend(core.sends.broadcast_delivered(key));
-            }
-        }
+        core.sends
+            .deliver_broadcasts(|key| self.passive_ack_quorum_heard(&core.nib, key));
 
-        actions.extend(core.sends.tick(now, &self.tunables, |frame| {
+        core.sends.tick(now, &self.tunables, |frame| {
             self.resolve_unrouted_unicast(&core.nib, frame, now)
-        }));
+        });
 
         let discoveries = core.nib.routing.tick_discoveries(
             self.state.network_address,
@@ -336,15 +335,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         for (destination, route_request_identifier) in discoveries.restarted {
-            actions.extend(self.broadcast_discovery_request(
-                core,
-                destination,
-                route_request_identifier,
-            ));
+            self.broadcast_discovery_request(core, destination, route_request_identifier);
         }
 
         for destination in discoveries.unreachable {
-            actions.extend(core.sends.fail_unrouted(destination));
+            core.sends.fail_unrouted(destination);
         }
 
         let next_wake = [
@@ -358,7 +353,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         .min();
 
         // This pass is the timer task's own: waking the timer here would make it spin
-        self.run_send_actions(guard, actions);
+        self.run_send_actions(guard);
         next_wake
     }
 }

@@ -3,7 +3,6 @@
 //! This table knows nothing of route discovery. The routing table decides when one is
 //! started, restarted or given up on; a held send only waits for a next hop.
 
-use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use ziggurat_ieee_802154::types::Nwk;
@@ -12,24 +11,22 @@ use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Actions, Confirm, SendFailure, SendId, TxPriority};
+use super::{Action, Confirm, Outbox, SendFailure, SendFrame, SendId, TxPriority};
 
 /// What an unrouted unicast is enqueued with.
 #[derive(Debug)]
-pub struct UnroutedUnicast<F, W> {
+pub struct UnroutedUnicast<F> {
     pub frame: F,
     pub priority: TxPriority,
-    pub waiter: W,
     pub confirm: Confirm,
     pub destination: Nwk,
 }
 
 /// A held send: what it carries to the unicasts once its route is known.
 #[derive(Debug)]
-pub(super) struct Record<F, W> {
+pub(super) struct Record<F> {
     pub(super) frame: F,
     pub(super) priority: TxPriority,
-    pub(super) waiter: W,
     pub(super) confirm: Confirm,
     pub(super) destination: Nwk,
     /// When the send fails if still unrouted.
@@ -37,12 +34,12 @@ pub(super) struct Record<F, W> {
 }
 
 #[derive(Debug)]
-pub(super) struct UnroutedUnicasts<F, W, E> {
-    records: FlatMap<SendId, Record<F, W>>,
+pub(super) struct UnroutedUnicasts<F, E> {
+    records: FlatMap<SendId, Record<F>>,
     _error: PhantomData<fn() -> E>,
 }
 
-impl<F, W, E> Default for UnroutedUnicasts<F, W, E> {
+impl<F, E> Default for UnroutedUnicasts<F, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
@@ -51,7 +48,7 @@ impl<F, W, E> Default for UnroutedUnicasts<F, W, E> {
     }
 }
 
-impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
+impl<F: SendFrame, E: From<SendFailure>> UnroutedUnicasts<F, E> {
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }
@@ -67,7 +64,7 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
-        send: UnroutedUnicast<F, W>,
+        send: UnroutedUnicast<F>,
         now: Instant,
         tunables: &Tunables,
     ) {
@@ -76,7 +73,6 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
             Record {
                 frame: send.frame,
                 priority: send.priority,
-                waiter: send.waiter,
                 confirm: send.confirm,
                 destination: send.destination,
                 deadline: now + tunables.handoff_timeout(),
@@ -84,75 +80,54 @@ impl<F, W, E: From<SendFailure>> UnroutedUnicasts<F, W, E> {
         );
     }
 
-    /// The id of every held send, oldest first.
-    pub(super) fn ids(&self) -> Vec<SendId> {
-        self.records.keys().copied().collect()
+    /// Take every held send `next_hop` finds a next hop for, oldest first, with that
+    /// next hop. `next_hop` may rewrite the frame, for a source route.
+    pub(super) fn take_routed<T>(
+        &mut self,
+        mut next_hop: impl FnMut(&mut F) -> Option<T>,
+    ) -> impl Iterator<Item = (SendId, Record<F>, T)> {
+        self.records
+            .extract_map(move |_, send| next_hop(&mut send.frame))
     }
 
-    pub(super) fn frame_mut(&mut self, id: SendId) -> &mut F {
-        &mut self.records.get_mut(&id).unwrap().frame
-    }
-
-    /// Take a held send: it has a route.
-    pub(super) fn take(&mut self, id: SendId) -> Record<F, W> {
-        self.records.remove(&id).unwrap()
-    }
-
-    fn settled(send: Record<F, W>, failure: SendFailure) -> Action<F, W, E> {
+    fn settled(id: SendId, failure: SendFailure) -> Action<F, E> {
         Action::Settled {
-            waiter: send.waiter,
+            id,
             result: Err(failure.into()),
-            frame: send.frame,
             failed_hop: None,
         }
     }
 
     /// Fail every send to `destination`: no route to it will be found.
-    pub(super) fn fail(&mut self, destination: Nwk) -> Actions<F, W, E> {
-        let ids: Vec<SendId> = self
+    pub(super) fn fail(&mut self, destination: Nwk, outbox: &mut Outbox<F, E>) {
+        let failed = self
             .records
-            .iter()
-            .filter(|(_, send)| send.destination == destination)
-            .map(|(id, _)| *id)
-            .collect();
+            .extract_if(|_, send| send.destination == destination);
 
-        ids.into_iter()
-            .map(|id| Self::settled(self.take(id), SendFailure::RouteDiscoveryTimeout))
-            .collect()
-    }
-
-    /// Drop every record and return its waiter: the stack is shutting down.
-    pub(super) fn abandon(&mut self) -> Vec<W> {
-        let mut waiters = Vec::new();
-        while let Some((_, send)) = self.records.pop_first() {
-            waiters.push(send.waiter);
+        for (id, _) in failed {
+            outbox.push_back(Self::settled(id, SendFailure::RouteDiscoveryTimeout));
         }
-        waiters
     }
 
-    pub(super) fn cancel(&mut self, id: SendId) -> Actions<F, W, E> {
-        let send = self.records.remove(&id).unwrap();
-        let mut actions = Actions::new();
-        actions.push(Self::settled(send, SendFailure::Cancelled));
-        actions
+    /// Settle every record as cancelled: the stack is shutting down.
+    pub(super) fn abandon(&mut self, outbox: &mut Outbox<F, E>) {
+        while let Some((id, _)) = self.records.pop_first() {
+            outbox.push_back(Self::settled(id, SendFailure::Cancelled));
+        }
+    }
+
+    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, E>) {
+        self.records.remove(&id).unwrap();
+        outbox.push_back(Self::settled(id, SendFailure::Cancelled));
     }
 
     /// Fail sends past their deadline.
-    pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
-        let lapsed: Vec<SendId> = self
-            .records
-            .iter()
-            .filter(|(_, send)| send.deadline <= now)
-            .map(|(id, _)| *id)
-            .collect();
+    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, E>) {
+        let lapsed = self.records.extract_if(|_, send| send.deadline <= now);
 
-        lapsed
-            .into_iter()
-            .map(|id| {
-                let send = self.records.remove(&id).unwrap();
-                Self::settled(send, SendFailure::HandoffTimeout)
-            })
-            .collect()
+        for (id, _) in lapsed {
+            outbox.push_back(Self::settled(id, SendFailure::HandoffTimeout));
+        }
     }
 
     pub(super) fn next_wake(&self) -> Option<Instant> {

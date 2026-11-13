@@ -1,5 +1,5 @@
-//! Turns tracked sends into their wire confirm frames: an `id -> SendHandle` map plus a
-//! sweep.
+//! Turns tracked sends into their wire confirm frames: an `id -> SendHandle` map that
+//! hands out the frames it owes one at a time.
 //!
 //! Once `request_id` leaves the driver, this map must exist at the protocol layer
 //! regardless — cancellation needs it. It is sans-io and shared verbatim by the host
@@ -8,11 +8,11 @@
 //!
 //! The tracker only ever calls [`SendHandle::status`] (it never awaits) so both of a
 //! handle's per-stage waiters stay free for a local caller. The async shell around it
-//! is one wake-and-sweep reactor per transport: it waits on the shared wake, sweeps
-//! the whole table, and emits the frames the sweep returns.
+//! is one reactor per transport: it waits on the shared wake, then takes and emits
+//! [`SendTracker::next_confirm`] until none is owed. It holds the tracker's lock for one
+//! call at a time, so it can encode and send each frame without it.
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use ziggurat_driver::sync::Notify;
 use ziggurat_driver::zigbee_stack::{SendHandle, SendId};
@@ -45,8 +45,9 @@ struct TrackedSend {
     emitted_send_confirm: bool,
 }
 
-/// The per-transport map of in-flight tracked sends. Entries resolve as their slots do
-/// and are removed by [`sweep`](Self::sweep) once every frame they owe has been emitted.
+/// The per-transport map of in-flight tracked sends. Entries resolve as their sends do
+/// and are removed by [`next_confirm`](Self::next_confirm) once every frame they owe has
+/// been handed out.
 pub struct SendTracker {
     entries: FlatMap<RequestId, TrackedSend>,
     wake: Arc<Notify>,
@@ -69,7 +70,7 @@ impl SendTracker {
     }
 
     /// Begin tracking a send under its wire `request_id`. Registers the shared wake on
-    /// the handle; the slot may already be resolved, so the shell must self-notify once
+    /// the handle; the send may already be resolved, so the shell must self-notify once
     /// after inserting (the sweep re-checks everything, closing the race).
     pub fn insert(&mut self, id: RequestId, handle: SendHandle, confirm_kind: ConfirmKind) {
         handle.set_completion_wake(self.wake.clone());
@@ -89,80 +90,65 @@ impl SendTracker {
         self.entries.get(&id).map(|entry| entry.handle.id())
     }
 
-    /// One reactor pass: emit every confirm frame now owed and drop entries that have
-    /// emitted their last. Per-entry `emitted_send_confirm` flags keep the two-frame kind
-    /// exactly-once and ordered even though a coalesced wake sweeps the whole table.
-    pub fn sweep(&mut self) -> Vec<Notification> {
-        let mut out = Vec::new();
-        let mut done: Vec<RequestId> = Vec::new();
+    /// The next confirm frame owed, oldest request first, or `None` when none is. An
+    /// entry is dropped with the last frame it owes. The per-entry `emitted_send_confirm`
+    /// flag keeps the two-frame kind exactly-once and ordered.
+    pub fn next_confirm(&mut self) -> Option<Notification> {
+        let (id, notification, done) = self
+            .entries
+            .iter_mut()
+            .find_map(|(&id, entry)| Self::owed(id, entry).map(|(n, done)| (id, n, done)))?;
 
-        for (id, entry) in self.entries.iter_mut() {
-            let progress = entry.handle.status();
-
-            match entry.confirm_kind {
-                ConfirmKind::UnicastNoAck => {
-                    if let Some(delivered) = &progress.delivered {
-                        out.push(Notification::SendConfirm(
-                            *id,
-                            SendConfirmPayload {
-                                status: send_status(delivered),
-                            },
-                        ));
-                        done.push(*id);
-                    }
-                }
-                ConfirmKind::Broadcast => {
-                    if let Some(delivered) = &progress.delivered {
-                        out.push(Notification::BroadcastConfirm(
-                            *id,
-                            BroadcastConfirmPayload {
-                                status: send_status(delivered),
-                            },
-                        ));
-                        done.push(*id);
-                    }
-                }
-                ConfirmKind::UnicastApsAck => {
-                    if !entry.emitted_send_confirm {
-                        if let Some(handed_off) = &progress.handed_off {
-                            out.push(Notification::SendConfirm(
-                                *id,
-                                SendConfirmPayload {
-                                    status: send_status(handed_off),
-                                },
-                            ));
-                            entry.emitted_send_confirm = true;
-
-                            // A failed handoff is terminal: no end-to-end ack will follow,
-                            // so the `ApsAckConfirm` is never owed.
-                            if handed_off.is_err() {
-                                done.push(*id);
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Reached only once the handoff succeeded (its failure was retired
-                    // above), so `delivered` here is the end-to-end ack verdict.
-                    if entry.emitted_send_confirm {
-                        if let Some(delivered) = &progress.delivered {
-                            out.push(Notification::ApsAckConfirm(
-                                *id,
-                                ApsAckConfirmPayload {
-                                    status: send_status(delivered),
-                                },
-                            ));
-                            done.push(*id);
-                        }
-                    }
-                }
-            }
-        }
-
-        for id in done {
+        if done {
             self.entries.remove(&id);
         }
 
-        out
+        Some(notification)
+    }
+
+    /// The frame an entry owes now, and whether it is the last.
+    fn owed(id: RequestId, entry: &mut TrackedSend) -> Option<(Notification, bool)> {
+        let progress = entry.handle.status();
+
+        match entry.confirm_kind {
+            ConfirmKind::UnicastNoAck => {
+                let delivered = progress.delivered?;
+                let status = send_status(&delivered);
+                Some((
+                    Notification::SendConfirm(id, SendConfirmPayload { status }),
+                    true,
+                ))
+            }
+            ConfirmKind::Broadcast => {
+                let delivered = progress.delivered?;
+                let status = send_status(&delivered);
+                Some((
+                    Notification::BroadcastConfirm(id, BroadcastConfirmPayload { status }),
+                    true,
+                ))
+            }
+            ConfirmKind::UnicastApsAck if !entry.emitted_send_confirm => {
+                let handed_off = progress.handed_off?;
+                entry.emitted_send_confirm = true;
+
+                // A failed handoff is terminal: no end-to-end ack will follow, so the
+                // `ApsAckConfirm` is never owed
+                let status = send_status(&handed_off);
+                Some((
+                    Notification::SendConfirm(id, SendConfirmPayload { status }),
+                    handed_off.is_err(),
+                ))
+            }
+            // Reached only once the handoff succeeded (its failure was retired above), so
+            // `delivered` here is the end-to-end ack verdict
+            ConfirmKind::UnicastApsAck => {
+                let delivered = progress.delivered?;
+                let status = send_status(&delivered);
+                Some((
+                    Notification::ApsAckConfirm(id, ApsAckConfirmPayload { status }),
+                    true,
+                ))
+            }
+        }
     }
 }

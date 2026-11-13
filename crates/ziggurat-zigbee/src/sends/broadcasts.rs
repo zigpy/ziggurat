@@ -5,7 +5,6 @@
 //! outstanding. Every copy, the first included, is queued by the tick its schedule
 //! makes it due on; only a `Once` schedule queues its copy at admission.
 
-use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::marker::PhantomData;
 use core::time::Duration;
@@ -16,7 +15,9 @@ use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
-use super::{Action, Actions, InFlight, SendFailure, SendId, Transmit, TxPriority};
+use super::{
+    Action, InFlight, Outbox, SendFailure, SendFrame, SendId, Transmit, TransmitError, TxPriority,
+};
 
 /// How a broadcast is retransmitted and when it is done.
 ///
@@ -44,10 +45,9 @@ pub enum Schedule {
 
 /// What a broadcast is enqueued with.
 #[derive(Debug)]
-pub struct Broadcast<F, W> {
+pub struct Broadcast<F> {
     pub frame: F,
     pub priority: TxPriority,
-    pub waiter: W,
     pub schedule: Schedule,
 }
 
@@ -69,11 +69,10 @@ enum CopyState {
 }
 
 #[derive(Debug)]
-struct Record<F, W, E> {
+struct Record<F, E> {
     /// `None` exactly while a copy is on loan to the radio (`CopyState::Transmitting`).
     frame: Option<F>,
     priority: TxPriority,
-    waiter: W,
     schedule: Schedule,
     copy: CopyState,
     handed_off: bool,
@@ -87,7 +86,7 @@ struct Record<F, W, E> {
     deadline: Instant,
 }
 
-impl<F, W, E> Record<F, W, E> {
+impl<F, E> Record<F, E> {
     const fn next_attempt(&self) -> Option<Instant> {
         match self.schedule {
             Schedule::Once => None,
@@ -109,12 +108,12 @@ impl<F, W, E> Record<F, W, E> {
 }
 
 #[derive(Debug)]
-pub(super) struct Broadcasts<F, W, E> {
-    records: FlatMap<SendId, Record<F, W, E>>,
+pub(super) struct Broadcasts<F, E> {
+    records: FlatMap<SendId, Record<F, E>>,
     _error: PhantomData<fn() -> E>,
 }
 
-impl<F, W, E> Default for Broadcasts<F, W, E> {
+impl<F, E> Default for Broadcasts<F, E> {
     fn default() -> Self {
         Self {
             records: FlatMap::new(),
@@ -123,12 +122,12 @@ impl<F, W, E> Default for Broadcasts<F, W, E> {
     }
 }
 
-impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
+impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
     /// The send fails if still not over within the handoff timeout.
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
-        broadcast: Broadcast<F, W>,
+        broadcast: Broadcast<F>,
         now: Instant,
         tunables: &Tunables,
     ) {
@@ -137,7 +136,6 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             Record {
                 frame: Some(broadcast.frame),
                 priority: broadcast.priority,
-                waiter: broadcast.waiter,
                 schedule: broadcast.schedule,
                 copy: match broadcast.schedule {
                     Schedule::Once => CopyState::Queued,
@@ -178,12 +176,11 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         &mut self,
         id: SendId,
         frame: F,
-        result: Result<(), E>,
+        result: Result<(), TransmitError<E>>,
         now: Instant,
         passive_ack_interval: Duration,
-    ) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-
+        outbox: &mut Outbox<F, E>,
+    ) {
         let record = self
             .records
             .get_mut(&id)
@@ -192,10 +189,20 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
         record.copy = CopyState::Idle;
         record.frame = Some(frame);
 
+        let result = match result {
+            Ok(()) => Ok(()),
+            Err(TransmitError::Failed(err)) => Err(err),
+            // No later copy can succeed either
+            Err(TransmitError::Rejected(err)) => {
+                self.settle(id, Err(err), outbox);
+                return;
+            }
+        };
+
         match &mut record.schedule {
             Schedule::Once => {
-                self.settle(id, result, &mut actions);
-                return actions;
+                self.settle(id, result, outbox);
+                return;
             }
             Schedule::PassiveAck { next_attempt, .. } => {
                 *next_attempt = now + passive_ack_interval;
@@ -217,108 +224,100 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
             Err(err) => record.last_error = Some(err),
         }
 
-        if record.quorum_heard && record.handed_off {
-            // `settle` reports the handoff
-            self.settle(id, Ok(()), &mut actions);
-        } else if first_handoff {
-            actions.push(Action::HandedOff(record.waiter.clone()));
+        let delivered = record.quorum_heard && record.handed_off;
+        if first_handoff {
+            outbox.push_back(Action::HandedOff(id));
         }
-
-        actions
+        if delivered {
+            self.settle(id, Ok(()), outbox);
+        }
     }
 
-    /// Remove a record and report its verdict. The only way a record leaves the table.
-    fn settle(&mut self, id: SendId, result: Result<(), E>, actions: &mut Actions<F, W, E>) {
+    /// Remove a record and report its verdict.
+    fn settle(&mut self, id: SendId, result: Result<(), E>, outbox: &mut Outbox<F, E>) {
         let record = self.records.remove(&id).unwrap();
+        Self::settled(id, record, result, outbox);
+    }
 
-        // Repeat the handoff: its own action may not have reached the waiter yet
-        if record.handed_off {
-            actions.push(Action::HandedOff(record.waiter.clone()));
-        }
-
-        actions.push(Action::Settled {
-            waiter: record.waiter,
-            result,
-            frame: record
+    /// Report the verdict of a record removed from the table.
+    fn settled(id: SendId, record: Record<F, E>, result: Result<(), E>, outbox: &mut Outbox<F, E>) {
+        drop(
+            record
                 .frame
                 .expect("a transmitting send is never settled from outside"),
+        );
+
+        outbox.push_back(Action::Settled {
+            id,
+            result,
             failed_hop: None,
         });
     }
 
-    pub(super) fn awaiting_quorum(&self) -> Vec<(Nwk, u8)> {
-        self.records
-            .values()
-            .filter_map(|record| match record.schedule {
-                Schedule::PassiveAck { key, .. } if !record.quorum_heard => Some(key),
-                _ => None,
-            })
-            .collect()
+    /// Deliver every broadcast whose passive-ack quorum `heard` says was heard: the send
+    /// is delivered once a copy was handed off. Until then (no copy handed off yet, or
+    /// one in the radio right now) the first successful report settles it instead.
+    pub(super) fn deliver(
+        &mut self,
+        mut heard: impl FnMut((Nwk, u8)) -> bool,
+        outbox: &mut Outbox<F, E>,
+    ) {
+        let delivered = self.records.extract_if(|_, record| {
+            let Schedule::PassiveAck { key, .. } = record.schedule else {
+                return false;
+            };
+            if record.quorum_heard || !heard(key) {
+                return false;
+            }
+
+            if record.copy == CopyState::Transmitting || !record.handed_off {
+                record.quorum_heard = true;
+                return false;
+            }
+            true
+        });
+
+        for (id, record) in delivered {
+            Self::settled(id, record, Ok(()), outbox);
+        }
     }
 
-    /// The passive-ack quorum for a broadcast was heard: the send is delivered once a
-    /// copy was handed off. Until then (no copy handed off yet, or one in the radio
-    /// right now) the first successful report settles it instead.
-    pub(super) fn delivered(&mut self, key: (Nwk, u8)) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-
-        let found = self
-            .records
-            .iter()
-            .find_map(|(id, record)| match record.schedule {
-                Schedule::PassiveAck { key: k, .. } if k == key => Some(*id),
-                _ => None,
+    /// Settle every record as cancelled: the stack is shutting down and no copy, in the
+    /// radio or not, is ever reported on again.
+    pub(super) fn abandon(&mut self, outbox: &mut Outbox<F, E>) {
+        while let Some((id, _)) = self.records.pop_first() {
+            outbox.push_back(Action::Settled {
+                id,
+                result: Err(SendFailure::Cancelled.into()),
+                failed_hop: None,
             });
-
-        let Some(id) = found else {
-            return actions;
-        };
-
-        let record = self.records.get_mut(&id).unwrap();
-        if record.copy == CopyState::Transmitting || !record.handed_off {
-            record.quorum_heard = true;
-        } else {
-            self.settle(id, Ok(()), &mut actions);
         }
-
-        actions
-    }
-
-    /// Drop every record and return its waiter: the stack is shutting down and no
-    /// copy, in the radio or not, is ever reported on again.
-    pub(super) fn abandon(&mut self) -> Vec<W> {
-        let mut waiters = Vec::new();
-        while let Some((_, record)) = self.records.pop_first() {
-            waiters.push(record.waiter);
-        }
-        waiters
     }
 
     pub(super) fn contains(&self, id: SendId) -> bool {
         self.records.contains_key(&id)
     }
 
-    /// `None` if a copy is in the radio right now, or the send is unknown.
-    pub(super) fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
-        let record = self.records.get(&id)?;
+    /// Whether the send was cancelled: not if a copy is in the radio right now, or the
+    /// send is unknown.
+    pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, E>) -> bool {
+        let Some(record) = self.records.get(&id) else {
+            return false;
+        };
         if record.copy == CopyState::Transmitting {
-            return None;
+            return false;
         }
-
-        let mut actions = Actions::new();
-        self.settle(id, Err(SendFailure::Cancelled.into()), &mut actions);
-        Some(actions)
+        self.settle(id, Err(SendFailure::Cancelled.into()), outbox);
+        true
     }
 
     /// Send no further copies of a broadcast nobody waits on any more. A copy in the
     /// radio right now cannot be recalled: its schedule is emptied instead, so the
     /// record settles when it next comes due (a `Once` schedule settles on the copy's
     /// own report).
-    pub(super) fn stop(&mut self, id: SendId) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-
+    pub(super) fn stop(&mut self, id: SendId, outbox: &mut Outbox<F, E>) {
         let Some(record) = self.records.get_mut(&id) else {
-            return actions;
+            return;
         };
 
         if record.copy == CopyState::Transmitting {
@@ -332,21 +331,16 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 } => *copies_remaining = 0,
             }
         } else {
-            self.settle(id, Err(SendFailure::Cancelled.into()), &mut actions);
+            self.settle(id, Err(SendFailure::Cancelled.into()), outbox);
         }
-
-        actions
     }
 
     /// Queue copies that are due, complete or fail schedules that ran out, and fail
     /// records past their deadline.
-    pub(super) fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
-        let mut actions = Actions::new();
-        let mut settle: Vec<(SendId, Result<(), E>)> = Vec::new();
-
-        for (id, record) in self.records.iter_mut() {
+    pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, E>) {
+        let over = self.records.extract_map(|_, record| {
             if record.copy == CopyState::Transmitting {
-                continue;
+                return None;
             }
 
             if record.copy == CopyState::Idle
@@ -355,32 +349,29 @@ impl<F, W: Clone, E: From<SendFailure>> Broadcasts<F, W, E> {
                 match due {
                     Due::Copy => record.copy = CopyState::Queued,
                     Due::Over => {
-                        let verdict = if record.handed_off {
+                        return Some(if record.handed_off {
                             Ok(())
                         } else {
                             Err(record.last_error.take().unwrap())
-                        };
-                        settle.push((*id, verdict));
-                        continue;
+                        });
                     }
                 }
             }
 
             if record.deadline <= now {
-                let verdict = if record.handed_off {
+                return Some(if record.handed_off {
                     Ok(())
                 } else {
                     Err(SendFailure::HandoffTimeout.into())
-                };
-                settle.push((*id, verdict));
+                });
             }
-        }
 
-        for (id, result) in settle {
-            self.settle(id, result, &mut actions);
-        }
+            None
+        });
 
-        actions
+        for (id, record, result) in over {
+            Self::settled(id, record, result, outbox);
+        }
     }
 
     /// Consume a schedule's next copy if it is due. `None` means nothing is due.

@@ -9,7 +9,6 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154CommandFrame, Ieee802154CommandPayload, Ieee802154Frame, Ieee802154FrameControl,
     Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_zigbee::aps::frame::{
     APS_STATUS_SECURITY_FAIL, APS_STATUS_SUCCESS, ApsCommandFrame, ApsCommandFrameCommand,
@@ -21,10 +20,10 @@ use ziggurat_zigbee::aps::frame::{
 };
 use ziggurat_zigbee::aps::security::AppliedKey;
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
+    BROADCAST_RX_ON_WHEN_IDLE, Nsdu, NwkFrame, NwkPayload, NwkRouteDiscovery,
+    NwkSecurityHeaderKeyId,
 };
 
-use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_zigbee::nwk::commands::{
     Nwk802154AssociationStatus, NwkCommand, NwkEndDeviceTimeoutRequestCommand,
@@ -435,7 +434,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         destination_eui64: Eui64,
         join_kind: JoinKind,
-    ) -> EncryptedApsCommandFrame {
+    ) -> Nsdu {
         let (network_key, key_seq_number) = {
             let core = self.core();
 
@@ -474,11 +473,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             core.aib.aps_security.device_link_key(destination_eui64)
         };
 
-        let encrypted = core.aib.aps_security.encrypt_command_with_link_key(
-            &link_key,
-            NwkSecurityHeaderKeyId::KeyTransportKey,
-            &transport_key_command,
-        );
+        let encrypted = core
+            .aib
+            .aps_security
+            .encrypt_command_with_link_key(
+                &link_key,
+                NwkSecurityHeaderKeyId::KeyTransportKey,
+                &transport_key_command,
+            )
+            .to_bytes();
         drop(core);
 
         self.persist_aps_frame_counter();
@@ -498,8 +501,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.build_encrypted_network_key_transport(destination_eui64, join_kind);
 
         let nwk_frame = self
-            .nwk_data_frame(destination, encrypted_command.to_bytes())
-            .expect("Transport-Key command should always fit")
+            .nwk_data_frame(destination, encrypted_command)
             .unsecured();
 
         // A direct one-hop unicast without an APS ack: next-hop acceptance is the
@@ -630,12 +632,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn send_secured_aps_payload(
         &self,
         destination: Nwk,
-        payload: Vec<u8>,
+        payload: Nsdu,
     ) -> Result<SendHandle, EnqueueError> {
         // Routed delivery to a non-neighbor must be allowed to discover a route (NWK data
         // frames default to suppressing discovery).
         let nwk_frame = self
-            .nwk_data_frame(destination, payload)?
+            .nwk_data_frame(destination, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
         self.send_unicast(Unicast {
@@ -1031,8 +1033,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             counter: self.next_aps_counter(),
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: device_eui64,
-                tunneled_frame: FrameBytes::from_slice(&encrypted_transport_key.to_bytes())
-                    .expect("an encrypted APS command is frame-bounded"),
+                tunneled_frame: encrypted_transport_key,
             }),
         };
 
