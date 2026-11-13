@@ -15,7 +15,9 @@ use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
 
-use super::{Action, InFlight, Outbox, SendFailure, SendFrame, SendId, Transmit, TxPriority};
+use super::{
+    Action, InFlight, Outbox, SendFailure, SendFrame, SendId, Transmit, TransmitError, TxPriority,
+};
 
 /// How a broadcast is retransmitted and when it is done.
 ///
@@ -174,7 +176,7 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
         &mut self,
         id: SendId,
         frame: F,
-        result: Result<(), E>,
+        result: Result<(), TransmitError<E>>,
         now: Instant,
         passive_ack_interval: Duration,
         outbox: &mut Outbox<F, E>,
@@ -186,6 +188,16 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
         debug_assert_eq!(record.copy, CopyState::Transmitting);
         record.copy = CopyState::Idle;
         record.frame = Some(frame);
+
+        let result = match result {
+            Ok(()) => Ok(()),
+            Err(TransmitError::Failed(err)) => Err(err),
+            // No later copy can succeed either
+            Err(TransmitError::Rejected(err)) => {
+                self.settle(id, Err(err), outbox);
+                return;
+            }
+        };
 
         match &mut record.schedule {
             Schedule::Once => {

@@ -127,6 +127,16 @@ pub enum SendFailure {
     Cancelled,
 }
 
+/// Why the sender failed to transmit a lent frame.
+#[derive(Debug)]
+pub enum TransmitError<E> {
+    /// This attempt failed. A later attempt may succeed.
+    Failed(E),
+    /// The frame can never be transmitted, for example because it is too long. The send
+    /// fails at once with no retries, and the next hop is not blamed.
+    Rejected(E),
+}
+
 /// What settles a unicast send's `delivered` verdict.
 #[derive(Debug)]
 pub enum Confirm {
@@ -346,7 +356,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
     pub fn transmitted(
         &mut self,
         in_flight: InFlight<F>,
-        result: Result<(), E>,
+        result: Result<(), TransmitError<E>>,
         now: Instant,
         retry_delay: Duration,
         passive_ack_interval: Duration,

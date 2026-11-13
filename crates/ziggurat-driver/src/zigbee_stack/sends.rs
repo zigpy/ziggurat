@@ -14,7 +14,9 @@ use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
-use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as UnicastRecord};
+use ziggurat_zigbee::sends::{
+    Action, Broadcast as BroadcastRecord, TransmitError, Unicast as UnicastRecord,
+};
 
 use crate::runtime::Runtime;
 
@@ -231,7 +233,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 };
 
                 let transmit = in_flight.transmit();
-                let result = self.transmit(in_flight.frame_mut(), transmit).await;
+                let result = self
+                    .transmit(in_flight.frame_mut(), transmit)
+                    .await
+                    .map_err(|err| match err {
+                        DeliveryError::FrameTooLong => TransmitError::Rejected(err),
+                        err => TransmitError::Failed(err),
+                    });
 
                 let now = self.core_now();
                 let retry_delay = self.unicast_retry_delay();

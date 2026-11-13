@@ -14,7 +14,7 @@ use crate::flat_map::FlatMap;
 
 use super::{
     Action, ApsAckData, Confirm, InFlight, Outbox, SendFailure, SendFrame, SendId, SrcMatchTable,
-    Transmit, TxPriority,
+    Transmit, TransmitError, TxPriority,
 };
 
 /// What a unicast is enqueued with.
@@ -195,7 +195,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
         &mut self,
         id: SendId,
         frame: F,
-        result: Result<(), E>,
+        result: Result<(), TransmitError<E>>,
         now: Instant,
         retry_delay: Duration,
         outbox: &mut Outbox<F, E>,
@@ -214,7 +214,9 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
             // The destination acked end to end while the radio reported a failure: the
             // frame got through
             Err(_) if acked => self.handed_off(id, now, acked, outbox),
-            Err(err) => match record.poll_address {
+            // Nothing reached the air, so the next hop is not to blame
+            Err(TransmitError::Rejected(err)) => self.settle(id, Err(err), None, outbox),
+            Err(TransmitError::Failed(err)) => match record.poll_address {
                 // 802.15.4 spec 6.7.3: a transaction is only extracted once acknowledged,
                 // so a failed transmit awaits the device's next poll, keeping its deadline
                 Some(_) if now < record.deadline => record.stage = Stage::AwaitingPoll,
