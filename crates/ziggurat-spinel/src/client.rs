@@ -1,39 +1,31 @@
 use crate::{
-    HdlcSpecial, SPINEL_FRAME_MAX_SIZE, SpinelCommandId, SpinelFrame, SpinelFrameParsingError,
-    SpinelFramePropValueIs, SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelResetReason,
-    SpinelStatus, hdlc_escape_into, packed_uint21_deserialize, packed_uint21_to_bytes,
+    HdlcSpecial, SPINEL_FRAME_MAX_SIZE, SpinelCommandId, SpinelEvent, SpinelFrameParsingError,
+    SpinelHeader, SpinelPropertyId, SpinelProtocol, SpinelResetReason, SpinelStatus, Transaction,
+    hdlc_escape_into, packed_uint21_deserialize, packed_uint21_into,
 };
-use std::string::String;
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::pin::pin;
+use core::time::Duration;
+use embedded_io_async::{Error as _, Read, Write};
+use futures::future::{Either, select};
 use thiserror::Error;
-use ziggurat_ieee_802154::FrameBytes;
+use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::Eui64;
-
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::mpsc;
-use tokio::time::{Duration, timeout};
-
-/// A link to the RCP: a serial port or a TCP socket. Boxed so [`SpinelClient`] stays
-/// transport-agnostic regardless of which one a caller opens.
-pub trait RcpTransport: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
-impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> RcpTransport for T {}
+use ziggurat_runtime::runtime::{RtInstant, Runtime};
+use ziggurat_runtime::sync::{AsyncMutex, AsyncMutexGuard, Mutex, Notify};
 
 /// A local RCP link — serial, or Ethernet to a network-attached RCP — answers in
 /// milliseconds; anything beyond this is a failure. Wi-Fi is not supported: its
-/// latency variance can spuriously trip `MAX_CONSECUTIVE_TIMEOUTS` below and force a
+/// latency variance can spuriously trip the consecutive-timeout limit and force a
 /// reset-recovery against a perfectly healthy radio.
 const TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Consecutive command timeouts before the RCP is presumed wedged and the
-/// reset-recovery path is triggered.
-const MAX_CONSECUTIVE_TIMEOUTS: u32 = 4;
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelTxFrame {
-    pub psdu: Vec<u8>,
+    pub psdu: Psdu,
     pub channel: Option<u8>,
     pub max_csma_backoffs: Option<u8>,
     pub max_frame_retries: Option<u8>,
@@ -47,9 +39,25 @@ pub struct SpinelTxFrame {
     pub tx_power: Option<i8>,
 }
 
+/// The property id and value of a property response payload.
+fn parse_property(response: &[u8]) -> Result<(SpinelPropertyId, &[u8]), SpinelError> {
+    let (property_id, value) =
+        packed_uint21_deserialize(response).map_err(SpinelError::U21ParsingError)?;
+    let property_id = SpinelPropertyId::try_from(property_id)
+        .map_err(|_| SpinelError::InvalidResponsePropertyId { property_id })?;
+
+    Ok((property_id, value))
+}
+
 impl SpinelTxFrame {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::new();
+        self.serialize_into(&mut result);
+        result
+    }
+
+    /// Append the `STREAM_RAW` value: the PSDU and its transmit metadata.
+    pub fn serialize_into(&self, result: &mut Vec<u8>) {
         result.extend_from_slice(&(self.psdu.len() as u16).to_le_bytes());
         result.extend_from_slice(&self.psdu);
 
@@ -98,14 +106,12 @@ impl SpinelTxFrame {
         if let Some(tx_power) = self.tx_power {
             result.push(tx_power as u8);
         }
-
-        result
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelRxFrame {
-    pub psdu: FrameBytes,
+    pub psdu: Psdu,
     pub rssi: i8,
     pub noise_floor: i8,
     pub flags: u32,
@@ -113,7 +119,6 @@ pub struct SpinelRxFrame {
     pub lqi: u8,
     pub timestamp_us: u64,
     pub receive_error: u8,
-    pub manufacturer_specific: Vec<u8>,
 }
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -148,7 +153,7 @@ impl SpinelRxFrame {
             });
         }
 
-        let psdu = FrameBytes::from_slice(&bytes[offset..offset + psdu_len])
+        let psdu = Psdu::from_slice(&bytes[offset..offset + psdu_len])
             .map_err(|_| SpinelRxFrameError::PsduTooLong { got: psdu_len })?;
         offset += psdu_len;
 
@@ -184,10 +189,8 @@ impl SpinelRxFrame {
         ]);
         offset += 8;
 
+        // Any vendor-specific bytes after it are not read
         let receive_error = bytes[offset];
-        offset += 1;
-
-        let manufacturer_specific = bytes[offset..].to_vec();
 
         Ok(Self {
             psdu,
@@ -198,19 +201,20 @@ impl SpinelRxFrame {
             lqi,
             timestamp_us,
             receive_error,
-            manufacturer_specific,
         })
     }
 }
 
 #[derive(Error, Debug)]
 pub enum SpinelError {
-    #[error("io error")]
-    IoError(#[from] std::io::Error),
+    #[error("io error: {0:?}")]
+    Io(embedded_io_async::ErrorKind),
     #[error("command cancelled by an RCP reset")]
     CancelledByReset,
     #[error("the spinel transport closed")]
     TransportClosed,
+    #[error("the spinel transport stopped accepting bytes")]
+    WriteStalled,
     #[error("timeout")]
     Timeout,
     #[error("spinel U21 parsing error")]
@@ -232,195 +236,446 @@ pub enum SpinelError {
     InvalidStatus { status: u8 },
 }
 
-/// The writer half of the port plus its serialization scratch: frames go out one at a
-/// time, so two persistent buffers cover every TX without per-frame allocation.
-struct SpinelWriter {
-    port: WriteHalf<Box<dyn RcpTransport>>,
-    frame_scratch: Vec<u8>,
-    hdlc_scratch: Vec<u8>,
+/// A frame waiting for the write loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outbound {
+    /// The request of this transaction id, written in its transaction.
+    Request(u8),
+    /// A `CMD_RESET`, which has no transaction.
+    Reset(SpinelResetReason),
 }
 
-pub struct SpinelClient {
-    /// The reader half of the port, owned by the task spawned in `spawn_reader`.
-    reader: Mutex<Option<ReadHalf<Box<dyn RcpTransport>>>>,
-    /// The writer half of the port. The mutex also serializes outbound HDLC writes so
-    /// concurrent commands cannot interleave partial frames inside the byte stream.
-    writer: AsyncMutex<SpinelWriter>,
-    pub protocol: Arc<Mutex<SpinelProtocol>>,
+struct State {
+    protocol: SpinelProtocol,
+    /// Frames waiting for the write loop.
+    outbound: VecDeque<Outbound>,
+    /// The transaction id of the request the write loop is writing right now.
+    writing: Option<u8>,
+    /// [`SpinelClient::run`] was called. It runs once per client.
+    started: bool,
+    /// [`SpinelClient::run`] returned: nothing is read or written any more.
+    closed: bool,
+}
+
+/// A command's hold on its transaction id. The id and a frame the write loop has not
+/// reached yet are given back when the command returns or its future is dropped.
+struct HeldTransaction<'a, R: Runtime> {
+    client: &'a SpinelClient<R>,
+    tid: u8,
+}
+
+impl<R: Runtime> HeldTransaction<'_, R> {
+    /// Give the id back. A response is read with `read` before the id is released, as
+    /// another command could otherwise overwrite it. Returns what `read` made of the
+    /// response, or where the transaction stood if there was none.
+    fn release<T>(&self, read: impl FnOnce(&[u8]) -> T) -> Result<T, Transaction> {
+        let now = self.client.now();
+
+        let released = {
+            let mut state = self.client.state.lock();
+            state
+                .outbound
+                .retain(|outbound| *outbound != Outbound::Request(self.tid));
+
+            // The request went out, or is going out, and its response is still to
+            // come. The id waits for it, so that it cannot reach a later command
+            let response_due = *state.protocol.transaction(self.tid)
+                == Transaction::AwaitingResponse
+                || state.writing == Some(self.tid);
+
+            let transaction = if response_due {
+                state.protocol.abandon_request(self.tid, now + TIMEOUT)
+            } else {
+                state.protocol.release_request(self.tid)
+            };
+
+            match transaction {
+                Transaction::Answered => Ok(read(state.protocol.response(self.tid))),
+                transaction => Err(transaction),
+            }
+        };
+        self.client.tid_released.notify_one();
+
+        released
+    }
+
+    /// Give the id back, reading its response with `read` if it has one.
+    fn finish<T>(self, read: impl FnOnce(&[u8]) -> T) -> Result<T, Transaction> {
+        let released = self.release(read);
+        // The id may already belong to another command: it must not be released twice
+        core::mem::forget(self);
+
+        released
+    }
+}
+
+impl<R: Runtime> Drop for HeldTransaction<'_, R> {
+    fn drop(&mut self) {
+        let _ = self.release(|_| ());
+    }
+}
+
+/// Closes the link when [`SpinelClient::run`] ends, also when its future is dropped.
+/// The write loop may have taken a frame it will now never write, and its command
+/// must not wait for it.
+struct CloseOnDrop<'a, R: Runtime>(&'a SpinelClient<R>);
+
+impl<R: Runtime> Drop for CloseOnDrop<'_, R> {
+    fn drop(&mut self) {
+        self.0.state.lock().closed = true;
+        self.0.wake_all_waiters();
+    }
+}
+
+/// Receives the unsolicited events: property updates, with their value, and resets.
+pub type EventHandler = Box<dyn Fn(SpinelEvent, &[u8]) + Send + Sync>;
+
+/// The RCP link. Commands queue frames and wait for their responses; [`Self::run`] does
+/// all the transport IO.
+pub struct SpinelClient<R: Runtime> {
+    state: Mutex<State>,
+    /// Indexed by transaction id; woken when that transaction changes and when the
+    /// link closes.
+    transaction_changed: [Notify; 8],
+    outbound_ready: Notify,
+    /// Commands that found all seven transaction ids in use wait here, in order. Only
+    /// the first of them waits on `tid_released`.
+    tid_queue: AsyncMutex<()>,
+    tid_released: Notify,
+    on_event: EventHandler,
     /// Functional ownership of the radio (scan, reset recovery, channel retune), taken via
     /// [`Self::lock_radio`].
     exclusive_lock: AsyncMutex<()>,
-    consecutive_timeouts: AtomicU32,
+    /// The fixed moment the protocol's clock counts from.
+    epoch: R::Instant,
 }
 
-impl SpinelClient {
-    pub fn new(port: Box<dyn RcpTransport>) -> Self {
-        let (reader, writer) = tokio::io::split(port);
-
+impl<R: Runtime> SpinelClient<R> {
+    pub fn new(on_event: EventHandler) -> Self {
         Self {
-            reader: Mutex::new(Some(reader)),
-            writer: AsyncMutex::new(SpinelWriter {
-                port: writer,
-                frame_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
-                // Worst-case HDLC escaping doubles the frame, plus two flags
-                hdlc_scratch: Vec::with_capacity(2 * SPINEL_FRAME_MAX_SIZE + 2),
+            state: Mutex::new(State {
+                protocol: SpinelProtocol::new(),
+                outbound: VecDeque::new(),
+                writing: None,
+                started: false,
+                closed: false,
             }),
-            protocol: Arc::new(Mutex::new(SpinelProtocol::new())),
+            transaction_changed: core::array::from_fn(|_| Notify::new()),
+            outbound_ready: Notify::new(),
+            tid_queue: AsyncMutex::new(()),
+            tid_released: Notify::new(),
+            on_event,
             exclusive_lock: AsyncMutex::new(()),
-            consecutive_timeouts: AtomicU32::new(0),
+            epoch: R::now(),
         }
     }
 
-    pub fn set_property_update_receiver(
-        &self,
-        property_id: SpinelPropertyId,
-        tx: mpsc::Sender<SpinelFramePropValueIs>,
-    ) {
-        self.protocol
-            .lock()
-            .expect("Failed to lock Spinel")
-            .property_update_receivers
-            .insert(property_id, tx);
+    fn now(&self) -> Duration {
+        R::now().saturating_duration_since(self.epoch)
     }
 
-    pub fn set_reset_notification_receiver(&self, tx: mpsc::Sender<SpinelStatus>) {
-        self.protocol
-            .lock()
-            .expect("Failed to lock Spinel")
-            .set_reset_notification_receiver(tx);
-    }
-
-    /// Start a reading loop to parse and handle inbound frames.
+    /// Drive the link: parse inbound bytes and write queued frames. Returns only when
+    /// the transport fails. Commands that wait then fail with `TransportClosed`.
     ///
-    /// Serial death (USB yank, EOF) exits the whole process: the supervisor (Docker)
-    /// restarts us. A half-dead process with a deaf radio is the worst failure mode.
-    pub fn spawn_reader(&self) {
-        let mut reader = self
-            .reader
-            .lock()
-            .expect("Failed to lock reader")
-            .take()
-            .expect("Reader already taken");
-        let protocol = Arc::clone(&self.protocol);
+    /// Runs once per client. A link that comes back may lead to another radio, so it
+    /// needs a new client.
+    pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> SpinelError {
+        {
+            let mut state = self.state.lock();
+            assert!(!state.started, "the Spinel link runs once per client");
+            state.started = true;
+        }
+        let _closing = CloseOnDrop(self);
 
-        tokio::spawn(async move {
-            let mut buffer = [0u8; 2048];
+        let read = pin!(self.read_loop(reader));
+        let write = pin!(self.write_loop(writer));
+
+        match select(read, write).await {
+            Either::Left((error, _)) | Either::Right((error, _)) => error,
+        }
+    }
+
+    async fn read_loop<Rd: Read>(&self, mut reader: Rd) -> SpinelError {
+        let mut buffer = [0u8; 2048];
+        // The value of the property update being handled. It keeps its capacity
+        let mut update = Vec::new();
+
+        loop {
+            let n = match reader.read(&mut buffer).await {
+                Ok(0) => return SpinelError::TransportClosed,
+                Ok(n) => n,
+                Err(e) => return SpinelError::Io(e.kind()),
+            };
+
+            self.state.lock().protocol.receive(&buffer[..n]);
 
             loop {
-                match reader.read(&mut buffer).await {
-                    Ok(n) if n > 0 => {
-                        let mut protocol = protocol.lock().expect("Failed to lock Spinel");
-                        protocol.handle_inbound_bytes(&buffer[..n])
+                // One frame at a time, so events are handled outside the lock
+                let event = self.state.lock().protocol.next_event(&mut update);
+                let Some(event) = event else {
+                    break;
+                };
+
+                match event {
+                    SpinelEvent::Response(tid) => {
+                        self.transaction_changed[usize::from(tid)].notify_one();
                     }
-                    Ok(_) => {
-                        tracing::error!("Serial port EOF, exiting");
-                        std::process::exit(1);
+                    SpinelEvent::LateResponse(_) => self.tid_released.notify_one(),
+                    SpinelEvent::Reset(_) => {
+                        self.wake_all_waiters();
+                        (self.on_event)(event, &[]);
                     }
-                    Err(e) => {
-                        tracing::error!("Serial port read failed ({e}), exiting");
-                        std::process::exit(1);
-                    }
+                    SpinelEvent::PropertyUpdate(_) => (self.on_event)(event, &update),
                 }
             }
-        });
+        }
     }
 
-    /// Serialize and HDLC-frame `frame` into the writer's persistent scratch buffers
-    /// and put it on the wire.
-    // The writer lock is intentionally held until the write completes: it is what
-    // serializes outbound frames on the wire
-    #[allow(clippy::significant_drop_tightening)]
-    async fn send_frame(&self, frame: &SpinelFrame) -> Result<(), SpinelError> {
-        let mut writer = self.writer.lock().await;
-        let SpinelWriter {
-            port,
-            frame_scratch,
-            hdlc_scratch,
-        } = &mut *writer;
+    async fn write_loop<Wr: Write>(&self, mut writer: Wr) -> SpinelError {
+        // Frames go out one at a time, so two persistent buffers cover every TX
+        let mut frame_scratch = Vec::with_capacity(SPINEL_FRAME_MAX_SIZE);
+        // Worst-case HDLC escaping doubles the frame, plus two flags
+        let mut hdlc_scratch = Vec::with_capacity(2 * SPINEL_FRAME_MAX_SIZE + 2);
 
-        frame_scratch.clear();
-        frame.serialize_into(frame_scratch);
+        loop {
+            if !self.next_outbound(&mut frame_scratch) {
+                self.outbound_ready.notified().await;
+                continue;
+            }
 
-        hdlc_scratch.clear();
-        hdlc_scratch.push(HdlcSpecial::Flag as u8);
-        hdlc_escape_into(frame_scratch, hdlc_scratch);
-        hdlc_scratch.push(HdlcSpecial::Flag as u8);
+            hdlc_scratch.clear();
+            hdlc_scratch.push(HdlcSpecial::Flag as u8);
+            hdlc_escape_into(&frame_scratch, &mut hdlc_scratch);
+            hdlc_scratch.push(HdlcSpecial::Flag as u8);
 
-        tracing::trace!("Writing {hdlc_scratch:02X?}");
+            tracing::trace!("Writing {hdlc_scratch:02X?}");
 
-        port.write_all(hdlc_scratch)
-            .await
-            .map_err(SpinelError::IoError)?;
+            // A transport that takes this long to accept one frame is dead
+            let write = pin!(writer.write_all(&hdlc_scratch));
+            let stalled = pin!(R::sleep(TIMEOUT));
+            match select(write, stalled).await {
+                Either::Left((Ok(()), _)) => {}
+                Either::Left((Err(e), _)) => return SpinelError::Io(e.kind()),
+                Either::Right(_) => return SpinelError::WriteStalled,
+            }
 
-        Ok(())
+            // The command's response timeout starts here. One lock covers both steps: a
+            // command dropped in between would find its request neither being written
+            // nor sent, and free its id while the response is still to come
+            let tid = {
+                let mut state = self.state.lock();
+                let tid = state.writing.take();
+                if let Some(tid) = tid {
+                    state.protocol.request_written(tid);
+                }
+                tid
+            };
+            if let Some(tid) = tid {
+                self.transaction_changed[usize::from(tid)].notify_one();
+            }
+        }
+    }
+
+    /// Take the next frame waiting for the write loop into `frame`, cleared first, and
+    /// mark its transaction as being written. Returns `false` when none waits.
+    fn next_outbound(&self, frame: &mut Vec<u8>) -> bool {
+        let mut state = self.state.lock();
+
+        // A reset cancels the queued requests. Their commands remove their frames only
+        // when they next run, and the reset RCP must not get them before then
+        let outbound = loop {
+            let outbound = state.outbound.pop_front();
+            match outbound {
+                Some(Outbound::Request(tid))
+                    if *state.protocol.transaction(tid) == Transaction::Cancelled => {}
+                _ => break outbound,
+            }
+        };
+
+        frame.clear();
+        state.writing = match outbound {
+            Some(Outbound::Request(tid)) => {
+                frame.extend_from_slice(state.protocol.request(tid));
+                Some(tid)
+            }
+            Some(Outbound::Reset(reason)) => {
+                let header = SpinelHeader {
+                    flag: 0b10,
+                    network_link_id: 0,
+                    transaction_id: 0,
+                };
+                frame.extend(header.to_bytes());
+                frame.push(SpinelCommandId::Reset as u8);
+                frame.push(reason as u8);
+                // Resets carry no transaction
+                None
+            }
+            None => None,
+        };
+
+        outbound.is_some()
+    }
+
+    fn wake_all_waiters(&self) {
+        for changed in &self.transaction_changed {
+            changed.notify_one();
+        }
+        // A reset frees the abandoned transaction ids
+        self.tid_released.notify_one();
     }
 
     /// `CMD_RESET` is acknowledged with an unsolicited `LastStatus = RESET_*`
     /// notification rather than a tid-matched response, so this only sends.
-    pub async fn send_reset(&self, reason: SpinelResetReason) -> Result<(), SpinelError> {
-        let frame = SpinelFrame {
-            header: SpinelHeader {
-                flag: 0b10,
-                network_link_id: 0,
-                transaction_id: 0,
-            },
-            command_id: SpinelCommandId::Reset,
-            payload: vec![reason as u8],
-        };
-
-        self.send_frame(&frame).await
+    pub fn send_reset(&self, reason: SpinelResetReason) {
+        self.state
+            .lock()
+            .outbound
+            .push_back(Outbound::Reset(reason));
+        self.outbound_ready.notify_one();
     }
 
-    pub async fn send_command(
-        &self,
-        command_id: SpinelCommandId,
-        payload: Vec<u8>,
-    ) -> Result<SpinelFrame, SpinelError> {
-        let (frame, rx) = {
-            self.protocol
-                .lock()
-                .expect("Failed to lock Spinel")
-                .prepare_request(command_id, payload)
-        };
+    /// Take a transaction id, waiting for one while all seven are in use.
+    async fn allocate_tid(&self) -> u8 {
+        let _queue = self.tid_queue.lock().await;
 
-        tracing::trace!("Sending frame {frame:?}");
-
-        self.send_frame(&frame).await?;
-
-        match timeout(TIMEOUT, rx).await {
-            Ok(Ok(response_frame)) => {
-                self.consecutive_timeouts.store(0, Ordering::Relaxed);
-                Ok(response_frame)
-            }
-            Ok(Err(_)) => {
-                self.protocol
-                    .lock()
-                    .expect("Failed to lock Spinel")
-                    .cancel_request(frame.header.transaction_id);
-
-                Err(SpinelError::CancelledByReset)
-            }
-            Err(_) => {
-                self.protocol
-                    .lock()
-                    .expect("Failed to lock Spinel")
-                    .cancel_request(frame.header.transaction_id);
-
-                let timeouts = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
-                if timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
-                    self.consecutive_timeouts.store(0, Ordering::Relaxed);
-                    tracing::error!(
-                        "RCP unresponsive after {timeouts} consecutive command timeouts, triggering reset recovery"
-                    );
-                    self.protocol
-                        .lock()
-                        .expect("Failed to lock Spinel")
-                        .notify_reset(SpinelStatus::ResponseTimeout);
+        loop {
+            let now = self.now();
+            let abandoned_until = {
+                let mut state = self.state.lock();
+                if let Some(tid) = state.protocol.allocate_tid(now) {
+                    return tid;
                 }
+                state.protocol.next_abandoned_expiry()
+            };
 
-                Err(SpinelError::Timeout)
+            // An abandoned id comes back by itself, with no release to wake us
+            match abandoned_until {
+                Some(until) => {
+                    let _ =
+                        R::timeout(until.saturating_sub(now), self.tid_released.notified()).await;
+                }
+                None => self.tid_released.notified().await,
             }
         }
+    }
+
+    /// Send a command whose payload `write` appends, and read its response payload
+    /// with `read`.
+    pub async fn send_command<T>(
+        &self,
+        command_id: SpinelCommandId,
+        write: impl FnOnce(&mut Vec<u8>),
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T, SpinelError> {
+        let tid = self.allocate_tid().await;
+        let transaction = HeldTransaction { client: self, tid };
+
+        {
+            let mut state = self.state.lock();
+            if state.closed {
+                return Err(SpinelError::TransportClosed);
+            }
+            state.protocol.write_request(tid, command_id, write);
+            tracing::trace!("Sending frame {:02X?}", state.protocol.request(tid));
+            state.outbound.push_back(Outbound::Request(tid));
+        }
+        self.outbound_ready.notify_one();
+
+        // The timeout is for the RCP to answer, so it starts once the request is
+        // written. A request reported as timed out must not go out afterwards: the
+        // caller may send it again, and a transmit would then reach the air twice
+        if R::timeout(TIMEOUT, self.request_left_queue(tid))
+            .await
+            .is_err()
+        {
+            // Removed under the lock that finds it, so the write loop cannot take it
+            // in between
+            let unsent = {
+                let mut state = self.state.lock();
+                let queued = state.outbound.len();
+                state
+                    .outbound
+                    .retain(|outbound| *outbound != Outbound::Request(tid));
+                state.outbound.len() != queued
+            };
+
+            if unsent {
+                return Err(self.request_timed_out());
+            }
+
+            // The write loop is writing it. It finishes, or gives up and closes the
+            // link, within its own timeout
+            self.request_left_queue(tid).await;
+        }
+
+        let timed_out = R::timeout(TIMEOUT, self.request_settled(tid))
+            .await
+            .is_err();
+
+        // Where the transaction stands decides the result, not the timer: a response
+        // can arrive between the timeout firing and this line
+        match transaction.finish(read) {
+            Ok(response) => Ok(response),
+            Err(Transaction::Answered) => unreachable!("an answered transaction is read"),
+            Err(Transaction::Cancelled) => Err(SpinelError::CancelledByReset),
+            Err(
+                Transaction::Queued
+                | Transaction::AwaitingResponse
+                | Transaction::Free
+                | Transaction::Abandoned { .. },
+            ) => {
+                if timed_out {
+                    Err(self.request_timed_out())
+                } else {
+                    // Nothing settled it, so the link closed
+                    Err(SpinelError::TransportClosed)
+                }
+            }
+        }
+    }
+
+    /// Wait until the request `tid` is no longer queued: it was written or a reset
+    /// cancelled it. Also returns when the link closes.
+    async fn request_left_queue(&self, tid: u8) {
+        loop {
+            {
+                let state = self.state.lock();
+                if *state.protocol.transaction(tid) != Transaction::Queued || state.closed {
+                    return;
+                }
+            }
+            self.transaction_changed[usize::from(tid)].notified().await;
+        }
+    }
+
+    /// Wait until the request `tid` has its response or a reset cancelled it. Also
+    /// returns when the link closes.
+    async fn request_settled(&self, tid: u8) {
+        loop {
+            {
+                let state = self.state.lock();
+                if matches!(
+                    state.protocol.transaction(tid),
+                    Transaction::Answered | Transaction::Cancelled
+                ) || state.closed
+                {
+                    return;
+                }
+            }
+            self.transaction_changed[usize::from(tid)].notified().await;
+        }
+    }
+
+    /// Count a request that timed out, and start reset recovery once enough have.
+    fn request_timed_out(&self) -> SpinelError {
+        let reset = self.state.lock().protocol.request_timed_out();
+
+        if let Some(reset) = reset {
+            self.wake_all_waiters();
+            (self.on_event)(reset, &[]);
+        }
+
+        SpinelError::Timeout
     }
 
     pub async fn prop_value_get(
@@ -437,27 +692,35 @@ impl SpinelClient {
         &self,
         property_id: SpinelPropertyId,
     ) -> Result<Vec<u8>, SpinelError> {
-        let response = self
-            .send_command(
-                SpinelCommandId::PropValueGet,
-                packed_uint21_to_bytes(property_id as u32),
-            )
-            .await?;
-
-        let response_payload = response.payload;
-        let (_rsp_property_id, payload) =
-            packed_uint21_deserialize(&response_payload).map_err(SpinelError::U21ParsingError)?;
-
-        Ok(payload.to_vec())
+        self.send_command(
+            SpinelCommandId::PropValueGet,
+            |payload| packed_uint21_into(property_id as u32, payload),
+            |response| {
+                let (_, value) =
+                    packed_uint21_deserialize(response).map_err(SpinelError::U21ParsingError)?;
+                Ok(value.to_vec())
+            },
+        )
+        .await?
     }
 
     pub async fn prop_value_set(
         &self,
         property_id: SpinelPropertyId,
-        value: Vec<u8>,
+        value: &[u8],
     ) -> Result<(SpinelPropertyId, Vec<u8>), SpinelError> {
-        match self.prop_value_set_once(property_id, value.clone()).await {
-            Err(SpinelError::Timeout) => self.prop_value_set_once(property_id, value).await,
+        self.prop_value_set_with(property_id, |payload| payload.extend_from_slice(value))
+            .await
+    }
+
+    /// Set a property to the value `write` appends.
+    pub async fn prop_value_set_with(
+        &self,
+        property_id: SpinelPropertyId,
+        write: impl Fn(&mut Vec<u8>) + Sync,
+    ) -> Result<(SpinelPropertyId, Vec<u8>), SpinelError> {
+        match self.prop_value_set_once(property_id, &write).await {
+            Err(SpinelError::Timeout) => self.prop_value_set_once(property_id, &write).await,
             result => result,
         }
     }
@@ -465,41 +728,32 @@ impl SpinelClient {
     async fn prop_value_set_once(
         &self,
         property_id: SpinelPropertyId,
-        value: Vec<u8>,
+        write: impl FnOnce(&mut Vec<u8>),
     ) -> Result<(SpinelPropertyId, Vec<u8>), SpinelError> {
-        let response = self
+        let (rsp_property_id, value) = self
             .send_command(
                 SpinelCommandId::PropValueSet,
-                packed_uint21_to_bytes(property_id as u32)
-                    .iter()
-                    .chain(value.iter())
-                    .cloned()
-                    .collect(),
+                |payload| {
+                    packed_uint21_into(property_id as u32, payload);
+                    write(payload);
+                },
+                |response| {
+                    parse_property(response)
+                        .map(|(property_id, value)| (property_id, value.to_vec()))
+                },
             )
-            .await?;
+            .await??;
 
-        let response_payload = response.payload;
-        let (rsp_property_id_int, payload) =
-            packed_uint21_deserialize(&response_payload).map_err(SpinelError::U21ParsingError)?;
+        tracing::trace!("Set property {property_id:?}, result {rsp_property_id:?}={value:02X?}");
 
-        let rsp_property_id = SpinelPropertyId::try_from(rsp_property_id_int).map_err(|_| {
-            SpinelError::InvalidResponsePropertyId {
-                property_id: rsp_property_id_int,
-            }
-        })?;
-
-        tracing::trace!(
-            "Setting property {property_id:?}={value:02X?}, result {rsp_property_id:?}={payload:02X?}"
-        );
-
-        Ok((rsp_property_id, payload.to_vec()))
+        Ok((rsp_property_id, value))
     }
 
     /// Take functional ownership of the radio, fencing out transmits for the life of the
     /// guard. The right tool for any operation that drives the radio across multiple
     /// commands: scans, channel retune, reset recovery. The guard can itself transmit —
     /// see [`ExclusiveRadio::transmit_frame`].
-    pub async fn lock_radio(&self) -> ExclusiveRadio<'_> {
+    pub async fn lock_radio(&self) -> ExclusiveRadio<'_, R> {
         ExclusiveRadio {
             client: self,
             _guard: self.exclusive_lock.lock().await,
@@ -544,32 +798,40 @@ impl SpinelClient {
     ) -> Result<SpinelStatus, SpinelError> {
         // No retry on timeout: a duplicate transmit is worse than a failed one, and the
         // NWK retry paths handle the failure
-        let (rsp_prop_id, rsp) = self
-            .prop_value_set_once(SpinelPropertyId::StreamRaw, tx_frame.to_bytes())
-            .await?;
+        self.send_command(
+            SpinelCommandId::PropValueSet,
+            |payload| {
+                packed_uint21_into(SpinelPropertyId::StreamRaw as u32, payload);
+                tx_frame.serialize_into(payload);
+            },
+            |response| {
+                let (rsp_prop_id, value) = parse_property(response)?;
 
-        if rsp_prop_id != SpinelPropertyId::LastStatus {
-            return Err(SpinelError::UnexpectedResponseProperty {
-                expected: SpinelPropertyId::LastStatus,
-                got: rsp_prop_id,
-            });
-        }
+                if rsp_prop_id != SpinelPropertyId::LastStatus {
+                    return Err(SpinelError::UnexpectedResponseProperty {
+                        expected: SpinelPropertyId::LastStatus,
+                        got: rsp_prop_id,
+                    });
+                }
 
-        if rsp.is_empty() {
-            return Err(SpinelError::EmptyResponse);
-        }
+                let &[status, ..] = value else {
+                    return Err(SpinelError::EmptyResponse);
+                };
 
-        SpinelStatus::try_from(rsp[0]).map_err(|_| SpinelError::InvalidStatus { status: rsp[0] })
+                SpinelStatus::try_from(status).map_err(|_| SpinelError::InvalidStatus { status })
+            },
+        )
+        .await?
     }
 }
 
 /// Functional ownership of the radio, handed out by [`SpinelClient::lock_radio`].
-pub struct ExclusiveRadio<'a> {
-    client: &'a SpinelClient,
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+pub struct ExclusiveRadio<'a, R: Runtime> {
+    client: &'a SpinelClient<R>,
+    _guard: AsyncMutexGuard<'a, ()>,
 }
 
-impl ExclusiveRadio<'_> {
+impl<R: Runtime> ExclusiveRadio<'_, R> {
     /// Put a frame on the air while owning the radio.
     pub async fn transmit_frame(
         &self,

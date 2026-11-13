@@ -48,9 +48,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     pub(super) fn maybe_age_neighbors(&self) {
-        // Link costs reset after `router_age_limit` missed link status periods
+        // Spec 3.6.4.4.4: link costs reset once `router_age_limit` link status frames
+        // in a row are missed. Wait one extra period, so a frame that arrives a little
+        // late is not counted as missed.
         let max_age =
-            u32::from(self.tunables.router_age_limit()) * self.tunables.link_status_period();
+            (u32::from(self.tunables.router_age_limit()) + 1) * self.tunables.link_status_period();
 
         // TODO: this function should be replaced by real timers
         let stale_neighbors = self.core().nib.neighbors.age(self.core_now(), max_age);

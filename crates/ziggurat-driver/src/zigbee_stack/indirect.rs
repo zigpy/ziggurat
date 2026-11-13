@@ -1,6 +1,5 @@
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame};
-use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioError, RadioPhy};
 
@@ -50,8 +49,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let now = self.core_now();
         let delivered = fp_advertised && {
             let mut core = self.core();
-            let (queued, actions) = core.sends.poll(source_eui64, source_nwk, now);
-            self.commit_sends(core, actions);
+            let queued = core.sends.poll(source_eui64, source_nwk, now);
+            self.commit_sends(core);
             queued
         };
 
@@ -73,8 +72,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Fail every frame awaiting a device's poll: it is no longer a child.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
         let mut core = self.core();
-        let actions = core.sends.drop_indirect_unicasts(eui64, nwk);
-        self.commit_sends(core, actions);
+        core.sends.drop_indirect_unicasts(eui64, nwk);
+        self.commit_sends(core);
     }
 
     /// Spec 3.6.10.4: a poll from a device with no neighbor table entry is answered
@@ -148,10 +147,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             table.extended_addresses
         );
 
-        let short: Vec<Nwk> = table.short_addresses.iter().copied().collect();
-        let extended: Vec<Eui64> = table.extended_addresses.iter().copied().collect();
         self.radio
-            .set_frame_pending_table(&short, &extended)
+            .set_frame_pending_table(
+                table.short_addresses.as_slice(),
+                table.extended_addresses.as_slice(),
+            )
             .await?;
 
         *self.src_match_written.lock() = table;

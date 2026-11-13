@@ -7,9 +7,9 @@
 //! - [`Unicasts`](unicasts::Unicasts): a frame with a known next hop, delivered directly
 //!   (with retries) or to a sleepy child when it polls.
 //! - [`UnroutedUnicasts`](unrouted::UnroutedUnicasts): a unicast with no route yet, held
-//!   until its destination's route discovery ends. The driver runs the discovery against its
-//!   routing table and reports when the route is known or the discovery lapsed; the
-//!   send then moves to the unicasts or fails.
+//!   until a timer pass finds a next hop for it. The routing table decides when a route
+//!   discovery is started or given up on; the driver reports a destination it gave up
+//!   on, and the sends held for it fail.
 //! - [`Broadcasts`](broadcasts::Broadcasts): a frame sent once, or rebroadcast on a
 //!   schedule until its passive-ack quorum is heard.
 //!
@@ -18,18 +18,21 @@
 //! table holding the id.
 //!
 //! The tables never read a clock and never notify anyone: `now` is passed in, and every
-//! mutation returns the [`Action`]s the driver must carry out. They are generic over the
-//! frame type `F`, the waiter type `W` and the driver's error type `E`, which they only
+//! mutation queues the [`Action`]s the driver must carry out, for the driver to take
+//! with [`Sends::next_action`]. They are generic over the
+//! frame type `F` and the driver's error type `E`, which they only
 //! ever need to build from a [`SendFailure`].
 //!
 //! Every record carries a deadline, so no send can be stranded: a record past its
 //! deadline fails with the error its state implies.
 
 mod broadcasts;
+#[cfg(test)]
+mod tests;
 mod unicasts;
 mod unrouted;
 
-use alloc::vec::Vec;
+use alloc::collections::VecDeque;
 use core::cmp::Reverse;
 use core::time::Duration;
 
@@ -121,8 +124,17 @@ pub enum SendFailure {
         destination: Ieee802154Address,
     },
     RouteDiscoveryTimeout,
-    BroadcastQuorumNotReached,
     Cancelled,
+}
+
+/// Why the sender failed to transmit a lent frame.
+#[derive(Debug)]
+pub enum TransmitError<E> {
+    /// This attempt failed. A later attempt may succeed.
+    Failed(E),
+    /// The frame can never be transmitted, for example because it is too long. The send
+    /// fails at once with no retries, and the next hop is not blamed.
+    Rejected(E),
 }
 
 /// What settles a unicast send's `delivered` verdict.
@@ -170,64 +182,33 @@ impl<F> InFlight<F> {
     }
 }
 
-/// What the driver must do after a mutation.
+/// A frame the send tables hold.
+pub trait SendFrame {
+    /// What the driver reads from a unicast's frame once the unicast fails at its next
+    /// hop.
+    type Failure: core::fmt::Debug;
+
+    fn failure(&self) -> Self::Failure;
+}
+
+/// Something the driver must do because of a mutation, taken with
+/// [`Sends::next_action`].
 #[derive(Debug)]
-pub enum Action<F, W, E> {
-    /// The mesh accepted the send's frame; its waiter learns so.
-    HandedOff(W),
-    /// The send is over. The frame is handed back so the driver drops it (and whatever
-    /// budget it holds). `failed_hop` names the next hop a unicast exhausted its
-    /// attempts at.
+pub enum Action<F: SendFrame, E> {
+    /// The mesh accepted the send's frame.
+    HandedOff(SendId),
+    /// The send is over and its frame is dropped. `failed_hop` names the next hop a
+    /// unicast exhausted its attempts at, with what the driver needs from its frame.
     Settled {
-        waiter: W,
+        id: SendId,
         result: Result<(), E>,
-        frame: F,
-        failed_hop: Option<Nwk>,
+        failed_hop: Option<(Nwk, F::Failure)>,
     },
 }
 
-/// What the driver must do after a mutation, in order. Every mutating verb returns one,
-/// so a mutation whose consequences are dropped is a compile-time warning.
-#[must_use = "actions resolve waiters; dropping them loses sends"]
-#[derive(Debug)]
-pub struct Actions<F, W, E>(Vec<Action<F, W, E>>);
-
-impl<F, W, E> Default for Actions<F, W, E> {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
-
-impl<F, W, E> Actions<F, W, E> {
-    pub const fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    pub fn push(&mut self, action: Action<F, W, E>) {
-        self.0.push(action);
-    }
-}
-
-impl<F, W, E> Extend<Action<F, W, E>> for Actions<F, W, E> {
-    fn extend<I: IntoIterator<Item = Action<F, W, E>>>(&mut self, actions: I) {
-        self.0.extend(actions);
-    }
-}
-
-impl<F, W, E> FromIterator<Action<F, W, E>> for Actions<F, W, E> {
-    fn from_iter<I: IntoIterator<Item = Action<F, W, E>>>(actions: I) -> Self {
-        Self(actions.into_iter().collect())
-    }
-}
-
-impl<F, W, E> IntoIterator for Actions<F, W, E> {
-    type Item = Action<F, W, E>;
-    type IntoIter = alloc::vec::IntoIter<Action<F, W, E>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
+/// The actions mutations queued, oldest first. Its storage is kept between drains, so
+/// a mutation allocates only when it queues more actions than any before it.
+type Outbox<F, E> = VecDeque<Action<F, E>>;
 
 /// The source address match table the radio should hold: every device with a frame
 /// awaiting its poll, under both its address forms (the device may poll with either).
@@ -247,85 +228,99 @@ impl SrcMatchTable {
 }
 
 /// The three send tables behind one id space.
+///
+/// Mutations queue the actions they cause instead of returning them. The driver takes
+/// them with [`Sends::next_action`] after every mutation, while it still holds the
+/// table, so actions are carried out in the order they happened.
 #[derive(Debug)]
-pub struct Sends<F, W, E> {
+pub struct Sends<F: SendFrame, E> {
     next_id: u32,
-    unicasts: Unicasts<F, W, E>,
-    unrouted_unicasts: UnroutedUnicasts<F, W, E>,
-    broadcasts: Broadcasts<F, W, E>,
+    unicasts: Unicasts<F, E>,
+    unrouted_unicasts: UnroutedUnicasts<F, E>,
+    broadcasts: Broadcasts<F, E>,
+    /// The broadcast carrying the latest route request toward a destination, while it
+    /// still has copies to send. Kept to stop those copies when the discovery is
+    /// replaced or abandoned.
+    route_requests: FlatMap<Nwk, SendId>,
+    outbox: Outbox<F, E>,
 }
 
-impl<F, W, E> Default for Sends<F, W, E> {
+impl<F: SendFrame, E> Default for Sends<F, E> {
     fn default() -> Self {
         Self {
             next_id: 0,
             unicasts: Unicasts::default(),
             unrouted_unicasts: UnroutedUnicasts::default(),
             broadcasts: Broadcasts::default(),
+            route_requests: FlatMap::new(),
+            outbox: VecDeque::new(),
         }
     }
 }
 
-impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
+impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
     const fn next_id(&mut self) -> SendId {
         let id = SendId(self.next_id);
         self.next_id += 1;
         id
     }
 
+    /// The oldest action a mutation queued.
+    pub fn next_action(&mut self) -> Option<Action<F, E>> {
+        self.outbox.pop_front()
+    }
+
     /// Enqueue a unicast with a known next hop.
     pub fn enqueue_unicast(
         &mut self,
-        unicast: Unicast<F, W>,
+        unicast: Unicast<F>,
         now: Instant,
         tunables: &Tunables,
-    ) -> (SendId, Actions<F, W, E>) {
+    ) -> SendId {
         let id = self.next_id();
         self.unicasts
             .enqueue(id, unicast, now, None, None, tunables);
-        (id, Actions::new())
+        id
     }
 
     /// Enqueue a broadcast's copy for one sleepy child (spec 3.6.6).
     pub fn enqueue_broadcast_copy(
         &mut self,
         broadcast: SendId,
-        unicast: Unicast<F, W>,
+        unicast: Unicast<F>,
         now: Instant,
         tunables: &Tunables,
-    ) -> (SendId, Actions<F, W, E>) {
+    ) -> SendId {
         let id = self.next_id();
         self.unicasts
             .enqueue(id, unicast, now, None, Some(broadcast), tunables);
-        (id, Actions::new())
+        id
     }
 
-    /// Enqueue a unicast with no route yet, held until its destination's discovery
-    /// ends. The caller starts that discovery if the destination was not already
-    /// awaited; the first unrouted send to a destination fixes how often it is
-    /// restarted.
+    /// Enqueue a unicast with no route yet, held until a timer pass finds it a next
+    /// hop. The caller tells the routing table a route is wanted.
     pub fn enqueue_unrouted_unicast(
         &mut self,
-        send: UnroutedUnicast<F, W>,
+        send: UnroutedUnicast<F>,
         now: Instant,
         tunables: &Tunables,
-    ) -> (SendId, Actions<F, W, E>) {
+    ) -> SendId {
         let id = self.next_id();
         self.unrouted_unicasts.enqueue(id, send, now, tunables);
-        (id, Actions::new())
+        id
     }
 
     /// Enqueue a broadcast. Its first copy goes out on the next tick its schedule says
     /// it is due (a `Once` schedule queues it right away).
     pub fn enqueue_broadcast(
         &mut self,
-        broadcast: Broadcast<F, W>,
+        broadcast: Broadcast<F>,
         now: Instant,
         tunables: &Tunables,
-    ) -> (SendId, Actions<F, W, E>) {
+    ) -> SendId {
         let id = self.next_id();
         self.broadcasts.enqueue(id, broadcast, now, tunables);
-        (id, Actions::new())
+        id
     }
 
     /// Lend the highest-priority queued frame (oldest first within a priority) to the
@@ -361,11 +356,11 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
     pub fn transmitted(
         &mut self,
         in_flight: InFlight<F>,
-        result: Result<(), E>,
+        result: Result<(), TransmitError<E>>,
         now: Instant,
         retry_delay: Duration,
         passive_ack_interval: Duration,
-    ) -> Actions<F, W, E> {
+    ) {
         let InFlight {
             id,
             frame,
@@ -376,156 +371,150 @@ impl<F, W: Clone, E: From<SendFailure>> Sends<F, W, E> {
         match transmit {
             Transmit::Unicast { .. } => {
                 self.unicasts
-                    .transmitted(id, frame, result, now, retry_delay)
+                    .transmitted(id, frame, result, now, retry_delay, &mut self.outbox);
             }
             Transmit::Broadcast => {
-                self.broadcasts
-                    .transmitted(id, frame, result, now, passive_ack_interval)
+                self.broadcasts.transmitted(
+                    id,
+                    frame,
+                    result,
+                    now,
+                    passive_ack_interval,
+                    &mut self.outbox,
+                );
             }
         }
     }
 
     /// 802.15.4 spec 6.7.3: a MAC Data Request extracts the oldest frame awaiting the
     /// polling device. Returns whether one was queued for the sender.
-    pub fn poll(
-        &mut self,
-        eui64: Option<Eui64>,
-        nwk: Option<Nwk>,
-        now: Instant,
-    ) -> (bool, Actions<F, W, E>) {
-        (self.unicasts.poll(eui64, nwk, now), Actions::new())
+    pub fn poll(&mut self, eui64: Option<Eui64>, nwk: Option<Nwk>, now: Instant) -> bool {
+        self.unicasts.poll(eui64, nwk, now)
     }
 
     /// An end-to-end APS ack arrived.
-    pub fn aps_ack_received(&mut self, ack: &ApsAckData) -> Actions<F, W, E> {
-        self.unicasts.ack_received(ack)
+    pub fn aps_ack_received(&mut self, ack: &ApsAckData) {
+        self.unicasts.ack_received(ack, &mut self.outbox);
     }
 
-    /// Every destination with unrouted sends.
-    pub fn unrouted_destinations(&self) -> Vec<Nwk> {
-        self.unrouted_unicasts.destinations()
-    }
-
-    /// Whether any unrouted send waits on `destination`'s route discovery.
+    /// Whether any unrouted send waits for a route to `destination`.
     pub fn has_unrouted(&self, destination: Nwk) -> bool {
-        self.unrouted_unicasts.has_unrouted(destination)
+        self.unrouted_unicasts.has_sends_to(destination)
     }
 
-    /// `destination`'s discovery lapsed: consume a restart of it, if one is left and
-    /// an unrouted send still waits on it. The caller restarts the discovery.
-    pub fn retry_discovery(&mut self, destination: Nwk) -> bool {
-        self.unrouted_unicasts.retry_discovery(destination)
+    /// The driver broadcast `request`, a route request toward `destination`. Copies of
+    /// the request it replaces still to come are not sent.
+    pub fn route_request_sent(&mut self, destination: Nwk, request: SendId) {
+        if let Some(previous) = self.route_requests.insert(destination, request) {
+            self.broadcasts.stop(previous, &mut self.outbox);
+        }
     }
 
-    /// Fail every unrouted send to `destination`: its discovery is over without a
-    /// route.
-    pub fn fail_unrouted(&mut self, destination: Nwk) -> Actions<F, W, E> {
-        self.unrouted_unicasts.fail(destination)
+    /// Fail every unrouted send to `destination`: no route to it will be found. Copies
+    /// of its route request still to come are not sent.
+    pub fn fail_unrouted(&mut self, destination: Nwk) {
+        self.unrouted_unicasts.fail(destination, &mut self.outbox);
+
+        if let Some(request) = self.route_requests.remove(&destination) {
+            self.broadcasts.stop(request, &mut self.outbox);
+        }
     }
 
-    /// A route to `destination` is known: move every unrouted send to it to the unicasts,
-    /// keeping the deadline it was admitted with. `resolve` finds each frame's next hop
-    /// (rewriting the frame for a source route) and the address the device polls under
-    /// if the frame must wait for its poll, or fails the send.
-    pub fn route_unicasts(
+    /// Move every unrouted send that `next_hop` finds a next hop for.
+    fn route_unicasts(
         &mut self,
-        destination: Nwk,
         now: Instant,
         tunables: &Tunables,
-        mut resolve: impl FnMut(&mut F) -> Result<(Nwk, Option<Ieee802154Address>), E>,
-    ) -> Actions<F, W, E> {
-        // Fail the sends past their deadline first, so routing never revives one
-        let mut actions = self.unrouted_unicasts.tick(now);
-
-        for (id, mut unrouted) in self.unrouted_unicasts.route(destination) {
-            match resolve(&mut unrouted.frame) {
-                Ok((next_hop, poll_address)) => self.unicasts.enqueue(
-                    id,
-                    Unicast {
-                        frame: unrouted.frame,
-                        priority: unrouted.priority,
-                        waiter: unrouted.waiter,
-                        confirm: unrouted.confirm,
-                        next_hop,
-                        poll_address,
-                    },
-                    now,
-                    Some(unrouted.deadline),
-                    None,
-                    tunables,
-                ),
-                Err(err) => actions.push(Action::Settled {
-                    waiter: unrouted.waiter,
-                    result: Err(err),
+        mut next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+    ) {
+        // A send without a next hop stays held
+        for (id, unrouted, (next_hop, poll_address)) in
+            self.unrouted_unicasts.take_routed(&mut next_hop)
+        {
+            self.unicasts.enqueue(
+                id,
+                Unicast {
                     frame: unrouted.frame,
-                    failed_hop: None,
-                }),
-            }
+                    priority: unrouted.priority,
+                    confirm: unrouted.confirm,
+                    next_hop,
+                    poll_address,
+                },
+                now,
+                Some(unrouted.deadline),
+                None,
+                tunables,
+            );
         }
-
-        actions
     }
 
-    /// The key of every broadcast awaiting its passive-ack quorum.
-    pub fn broadcasts_awaiting_quorum(&self) -> Vec<(Nwk, u8)> {
-        self.broadcasts.awaiting_quorum()
-    }
-
-    /// The passive-ack quorum for a broadcast was heard: the send is delivered.
-    pub fn broadcast_delivered(&mut self, key: (Nwk, u8)) -> Actions<F, W, E> {
-        self.broadcasts.delivered(key)
+    /// Deliver every broadcast whose passive-ack quorum `heard` says was heard. `heard`
+    /// is asked about each broadcast still waiting for its quorum, by its key.
+    pub fn deliver_broadcasts(&mut self, heard: impl FnMut((Nwk, u8)) -> bool) {
+        self.broadcasts.deliver(heard, &mut self.outbox);
     }
 
     /// Fail every frame awaiting a device's poll: it is no longer a child.
-    pub fn drop_indirect_unicasts(&mut self, eui64: Option<Eui64>, nwk: Nwk) -> Actions<F, W, E> {
-        self.unicasts.drop_indirect(eui64, nwk)
+    pub fn drop_indirect_unicasts(&mut self, eui64: Option<Eui64>, nwk: Nwk) {
+        self.unicasts.drop_indirect(eui64, nwk, &mut self.outbox);
     }
 
-    /// Empty every table and return the waiter of each send that was still live, for
+    /// Empty every table and settle each send that was still live as cancelled, for
     /// the driver to fail: the stack is shutting down, so no send is ever reported on
     /// again. A frame on loan to the radio is left with the sender that holds it.
-    pub fn abandon(&mut self) -> Vec<W> {
-        let mut waiters = self.unicasts.abandon();
-        waiters.extend(self.unrouted_unicasts.abandon());
-        waiters.extend(self.broadcasts.abandon());
-        waiters
+    pub fn abandon(&mut self) {
+        self.unicasts.abandon(&mut self.outbox);
+        self.unrouted_unicasts.abandon(&mut self.outbox);
+        self.broadcasts.abandon(&mut self.outbox);
+        self.route_requests.clear();
     }
 
-    /// Cancel a send. `None` if it is unknown, already over, or in the radio right now
-    /// (its own report settles it within the radio's timeout).
-    pub fn cancel(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
+    /// Cancel a send. Returns whether it was cancelled: not if it is unknown, already
+    /// over, or in the radio right now (its own report settles it within the radio's
+    /// timeout).
+    pub fn cancel(&mut self, id: SendId) -> bool {
         if self.unicasts.contains(id) {
-            self.unicasts.cancel(id)
+            self.unicasts.cancel(id, &mut self.outbox)
         } else if self.unrouted_unicasts.contains(id) {
-            Some(self.unrouted_unicasts.cancel(id))
+            self.unrouted_unicasts.cancel(id, &mut self.outbox);
+            true
         } else {
             self.cancel_broadcast(id)
         }
     }
 
     /// Cancel a broadcast with its sleepy child copies, or nothing if any is in the radio.
-    fn cancel_broadcast(&mut self, id: SendId) -> Option<Actions<F, W, E>> {
-        let copies = self.unicasts.copies_of(id);
-        if copies
-            .iter()
-            .any(|copy| self.unicasts.is_transmitting(*copy))
-        {
-            return None;
+    fn cancel_broadcast(&mut self, id: SendId) -> bool {
+        if self.unicasts.copy_transmitting(id) {
+            return false;
         }
 
-        let mut actions = self.broadcasts.cancel(id)?;
-        for copy in copies {
-            actions.extend(self.unicasts.cancel(copy).unwrap());
+        if !self.broadcasts.cancel(id, &mut self.outbox) {
+            return false;
         }
-        Some(actions)
+        self.unicasts.cancel_copies(id, &mut self.outbox);
+        true
     }
 
-    /// The timer pass: re-queue what is due and fail what is past its deadline.
-    pub fn tick(&mut self, now: Instant) -> Actions<F, W, E> {
-        let mut actions = self.unicasts.tick(now);
-        actions.extend(self.unrouted_unicasts.tick(now));
-        actions.extend(self.broadcasts.tick(now));
-        actions
+    /// The timer pass over the three tables.
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        tunables: &Tunables,
+        // A frame's next hop, and the address its device polls under if the frame must
+        // wait for its poll
+        next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+    ) {
+        // Fail the sends past their deadline first, so routing never revives one
+        self.unrouted_unicasts.tick(now, &mut self.outbox);
+        self.route_unicasts(now, tunables, next_hop);
+
+        self.unicasts.tick(now, &mut self.outbox);
+        self.broadcasts.tick(now, &mut self.outbox);
+
+        // A route request with no copy left to send needs no stopping
+        self.route_requests
+            .retain(|_, request| self.broadcasts.contains(*request));
     }
 
     /// When the timer must next run, or `None` when nothing is waiting on time.

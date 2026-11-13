@@ -3,13 +3,9 @@
 //! `sli_*` on EFR32, or `otPlatCryptoAesEncrypt` on platforms without a CCM engine).
 
 use ziggurat_ieee_802154::types::Key;
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_zigbee::crypto::{self, CryptoBackend, DecryptionError, MIC_LENGTH};
 
 use crate::platform;
-
-/// Max 802.15.4 PHY payload; bounds the scratch buffer.
-const MAX_FRAME: usize = 128;
 
 struct PlatformCryptoBackend;
 
@@ -25,10 +21,8 @@ impl CryptoBackend for PlatformCryptoBackend {
         key: &Key,
         nonce: &[u8; 13],
         auth_data: &[u8],
-        mut buffer: FrameBytes,
-    ) -> FrameBytes {
-        let len = buffer.len();
-        let mut out = [0u8; MAX_FRAME];
+        payload: &mut [u8],
+    ) -> [u8; MIC_LENGTH] {
         let mut tag = [0u8; MIC_LENGTH];
         unsafe {
             platform::ziggurat_platform_ccm_crypt(
@@ -37,18 +31,14 @@ impl CryptoBackend for PlatformCryptoBackend {
                 nonce.as_ptr(),
                 auth_data.as_ptr(),
                 auth_data.len(),
-                buffer.as_ptr(),
-                out.as_mut_ptr(),
-                len,
+                payload.as_mut_ptr(),
+                payload.as_mut_ptr(),
+                payload.len(),
                 tag.as_mut_ptr(),
                 MIC_LENGTH,
             );
         }
-        buffer[..len].copy_from_slice(&out[..len]);
-        buffer
-            .extend_from_slice(&tag)
-            .expect("a frame always has room for its MIC");
-        buffer
+        tag
     }
 
     fn decrypt_ccm(
@@ -56,15 +46,10 @@ impl CryptoBackend for PlatformCryptoBackend {
         key: &Key,
         nonce: &[u8; 13],
         auth_data: &[u8],
-        mut tagged_ciphertext: FrameBytes,
-    ) -> Result<FrameBytes, DecryptionError> {
-        let ct_len = tagged_ciphertext
-            .len()
-            .checked_sub(MIC_LENGTH)
-            .ok_or(DecryptionError::CiphertextTooShort)?;
-        let mut tag = [0u8; MIC_LENGTH];
-        tag.copy_from_slice(&tagged_ciphertext[ct_len..]);
-        let mut out = [0u8; MAX_FRAME];
+        payload: &mut [u8],
+        mic: &[u8; MIC_LENGTH],
+    ) -> Result<(), DecryptionError> {
+        let mut tag = *mic;
         let status = unsafe {
             platform::ziggurat_platform_ccm_crypt(
                 false,
@@ -72,9 +57,9 @@ impl CryptoBackend for PlatformCryptoBackend {
                 nonce.as_ptr(),
                 auth_data.as_ptr(),
                 auth_data.len(),
-                tagged_ciphertext.as_ptr(),
-                out.as_mut_ptr(),
-                ct_len,
+                payload.as_mut_ptr(),
+                payload.as_mut_ptr(),
+                payload.len(),
                 tag.as_mut_ptr(),
                 MIC_LENGTH,
             )
@@ -82,9 +67,7 @@ impl CryptoBackend for PlatformCryptoBackend {
         if status != 0 {
             return Err(DecryptionError::InvalidMacTag);
         }
-        tagged_ciphertext.truncate(ct_len);
-        tagged_ciphertext[..ct_len].copy_from_slice(&out[..ct_len]);
-        Ok(tagged_ciphertext)
+        Ok(())
     }
 }
 

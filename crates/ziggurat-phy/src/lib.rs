@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::time::Duration;
 
+use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 
 /// A pull-based stream of events the backend delivers spontaneously (received frames,
@@ -21,7 +22,7 @@ pub trait Receiver<T>: Send {
 /// overrides the current channel for this frame only.
 #[derive(Debug, Clone)]
 pub struct TxFrame {
-    pub psdu: Vec<u8>,
+    pub psdu: Psdu,
     pub channel: Option<u8>,
     pub csma_ca: bool,
     pub max_frame_retries: u8,
@@ -32,7 +33,7 @@ pub struct TxFrame {
 /// A received frame, normalized: `psdu` is the 802.15.4 frame with the FCS stripped.
 #[derive(Debug, Clone)]
 pub struct RxFrame {
-    pub psdu: Vec<u8>,
+    pub psdu: Psdu,
     pub channel: u8,
     pub rssi: i8,
     pub lqi: u8,

@@ -24,13 +24,14 @@ use core::time::Duration;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver};
-use embassy_sync::mutex::{Mutex, MutexGuard};
 use embassy_sync::signal::Signal;
+use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
 };
+use ziggurat_runtime::sync::{AsyncMutex, AsyncMutexGuard};
 
 const RX_DEPTH: usize = 16;
 
@@ -50,8 +51,7 @@ pub trait LinkOps: Send + Sync {
     fn set_promiscuous(&self, promiscuous: bool) -> Result<(), RadioError>;
 
     /// Replace the source-match (frame-pending) table.
-    fn set_frame_pending_table(&self, short: &[Nwk], extended: &[Eui64])
-    -> Result<(), RadioError>;
+    fn set_frame_pending_table(&self, short: &[Nwk], extended: &[Eui64]) -> Result<(), RadioError>;
 
     /// Submit one frame (PSDU without FCS). Completion arrives via
     /// [`deliver_tx_result`]; only one transmit is in flight at a time.
@@ -91,7 +91,7 @@ pub fn rx_dropped() -> usize {
 /// A frame was received (PSDU without FCS). Called from the link-raw receive-done path.
 pub fn deliver_rx(psdu: &[u8], channel: u8, rssi: i8, lqi: u8, timestamp_us: u64) {
     let frame = RxFrame {
-        psdu: psdu.to_vec(),
+        psdu: Psdu::from_slice(psdu).expect("a received frame fits in a PSDU"),
         channel,
         rssi,
         lqi,
@@ -120,16 +120,18 @@ struct RadioState {
 
 pub struct OtLinkPhy {
     ops: &'static dyn LinkOps,
-    state: Mutex<CriticalSectionRawMutex, RadioState>,
-    exclusive: Mutex<CriticalSectionRawMutex, ()>,
+    /// Fair, so a transmit waiting behind an energy scan gets the radio between two
+    /// channels instead of after the whole scan.
+    state: AsyncMutex<RadioState>,
+    exclusive: AsyncMutex<()>,
 }
 
 impl OtLinkPhy {
     pub const fn new(ops: &'static dyn LinkOps) -> Self {
         Self {
             ops,
-            state: Mutex::new(RadioState { config: None }),
-            exclusive: Mutex::new(()),
+            state: AsyncMutex::new(RadioState { config: None }),
+            exclusive: AsyncMutex::new(()),
         }
     }
 
@@ -169,7 +171,7 @@ impl Receiver<ResetEvent> for OtLinkResetStream {
 
 pub struct OtLinkExclusive<'a> {
     phy: &'a OtLinkPhy,
-    _guard: MutexGuard<'a, CriticalSectionRawMutex, ()>,
+    _guard: AsyncMutexGuard<'a, ()>,
 }
 
 impl ExclusiveRadio for OtLinkExclusive<'_> {
@@ -206,10 +208,8 @@ impl RadioPhy for OtLinkPhy {
     async fn reconfigure(&self, config: &RadioConfig) -> Result<(), RadioError> {
         let mut state = self.state.lock().await;
         CURRENT_CHANNEL.store(config.channel, Ordering::Relaxed);
-        self.ops.set_frame_pending_table(
-            &config.frame_pending_short,
-            &config.frame_pending_extended,
-        )?;
+        self.ops
+            .set_frame_pending_table(&config.frame_pending_short, &config.frame_pending_extended)?;
         self.ops.configure(config)?;
         state.config = Some(config.clone());
         Ok(())

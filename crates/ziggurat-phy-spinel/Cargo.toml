@@ -11,7 +11,13 @@ repository.workspace = true
 [dependencies]
 ziggurat-ieee-802154.workspace = true
 ziggurat-phy.workspace = true
+ziggurat-runtime.workspace = true
 ziggurat-spinel.workspace = true
 
-parking_lot = "0.12.5"
-tokio = { version = "1.53.1", features = ["rt", "time", "sync"] }
+embedded-io-async = "0.7"
+tracing = { version = "0.1", default-features = false }
+
+[features]
+default = ["tokio"]
+tokio = ["ziggurat-runtime/tokio", "ziggurat-spinel/tokio"]
+embassy = ["ziggurat-runtime/embassy", "ziggurat-spinel/embassy"]

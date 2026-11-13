@@ -2,9 +2,21 @@
 
 use core::time::Duration;
 
-use ziggurat_zigbee::Instant as CoreInstant;
+use crate::Instant;
 
-use crate::zigbee_stack::TrafficClass;
+/// Which tier of the broadcast budget admits a broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrafficClass {
+    /// A frame we originate on the host's behalf: refused first under pressure, the
+    /// host is told and can pace itself.
+    Host,
+    /// A transit frame relayed for another device: dropping one degrades the mesh but
+    /// the originator retries end-to-end.
+    Forwarding,
+    /// Stack machinery the mesh cannot function without: joins, APS acks, NWK
+    /// commands, indirect deliveries. Always admitted.
+    Critical,
+}
 
 /// The outcome of asking the budget to admit one broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +38,7 @@ pub struct BroadcastBudget {
     tokens: u32,
     /// When the last whole token was accrued. Advanced in whole-token steps so the
     /// sub-token remainder of elapsed time is never discarded.
-    last_refill: CoreInstant,
+    last_refill: Instant,
 }
 
 impl BroadcastBudget {
@@ -34,7 +46,7 @@ impl BroadcastBudget {
     pub fn new(initial_tokens: u8) -> Self {
         Self {
             tokens: u32::from(initial_tokens),
-            last_refill: CoreInstant::from_micros(0),
+            last_refill: Instant::from_micros(0),
         }
     }
 
@@ -48,7 +60,7 @@ impl BroadcastBudget {
     }
 
     /// Regenerate one token per `refill_interval`, capped at `capacity`.
-    fn refill(&mut self, now: CoreInstant, capacity: u32, refill_interval: Duration) {
+    fn refill(&mut self, now: Instant, capacity: u32, refill_interval: Duration) {
         let interval_us = refill_interval.as_micros();
 
         // A zero interval means "no rate limit": keep the bucket full.
@@ -90,7 +102,7 @@ impl BroadcastBudget {
     pub fn take(
         &mut self,
         class: TrafficClass,
-        now: CoreInstant,
+        now: Instant,
         capacity: u8,
         refill_interval: Duration,
         critical_reserve: u8,

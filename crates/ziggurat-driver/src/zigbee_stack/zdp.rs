@@ -1,8 +1,8 @@
 use crate::runtime::Runtime;
 use alloc::vec::Vec;
 use core::time::Duration;
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_ieee_802154::{TooLong, write_frame};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType};
 use ziggurat_zigbee::nwk::frame::{
@@ -273,8 +273,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tsn: u8,
         command: &T,
     ) -> Result<SendHandle, EnqueueError> {
-        let asdu = FrameBytes::from_slice(&command.serialize(tsn).unwrap())
-            .map_err(|_| EnqueueError::PayloadTooLong)?;
+        let asdu = write_frame(|writer| command.serialize(tsn, writer))
+            .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
 
         let aps_frame = ApsDataFrame {
             frame_control: ApsFrameControl {
@@ -296,7 +296,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         tracing::trace!("Prepared unicast ZDP APS frame: {aps_frame:?}");
         let nwk_frame = self
-            .nwk_data_frame(destination, aps_frame.to_bytes())?
+            .nwk_data_frame(
+                destination,
+                write_frame(|writer| aps_frame.serialize(writer))
+                    .map_err(|TooLong| EnqueueError::PayloadTooLong)?,
+            )
             .with_discover_route(NwkRouteDiscovery::Enable)
             .with_radius(2 * MAX_DEPTH);
 
@@ -358,7 +362,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let jitter = self
                 .tunables
                 .parent_annce_jitter_max()
-                .mul_f32(crate::rng::random_f32());
+                .mul_f32(crate::rng::random_f32::<R>());
 
             let slept_at = self.core_now();
             R::sleep((self.tunables.parent_annce_base_timer() + jitter).saturating_sub(send_time))

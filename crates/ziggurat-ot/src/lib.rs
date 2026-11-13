@@ -52,8 +52,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 
-use ziggurat_driver::rng;
-use ziggurat_driver::runtime::EmbassySpawner;
+use ziggurat_driver::runtime::{install_random_source, EmbassySpawner};
 use ziggurat_ieee_802154::types::Eui64;
 use ziggurat_ncp_api::{self as api, App, Platform, OUTBOUND};
 use ziggurat_phy::TxResult;
@@ -352,7 +351,7 @@ pub extern "C" fn ziggurat_start() {
     #[cfg(target_os = "none")]
     heap::init();
 
-    rng::install(Box::new(|buf: &mut [u8]| unsafe {
+    install_random_source(Box::new(|buf: &mut [u8]| unsafe {
         platform::ziggurat_platform_entropy(buf.as_mut_ptr(), buf.len());
     }));
     crypto::init();

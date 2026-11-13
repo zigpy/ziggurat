@@ -9,7 +9,6 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154CommandFrame, Ieee802154CommandPayload, Ieee802154Frame, Ieee802154FrameControl,
     Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_zigbee::aps::frame::{
     APS_STATUS_SECURITY_FAIL, APS_STATUS_SUCCESS, ApsCommandFrame, ApsCommandFrameCommand,
@@ -21,12 +20,11 @@ use ziggurat_zigbee::aps::frame::{
 };
 use ziggurat_zigbee::aps::security::AppliedKey;
 use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
+    BROADCAST_RX_ON_WHEN_IDLE, Nsdu, NwkFrame, NwkPayload, NwkRouteDiscovery,
+    NwkSecurityHeaderKeyId,
 };
 
-use alloc::vec::Vec;
 use core::time::Duration;
-use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
     Nwk802154AssociationStatus, NwkCommand, NwkEndDeviceTimeoutRequestCommand,
     NwkEndDeviceTimeoutResponseCommand, NwkEndDeviceTimeoutResponseStatus, NwkLeaveCommand,
@@ -103,11 +101,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
-        let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default().duration()
-        } else {
-            Duration::from_secs(0xFFFFFFFF)
-        };
+        let device_timeout = (device_type == NwkDeviceType::EndDevice)
+            .then(|| self.tunables.end_device_timeout_default().duration());
 
         self.core().nib.neighbors.upsert_child(
             neighbors::ChildDescriptor {
@@ -231,7 +226,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core.nib.address_map.allocate(
             eui64,
             &core.nib.neighbors,
-            core::iter::repeat_with(|| Nwk(crate::rng::random_u16())),
+            core::iter::repeat_with(|| Nwk(crate::rng::random_u16::<R>())),
         )
     }
 
@@ -240,7 +235,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         core.nib.address_map.generate_unused(
             &core.nib.neighbors,
-            core::iter::repeat_with(|| Nwk(crate::rng::random_u16())),
+            core::iter::repeat_with(|| Nwk(crate::rng::random_u16::<R>())),
         )
     }
 
@@ -248,34 +243,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// notified unless we learned of the conflict from such a notification; end
     /// device children are moved to a fresh address; routers resolve on their own.
     pub(super) fn handle_address_conflict(&self, address: Nwk, source: AddrConflictSource) {
-        {
-            let mut conflicts = self.state.address_conflicts.lock();
+        // Spec 3.6.1.10.5: a locally detected conflict is reported to the network with
+        // a jittered Network Status broadcast
+        let now = self.core_now();
+        let window = self.tunables.broadcast_delivery_time();
+        let report_jitter = self.broadcast_jitter();
 
-            let now = self.core_now();
-            let window = self.tunables.broadcast_delivery_time();
+        let is_new =
+            self.core()
+                .address_conflicts
+                .detect(address, source, now, window, report_jitter);
 
-            // Detection re-triggers on every frame from the conflicted devices, so a
-            // conflict is handled once per delivery window
-            if let Some(conflict) = conflicts.get_mut(&address)
-                && now < conflict.handled_at + window
-            {
-                conflict.heard_from_network |= source == AddrConflictSource::Network;
-                return;
-            }
-
-            conflicts.retain(|_, conflict| now < conflict.handled_at + 2 * window);
-            conflicts.insert(
-                address,
-                super::AddressConflict {
-                    handled_at: now,
-                    heard_from_network: source == AddrConflictSource::Network,
-                    // Spec 3.6.1.10.5: a locally detected conflict is reported to the
-                    // network with a jittered Network Status broadcast, cancelled when
-                    // another device reports it first
-                    report_at: (source == AddrConflictSource::Local)
-                        .then(|| now + self.broadcast_jitter()),
-                },
-            );
+        if !is_new {
+            return;
         }
 
         tracing::warn!("Address conflict detected on {address:?}");
@@ -296,11 +276,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        // Routers resolve their own conflicts after hearing the notification; our
-        // mapping for the address is ambiguous until the keeper re-announces
+        // Routers resolve their own conflicts after hearing the notification. Until
+        // one announces itself we cannot tell which device a frame to the address
+        // would reach, so sends held for it fail
         let mut core = self.core();
         core.nib.address_map.forget_address(address);
-        core.nib.routing.remove_route(address);
+        self.forget_nwk_state_in(core, address);
     }
 
     /// The address-conflict report reactor: a single long-lived task owning the
@@ -308,7 +289,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// owed report, then sends every due report another device hasn't already made.
     pub(super) async fn address_conflict_task(&self) {
         loop {
-            match self.earliest_conflict_report() {
+            let next_report = self.core().address_conflicts.next_report();
+
+            match next_report {
                 Some(deadline) => {
                     let _ = self
                         .timeout_at_core(deadline, self.address_conflict_wake.notified())
@@ -321,44 +304,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// The soonest owed conflict report across all tracked conflicts, or `None` when
-    /// none is owed (the reactor then sleeps on its wake signal).
-    fn earliest_conflict_report(&self) -> Option<CoreInstant> {
-        self.state
-            .address_conflicts
-            .lock()
-            .values()
-            .filter_map(|conflict| conflict.report_at)
-            .min()
-    }
-
     /// One reactor pass: broadcast every due report, unless another device's report
     /// arrived during the jitter window.
     fn drive_conflict_reports(&self) {
         let now = self.core_now();
-
-        let due: Vec<Nwk> = {
-            let mut conflicts = self.state.address_conflicts.lock();
-            let mut due = Vec::new();
-
-            for (address, conflict) in conflicts.iter_mut() {
-                if conflict.report_at.is_none_or(|report_at| report_at > now) {
-                    continue;
-                }
-                conflict.report_at = None;
-
-                if conflict.heard_from_network {
-                    tracing::debug!(
-                        "Address conflict on {address:?} was already reported, not rebroadcasting"
-                    );
-                } else {
-                    due.push(*address);
-                }
-            }
-            drop(conflicts);
-
-            due
-        };
+        let due = self.core().address_conflicts.take_due_reports(now);
 
         for address in due {
             let conflict_frame = self.nwk_command_frame(
@@ -481,7 +431,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         destination_eui64: Eui64,
         join_kind: JoinKind,
-    ) -> EncryptedApsCommandFrame {
+    ) -> Nsdu {
         let (network_key, key_seq_number) = {
             let core = self.core();
 
@@ -520,11 +470,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             core.aib.aps_security.device_link_key(destination_eui64)
         };
 
-        core.aib.aps_security.encrypt_command_with_link_key(
-            &link_key,
-            NwkSecurityHeaderKeyId::KeyTransportKey,
-            &transport_key_command,
-        )
+        let encrypted = core
+            .aib
+            .aps_security
+            .encrypt_command_with_link_key(
+                &link_key,
+                NwkSecurityHeaderKeyId::KeyTransportKey,
+                &transport_key_command,
+            )
+            .to_bytes();
+        drop(core);
+
+        self.persist_aps_frame_counter();
+        encrypted
     }
 
     /// Zigbee spec 4.6.3.2: deliver the network key to a joining device. The NWK frame
@@ -540,8 +498,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.build_encrypted_network_key_transport(destination_eui64, join_kind);
 
         let nwk_frame = self
-            .nwk_data_frame(destination, encrypted_command.to_bytes())
-            .expect("Transport-Key command should always fit")
+            .nwk_data_frame(destination, encrypted_command)
             .unsecured();
 
         // A direct one-hop unicast without an APS ack: next-hop acceptance is the
@@ -672,12 +629,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn send_secured_aps_payload(
         &self,
         destination: Nwk,
-        payload: Vec<u8>,
+        payload: Nsdu,
     ) -> Result<SendHandle, EnqueueError> {
         // Routed delivery to a non-neighbor must be allowed to discover a route (NWK data
         // frames default to suppressing discovery).
         let nwk_frame = self
-            .nwk_data_frame(destination, payload)?
+            .nwk_data_frame(destination, payload)
             .with_discover_route(NwkRouteDiscovery::Enable);
 
         self.send_unicast(Unicast {
@@ -755,7 +712,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .core()
             .aib
             .aps_security
-            .issue_device_key(source_ieee, Key(crate::rng::random_array()));
+            .issue_device_key(source_ieee, Key(crate::rng::random_array::<R, 16>()));
 
         // The key is persisted only once the device proves possession via Verify-Key
         // (see `handle_verify_key`); a device that never completes the exchange must not
@@ -797,6 +754,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         };
 
+        self.persist_aps_frame_counter();
         self.send_secured_aps_payload(nwk_frame.nwk_header.source, encrypted_command.to_bytes())
             .map_err(|err| tracing::warn!("Failed to send transport key to {source_ieee:?}: {err}"))
             .ok();
@@ -903,15 +861,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let payload = if encrypted {
             // Confirm key commands are APS encrypted with the link key itself, i.e. the
             // "data key" (spec 4.4.1.3)
-            self.core()
-                .aib
-                .aps_security
-                .encrypt_command(
-                    destination_eui64,
-                    NwkSecurityHeaderKeyId::DataKey,
-                    &confirm_key_command,
-                )
-                .to_bytes()
+            let encrypted = self.core().aib.aps_security.encrypt_command(
+                destination_eui64,
+                NwkSecurityHeaderKeyId::DataKey,
+                &confirm_key_command,
+            );
+
+            self.persist_aps_frame_counter();
+            encrypted.to_bytes()
         } else {
             confirm_key_command.to_bytes()
         };
@@ -1073,8 +1030,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             counter: self.next_aps_counter(),
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: device_eui64,
-                tunneled_frame: FrameBytes::from_slice(&encrypted_transport_key.to_bytes())
-                    .expect("an encrypted APS command is frame-bounded"),
+                tunneled_frame: encrypted_transport_key,
             }),
         };
 
@@ -1121,6 +1077,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             tracing::warn!("Rejoin request source EUI64 is missing");
             return;
         };
+
+        // Spec 4.7.3.6: an unsecured rejoin re-delivers the network key encrypted
+        // with the well-known key unless the device holds a unique link key. Reject
+        // when it has neither, so the network key is never exposed to anyone who
+        // knows the well-known key. Nobody authenticated this frame, so it is rejected
+        // before it changes any state.
+        if !secured && !self.may_rejoin_unsecured(source_ieee) {
+            tracing::warn!(
+                "Rejecting unsecured rejoin from {source_ieee:?} without a unique link key"
+            );
+            return;
+        }
 
         let requested_nwk = nwk_frame.nwk_header.source;
         let capability = &rejoin_request.capability_information;
@@ -1174,11 +1142,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
-        let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default().duration()
-        } else {
-            Duration::from_secs(0xFFFFFFFF)
-        };
+        let device_timeout = (device_type == NwkDeviceType::EndDevice)
+            .then(|| self.tunables.end_device_timeout_default().duration());
 
         self.core().nib.neighbors.upsert_child(
             neighbors::ChildDescriptor {
@@ -1211,16 +1176,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A trust center rejoin means the device no longer has the network key
         if !secured {
-            // Spec 4.7.3.6: an unsecured rejoin re-delivers the network key encrypted
-            // with the well-known key unless the device holds a unique link key. Reject
-            // when it has neither, so the network key is never exposed to anyone who
-            // knows the well-known key.
-            if !self.may_rejoin_unsecured(source_ieee) {
-                tracing::warn!(
-                    "Rejecting unsecured rejoin from {source_ieee:?} without a unique link key"
-                );
-                return;
-            }
             // The join is announced only once the key transport lands
             let stack = self
                 .self_weak
@@ -1305,7 +1260,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // The address map entry and any negotiated link key are kept around so that the
         // device can rejoin later
         self.drop_indirect_transactions(source_ieee, source);
-        self.core().nib.routing.remove_route(source);
+        self.forget_nwk_state(source);
 
         self.push_notification(ZigbeeNotification::DeviceLeft {
             nwk: source,

@@ -16,16 +16,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::Channel;
 
-use ziggurat_driver::runtime::EmbassySpawner;
+use ziggurat_driver::runtime::{EmbassyRuntime, EmbassySpawner};
 use ziggurat_driver::sync::Notify;
 use ziggurat_driver::zigbee_stack::{SendHandle, ZigbeeStack};
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy};
-use ziggurat_protocol::{RequestId, SendTracker, ConfirmKind};
+use ziggurat_protocol::{ConfirmKind, RequestId, SendTracker};
 
 pub(crate) const DEFAULT_TX_POWER: i8 = 8;
 
@@ -37,7 +37,7 @@ pub static OUTBOUND: Channel<CriticalSectionRawMutex, Vec<u8>, OUTBOUND_DEPTH> =
 pub type CaptureStop = embassy_sync::signal::Signal<CriticalSectionRawMutex, ()>;
 
 /// One firmware's send tracker, shared between the request dispatch path and the
-/// wake-and-sweep reactor (two independent tasks, so it lives behind a shared cell rather
+/// confirm reactor (two independent tasks, so it lives behind a shared cell rather
 /// than in one task's stack). The blocking lock is held only briefly, never across an
 /// await. There is one client, so one tracker per [`App`].
 pub type SendTrackerCell = Arc<BlockingMutex<CriticalSectionRawMutex, RefCell<SendTracker>>>;
@@ -45,12 +45,12 @@ pub type SendTrackerCell = Arc<BlockingMutex<CriticalSectionRawMutex, RefCell<Se
 /// Build an empty send tracker cell for an [`App`]. Its contents are replaced with a
 /// fresh tracker (and reactor) each time a stack starts.
 pub fn new_send_tracker() -> SendTrackerCell {
-    Arc::new(BlockingMutex::new(RefCell::new(SendTracker::new(Arc::new(
-        Notify::new(),
-    )))))
+    Arc::new(BlockingMutex::new(RefCell::new(SendTracker::new(
+        Arc::new(Notify::new()),
+    ))))
 }
 
-/// Begin tracking a send and nudge the sweep reactor. Called by the `send_aps` handler.
+/// Begin tracking a send and nudge the confirm reactor. Called by the `send_aps` handler.
 pub(crate) fn track_send(
     sends: &SendTrackerCell,
     id: RequestId,
@@ -96,7 +96,7 @@ pub struct App<P: RadioPhy> {
     pub phy: Arc<P>,
     pub spawner: EmbassySpawner,
     pub platform: &'static dyn Platform,
-    pub stack: Option<Arc<ZigbeeStack<P>>>,
+    pub stack: Option<Arc<ZigbeeStack<P, EmbassyRuntime>>>,
     /// Whether the configured stack has been started (`configure` -> `load_*` ->
     /// `start_network` are separate phases).
     pub started: bool,
@@ -158,9 +158,12 @@ pub async fn handle_frame<P: RadioPhy>(app: &mut App<P>, frame: &[u8]) {
     protocol::handle_frame(app, frame).await;
 }
 
-/// Start the receive loop, the notification pump, and the send-confirm sweep reactor for
+/// Start the receive loop, the notification pump, and the send-confirm reactor for
 /// a freshly-started stack.
-pub(crate) fn spawn_stack_pumps<P: RadioPhy>(stack: &Arc<ZigbeeStack<P>>, sends: SendTrackerCell) {
+pub(crate) fn spawn_stack_pumps<P: RadioPhy>(
+    stack: &Arc<ZigbeeStack<P, EmbassyRuntime>>,
+    sends: SendTrackerCell,
+) {
     stack.spawn_tracked(|arc_self| async move {
         arc_self.run().await;
     });
@@ -183,12 +186,11 @@ pub(crate) fn spawn_stack_pumps<P: RadioPhy>(stack: &Arc<ZigbeeStack<P>>, sends:
     stack.spawn_tracked(|_arc_self| async move {
         loop {
             wake.notified().await;
-            let frames: Vec<Vec<u8>> = with_send_tracker(&sends, SendTracker::sweep)
-                .into_iter()
-                .filter_map(|notification| notification.frame())
-                .collect();
-            for frame in frames {
-                push_outbound(frame);
+            while let Some(notification) = with_send_tracker(&sends, SendTracker::next_confirm)
+            {
+                if let Some(frame) = notification.frame() {
+                    push_outbound(frame);
+                }
             }
         }
     });

@@ -713,17 +713,20 @@ pub enum SendStatus {
     Success = 0,
     RouteDiscoveryTimeout = 1,
     RouteDiscoveryNoEntry = 2,
+    /// No longer sent. Kept so a confirmation from older firmware still decodes.
     RouteInactiveAfterDiscovery = 3,
     NwkNoAck = 4,
     CcaFailure = 5,
     TransmitFailed = 6,
     ApsAckTimeout = 7,
+    /// No longer sent. Kept so a confirmation from older firmware still decodes.
     BroadcastQuorumNotReached = 8,
     IndirectExpired = 9,
     FrameBudgetExhausted = 10,
     Cancelled = 11,
     RadioError = 12,
     HandoffTimeout = 13,
+    FrameTooLong = 14,
 }
 
 #[abstract_bits]
@@ -738,7 +741,7 @@ pub struct ApsAckConfirmPayload {
     pub status: SendStatus,
 }
 
-/// The passive-ack quorum verdict of a broadcast or groupcast send.
+/// The verdict of a broadcast or groupcast send, sent once its retransmissions end.
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct BroadcastConfirmPayload {

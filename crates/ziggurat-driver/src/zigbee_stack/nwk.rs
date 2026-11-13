@@ -1,15 +1,11 @@
-use super::TrafficClass;
-use crate::broadcast_budget::BroadcastAdmission;
+use super::{BroadcastAdmission, TrafficClass};
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
-use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::time::Duration;
-use ziggurat_ieee_802154::FrameBytes;
-use ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
@@ -18,26 +14,48 @@ use ziggurat_zigbee::nwk::commands::{
 };
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_DEVICES, BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS,
-    EncryptedNwkFrame, NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader,
-    NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId,
-    NwkSecurityLevel,
+    Nsdu, NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload,
+    NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    OutgoingNwkFrame,
 };
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
-    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendId,
-    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError,
+    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective,
+    Schedule, SendHandle, SendId, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore,
+    ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    pub fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
-        let conflict = self.core().nib.address_map.update_mapping(eui64, nwk);
+    /// A device joined or rejoined as `nwk`: the address starts a new session. The
+    /// mapping and the state it replaces change under one lock, so no send can be
+    /// enqueued against the old session in between.
+    pub(super) fn update_nwk_eui64_mapping(&self, nwk: Nwk, eui64: Eui64) {
+        let mut core = self.core();
 
-        if conflict {
+        // `nwk` belongs to another device, whose state must stay
+        if core.nib.address_map.update_mapping(eui64, nwk) {
+            drop(core);
             self.handle_address_conflict(nwk, AddrConflictSource::Local);
+            return;
         }
+
+        self.forget_nwk_state_in(core, nwk);
+    }
+
+    /// The device at `nwk` left or joined again, or two devices claim the address, so
+    /// what we know about it no longer holds. Held sends fail: they wait on a route
+    /// request the device never heard, and forgetting the address drops that discovery.
+    pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
+        self.forget_nwk_state_in(self.core(), nwk);
+    }
+
+    pub(super) fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
+        core.nib.routing.forget(self.state.network_address, nwk);
+        core.sends.fail_unrouted(nwk);
+        self.commit_sends(core);
     }
 
     /// Filter broadcast frames based on the NWK broadcast transaction table
@@ -54,15 +72,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         // The passive ack contract is formed when the transaction is created: only
-        // routers that were neighbors at that point are expected to relay
+        // routers that were good neighbors at that point are expected to relay
         let mut core = self.core();
-        let audience = core.nib.neighbors.expected_broadcast_relayers();
-
-        let duplicate = core.nib.broadcasts.filter_received(
+        let nib = &mut core.nib;
+        let duplicate = nib.broadcasts.filter_received(
             nwk_frame.nwk_header.source,
             nwk_frame.nwk_header.sequence_number,
             sender_nwk,
-            audience,
+            || {
+                nib.neighbors
+                    .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost())
+            },
             now,
             self.tunables.broadcast_delivery_time(),
         );
@@ -86,8 +106,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: NwkFrame,
         attempts: u8,
         initial_delay: Duration,
-    ) -> SendActions {
-        let (_, actions) = self.enqueue_broadcast_in(
+    ) -> SendId {
+        self.enqueue_broadcast_in(
             core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
@@ -99,27 +119,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 copies_remaining: attempts,
                 next_attempt: self.core_now() + initial_delay,
             },
-        );
-
-        actions
+        )
+        .id()
     }
 
     /// A random retransmission jitter in `[0, max_broadcast_jitter)` (spec 3.6.6).
     pub(super) fn broadcast_jitter(&self) -> Duration {
         self.tunables
             .max_broadcast_jitter()
-            .mul_f32(crate::rng::random_f32())
+            .mul_f32(crate::rng::random_f32::<R>())
     }
 
     /// Whether the broadcast's passive ack quorum has been heard from the audience
-    /// members that are still live neighbors.
+    /// members that are still good neighbors.
     pub(super) fn passive_ack_quorum_heard(&self, nib: &Nib, key: (Nwk, u8)) -> bool {
-        let live_relayers = nib.neighbors.expected_broadcast_relayers();
+        let max_link_cost = self.tunables.broadcast_relayer_max_link_cost();
 
         let acked = nib.broadcasts.passively_acked(
             key.0,
             key.1,
-            &live_relayers,
+            |nwk| {
+                nib.neighbors
+                    .is_expected_broadcast_relayer(nwk, max_link_cost)
+            },
             self.tunables.broadcast_passive_ack_quorum(),
         );
 
@@ -130,7 +152,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         acked
     }
 
-    pub fn handle_decrypted_frame(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, lqi: u8, rssi: i8) {
+    /// Process a decrypted NWK frame. False when the frame must not reach the APS layer.
+    #[must_use = "a filtered frame must not be delivered to the APS layer"]
+    pub fn handle_decrypted_frame(
+        &self,
+        nwk_frame: &NwkFrame,
+        sender_nwk: Nwk,
+        lqi: u8,
+        rssi: i8,
+    ) -> bool {
         // Update the frame counter for the relaying device
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
@@ -148,9 +178,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
-        // Update the address cache
+        // Update the address cache. Hearing a device is not a join, so the address keeps
+        // its session state.
         if let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
-            self.update_nwk_eui64_mapping(nwk_frame.nwk_header.source, src_eui64);
+            let source = nwk_frame.nwk_header.source;
+            let conflict = self
+                .core()
+                .nib
+                .address_map
+                .update_mapping(src_eui64, source);
+
+            if conflict {
+                self.handle_address_conflict(source, AddrConflictSource::Local);
+            }
         }
 
         // Spec 3.6.1.10.2: a frame addressed to our network address but a different
@@ -179,8 +219,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             && !bypasses_transaction_table
         {
             if self.filter_broadcast(nwk_frame, sender_nwk) {
-                tracing::debug!("Filtering broadcast, stopping further processing");
-                return;
+                tracing::trace!("Filtering broadcast, stopping further processing");
+                return false;
             }
 
             // Spec 3.6.1.10.2: a fresh broadcast claiming our address as its source
@@ -196,7 +236,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         AddrConflictSource::Local,
                     );
                 }
-                return;
+                return false;
             }
 
             // A fresh broadcast is relayed onward to the rest of the mesh
@@ -211,17 +251,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NwkCommand::RouteRecord(cmd) => {
                     tracing::trace!("Route record command frame received: {cmd:?}");
                     let source = nwk_frame.nwk_header.source;
-                    let changed = self
+                    let change = self
                         .core()
                         .nib
                         .routing
                         .store_route_record(source, cmd.relays.clone());
 
-                    if changed {
+                    if change.source {
                         self.push_notification(ZigbeeNotification::RouteRecord {
                             destination: source,
                             relays: cmd.relays.clone(),
                         });
+                    }
+
+                    // Sends held for the device, or for a relay on its path, can now be
+                    // source routed
+                    if change.any {
+                        self.send_timer_wake.notify_one();
                     }
                 }
                 NwkCommand::RouteRequest(cmd) => {
@@ -256,6 +302,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
         }
+
+        true
     }
 
     /// A NWK command frame originated by us, with stack-wide defaults: secured, route
@@ -296,12 +344,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// A NWK data frame originated by us; same defaults as [`Self::nwk_command_frame`]
     /// except data frames carry no extended source.
-    pub(super) fn nwk_data_frame(
-        &self,
-        destination: Nwk,
-        payload: Vec<u8>,
-    ) -> Result<NwkFrame, EnqueueError> {
-        Ok(NwkFrame {
+    pub(super) const fn nwk_data_frame(&self, destination: Nwk, payload: Nsdu) -> NwkFrame {
+        NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -325,10 +369,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 source_route: None,
             },
             aux_header: None, // Applied at encryption time
-            payload: NwkPayload::Opaque(
-                FrameBytes::from_slice(&payload).map_err(|_| EnqueueError::PayloadTooLong)?,
-            ),
-        })
+            payload: NwkPayload::Opaque(payload),
+        }
     }
 
     /// Send a unicast: assign its NWK sequence number, resolve a next hop, and enqueue
@@ -364,9 +406,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &mut nwk_frame,
             &mode,
             self.next_hop_policy(),
+            now,
         );
 
-        let (handle, actions) = match resolved {
+        let handle = match resolved {
             NextHop::Resolved(next_hop) => {
                 let poll_address = Self::poll_address(&core.nib, next_hop);
                 self.enqueue_unicast_in(
@@ -380,26 +423,35 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
             NextHop::NeedDiscovery => {
                 tracing::debug!("Holding frame until a route to {destination:?} is known");
-                let slot = Arc::new(SendSlot::default());
-
-                // The first unrouted send to a destination starts its discovery
-                let discovering = core.sends.has_unrouted(destination);
-                let (id, mut actions) = core.sends.enqueue_unrouted_unicast(
+                let id = core.sends.enqueue_unrouted_unicast(
                     UnroutedUnicast {
                         frame: Frame::nwk(nwk_frame, security),
                         priority: policy.priority,
-                        waiter: slot.clone(),
                         confirm,
                         destination,
                     },
                     now,
                     &self.tunables,
                 );
-                if !discovering {
-                    actions.extend(self.start_route_discovery(&mut core, destination));
+
+                // The routing table starts a discovery unless the send can wait on
+                // one: a discovery of ours still underway, or one the timer pass starts
+                let route_request_identifier = core.nib.routing.want_route(
+                    self.state.network_address,
+                    destination,
+                    now,
+                    self.tunables.route_discovery_time(),
+                    self.tunables.pending_route_discovery_attempts(),
+                );
+                if let Some(route_request_identifier) = route_request_identifier {
+                    self.broadcast_discovery_request(
+                        &mut core,
+                        destination,
+                        route_request_identifier,
+                    );
                 }
 
-                (SendHandle::new(id, slot), actions)
+                SendHandle::new(id, &self.send_watches)
             }
             NextHop::Discard => {
                 tracing::debug!(
@@ -409,7 +461,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        self.commit_sends(core, actions);
+        self.commit_sends(core);
         Ok(handle)
     }
 
@@ -417,7 +469,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.core().nib.next_sequence_number()
     }
 
-    fn apply_nwk_aux_header(&self, nwk_frame: &mut NwkFrame, security: NwkSecurityMode) {
+    /// Give the frame the auxiliary header for this attempt and return the key to
+    /// encrypt it with, or `None` for a frame sent unsecured.
+    fn secure_nwk_frame(&self, nwk_frame: &mut NwkFrame, security: NwkSecurityMode) -> Option<Key> {
         if security == NwkSecurityMode::NetworkKey {
             nwk_frame.aux_header = Some(NwkAuxHeader {
                 security_control: NwkSecurityHeaderControlField {
@@ -426,31 +480,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     extended_nonce: true,
                     require_verified_frame_counter: false,
                 },
-                frame_counter: 0, // This field is rewritten and is always up-to-date
+                // The encryption frame counter always increments
+                frame_counter: self.next_nwk_frame_counter(),
                 extended_source: Some(self.state.ieee_address),
                 key_sequence_number: self.core().nib.nwk_security.active_key_seq_number(),
             });
-        }
-    }
 
-    fn encrypt_nwk_frame(
-        &self,
-        nwk_frame: &mut NwkFrame,
-        security: NwkSecurityMode,
-    ) -> EncryptedNwkFrame {
-        match security {
-            NwkSecurityMode::NetworkKey => {
-                // The encryption frame counter always increments
-                nwk_frame.aux_header.as_mut().unwrap().frame_counter =
-                    self.next_nwk_frame_counter();
-
-                nwk_frame.encrypt(&self.core().nib.nwk_security.network_key())
-            }
-            NwkSecurityMode::Unsecured => EncryptedNwkFrame {
-                nwk_header: nwk_frame.nwk_header.clone(),
-                aux_header: None,
-                ciphertext: nwk_frame.payload.to_bytes(),
-            },
+            Some(self.core().nib.nwk_security.network_key())
+        } else {
+            None
         }
     }
 
@@ -515,11 +553,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         frame_pending: bool,
     ) -> Result<(), DeliveryError> {
-        self.apply_nwk_aux_header(nwk_frame, security);
-        let encrypted_nwk_frame = self.encrypt_nwk_frame(nwk_frame, security);
+        let key = self.secure_nwk_frame(nwk_frame, security);
         let mut ieee802154_frame = self.build_unicast_802154_data_frame(
             next_hop_address,
-            encrypted_nwk_frame,
+            OutgoingNwkFrame {
+                frame: nwk_frame,
+                key,
+            },
             frame_pending,
         );
 
@@ -553,7 +593,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 }
             }
 
-            tracing::warn!("Failed to send unicast frame: {e}");
+            tracing::warn!(
+                "Failed to send unicast frame to {:?}: {e}",
+                nwk_frame.nwk_header.destination
+            );
         }
 
         result
@@ -563,13 +606,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// routes through it. A frame we originated also drops any stored source route and
     /// pushes the MTORR scheduler; a frame we were relaying reports the failure back
     /// to its originator (spec 3.6.4.8.1).
-    pub(super) fn handle_unicast_send_failure(&self, nwk_frame: &NwkFrame, next_hop: Nwk) {
-        if nwk_frame.nwk_header.source != self.state.network_address {
-            self.handle_relay_failure(nwk_frame, next_hop);
+    pub(super) fn handle_unicast_send_failure(&self, failed: FailedNwkUnicast, next_hop: Nwk) {
+        if failed.source != self.state.network_address {
+            self.handle_relay_failure(failed, next_hop);
             return;
         }
 
-        let destination = nwk_frame.nwk_header.destination;
+        let destination = failed.destination;
         self.invalidate_routes_via(next_hop);
 
         if self.core().nib.routing.remove_route_record(destination) {
@@ -594,19 +637,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         class: TrafficClass,
         copy_of: Option<SendId>,
-    ) -> SendActions {
-        let mut actions = SendActions::new();
+    ) {
         if nwk_frame.nwk_header.destination != BROADCAST_ALL_DEVICES {
-            return actions;
+            return;
         }
 
-        let sleepy_children: Vec<(Eui64, Nwk)> = core
+        // The source already has the frame
+        let sleepy_children = core
             .nib
             .neighbors
             .sleepy_children()
-            .into_iter()
-            .filter(|(_, child_nwk)| *child_nwk != nwk_frame.nwk_header.source)
-            .collect();
+            .filter(|(_, child_nwk)| *child_nwk != nwk_frame.nwk_header.source);
 
         let policy = TxPolicy {
             priority: TxPriority::UserNormal,
@@ -617,12 +658,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let unicast = UnicastRecord {
                 frame: Frame::nwk(nwk_frame.clone(), security),
                 priority: policy.priority,
-                waiter: Arc::new(SendSlot::default()),
                 confirm: Confirm::OnHandoff,
                 next_hop: child_nwk,
                 poll_address: Some(Ieee802154Address::Eui64(child_eui64)),
             };
-            let (_, copy_actions) = match copy_of {
+            match copy_of {
                 Some(broadcast) => core.sends.enqueue_broadcast_copy(
                     broadcast,
                     unicast,
@@ -633,10 +673,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .sends
                     .enqueue_unicast(unicast, self.core_now(), &self.tunables),
             };
-            actions.extend(copy_actions);
         }
-
-        actions
     }
 
     /// Send a broadcast, retransmitted until its passive-ack quorum is heard or its
@@ -672,9 +709,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         // The passive ack contract is formed at transmission time: only routers that
-        // are neighbors right now are expected to relay
+        // are good neighbors right now are expected to relay
         let mut core = self.core();
-        let audience = core.nib.neighbors.expected_broadcast_relayers();
+        let audience = core
+            .nib
+            .neighbors
+            .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost());
+
         core.nib.broadcasts.record_transmission(
             key.0,
             key.1,
@@ -685,8 +726,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // The first copy is due now and the retries follow at the passive-ack interval:
         // a lost copy is not terminal, the schedule retransmits. The first copy on air
-        // is the send's handoff; the quorum is its delivery.
-        let (handle, mut actions) = self.enqueue_broadcast_in(
+        // is the send's handoff; the end of the retransmissions is its delivery.
+        let handle = self.enqueue_broadcast_in(
             &mut core,
             Frame::nwk(nwk_frame.clone(), security),
             policy,
@@ -699,14 +740,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
         // for each (spec 3.6.6)
-        actions.extend(self.maybe_fan_out_broadcast_to_sleepy_children(
+        self.maybe_fan_out_broadcast_to_sleepy_children(
             &mut core,
             &nwk_frame,
             security,
             policy.class,
             Some(handle.id()),
-        ));
-        self.commit_sends(core, actions);
+        );
+        self.commit_sends(core);
         Ok(handle)
     }
 
@@ -729,9 +770,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: &mut NwkFrame,
         security: NwkSecurityMode,
     ) -> Result<(), DeliveryError> {
-        self.apply_nwk_aux_header(nwk_frame, security);
-
-        let encrypted_nwk_frame = self.encrypt_nwk_frame(nwk_frame, security);
+        let key = self.secure_nwk_frame(nwk_frame, security);
 
         let (ieee802154_sequence_number, pan_id) = {
             let core = self.core();
@@ -761,7 +800,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 src_pan_id: None,
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
             },
-            payload: encrypted_nwk_frame,
+            payload: OutgoingNwkFrame {
+                frame: nwk_frame,
+                key,
+            },
             fcs: 0x0000, // It'll be replaced
         });
 
@@ -913,16 +955,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Zigbee spec 3.6.4.8.1: when relaying fails, the routes through the dead link are
     /// invalidated and the failure is reported back to the frame's originator.
-    fn handle_relay_failure(&self, nwk_frame: &NwkFrame, next_hop: Nwk) {
+    fn handle_relay_failure(&self, failed: FailedNwkUnicast, next_hop: Nwk) {
         self.invalidate_routes_via(next_hop);
 
-        let source = nwk_frame.nwk_header.source;
+        let source = failed.source;
 
         let destination_ieee = self.core().nib.address_map.eui64_for(source);
 
         // Spec 3.6.4.8.1: failures while relaying along a source route are reported
         // as such, so the concentrator can drop the stored route
-        let status_code = if nwk_frame.nwk_header.source_route.is_some() {
+        let status_code = if failed.source_routed {
             NwkNetworkStatus::SourceRouteFailure
         } else {
             NwkNetworkStatus::LinkFailure
@@ -935,7 +977,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 source,
                 NwkCommand::NetworkStatus(NwkNetworkStatusCommand {
                     status_code,
-                    network_address: nwk_frame.nwk_header.destination,
+                    network_address: failed.destination,
                 }),
             )
             .with_destination_ieee(destination_ieee)
@@ -985,14 +1027,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Spec 3.6.6: deliver another device's 0xFFFF broadcast to our own sleepy
         // children as MAC unicasts (a no-op for non-0xFFFF destinations).
         let mut core = self.core();
-        let actions = self.maybe_fan_out_broadcast_to_sleepy_children(
+        self.maybe_fan_out_broadcast_to_sleepy_children(
             &mut core,
             &relayed_frame,
             NwkSecurityMode::NetworkKey,
             TrafficClass::Forwarding,
             None,
         );
-        self.commit_sends(core, actions);
+        self.commit_sends(core);
 
         relayed_frame.nwk_header.radius = relayed_frame.nwk_header.radius.saturating_sub(1);
         if relayed_frame.nwk_header.radius == 0 {

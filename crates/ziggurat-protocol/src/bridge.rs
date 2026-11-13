@@ -191,13 +191,14 @@ pub fn apply_children<P: RadioPhy, R: Runtime>(
             // Unknown restores as an end device (the safe frame-pending default).
             ChildDeviceType::Unknown | ChildDeviceType::EndDevice => NwkDeviceType::EndDevice,
         };
-        core.nib.neighbors.upsert_child(
+        core.nib.neighbors.restore_child(
             ChildDescriptor {
                 eui64: entry.ieee,
                 network_address: entry.nwk,
                 device_type,
                 rx_on_when_idle: entry.flags.rx_on_when_idle,
-                device_timeout: RESTORED_CHILD_TIMEOUT,
+                device_timeout: (device_type == NwkDeviceType::EndDevice)
+                    .then_some(RESTORED_CHILD_TIMEOUT),
                 relationship: Relationship::Child,
             },
             now,
@@ -303,8 +304,8 @@ pub fn send_unicast<P: RadioPhy, R: Runtime>(
         .map_err(|e| enqueue_error(&e))
 }
 
-/// Hand a broadcast send to the stack; its confirm frame is the passive-ack quorum
-/// verdict.
+/// Hand a broadcast send to the stack; its confirm frame follows the end of its
+/// retransmissions.
 pub fn send_broadcast<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: SendBroadcastPayload,
@@ -325,7 +326,7 @@ pub fn send_broadcast<P: RadioPhy, R: Runtime>(
 }
 
 /// Hand a groupcast send to the stack; it rides the broadcast machinery, so its confirm
-/// frame is likewise the passive-ack quorum verdict.
+/// frame likewise follows the end of its retransmissions.
 pub fn send_groupcast<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: SendGroupcastPayload,
@@ -420,13 +421,12 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
         Ok(()) => SendStatus::Success,
         Err(err) => match err {
             DeliveryError::RouteDiscoveryTimeout => SendStatus::RouteDiscoveryTimeout,
-            DeliveryError::RouteInactiveAfterDiscovery => SendStatus::RouteInactiveAfterDiscovery,
             DeliveryError::NwkNoAck { .. } => SendStatus::NwkNoAck,
             DeliveryError::CcaFailure => SendStatus::CcaFailure,
             DeliveryError::TransmitFailed(_) => SendStatus::TransmitFailed,
+            DeliveryError::FrameTooLong => SendStatus::FrameTooLong,
             DeliveryError::ApsAckTimeout => SendStatus::ApsAckTimeout,
             DeliveryError::HandoffTimeout => SendStatus::HandoffTimeout,
-            DeliveryError::BroadcastQuorumNotReached => SendStatus::BroadcastQuorumNotReached,
             DeliveryError::IndirectExpired { .. } => SendStatus::IndirectExpired,
             DeliveryError::Cancelled => SendStatus::Cancelled,
             DeliveryError::Radio(_) => SendStatus::RadioError,

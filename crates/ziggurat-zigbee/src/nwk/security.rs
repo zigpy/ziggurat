@@ -131,7 +131,12 @@ impl NwkSecurity {
                 tracing::debug!("Unknown sender, not validating frame counter");
             }
             Some(&last_stored_frame_counter) => {
-                if frame_counter <= last_stored_frame_counter {
+                if frame_counter == last_stored_frame_counter {
+                    tracing::debug!("Ignoring frame, duplicate frame counter {frame_counter}");
+                    return None;
+                }
+
+                if frame_counter < last_stored_frame_counter {
                     tracing::debug!(
                         "Ignoring frame, frame counter has rolled backward from \
                          {last_stored_frame_counter} to {frame_counter}"

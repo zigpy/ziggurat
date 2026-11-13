@@ -1,15 +1,17 @@
 use crate::flat_map::FlatMap;
-use alloc::vec;
 
 use subtle::ConstantTimeEq;
 use ziggurat_ieee_802154::types::{Eui64, Key};
 
 use crate::aps::frame::{
     ApsAckFrame, ApsAuxHeader, ApsCommandFrame, ApsDataFrame, EncryptedApsAckFrame,
-    EncryptedApsCommandFrame, EncryptedApsDataFrame,
+    EncryptedApsCommandFrame, EncryptedApsDataFrame, SecuredApsFrame,
 };
 use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
 use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
+
+#[cfg(test)]
+mod tests;
 
 /// Which stack's seed-to-key transformation a TCLK seed uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +110,12 @@ pub struct ApsSecurity {
     /// The outgoing security frame counter shared by all frames encrypted with keys
     /// derived from link keys
     outgoing_frame_counter: u32,
+    /// The counter asks to be persisted once it is this far past the last value the
+    /// client was given
+    persist_interval: u32,
+    /// The last counter value the client was asked to persist. A rollback after a
+    /// restart would make every device silently reject our frames.
+    persisted_frame_counter: u32,
 }
 
 impl ApsSecurity {
@@ -115,6 +123,7 @@ impl ApsSecurity {
         global_link_key: Key,
         local_eui64: Eui64,
         tclk_seed: Option<TclkSeed>,
+        persist_interval: u32,
     ) -> Self {
         Self {
             global_link_key,
@@ -122,6 +131,8 @@ impl ApsSecurity {
             devices: FlatMap::new(),
             tclk_seed,
             outgoing_frame_counter: 0,
+            persist_interval,
+            persisted_frame_counter: 0,
         }
     }
 
@@ -256,10 +267,18 @@ impl ApsSecurity {
     /// Only joining devices share the well-known key: fresh joins use
     /// [`Self::join_link_key`] instead.
     pub fn device_link_key(&self, eui64: Eui64) -> Key {
-        self.device_key(eui64).map_or_else(
-            || self.unkeyed_link_key(eui64),
-            |link_key| link_key.key.clone(),
-        )
+        self.device_link_key_with_entry(eui64).0
+    }
+
+    /// [`Self::device_link_key`], with the key-pair entry it belongs to.
+    fn device_link_key_with_entry(&self, eui64: Eui64) -> (Key, AppliedKey) {
+        match (self.device_key(eui64), &self.tclk_seed) {
+            // A stored key equal to the global key would also count as the device's
+            // own. No device is ever issued the global key, so this never happens.
+            (Some(entry), _) => (entry.key.clone(), AppliedKey::Device),
+            (None, Some(seed)) => (seed.derive(eui64), AppliedKey::Device),
+            (None, None) => (self.global_link_key.clone(), AppliedKey::Global),
+        }
     }
 
     /// The key a factory-new joiner shares with us before any key exchange: its
@@ -306,6 +325,19 @@ impl ApsSecurity {
         self.outgoing_frame_counter
     }
 
+    /// The outgoing frame counter value the client should persist now, if it is far
+    /// enough past the last one. The distance is checked, not an exact value, so no
+    /// jump of the counter and no missed call can skip a persist: the next call owes it.
+    #[must_use]
+    pub const fn take_counter_to_persist(&mut self) -> Option<u32> {
+        if self.outgoing_frame_counter - self.persisted_frame_counter < self.persist_interval {
+            return None;
+        }
+
+        self.persisted_frame_counter = self.outgoing_frame_counter;
+        Some(self.outgoing_frame_counter)
+    }
+
     /// The key a given key identifier selects, derived from a device link key.
     /// `NetworkKey` is NWK security material and is not derived from link keys.
     fn select_key(link_key: &Key, key_id: NwkSecurityHeaderKeyId) -> Option<Key> {
@@ -319,12 +351,12 @@ impl ApsSecurity {
 
     /// Encrypt an APS command for a device, with the key class selected by `key_id`
     /// derived from the device's current link key.
-    pub fn encrypt_command(
+    pub fn encrypt_command<'f>(
         &mut self,
         destination: Eui64,
         key_id: NwkSecurityHeaderKeyId,
-        command: &ApsCommandFrame,
-    ) -> EncryptedApsCommandFrame {
+        command: &'f ApsCommandFrame,
+    ) -> SecuredApsFrame<'f, ApsCommandFrame> {
         let link_key = self.device_link_key(destination);
         self.encrypt_command_with_link_key(&link_key, key_id, command)
     }
@@ -332,29 +364,29 @@ impl ApsSecurity {
     /// Encrypt an APS command with an explicitly provided link key. Needed when the
     /// command must be protected with a key other than the device's current one, e.g.
     /// delivering a new link key encrypted with the key it replaces.
-    pub fn encrypt_command_with_link_key(
+    pub fn encrypt_command_with_link_key<'f>(
         &mut self,
         link_key: &Key,
         key_id: NwkSecurityHeaderKeyId,
-        command: &ApsCommandFrame,
-    ) -> EncryptedApsCommandFrame {
+        command: &'f ApsCommandFrame,
+    ) -> SecuredApsFrame<'f, ApsCommandFrame> {
         let key = Self::select_key(link_key, key_id)
             .expect("APS commands are encrypted with link key classes, not the network key");
         let aux_header = self.next_aux_header(key_id);
 
-        command.encrypt(&key, &aux_header)
+        SecuredApsFrame::new(command, &key, &aux_header)
     }
 
     /// Encrypt a command reply with the same key-pair entry that decrypted the request
     /// (spec 4.7.3.8 step 2). `None` when `applied` is the network key, which can't secure
     /// a command reply.
-    pub fn encrypt_command_with_applied_key(
+    pub fn encrypt_command_with_applied_key<'f>(
         &mut self,
         source: Eui64,
         applied: AppliedKey,
         key_id: NwkSecurityHeaderKeyId,
-        command: &ApsCommandFrame,
-    ) -> Option<EncryptedApsCommandFrame> {
+        command: &'f ApsCommandFrame,
+    ) -> Option<SecuredApsFrame<'f, ApsCommandFrame>> {
         let link_key = match applied {
             AppliedKey::Network => return None,
             AppliedKey::Device => self.device_link_key(source),
@@ -378,28 +410,28 @@ impl ApsSecurity {
     /// APS-encrypt a data frame for a device with its current link key (key identifier
     /// `DataKey`, spec 4.4.1.1 step 1a). `None` when the device's key may not be used
     /// for encryption yet.
-    pub fn encrypt_data(
+    pub fn encrypt_data<'f>(
         &mut self,
         destination: Eui64,
-        frame: &ApsDataFrame,
-    ) -> Option<EncryptedApsDataFrame> {
+        frame: &'f ApsDataFrame,
+    ) -> Option<SecuredApsFrame<'f, ApsDataFrame>> {
         let key = self.data_link_key(destination)?;
         let aux_header = self.next_aux_header(NwkSecurityHeaderKeyId::DataKey);
 
-        Some(frame.encrypt(&key, &aux_header))
+        Some(SecuredApsFrame::new(frame, &key, &aux_header))
     }
 
     /// APS-encrypt an acknowledgement; ACKs mirror the security of the frame they
     /// acknowledge. `None` when the device's key may not be used for encryption yet.
-    pub fn encrypt_ack(
+    pub fn encrypt_ack<'f>(
         &mut self,
         destination: Eui64,
-        ack: &ApsAckFrame,
-    ) -> Option<EncryptedApsAckFrame> {
+        ack: &'f ApsAckFrame,
+    ) -> Option<SecuredApsFrame<'f, ApsAckFrame>> {
         let key = self.data_link_key(destination)?;
         let aux_header = self.next_aux_header(NwkSecurityHeaderKeyId::DataKey);
 
-        Some(ack.encrypt(&key, &aux_header))
+        Some(SecuredApsFrame::new(ack, &key, &aux_header))
     }
 
     /// The auxiliary header for the next outgoing link-key-secured frame.
@@ -445,19 +477,18 @@ impl ApsSecurity {
             return decrypt(network_key).map(|frame| (frame, AppliedKey::Network));
         }
 
-        let mut candidate_keys = vec![self.device_link_key(source)];
-        if candidate_keys[0] != self.global_link_key {
-            candidate_keys.push(self.global_link_key.clone());
-        }
+        let decrypt_with = |link_key: &Key| {
+            decrypt(&Self::select_key(link_key, key_id).expect("NetworkKey is handled above"))
+        };
 
-        let (link_key, frame) = candidate_keys.iter().find_map(|link_key| {
-            let key = Self::select_key(link_key, key_id).expect("NetworkKey is handled above");
-            decrypt(&key).map(|frame| (link_key, frame))
-        })?;
-        let applied = if *link_key == self.global_link_key {
-            AppliedKey::Global
-        } else {
-            AppliedKey::Device
+        let (link_key, entry) = self.device_link_key_with_entry(source);
+        let (frame, applied) = match decrypt_with(&link_key) {
+            Some(frame) => (frame, entry),
+            // Devices encrypt with the well-known key until their key exchange completes
+            None if entry == AppliedKey::Device => {
+                (decrypt_with(&self.global_link_key)?, AppliedKey::Global)
+            }
+            None => return None,
         };
 
         // Spec 4.4.1.2 steps 4 and 9: replay protection applies to unique link keys
@@ -487,7 +518,7 @@ impl ApsSecurity {
     pub fn decrypt_command(
         &mut self,
         source: Eui64,
-        frame: &EncryptedApsCommandFrame,
+        frame: &EncryptedApsCommandFrame<'_>,
         network_key: &Key,
     ) -> Option<(ApsCommandFrame, AppliedKey)> {
         self.decrypt_frame(source, &frame.aux_header, network_key, |key| {
@@ -498,7 +529,7 @@ impl ApsSecurity {
     pub fn decrypt_data(
         &mut self,
         source: Eui64,
-        frame: &EncryptedApsDataFrame,
+        frame: &EncryptedApsDataFrame<'_>,
         network_key: &Key,
     ) -> Option<ApsDataFrame> {
         self.decrypt_frame(source, &frame.aux_header, network_key, |key| {
@@ -510,7 +541,7 @@ impl ApsSecurity {
     pub fn decrypt_ack(
         &mut self,
         source: Eui64,
-        frame: &EncryptedApsAckFrame,
+        frame: &EncryptedApsAckFrame<'_>,
         network_key: &Key,
     ) -> Option<ApsAckFrame> {
         self.decrypt_frame(source, &frame.aux_header, network_key, |key| {

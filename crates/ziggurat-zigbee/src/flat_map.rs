@@ -108,6 +108,51 @@ impl<K, V> FlatMap<K, V> {
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.entries.iter_mut().map(|(_, v)| v)
     }
+
+    /// Remove every entry `f` returns true for and yield them in key order. `f` may
+    /// change the entries it keeps. Entries the iterator has not reached when it is
+    /// dropped are kept.
+    pub fn extract_if<F: FnMut(&K, &mut V) -> bool>(
+        &mut self,
+        mut f: F,
+    ) -> impl Iterator<Item = (K, V)> {
+        self.entries.extract_if(.., move |(k, v)| f(k, v))
+    }
+
+    /// [`Self::extract_if`], for an `f` that also returns a value for each entry it
+    /// removes. Each removal moves the entries after it.
+    pub const fn extract_map<T, F: FnMut(&K, &mut V) -> Option<T>>(
+        &mut self,
+        f: F,
+    ) -> ExtractMap<'_, K, V, F> {
+        ExtractMap {
+            entries: &mut self.entries,
+            index: 0,
+            f,
+        }
+    }
+}
+
+pub struct ExtractMap<'a, K, V, F> {
+    entries: &'a mut Vec<(K, V)>,
+    index: usize,
+    f: F,
+}
+
+impl<K, V, T, F: FnMut(&K, &mut V) -> Option<T>> Iterator for ExtractMap<'_, K, V, F> {
+    type Item = (K, V, T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.entries.len() {
+            let (key, value) = &mut self.entries[self.index];
+            if let Some(extra) = (self.f)(key, value) {
+                let (key, value) = self.entries.remove(self.index);
+                return Some((key, value, extra));
+            }
+            self.index += 1;
+        }
+        None
+    }
 }
 
 impl<K: Ord, V> Default for FlatMap<K, V> {
@@ -272,45 +317,57 @@ impl<'a, K, V> VacantEntry<'a, K, V> {
 }
 
 pub struct FlatSet<T> {
-    map: FlatMap<T, ()>,
+    values: Vec<T>,
 }
 
 impl<T: Ord> FlatSet<T> {
     pub const fn new() -> Self {
-        Self {
-            map: FlatMap::new(),
-        }
+        Self { values: Vec::new() }
     }
 
     /// Returns whether the value was newly inserted.
     pub fn insert(&mut self, value: T) -> bool {
-        self.map.insert(value, ()).is_none()
+        match self.values.binary_search(&value) {
+            Ok(_) => false,
+            Err(i) => {
+                self.values.insert(i, value);
+                true
+            }
+        }
     }
 
     pub fn contains(&self, value: &T) -> bool {
-        self.map.contains_key(value)
+        self.values.binary_search(value).is_ok()
     }
 
     pub fn remove(&mut self, value: &T) -> bool {
-        self.map.remove(value).is_some()
+        self.values
+            .binary_search(value)
+            .map(|i| self.values.remove(i))
+            .is_ok()
     }
 }
 
 impl<T> FlatSet<T> {
     pub const fn len(&self) -> usize {
-        self.map.len()
+        self.values.len()
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.values.is_empty()
     }
 
     pub fn clear(&mut self) {
-        self.map.clear();
+        self.values.clear();
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.map.keys()
+        self.values.iter()
+    }
+
+    /// The values in sorted order.
+    pub fn as_slice(&self) -> &[T] {
+        &self.values
     }
 }
 
@@ -323,14 +380,14 @@ impl<T: Ord> Default for FlatSet<T> {
 impl<T: Clone> Clone for FlatSet<T> {
     fn clone(&self) -> Self {
         Self {
-            map: self.map.clone(),
+            values: self.values.clone(),
         }
     }
 }
 
 impl<T: PartialEq> PartialEq for FlatSet<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.map == other.map
+        self.values == other.values
     }
 }
 
@@ -366,11 +423,10 @@ impl<T: Ord> Extend<T> for FlatSet<T> {
 
 impl<'a, T> IntoIterator for &'a FlatSet<T> {
     type Item = &'a T;
-    type IntoIter = core::iter::Map<core::slice::Iter<'a, (T, ())>, fn(&'a (T, ())) -> &'a T>;
+    type IntoIter = core::slice::Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        let project: fn(&'a (T, ())) -> &'a T = |(v, ())| v;
-        self.map.entries.iter().map(project)
+        self.values.iter()
     }
 }
 
@@ -414,6 +470,19 @@ mod test {
         map.retain(|&k, _| k == 5);
         assert_eq!(map.len(), 1);
 
+        map.extend([(6, "six"), (7, "seven"), (8, "eight")]);
+        assert_eq!(
+            map.extract_if(|&k, _| k % 2 == 0)
+                .collect::<alloc::vec::Vec<_>>(),
+            [(6, "six"), (8, "eight")]
+        );
+        assert_eq!(
+            map.extract_map(|&k, v| (k == 7).then_some(v.len()))
+                .collect::<alloc::vec::Vec<_>>(),
+            [(7, "seven", 5)]
+        );
+        assert_eq!(map.len(), 1);
+
         map.clear();
         assert_eq!(map.pop_first(), None);
     }
@@ -428,5 +497,6 @@ mod test {
         assert!(set.remove(&3));
         assert!(!set.remove(&3));
         assert_eq!(set.len(), 2);
+        assert_eq!(set.as_slice(), [1, 2]);
     }
 }

@@ -8,6 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 ziggurat-phy = { path = "../ziggurat-phy" }
 ziggurat-ieee-802154 = { path = "../ziggurat-ieee-802154" }
+ziggurat-runtime = { path = "../ziggurat-runtime", default-features = false }
 embassy-sync = "0.8"
 
 # Standalone workspace, like the other MCU crates.

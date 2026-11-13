@@ -15,8 +15,8 @@ use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendActions, SendHandle, SendMode,
-    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
+    TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -31,22 +31,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // Both `responder_eui64` and `originator_eui64` SHALL be set according to the
         // R23 spec but real devices do not do this
 
-        let sender_link = self.core().nib.neighbors.link(nwk_frame.nwk_header.source);
-
-        let Some(sender_link) = sender_link else {
-            tracing::debug!("Ignoring route reply from unknown neighbor");
-            return;
-        };
-
-        if sender_link.outgoing_cost == 0 {
-            tracing::debug!("Ignoring route reply from neighbor with zero outgoing cost");
-            return;
-        }
-
         // The path cost already accounts for every link the reply has traversed: the
         // responder seeds the first hop and each relay adds the link it forwards across.
         let updated_path_cost = route_reply_cmd.path_cost;
 
+        let now = self.core_now();
         let outcome = self.core().nib.routing.accept_route_reply(
             self.state.network_address,
             route_reply_cmd.originator_nwk,
@@ -54,6 +43,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             route_reply_cmd.responder_nwk,
             nwk_frame.nwk_header.source,
             updated_path_cost,
+            now,
         );
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
@@ -123,6 +113,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let network_address = self.state.network_address;
         let many_to_one = route_request_cmd.many_to_one != NwkRouteRequestManyToOne::NotManyToOne;
+
+        // Neighbors relay our own route requests back to us. Our discovery entry may
+        // already be gone, so it cannot be what filters them.
+        if nwk_frame.nwk_header.source == network_address {
+            tracing::debug!("Ignoring our own route request relayed by {sender_nwk:?}");
+            return;
+        }
 
         // We need to know who sent the frame
         let sender_link = self.core().nib.neighbors.link(sender_nwk);
@@ -258,14 +255,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let jitter = (min_jitter
             + max_jitter
                 .saturating_sub(min_jitter)
-                .mul_f32(crate::rng::random_f32()))
+                .mul_f32(crate::rng::random_f32::<R>()))
             * 2;
 
         let attempts = self.tunables.rreq_retries() + 1;
         let mut core = self.core();
-        let actions =
-            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
-        self.commit_sends(core, actions);
+        self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        self.commit_sends(core);
     }
 
     /// Zigbee spec 3.6.4.5.1: advertise a many-to-one route to ourselves so that every
@@ -405,26 +401,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             | NwkNetworkStatus::LegacyLinkFailure
             | NwkNetworkStatus::LinkFailure
             | NwkNetworkStatus::SourceRouteFailure => {
-                let mut core = self.core();
-
-                core.nib
+                // The reported path is broken whatever it was: a source route, or a
+                // next hop or direct route record gone stale when the device moved.
+                // The next transmission discovers until a fresh route record arrives
+                let removed_record = self
+                    .core()
+                    .nib
                     .routing
-                    .remove_route(network_status_cmd.network_address);
-
-                // A relay reported the stored path broken; the next transmission
-                // falls back to discovery until a fresh route record arrives
-                let removed_record = network_status_cmd.status_code
-                    == NwkNetworkStatus::SourceRouteFailure
-                    && core
-                        .nib
-                        .routing
-                        .remove_route_record(network_status_cmd.network_address);
-
-                drop(core);
+                    .forget_route_to(network_status_cmd.network_address);
 
                 if removed_record {
                     tracing::info!(
-                        "Removed failed source route to {:?}",
+                        "Removed failed route record to {:?}",
                         network_status_cmd.network_address
                     );
                 }
@@ -442,29 +430,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     AddrConflictSource::Network,
                 );
             }
+            // A frame we sent to a sleepy child expired in its parent's queue. Nothing
+            // to repair: the route is fine, the child did not poll in time.
+            NwkNetworkStatus::IndirectTransactionExpiry => {}
             _ => {
                 tracing::warn!("Unhandled network status: {network_status_cmd:?}");
             }
         }
     }
 
-    /// Begin or restart ad-hoc route discovery toward a destination: the routing entry
-    /// enters `DiscoveryUnderway` and a route request is broadcast. The send timer
-    /// watches the discovery on behalf of the unrouted sends to it; this only kicks it
-    /// off. Under a core lock the caller holds and commits.
-    pub(super) fn start_route_discovery(
+    /// Broadcast the route request of a discovery the routing table started or
+    /// restarted toward a destination. Under a core lock the caller holds and commits.
+    pub(super) fn broadcast_discovery_request(
         &self,
         core: &mut ZigbeeCore,
         destination: Nwk,
-    ) -> SendActions {
+        route_request_identifier: u8,
+    ) {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
-
-        let route_request_identifier = core.nib.routing.begin_discovery(
-            self.state.network_address,
-            destination,
-            self.core_now(),
-            self.tunables.route_discovery_time(),
-        );
 
         // If we know the EUI64 corresponding to the NWK, use it
         let destination_eui64 = core.nib.address_map.eui64_for(destination);
@@ -486,11 +469,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.4.5.1: the initial broadcast is repeated `nwkcInitialRREQRetries`
         // times, separated by the retry interval
-        self.broadcast_route_request(
+        let request = self.broadcast_route_request(
             core,
             route_request_frame,
             self.tunables.initial_rreq_retries() + 1,
             Duration::ZERO,
-        )
+        );
+        core.sends.route_request_sent(destination, request);
     }
 }

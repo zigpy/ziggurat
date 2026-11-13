@@ -32,13 +32,14 @@ impl Broadcasts {
     /// Digest a received broadcast. Returns true for a known transaction, which also
     /// records the sender's passive acknowledgment: the frame is a duplicate and must
     /// be filtered. An unknown broadcast creates a transaction expecting passive acks
-    /// from `audience` and returns false: the frame is fresh and must be processed.
+    /// from the routers `audience` returns, and returns false: the frame is fresh and
+    /// must be processed.
     pub fn filter_received(
         &mut self,
         source: Nwk,
         sequence_number: u8,
         sender: Nwk,
-        audience: Vec<Nwk>,
+        audience: impl FnOnce() -> Vec<Nwk>,
         now: Instant,
         delivery_time: Duration,
     ) -> bool {
@@ -55,7 +56,7 @@ impl Broadcasts {
             (source, sequence_number),
             Transaction {
                 expiration_time: now + delivery_time,
-                expected_relayers: audience,
+                expected_relayers: audience(),
                 // Whoever delivered the frame to us has already broadcast it
                 heard_from: FlatSet::from([sender]),
             },
@@ -84,35 +85,30 @@ impl Broadcasts {
         );
     }
 
-    /// Spec 3.6.6: a broadcast is fully delivered once every router that was in the
-    /// transaction's audience and is in `live_relayers` (still a live neighbor) has
-    /// been heard relaying it, bounded by the quorum: in dense neighborhoods it is
-    /// unreasonable to wait for all ~40 nearby routers, so _enough_ of them suffice.
-    /// An absent (expired) transaction means the delivery window has already closed,
-    /// which counts as acknowledged.
+    /// Spec 3.6.6: whether enough neighbors were heard relaying the broadcast.
+    /// Only expected relayers that are still good neighbors count. We need `quorum`
+    /// of them, or all of them if there are fewer. With none, the broadcast is never
+    /// acked. An expired transaction is always acked.
     pub fn passively_acked(
         &self,
         source: Nwk,
         sequence_number: u8,
-        live_relayers: &[Nwk],
+        is_live_relayer: impl Fn(Nwk) -> bool,
         quorum: usize,
     ) -> bool {
         self.table
             .get(&(source, sequence_number))
             .is_none_or(|transaction| {
-                let audience: Vec<Nwk> = transaction
-                    .expected_relayers
-                    .iter()
-                    .filter(|nwk| live_relayers.contains(nwk))
-                    .copied()
-                    .collect();
+                let mut audience = 0;
+                let mut heard = 0;
+                for &nwk in &transaction.expected_relayers {
+                    if is_live_relayer(nwk) {
+                        audience += 1;
+                        heard += usize::from(transaction.heard_from.contains(&nwk));
+                    }
+                }
 
-                let heard = audience
-                    .iter()
-                    .filter(|nwk| transaction.heard_from.contains(nwk))
-                    .count();
-
-                heard >= audience.len().min(quorum)
+                audience > 0 && heard >= audience.min(quorum)
             })
     }
 }

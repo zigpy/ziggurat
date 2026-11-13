@@ -48,13 +48,14 @@ pub struct TableEntry {
     pub end_device_configuration: u16,
 
     /// The end device child is evicted once this deadline passes without a keepalive
-    /// (the spec's "Timeout Counter", kept as a deadline instead of a countdown)
-    pub timeout_at: Instant,
+    /// (the spec's "Timeout Counter", kept as a deadline instead of a countdown).
+    /// `None` for a router, which is not aged by keepalives.
+    pub timeout_at: Option<Instant>,
 
     /// The keepalive period that refreshes `timeout_at`, defaulted from
     /// `nwkEndDeviceTimeoutDefault` and renegotiable via the End Device Timeout
-    /// Request command (the spec's "Device Timeout")
-    pub device_timeout: Duration,
+    /// Request command (the spec's "Device Timeout"). `None` for a router.
+    pub device_timeout: Option<Duration>,
     pub relationship: Relationship,
 
     /// A value indicating if previous transmissions to the device were successful or
@@ -91,6 +92,10 @@ pub struct TableEntry {
     /// up-counter, which does not roll-over.
     // Spec-expected field: `pub router_age: u16`, we instead keep track of a timestamp
     pub router_added_timestamp: Instant,
+
+    /// When the device last associated or rejoined through us. `None` for neighbors that
+    /// never attached to us.
+    pub attached_at: Option<Instant>,
 
     pub router_connectivity: u8,
     pub router_neighbor_set_diversity: u8,
@@ -154,7 +159,7 @@ pub struct ChildDescriptor {
     pub network_address: Nwk,
     pub device_type: NwkDeviceType,
     pub rx_on_when_idle: bool,
-    pub device_timeout: Duration,
+    pub device_timeout: Option<Duration>,
     pub relationship: Relationship,
 }
 
@@ -224,6 +229,24 @@ impl Neighbors {
             .any(|entry| entry.network_address == nwk)
     }
 
+    /// Whether `nwk` is a router child that associated or rejoined through us within
+    /// `window`.
+    pub fn is_recently_attached_router_child(
+        &self,
+        nwk: Nwk,
+        now: Instant,
+        window: Duration,
+    ) -> bool {
+        self.table.values().any(|entry| {
+            entry.network_address == nwk
+                && entry.device_type == NwkDeviceType::Router
+                && entry.is_child()
+                && entry
+                    .attached_at
+                    .is_some_and(|attached_at| now < attached_at + window)
+        })
+    }
+
     /// The EUI64 of the end device child with the given network address, if one
     /// exists. End devices do not participate in route discovery, so their parent acts
     /// on their behalf.
@@ -272,12 +295,11 @@ impl Neighbors {
     /// The (EUI64, network address) of every rx-off-when-idle end-device child. A
     /// 0xFFFF broadcast has to be delivered to each as a MAC unicast, since a sleeping
     /// radio never hears the broadcast itself (spec 3.6.6).
-    pub fn sleepy_children(&self) -> Vec<(Eui64, Nwk)> {
+    pub fn sleepy_children(&self) -> impl Iterator<Item = (Eui64, Nwk)> {
         self.table
             .values()
             .filter(|entry| !entry.rx_on_when_idle && entry.is_child())
             .map(|entry| (entry.extended_address, entry.network_address))
-            .collect()
     }
 
     pub fn contains(&self, eui64: Eui64) -> bool {
@@ -311,7 +333,7 @@ impl Neighbors {
         if let Some(eui64) = eui64
             && let Some(entry) = self.table.get_mut(&eui64)
         {
-            entry.timeout_at = now + entry.device_timeout;
+            entry.timeout_at = entry.device_timeout.map(|timeout| now + timeout);
             entry.keepalive_received = true;
             return true;
         }
@@ -322,7 +344,7 @@ impl Neighbors {
                 .values_mut()
                 .find(|entry| entry.network_address == nwk)
         {
-            entry.timeout_at = now + entry.device_timeout;
+            entry.timeout_at = entry.device_timeout.map(|timeout| now + timeout);
             entry.keepalive_received = true;
             return true;
         }
@@ -347,8 +369,8 @@ impl Neighbors {
             return false;
         };
 
-        entry.device_timeout = timeout;
-        entry.timeout_at = now + timeout;
+        entry.device_timeout = Some(timeout);
+        entry.timeout_at = Some(now + timeout);
         entry.end_device_configuration = configuration;
         entry.keepalive_received = true;
 
@@ -466,7 +488,7 @@ impl Neighbors {
             .filter(|entry| {
                 entry.is_child()
                     && entry.device_type == NwkDeviceType::EndDevice
-                    && entry.timeout_at <= now
+                    && entry.timeout_at.is_some_and(|timeout_at| timeout_at <= now)
             })
             .map(|entry| (entry.extended_address, entry.network_address))
             .collect();
@@ -484,13 +506,23 @@ impl Neighbors {
     /// are refreshed even on existing entries: a device may re-attach with different
     /// capabilities (e.g. re-flashed from router to end device).
     pub fn upsert_child(&mut self, child: ChildDescriptor, now: Instant) {
+        self.upsert(child, now, Some(now));
+    }
+
+    /// Seed a child entry restored by the client on startup. Unlike a device that
+    /// associates or rejoins, a restored child did not just attach to us.
+    pub fn restore_child(&mut self, child: ChildDescriptor, now: Instant) {
+        self.upsert(child, now, None);
+    }
+
+    fn upsert(&mut self, child: ChildDescriptor, now: Instant, attached_at: Option<Instant>) {
         let entry = self.table.entry(child.eui64).or_insert_with(|| TableEntry {
             extended_address: child.eui64,
             network_address: child.network_address,
             device_type: child.device_type,
             rx_on_when_idle: child.rx_on_when_idle,
             end_device_configuration: 0x0000,
-            timeout_at: now + child.device_timeout,
+            timeout_at: child.device_timeout.map(|timeout| now + timeout),
             device_timeout: child.device_timeout,
             relationship: Relationship::Child,
             transmit_failure: 0,
@@ -503,6 +535,7 @@ impl Neighbors {
             mac_unicast_bytes_transmitted: 0,
             mac_unicast_bytes_received: 0,
             router_added_timestamp: now,
+            attached_at,
             router_connectivity: 0,
             router_neighbor_set_diversity: 0,
             router_outbound_activity: 0,
@@ -510,11 +543,12 @@ impl Neighbors {
             security_timer: 0,
         });
 
+        entry.attached_at = attached_at;
         entry.network_address = child.network_address;
         entry.device_type = child.device_type;
         entry.rx_on_when_idle = child.rx_on_when_idle;
         entry.device_timeout = child.device_timeout;
-        entry.timeout_at = now + child.device_timeout;
+        entry.timeout_at = child.device_timeout.map(|timeout| now + timeout);
         entry.relationship = child.relationship;
     }
 
@@ -536,19 +570,31 @@ impl Neighbors {
         self.table
             .values()
             .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
-            .map(|entry| entry.timeout_at)
+            .filter_map(|entry| entry.timeout_at)
             .min()
     }
 
-    /// Router neighbors with a live link, which are expected to relay our broadcasts
-    /// (passive acknowledgment, spec 3.6.6). Aging zeroes the outgoing cost, so a
-    /// non-zero cost means the router is still exchanging link statuses with us.
-    pub fn expected_broadcast_relayers(&self) -> Vec<Nwk> {
+    /// Router neighbors with a good live link, which are expected to relay our
+    /// broadcasts (passive acknowledgment, spec 3.6.6).
+    pub fn expected_broadcast_relayers(&self, max_link_cost: u8) -> Vec<Nwk> {
         self.table
             .values()
-            .filter(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
+            .filter(|entry| Self::relays_broadcasts(entry, max_link_cost))
             .map(|entry| entry.network_address)
             .collect()
+    }
+
+    /// Whether `nwk` is one of the [`Self::expected_broadcast_relayers`].
+    pub fn is_expected_broadcast_relayer(&self, nwk: Nwk, max_link_cost: u8) -> bool {
+        self.table.values().any(|entry| {
+            entry.network_address == nwk && Self::relays_broadcasts(entry, max_link_cost)
+        })
+    }
+
+    fn relays_broadcasts(entry: &TableEntry, max_link_cost: u8) -> bool {
+        entry.device_type == NwkDeviceType::Router
+            && (1..=max_link_cost).contains(&entry.outgoing_cost)
+            && (1..=max_link_cost).contains(&entry.incoming_link_cost())
     }
 
     /// Reset link costs of neighbors that have been silent for `max_age` (stopped
@@ -566,7 +612,9 @@ impl Neighbors {
                 stale_neighbors.push(neighbor.network_address);
 
                 tracing::warn!(
-                    "Neighbor {neighbor:?} has ceased communicating, resetting link costs"
+                    "Neighbor {:?} ({:?}) has ceased communicating, resetting link costs",
+                    neighbor.network_address,
+                    neighbor.extended_address
                 )
             }
         }
@@ -673,8 +721,8 @@ impl Neighbors {
                 device_type: NwkDeviceType::Router,
                 rx_on_when_idle: true,
                 end_device_configuration: 0x0000,
-                timeout_at: now + Duration::from_secs(0xFFFFFFFF),
-                device_timeout: Duration::from_secs(0xFFFFFFFF),
+                timeout_at: None,
+                device_timeout: None,
                 relationship: Relationship::Sibling,
                 transmit_failure: 0,
                 lqas: LqaSamples::default(),
@@ -686,6 +734,7 @@ impl Neighbors {
                 mac_unicast_bytes_transmitted: 0,
                 mac_unicast_bytes_received: 0,
                 router_added_timestamp: now,
+                attached_at: None,
                 router_connectivity: 0,
                 router_neighbor_set_diversity: 0,
                 router_outbound_activity: 0,
@@ -769,7 +818,7 @@ mod test {
                 network_address: CHILD_NWK,
                 device_type,
                 rx_on_when_idle: false,
-                device_timeout: Duration::from_secs(60),
+                device_timeout: Some(Duration::from_secs(60)),
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),
@@ -795,9 +844,7 @@ mod test {
         assert!(!header.frame_control.end_device_initiator);
 
         // Only the End Device Initiator bit changes: frame control 0x2248 -> 0x0248
-        let mut bytes = Vec::new();
-        header.serialize_into(&mut bytes);
-        assert_eq!(bytes, hex!("4802fdff34121e05"));
+        assert_eq!(header.to_bytes(), hex!("4802fdff34121e05"));
     }
 
     #[test]
@@ -831,7 +878,7 @@ mod test {
                 network_address: Nwk(0x5678),
                 device_type: NwkDeviceType::Router,
                 rx_on_when_idle: true,
-                device_timeout: Duration::from_secs(30),
+                device_timeout: Some(Duration::from_secs(30)),
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),

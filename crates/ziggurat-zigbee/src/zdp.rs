@@ -1,22 +1,11 @@
 #![allow(clippy::useless_conversion)]
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::nwk::commands::NwkRejoinCapabilityInformation;
 use abstract_bits::{AbstractBits, BitReader, abstract_bits};
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-
-/// 802.15.4 mac layer has a maximum payload length of 104 bytes
-const MAC_PAYLOAD_MAX_LEN: usize = 104;
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("Could not serialize {ty}")]
-pub struct SerializeError {
-    ty: &'static str,
-    #[source]
-    cause: abstract_bits::ToBytesError,
-}
+use ziggurat_ieee_802154::{FrameWriter, TooLong};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DeserializeError {
@@ -60,8 +49,9 @@ pub enum ZdpStatus {
 pub trait ZdpCommand: AbstractBits + Sized {
     const CLUSTER_ID: ZdpClusterId;
 
-    fn serialize(&self, tsn: u8) -> Result<Vec<u8>, SerializeError> {
-        serialize(self, tsn)
+    fn serialize(&self, tsn: u8, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.push(tsn)?;
+        writer.bits(self)
     }
 
     fn deserialize(bytes: &[u8]) -> Result<(u8, Self), DeserializeError> {
@@ -244,21 +234,6 @@ pub struct MgmtRtgRsp {
 
 impl ZdpCommand for MgmtRtgRsp {
     const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtRtgRsp;
-}
-
-fn serialize<T: AbstractBits>(thing: &T, tsn: u8) -> Result<Vec<u8>, SerializeError> {
-    let mut bytes = vec![0u8; MAC_PAYLOAD_MAX_LEN];
-    bytes[0] = tsn;
-    let mut writer = abstract_bits::BitWriter::from(&mut bytes[1..]);
-    thing
-        .write_abstract_bits(&mut writer)
-        .map_err(|cause| SerializeError {
-            ty: core::any::type_name::<T>(),
-            cause,
-        })?;
-    let len = writer.bytes_written();
-    bytes.truncate(len + 1); // +1 for the transaction sequence number
-    Ok(bytes)
 }
 
 fn deserialize<T: AbstractBits>(bytes: &[u8]) -> Result<(u8, T), DeserializeError> {
