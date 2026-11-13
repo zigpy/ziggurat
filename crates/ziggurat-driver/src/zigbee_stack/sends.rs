@@ -18,7 +18,6 @@ use ziggurat_zigbee::sends::{Action, Broadcast as BroadcastRecord, Unicast as Un
 
 use crate::runtime::Runtime;
 
-use super::routing::Status as RouteStatus;
 use super::{
     Confirm, CoreGuard, DeliveryError, Frame, Nib, NwkSecurityMode, RouteDirective, Schedule,
     SendActions, SendHandle, SendId, SendMode, SendSlot, Transmit, TxPolicy, ZigbeeCore,
@@ -178,32 +177,41 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .map(Ieee802154Address::Eui64)
     }
 
-    /// The next hop of an unrouted frame once its route is known, and the address it
-    /// polls under if it is a sleepy child. The route can have vanished in the race,
-    /// which fails the send.
-    fn resolve_routed_unicast(
+    /// Resolve the route of an unrouted frame again: its next hop and the address it
+    /// polls under if it is a sleepy child. `None` means no route yet.
+    fn resolve_unrouted_unicast(
         &self,
         nib: &Nib,
         frame: &mut Frame,
         now: CoreInstant,
-    ) -> Result<(Nwk, Option<Ieee802154Address>), DeliveryError> {
+    ) -> Option<(Nwk, Option<Ieee802154Address>)> {
         let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
         };
+
+        // A forced discovery holds the frame only while it is underway. Once it is
+        // answered or has lapsed, the frame takes any route like every other frame
+        let mut policy = self.next_hop_policy();
+        policy.force_route_discovery &= nib.routing.own_discovery_underway(
+            self.state.network_address,
+            nwk_frame.nwk_header.destination,
+            now,
+        );
 
         let resolved = next_hop::resolve(
             &nib.routing,
             &nib.neighbors,
             nwk_frame,
             &SendMode::Route(RouteDirective::StackDecides),
-            self.next_hop_policy(),
+            policy,
             now,
         );
 
         match resolved {
-            NextHop::Resolved(next_hop) => Ok((next_hop, Self::poll_address(nib, next_hop))),
-            NextHop::NeedDiscovery | NextHop::Discard => {
-                Err(DeliveryError::RouteInactiveAfterDiscovery)
+            NextHop::Resolved(next_hop) => Some((next_hop, Self::poll_address(nib, next_hop))),
+            NextHop::NeedDiscovery => None,
+            NextHop::Discard => {
+                unreachable!("a frame is only held for a route if it allows discovery")
             }
         }
     }
@@ -298,16 +306,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, route
-    /// the sends whose route became active, restart or fail the discoveries that
-    /// lapsed, then run the table's timed transitions. Returns when the next pass is
-    /// due: the table's next deadline, or that of a route discovery unrouted sends wait
-    /// on, which lives in the routing table.
+    /// One timer pass: settle the broadcasts whose passive-ack quorum was heard, run
+    /// the send tables' pass against the routing and neighbor tables, then let the
+    /// routing table start a discovery for, or give up on, each destination a send
+    /// still waits on with none underway. Returns when the next pass is due.
     fn drive_sends(&self) -> Option<CoreInstant> {
         let now = self.core_now();
 
         let mut guard = self.core();
-        // A plain `&mut ZigbeeCore`, so the closure below borrows `nib` beside `sends`
+        // A plain `&mut ZigbeeCore`, so the closures below borrow `nib` beside `sends`
         let core = &mut *guard;
         let mut actions = SendActions::new();
 
@@ -317,37 +324,38 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         }
 
-        for destination in core.sends.unrouted_destinations() {
-            if core.nib.routing.route_status(destination) == Some(RouteStatus::Active) {
-                actions.extend(core.sends.route_unicasts(
-                    destination,
-                    now,
-                    &self.tunables,
-                    |send| self.resolve_routed_unicast(&core.nib, send, now),
-                ));
-            } else if core
-                .nib
-                .routing
-                .discovery_deadline(destination, now)
-                .is_none()
-            {
-                if core.sends.retry_discovery(destination) {
-                    actions.extend(self.start_route_discovery(core, destination));
-                } else {
-                    core.nib.routing.mark_discovery_failed(destination);
-                    actions.extend(core.sends.fail_unrouted(destination));
-                }
-            }
+        actions.extend(core.sends.tick(now, &self.tunables, |frame| {
+            self.resolve_unrouted_unicast(&core.nib, frame, now)
+        }));
+
+        let discoveries = core.nib.routing.tick_discoveries(
+            self.state.network_address,
+            now,
+            self.tunables.route_discovery_time(),
+            |destination| core.sends.has_unrouted(destination),
+        );
+
+        for (destination, route_request_identifier) in discoveries.restarted {
+            actions.extend(self.broadcast_discovery_request(
+                core,
+                destination,
+                route_request_identifier,
+            ));
         }
 
-        actions.extend(core.sends.tick(now));
+        for destination in discoveries.unreachable {
+            actions.extend(core.sends.fail_unrouted(destination));
+        }
 
-        let discoveries = core
-            .sends
-            .unrouted_destinations()
-            .into_iter()
-            .filter_map(|destination| core.nib.routing.discovery_deadline(destination, now));
-        let next_wake = core.sends.next_wake().into_iter().chain(discoveries).min();
+        let next_wake = [
+            core.sends.next_wake(),
+            core.nib
+                .routing
+                .next_discovery_lapse(self.state.network_address, now),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
 
         // This pass is the timer task's own: waking the timer here would make it spin
         self.run_send_actions(guard, actions);

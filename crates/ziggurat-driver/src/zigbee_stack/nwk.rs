@@ -26,9 +26,10 @@ use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, DeliveryError, EnqueueError, Frame, MAX_DEPTH, Nib,
-    NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions, SendHandle, SendId,
-    SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeNotification, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError, Frame,
+    MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective, Schedule, SendActions,
+    SendHandle, SendId, SendMode, SendSlot, TxPolicy, TxPriority, Unicast, ZigbeeCore,
+    ZigbeeNotification, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -45,17 +46,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        // The device can be reached again, so sends held for it are kept. The route
-        // request they wait on went out before it joined. With that discovery gone, the
-        // timer pass starts a new one.
-        core.nib.routing.forget(self.state.network_address, nwk);
-        self.commit_sends(core, SendActions::new());
+        self.forget_nwk_state_in(core, nwk);
     }
 
-    /// The device at `nwk` left, so what we know about the address belongs to a session
-    /// that is over. Held sends fail: nothing will answer a route request for it.
+    /// The device at `nwk` left or joined again, or two devices claim the address, so
+    /// what we know about it no longer holds. Held sends fail: they wait on a route
+    /// request the device never heard, and forgetting the address drops that discovery.
     pub(super) fn forget_nwk_state(&self, nwk: Nwk) {
-        let mut core = self.core();
+        self.forget_nwk_state_in(self.core(), nwk);
+    }
+
+    pub(super) fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
         core.nib.routing.forget(self.state.network_address, nwk);
         let actions = core.sends.fail_unrouted(nwk);
         self.commit_sends(core, actions);
@@ -247,17 +248,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NwkCommand::RouteRecord(cmd) => {
                     tracing::trace!("Route record command frame received: {cmd:?}");
                     let source = nwk_frame.nwk_header.source;
-                    let changed = self
+                    let change = self
                         .core()
                         .nib
                         .routing
                         .store_route_record(source, cmd.relays.clone());
 
-                    if changed {
+                    if change.source {
                         self.push_notification(ZigbeeNotification::RouteRecord {
                             destination: source,
                             relays: cmd.relays.clone(),
                         });
+                    }
+
+                    // Sends held for the device, or for a relay on its path, can now be
+                    // source routed
+                    if change.any {
+                        self.send_timer_wake.notify_one();
                     }
                 }
                 NwkCommand::RouteRequest(cmd) => {
@@ -419,8 +426,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 tracing::debug!("Holding frame until a route to {destination:?} is known");
                 let slot = Arc::new(SendSlot::default());
 
-                // The first unrouted send to a destination starts its discovery
-                let discovering = core.sends.has_unrouted(destination);
                 let (id, mut actions) = core.sends.enqueue_unrouted_unicast(
                     UnroutedUnicast {
                         frame: Frame::nwk(nwk_frame, security),
@@ -432,8 +437,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     now,
                     &self.tunables,
                 );
-                if !discovering {
-                    actions.extend(self.start_route_discovery(&mut core, destination));
+
+                // The routing table starts a discovery unless the send can wait on
+                // one: a discovery of ours still underway, or one the timer pass starts
+                let route_request_identifier = core.nib.routing.want_route(
+                    self.state.network_address,
+                    destination,
+                    now,
+                    self.tunables.route_discovery_time(),
+                    self.tunables.pending_route_discovery_attempts(),
+                );
+                if let Some(route_request_identifier) = route_request_identifier {
+                    actions.extend(self.broadcast_discovery_request(
+                        &mut core,
+                        destination,
+                        route_request_identifier,
+                    ));
                 }
 
                 (SendHandle::new(id, slot), actions)

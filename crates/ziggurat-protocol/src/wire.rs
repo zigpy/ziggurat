@@ -713,11 +713,14 @@ pub enum SendStatus {
     Success = 0,
     RouteDiscoveryTimeout = 1,
     RouteDiscoveryNoEntry = 2,
+    /// No longer sent. Kept so a confirmation from older firmware still decodes.
     RouteInactiveAfterDiscovery = 3,
     NwkNoAck = 4,
     CcaFailure = 5,
     TransmitFailed = 6,
     ApsAckTimeout = 7,
+    /// No longer sent. Kept so a confirmation from older firmware still decodes.
+    BroadcastQuorumNotReached = 8,
     IndirectExpired = 9,
     FrameBudgetExhausted = 10,
     Cancelled = 11,

@@ -296,11 +296,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        // Routers resolve their own conflicts after hearing the notification; our
-        // mapping for the address is ambiguous until the keeper re-announces
+        // Routers resolve their own conflicts after hearing the notification. Until
+        // one announces itself we cannot tell which device a frame to the address
+        // would reach, so sends held for it fail
         let mut core = self.core();
         core.nib.address_map.forget_address(address);
-        core.nib.routing.remove_route(address);
+        self.forget_nwk_state_in(core, address);
     }
 
     /// The address-conflict report reactor: a single long-lived task owning the

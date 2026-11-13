@@ -35,6 +35,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // responder seeds the first hop and each relay adds the link it forwards across.
         let updated_path_cost = route_reply_cmd.path_cost;
 
+        let now = self.core_now();
         let outcome = self.core().nib.routing.accept_route_reply(
             self.state.network_address,
             route_reply_cmd.originator_nwk,
@@ -42,6 +43,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             route_reply_cmd.responder_nwk,
             nwk_frame.nwk_header.source,
             updated_path_cost,
+            now,
         );
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
@@ -435,23 +437,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Begin or restart ad-hoc route discovery toward a destination: the routing entry
-    /// enters `DiscoveryUnderway` and a route request is broadcast. The send timer
-    /// watches the discovery on behalf of the unrouted sends to it; this only kicks it
-    /// off. Under a core lock the caller holds and commits.
-    pub(super) fn start_route_discovery(
+    /// Broadcast the route request of a discovery the routing table started or
+    /// restarted toward a destination. Under a core lock the caller holds and commits.
+    pub(super) fn broadcast_discovery_request(
         &self,
         core: &mut ZigbeeCore,
         destination: Nwk,
+        route_request_identifier: u8,
     ) -> SendActions {
         tracing::debug!("Sending route discovery for NWK {destination:?}");
-
-        let route_request_identifier = core.nib.routing.begin_discovery(
-            self.state.network_address,
-            destination,
-            self.core_now(),
-            self.tunables.route_discovery_time(),
-        );
 
         // If we know the EUI64 corresponding to the NWK, use it
         let destination_eui64 = core.nib.address_map.eui64_for(destination);
