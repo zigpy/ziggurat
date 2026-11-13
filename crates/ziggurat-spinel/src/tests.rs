@@ -20,9 +20,11 @@ fn test_transaction_id_is_not_reused_until_its_request_is_released() {
         transaction_id: tid,
     };
 
-    let mut events = Vec::new();
-    protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &[], &mut events);
-    assert_eq!(events, [SpinelEvent::Response(tid)]);
+    let mut update = Vec::new();
+    assert_eq!(
+        protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &[], &mut update),
+        Some(SpinelEvent::Response(tid))
+    );
 
     for _ in 0..12 {
         let other = protocol.allocate_tid(NOW).unwrap();
@@ -32,7 +34,7 @@ fn test_transaction_id_is_not_reused_until_its_request_is_released() {
 
     assert!(matches!(
         protocol.release_request(tid),
-        Transaction::Answered(_)
+        Transaction::Answered
     ));
     let reused = (0..7).any(|_| {
         let other = protocol.allocate_tid(NOW).unwrap();
@@ -80,25 +82,24 @@ fn test_reset_cancels_the_requests_without_a_response() {
     protocol.request_written(written);
     protocol.request_written(answered);
 
-    let mut events = Vec::new();
+    let mut update = Vec::new();
     let response = SpinelProtocol::request_frame(answered, SpinelCommandId::PropValueIs, vec![]);
-    protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut events);
+    assert_eq!(
+        protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut update),
+        Some(SpinelEvent::Response(answered))
+    );
 
     let (header, payload) = reset_notification();
-    protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &payload, &mut events);
     assert_eq!(
-        events,
-        [
-            SpinelEvent::Response(answered),
-            SpinelEvent::Reset(SpinelStatus::ResetPowerOn)
-        ]
+        protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &payload, &mut update),
+        Some(SpinelEvent::Reset(SpinelStatus::ResetPowerOn))
     );
 
     assert_eq!(protocol.release_request(queued), Transaction::Cancelled);
     assert_eq!(protocol.release_request(written), Transaction::Cancelled);
     assert!(matches!(
         protocol.release_request(answered),
-        Transaction::Answered(_)
+        Transaction::Answered
     ));
 }
 
@@ -122,11 +123,12 @@ fn test_abandoned_transaction_id_returns_with_its_response() {
     protocol.abandon_request(tid, NOW + Duration::from_secs(2));
     assert!(!is_given_out(&mut protocol, tid, NOW));
 
-    let mut events = Vec::new();
+    let mut update = Vec::new();
     let response = SpinelProtocol::request_frame(tid, SpinelCommandId::PropValueIs, vec![]);
-    protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut events);
-
-    assert_eq!(events, [SpinelEvent::LateResponse(tid)]);
+    assert_eq!(
+        protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut update),
+        Some(SpinelEvent::LateResponse(tid))
+    );
     assert!(is_given_out(&mut protocol, tid, NOW));
 }
 
@@ -157,8 +159,8 @@ fn test_reset_frees_an_abandoned_transaction_id() {
     protocol.abandon_request(tid, NOW + Duration::from_secs(2));
 
     let (header, payload) = reset_notification();
-    let mut events = Vec::new();
-    protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &payload, &mut events);
+    let mut update = Vec::new();
+    protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &payload, &mut update);
 
     assert!(is_given_out(&mut protocol, tid, NOW));
 }
@@ -166,15 +168,17 @@ fn test_reset_frees_an_abandoned_transaction_id() {
 #[test]
 fn test_response_to_no_request_is_dropped() {
     let mut protocol = SpinelProtocol::new();
-    let mut events = Vec::new();
+    let mut update = Vec::new();
 
     // Transaction ids 8 to 15 fit the header but we never use them
     for tid in [1, 15] {
         let response = SpinelProtocol::request_frame(tid, SpinelCommandId::PropValueIs, vec![]);
-        protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut events);
+        assert_eq!(
+            protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut update),
+            None
+        );
     }
 
-    assert_eq!(events, []);
     assert_eq!(*protocol.transaction(1), Transaction::Free);
 }
 
@@ -370,13 +374,13 @@ fn test_spinel_sending_request() {
     // session with a real device.
     protocol.next_tid = 3;
 
-    let request = SpinelProtocol::request_frame(
-        protocol.allocate_tid(NOW).unwrap(),
-        SpinelCommandId::PropValueGet,
-        packed_uint21_to_bytes(SpinelPropertyId::NcpVersion as u32),
-    );
+    let tid = protocol.allocate_tid(NOW).unwrap();
+    protocol.write_request(tid, SpinelCommandId::PropValueGet, |payload| {
+        packed_uint21_into(SpinelPropertyId::NcpVersion as u32, payload);
+    });
+    assert_eq!(tid, 3);
     assert_eq!(
-        request,
+        SpinelFrame::from_bytes(protocol.request(tid)).unwrap(),
         SpinelFrame {
             header: SpinelHeader {
                 flag: 0b10,
@@ -388,26 +392,20 @@ fn test_spinel_sending_request() {
         }
     );
 
-    // Receive a response
-    let mut events = Vec::new();
-    protocol.handle_inbound_bytes(
-        b"~\x83\x06\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 1",
-        &mut events,
-    );
-    protocol.handle_inbound_bytes(b"4:40:57\x00\x81\xf7~", &mut events);
-
-    assert_eq!(events, [SpinelEvent::Response(3)]);
+    // Receive a response, split across two reads
+    let mut update = Vec::new();
+    protocol.receive(b"~\x83\x06\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 1");
+    assert_eq!(protocol.next_event(&mut update), None);
+    protocol.receive(b"4:40:57\x00\x81\xf7~");
     assert_eq!(
-        protocol.release_request(3),
-        Transaction::Answered(SpinelFrame {
-            header: SpinelHeader {
-                flag: 0b10,
-                network_link_id: 0,
-                transaction_id: 3,
-            },
-            command_id: SpinelCommandId::PropValueIs,
-            payload: b"\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 14:40:57\x00"
-                .to_vec()
-        })
+        protocol.next_event(&mut update),
+        Some(SpinelEvent::Response(3))
+    );
+    assert_eq!(protocol.next_event(&mut update), None);
+
+    assert_eq!(protocol.release_request(3), Transaction::Answered);
+    assert_eq!(
+        protocol.response(3),
+        b"\x02SL-OPENTHREAD/2.4.4.0_GitHub-7074a43e4; EFR32; Oct 21 2024 14:40:57\x00"
     );
 }

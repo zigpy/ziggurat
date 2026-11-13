@@ -9,7 +9,6 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
@@ -182,11 +181,16 @@ impl Streams {
         self.energy.close();
     }
 
-    fn deliver(&self, event: SpinelEvent) {
+    fn deliver(&self, event: SpinelEvent, value: &[u8]) {
         match event {
-            SpinelEvent::PropertyUpdate(update) => match update.property_id {
-                SpinelPropertyId::StreamRaw => self.deliver_rx(&update.value),
-                SpinelPropertyId::MacEnergyScanResult => self.energy.push(update),
+            SpinelEvent::PropertyUpdate(property_id) => match property_id {
+                SpinelPropertyId::StreamRaw => self.deliver_rx(value),
+                SpinelPropertyId::MacEnergyScanResult => {
+                    self.energy.push(SpinelFramePropValueIs {
+                        property_id,
+                        value: value.to_vec(),
+                    });
+                }
                 // Expected for e.g. the MacScanState=IDLE update at the end of each
                 // scanned channel
                 property_id => tracing::debug!("Ignoring property update: {property_id:?}"),
@@ -257,7 +261,9 @@ impl<R: Runtime> SpinelPhy<R> {
         let client_streams = Arc::clone(&streams);
 
         Self {
-            client: SpinelClient::new(Box::new(move |event| client_streams.deliver(event))),
+            client: SpinelClient::new(Box::new(move |event, value| {
+                client_streams.deliver(event, value);
+            })),
             home_channel: Mutex::new(11),
             streams,
         }
@@ -286,7 +292,7 @@ pub struct SpinelExclusive<'a, R: Runtime> {
 impl<R: Runtime> ExclusiveRadio for SpinelExclusive<'_, R> {
     async fn set_channel(&self, channel: u8) -> Result<(), RadioError> {
         let (response, value) =
-            set_spinel_prop(&self.phy.client, SpinelPropertyId::PhyChan, vec![channel]).await?;
+            set_spinel_prop(&self.phy.client, SpinelPropertyId::PhyChan, &[channel]).await?;
         if response != SpinelPropertyId::PhyChan {
             return Err(RadioError::Rejected(format!(
                 "channel change to {channel} rejected: {response:?}={value:02X?}"
@@ -328,7 +334,7 @@ const fn map_status(status: SpinelStatus) -> TxResult {
 async fn set_spinel_prop<R: Runtime>(
     client: &SpinelClient<R>,
     id: SpinelPropertyId,
-    value: Vec<u8>,
+    value: &[u8],
 ) -> Result<(SpinelPropertyId, Vec<u8>), RadioError> {
     client.prop_value_set(id, value).await.map_err(map_err)
 }
@@ -338,24 +344,23 @@ async fn write_frame_pending<R: Runtime>(
     short: &[Nwk],
     extended: &[Eui64],
 ) -> Result<(), RadioError> {
-    let short_bytes: Vec<u8> = short.iter().flat_map(|nwk| nwk.to_bytes()).collect();
-    set_spinel_prop(
-        client,
-        SpinelPropertyId::MacSrcMatchShortAddresses,
-        short_bytes,
-    )
-    .await?;
+    client
+        .prop_value_set_with(SpinelPropertyId::MacSrcMatchShortAddresses, |value| {
+            for nwk in short {
+                value.extend(nwk.to_bytes());
+            }
+        })
+        .await
+        .map_err(map_err)?;
 
-    let extended_bytes: Vec<u8> = extended
-        .iter()
-        .flat_map(|eui64| eui64.to_be_bytes())
-        .collect();
-    set_spinel_prop(
-        client,
-        SpinelPropertyId::MacSrcMatchExtendedAddresses,
-        extended_bytes,
-    )
-    .await?;
+    client
+        .prop_value_set_with(SpinelPropertyId::MacSrcMatchExtendedAddresses, |value| {
+            for eui64 in extended {
+                value.extend(eui64.to_be_bytes());
+            }
+        })
+        .await
+        .map_err(map_err)?;
     Ok(())
 }
 
@@ -363,12 +368,12 @@ async fn apply_config<R: Runtime>(
     client: &SpinelClient<R>,
     config: &RadioConfig,
 ) -> Result<(), RadioError> {
-    set_spinel_prop(client, SpinelPropertyId::PhyEnabled, vec![1]).await?;
-    set_spinel_prop(client, SpinelPropertyId::PhyChan, vec![config.channel]).await?;
+    set_spinel_prop(client, SpinelPropertyId::PhyEnabled, &[1]).await?;
+    set_spinel_prop(client, SpinelPropertyId::PhyChan, &[config.channel]).await?;
     set_spinel_prop(
         client,
         SpinelPropertyId::PhyTxPower,
-        vec![config.tx_power as u8],
+        &[config.tx_power as u8],
     )
     .await?;
 
@@ -380,36 +385,36 @@ async fn apply_config<R: Runtime>(
     set_spinel_prop(
         client,
         SpinelPropertyId::MacPromiscuousMode,
-        vec![promiscuous as u8],
+        &[promiscuous as u8],
     )
     .await?;
 
     set_spinel_prop(
         client,
         SpinelPropertyId::Mac154Laddr,
-        config.extended_address.to_be_bytes().to_vec(),
+        &config.extended_address.to_be_bytes(),
     )
     .await?;
     set_spinel_prop(
         client,
         SpinelPropertyId::Mac154Saddr,
-        config.short_address.to_bytes().to_vec(),
+        &config.short_address.to_bytes(),
     )
     .await?;
     set_spinel_prop(
         client,
         SpinelPropertyId::Mac154Panid,
-        config.pan_id.to_bytes().to_vec(),
+        &config.pan_id.to_bytes(),
     )
     .await?;
     set_spinel_prop(
         client,
         SpinelPropertyId::MacRxOnWhenIdleMode,
-        vec![config.rx_on_when_idle as u8],
+        &[config.rx_on_when_idle as u8],
     )
     .await?;
-    set_spinel_prop(client, SpinelPropertyId::MacRawStreamEnabled, vec![1]).await?;
-    set_spinel_prop(client, SpinelPropertyId::MacSrcMatchEnabled, vec![1]).await?;
+    set_spinel_prop(client, SpinelPropertyId::MacRawStreamEnabled, &[1]).await?;
+    set_spinel_prop(client, SpinelPropertyId::MacSrcMatchEnabled, &[1]).await?;
     write_frame_pending(
         client,
         &config.frame_pending_short,
@@ -490,18 +495,18 @@ impl<R: Runtime> RadioPhy for SpinelPhy<R> {
             let _radio = self.client.lock_radio().await;
             self.streams.energy.clear();
 
-            set_spinel_prop(&self.client, SpinelPropertyId::MacScanMask, vec![channel]).await?;
+            set_spinel_prop(&self.client, SpinelPropertyId::MacScanMask, &[channel]).await?;
             set_spinel_prop(
                 &self.client,
                 SpinelPropertyId::MacScanPeriod,
-                scan_period_ms.to_le_bytes().to_vec(),
+                &scan_period_ms.to_le_bytes(),
             )
             .await?;
 
             let (response, value) = set_spinel_prop(
                 &self.client,
                 SpinelPropertyId::MacScanState,
-                vec![SpinelMacScanState::Energy as u8],
+                &[SpinelMacScanState::Energy as u8],
             )
             .await?;
             if response != SpinelPropertyId::MacScanState {
@@ -535,7 +540,7 @@ impl<R: Runtime> RadioPhy for SpinelPhy<R> {
         };
 
         let home = *self.home_channel.lock();
-        set_spinel_prop(&self.client, SpinelPropertyId::PhyChan, vec![home]).await?;
+        set_spinel_prop(&self.client, SpinelPropertyId::PhyChan, &[home]).await?;
         Ok(max_rssi)
     }
 
