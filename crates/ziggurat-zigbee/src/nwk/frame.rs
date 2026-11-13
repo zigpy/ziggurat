@@ -16,7 +16,7 @@ use educe::Educe;
 use crate::ParseError;
 use crate::nwk::commands::NwkCommand;
 
-use crate::crypto::{DecryptionError, decrypt_ccm, encrypt_ccm};
+use crate::crypto::{DecryptionError, decrypt_ccm, encrypt_ccm, split_mic};
 
 pub const BROADCAST_ALL_DEVICES: Nwk = Nwk(0xFFFF);
 pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
@@ -301,13 +301,15 @@ impl NwkAuxHeader {
     }
 }
 
+/// A received NWK frame before decryption.
 #[derive(Educe, Clone, PartialEq, Eq)]
 #[educe(Debug)]
-pub struct EncryptedNwkFrame {
+pub struct EncryptedNwkFrame<'a> {
     pub nwk_header: NwkHeader,
     pub aux_header: Option<NwkAuxHeader>,
+    /// The encrypted payload and the MIC, borrowed from the received frame
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: FrameBytes,
+    pub ciphertext: &'a [u8],
 }
 
 /// The body of a decrypted NWK frame.
@@ -425,7 +427,7 @@ impl NwkFrame {
     }
 }
 
-impl EncryptedNwkFrame {
+impl<'a> EncryptedNwkFrame<'a> {
     pub fn get_modified_aux_header(&self, nib_security_level: NwkSecurityLevel) -> NwkAuxHeader {
         if self.aux_header.is_none() {
             panic!("Auxiliary header is missing");
@@ -452,7 +454,7 @@ impl EncryptedNwkFrame {
     }
 
     #[allow(clippy::useless_let_if_seq)]
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         // A NWK frame rides inside a MAC frame, so it cannot exceed the PHY packet
         // size; a longer input parses into a frame too large to re-serialize
         if bytes.len() > MAX_PHY_PACKET_SIZE {
@@ -474,8 +476,7 @@ impl EncryptedNwkFrame {
         Ok(Self {
             nwk_header,
             aux_header,
-            ciphertext: FrameBytes::from_slice(remaining)
-                .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?,
+            ciphertext: remaining,
         })
     }
 
@@ -486,9 +487,9 @@ impl EncryptedNwkFrame {
         bytes
     }
 
-    /// Consumes the frame: the ciphertext buffer is decrypted in place and becomes the
-    /// payload, and the headers move into the decrypted frame.
-    pub fn decrypt(mut self, key: &Key) -> Result<NwkFrame, DecryptionError> {
+    /// The ciphertext is copied into the payload of the decrypted frame and decrypted
+    /// there.
+    pub fn decrypt(&self, key: &Key) -> Result<NwkFrame, DecryptionError> {
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
 
@@ -499,20 +500,21 @@ impl EncryptedNwkFrame {
             .and_then(|()| aux_header.serialize(&mut writer))
             .expect("a parsed NWK header is frame-bounded");
 
-        let plaintext_len = decrypt_ccm(key, &nonce, &auth_data, &mut self.ciphertext)?;
-        self.ciphertext.truncate(plaintext_len);
-        let payload =
-            NwkPayload::from_bytes(self.nwk_header.frame_control.frame_type, self.ciphertext);
+        let (ciphertext, mic) = split_mic(self.ciphertext)?;
+        let mut plaintext =
+            FrameBytes::from_slice(ciphertext).expect("a parsed NWK frame is frame-bounded");
+        decrypt_ccm(key, &nonce, &auth_data, &mut plaintext, mic)?;
+        let payload = NwkPayload::from_bytes(self.nwk_header.frame_control.frame_type, plaintext);
 
         Ok(NwkFrame {
-            nwk_header: self.nwk_header,
-            aux_header: self.aux_header,
+            nwk_header: self.nwk_header.clone(),
+            aux_header: self.aux_header.clone(),
             payload,
         })
     }
 }
 
-impl FramePayload for EncryptedNwkFrame {
+impl FramePayload for EncryptedNwkFrame<'_> {
     fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
         self.nwk_header.serialize(writer)?;
 
@@ -520,7 +522,7 @@ impl FramePayload for EncryptedNwkFrame {
             aux_header.serialize(writer)?;
         }
 
-        writer.extend(&self.ciphertext)
+        writer.extend(self.ciphertext)
     }
 
     fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -587,15 +589,15 @@ impl NwkFrame {
         Ok(())
     }
 
-    pub fn encrypt(&self, key: &Key) -> EncryptedNwkFrame {
+    /// The encrypted frame's bytes.
+    pub fn encrypt(&self, key: &Key) -> Psdu {
         let mut bytes = Psdu::new();
         self.serialize(
             &mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE),
             Some(key),
         )
         .expect("the NWK frame fits in a PSDU");
-
-        EncryptedNwkFrame::from_bytes(&bytes).expect("an encrypted NWK frame parses")
+        bytes
     }
 }
 
@@ -662,13 +664,13 @@ mod test {
                 extended_source: Some(Eui64::from_hex("00:12:4b:00:1e:17:ef:a8")),
                 key_sequence_number: 0,
             }),
-            ciphertext: FrameBytes::from_slice(&hex!("f7a7e37b47adb47593c8a375c98ba6")).unwrap(),
+            ciphertext: &hex!("f7a7e37b47adb47593c8a375c98ba6"),
         };
 
         assert_eq!(nwk_frame, expected_nwk_frame);
 
         let key = Key::from_hex("e8785a1ed5996b3ef715cb3fbdd69187");
-        let decrypted_nwk_frame = nwk_frame.clone().decrypt(&key).unwrap();
+        let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
 
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
@@ -681,10 +683,8 @@ mod test {
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
 
         // Make sure encryption is round trip
-        let re_encrypted_nwk_frame = decrypted_nwk_frame.encrypt(&key);
         assert_eq!(nwk_frame.to_bytes(), bytes);
-        assert_eq!(re_encrypted_nwk_frame, nwk_frame);
-        assert_eq!(re_encrypted_nwk_frame.to_bytes(), bytes);
+        assert_eq!(decrypted_nwk_frame.encrypt(&key), bytes);
     }
 
     #[test]
@@ -730,13 +730,13 @@ mod test {
                 extended_source: Some(Eui64::from_hex("00:17:88:01:0c:71:3c:02")),
                 key_sequence_number: 0,
             }),
-            ciphertext: FrameBytes::from_slice(&hex!("0b73db5468c7cbc47caf8705")).unwrap(),
+            ciphertext: &hex!("0b73db5468c7cbc47caf8705"),
         };
 
         assert_eq!(nwk_frame, expected_nwk_frame);
 
         let key = Key::from_hex("31908c7c51c2f01552bc90cc16e5443d");
-        let decrypted_nwk_frame = nwk_frame.clone().decrypt(&key).unwrap();
+        let decrypted_nwk_frame = nwk_frame.decrypt(&key).unwrap();
 
         let expected_decrypted_nwk_frame = NwkFrame {
             nwk_header: expected_nwk_frame.nwk_header,
@@ -747,9 +747,7 @@ mod test {
         assert_eq!(decrypted_nwk_frame, expected_decrypted_nwk_frame);
 
         // Make sure encryption is round trip
-        let re_encrypted_nwk_frame = decrypted_nwk_frame.encrypt(&key);
         assert_eq!(nwk_frame.to_bytes(), bytes);
-        assert_eq!(re_encrypted_nwk_frame, nwk_frame);
-        assert_eq!(re_encrypted_nwk_frame.to_bytes(), bytes);
+        assert_eq!(decrypted_nwk_frame.encrypt(&key), bytes);
     }
 }

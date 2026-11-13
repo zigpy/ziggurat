@@ -307,6 +307,16 @@ impl FramePayload for FrameBytes {
     }
 }
 
+impl FramePayload for &[u8] {
+    fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.extend(self)
+    }
+
+    fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        format_hex(self, f)
+    }
+}
+
 /// `Debug` adapter that routes a frame payload through [`FramePayload::fmt_payload`].
 struct PayloadDebug<'a, P>(&'a P);
 
@@ -432,9 +442,32 @@ impl Ieee802154CommandPayload {
     }
 }
 
-impl Ieee802154Frame<FrameBytes> {
-    pub fn from_bytes(data: &[u8]) -> Result<Self, ParseError> {
-        if data.len() < 2 + 2 {
+/// A received frame borrows its data payload from the buffer it was parsed from.
+impl<'a> Ieee802154Frame<&'a [u8]> {
+    pub fn from_bytes(data: &'a [u8]) -> Result<Self, ParseError> {
+        if data.len() < FCS_LENGTH {
+            return Err(ParseError::UnexpectedEnd {
+                ty: "Ieee802154Frame",
+            });
+        }
+
+        let (data, fcs) = data.split_at(data.len() - FCS_LENGTH);
+        let fcs = u16::from_le_bytes([fcs[0], fcs[1]]);
+
+        if Self::compute_fcs(data) != fcs {
+            return Err(ParseError::InvalidFcs);
+        }
+
+        Self::parse(data, fcs)
+    }
+
+    /// Parse a frame the radio has already checked, with its FCS removed.
+    pub fn from_bytes_without_fcs(data: &'a [u8]) -> Result<Self, ParseError> {
+        Self::parse(data, Self::compute_fcs(data))
+    }
+
+    fn parse(data: &'a [u8], fcs: u16) -> Result<Self, ParseError> {
+        if data.len() < 2 {
             return Err(ParseError::UnexpectedEnd {
                 ty: "Ieee802154Frame",
             });
@@ -442,18 +475,13 @@ impl Ieee802154Frame<FrameBytes> {
 
         // No 802.15.4 frame exceeds the PHY packet size; a longer input parses
         // into a frame that cannot be re-serialized into the fixed scratch buffer
-        if data.len() > MAX_PHY_PACKET_SIZE {
+        if data.len() > MAX_PHY_PACKET_SIZE - FCS_LENGTH {
             return Err(ParseError::InvalidLength {
                 ty: "Ieee802154Frame",
             });
         }
 
-        let fcs = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
-        let mut remaining = &data[..data.len() - 2];
-
-        if Self::compute_fcs(remaining) != fcs {
-            return Err(ParseError::InvalidFcs);
-        }
+        let mut remaining = data;
 
         // Parse frame control
         let mut reader = BitReader::from(remaining);
@@ -562,17 +590,11 @@ impl Ieee802154Frame<FrameBytes> {
                     fcs,
                 }))
             }
-            Ieee802154FrameType::Data => {
-                let payload =
-                    FrameBytes::from_slice(remaining).map_err(|_| ParseError::InvalidLength {
-                        ty: "Ieee802154DataFrame payload",
-                    })?;
-                Ok(Self::Data(Ieee802154DataFrame {
-                    header,
-                    payload,
-                    fcs,
-                }))
-            }
+            Ieee802154FrameType::Data => Ok(Self::Data(Ieee802154DataFrame {
+                header,
+                payload: remaining,
+                fcs,
+            })),
             Ieee802154FrameType::Ack => Ok(Self::Ack(Ieee802154AckFrame { header, fcs })),
             Ieee802154FrameType::Command => {
                 if remaining.is_empty() {
@@ -588,18 +610,6 @@ impl Ieee802154Frame<FrameBytes> {
                 }))
             }
         }
-    }
-
-    pub fn from_bytes_without_fcs(data: &[u8]) -> Result<Self, ParseError> {
-        let mut data_with_fcs = Psdu::new();
-        data_with_fcs
-            .extend_from_slice(data)
-            .and_then(|()| data_with_fcs.extend_from_slice(&Self::compute_fcs(data).to_le_bytes()))
-            .map_err(|_| ParseError::InvalidLength {
-                ty: "Ieee802154Frame",
-            })?;
-
-        Self::from_bytes(&data_with_fcs)
     }
 }
 
@@ -793,7 +803,7 @@ mod test {
                 Some(Ieee802154Address::Nwk(Nwk(0xF663)))
             );
 
-            assert_eq!(data_frame.payload, bytes[9..bytes.len() - 2]);
+            assert_eq!(data_frame.payload, &bytes[9..bytes.len() - 2]);
             assert_eq!(data_frame.fcs, 0xEAC5);
 
             let frame_again = Ieee802154Frame::Data(data_frame);
@@ -858,7 +868,7 @@ mod test {
         let frame = Ieee802154Frame::from_bytes(&bytes).unwrap();
 
         let expected_frame = Ieee802154Frame::Data(Ieee802154DataFrame {
-            header: Ieee802154FrameHeader{
+            header: Ieee802154FrameHeader {
                 frame_control: Ieee802154FrameControl {
                     frame_type: Ieee802154FrameType::Data,
                     security_enabled: false,
@@ -878,7 +888,9 @@ mod test {
                 src_pan_id: Some(PanId(0xBEEF)),
                 src_address: Some(Ieee802154Address::Nwk(Nwk(0x3E44))),
             },
-            payload: FrameBytes::from_slice(&hex!("48020000443e1eb4287cc54700e095dd0c018817000033a8fc4eb11941104ea261f13064f175f477d311e62736b708a6a390a4f8b120df6cd3ec5c24")).unwrap(),
+            payload: &hex!(
+                "48020000443e1eb4287cc54700e095dd0c018817000033a8fc4eb11941104ea261f13064f175f477d311e62736b708a6a390a4f8b120df6cd3ec5c24"
+            )[..],
             fcs: 0x8146,
         });
 
@@ -913,10 +925,9 @@ mod test {
                 src_pan_id: Some(PanId(0x7240)),
                 src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
             },
-            payload: FrameBytes::from_slice(&hex!(
+            payload: &hex!(
                 "0802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b"
-            ))
-            .unwrap(),
+            )[..],
             fcs: 0x2e1c,
         });
 
@@ -952,10 +963,9 @@ mod test {
                 src_pan_id: Some(PanId(0x7240)),
                 src_address: Some(Ieee802154Address::Nwk(Nwk(0x0000))),
             },
-            payload: FrameBytes::from_slice(&hex!(
+            payload: &hex!(
                 "0802f42600001e03284975922d90db24feff6e02bc00e1ddd9ffbbc3dadee840b61bf2ef2b"
-            ))
-            .unwrap(),
+            )[..],
             fcs: 0x4bdd,
         });
 

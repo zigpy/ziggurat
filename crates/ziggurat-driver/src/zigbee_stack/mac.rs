@@ -9,7 +9,7 @@ use crate::ziggurat_ieee_802154::{
 use abstract_bits::{AbstractBits, BitReader};
 use ziggurat_ieee_802154::types::{Nwk, PanId};
 use ziggurat_ieee_802154::{
-    FCS_LENGTH, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
+    FCS_LENGTH, FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
 };
 use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
@@ -245,7 +245,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::cognitive_complexity)]
     pub fn process_802154_data_frame(
         &self,
-        data_frame: &Ieee802154DataFrame,
+        data_frame: &Ieee802154DataFrame<&[u8]>,
         lqi: u8,
         rssi: i8,
     ) -> Option<NwkFrame> {
@@ -258,7 +258,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let pan_id = self.core().mac.pan_id;
 
         // A GPDF carries a stub NWK header instead (GP A.1.4.1), for the client to process
-        if GpNwkFrameControl::read_abstract_bits(&mut BitReader::from(&data_frame.payload[..]))
+        if GpNwkFrameControl::read_abstract_bits(&mut BitReader::from(data_frame.payload))
             .is_ok_and(|control| control.protocol_version == GP_PROTOCOL_VERSION)
         {
             self.process_gpdf(data_frame, pan_id, lqi, rssi);
@@ -295,7 +295,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         // Next, try to parse the NWK frame
-        let nwk_frame = match EncryptedNwkFrame::from_bytes(&data_frame.payload) {
+        let nwk_frame = match EncryptedNwkFrame::from_bytes(data_frame.payload) {
             Ok(nwk_frame) => nwk_frame,
             Err(_) => {
                 tracing::debug!("Ignoring frame, not a NWK frame");
@@ -319,7 +319,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if !nwk_frame.nwk_header.frame_control.security {
             let payload = NwkPayload::from_bytes(
                 nwk_frame.nwk_header.frame_control.frame_type,
-                nwk_frame.ciphertext,
+                FrameBytes::from_slice(nwk_frame.ciphertext)
+                    .expect("a parsed NWK frame is frame-bounded"),
             );
             self.handle_unsecured_nwk_frame(&NwkFrame {
                 nwk_header: nwk_frame.nwk_header,
@@ -398,7 +399,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Some(decrypted_nwk_frame)
     }
 
-    fn process_gpdf(&self, data_frame: &Ieee802154DataFrame, pan_id: PanId, lqi: u8, rssi: i8) {
+    fn process_gpdf(
+        &self,
+        data_frame: &Ieee802154DataFrame<&[u8]>,
+        pan_id: PanId,
+        lqi: u8,
+        rssi: i8,
+    ) {
         // A GPD is not part of the PAN and usually sends to the broadcast PAN ID
         // (GP A.1.4.1.1)
         match data_frame.header.dest_pan_id {

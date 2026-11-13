@@ -243,25 +243,29 @@ fn software_encrypt_ccm(
         .into()
 }
 
-/// Reverse of [`encrypt_ccm`]: verify the MIC that ends `tagged_ciphertext` and decrypt
-/// the rest in place. Returns the length of the plaintext.
-pub fn decrypt_ccm(
-    key: &Key,
-    nonce: &[u8; 13],
-    auth_data: &[u8],
-    tagged_ciphertext: &mut [u8],
-) -> Result<usize, DecryptionError> {
+/// Split a received ciphertext into the encrypted payload and the MIC that ends it.
+pub fn split_mic(tagged_ciphertext: &[u8]) -> Result<(&[u8], &[u8; MIC_LENGTH]), DecryptionError> {
     let ciphertext_len = tagged_ciphertext
         .len()
         .checked_sub(MIC_LENGTH)
         .ok_or(DecryptionError::CiphertextTooShort)?;
-    let (ciphertext, mic) = tagged_ciphertext.split_at_mut(ciphertext_len);
-    let mic: &[u8; MIC_LENGTH] = (&*mic)
-        .try_into()
-        .expect("the MIC is exactly MIC_LENGTH bytes");
+    let (ciphertext, mic) = tagged_ciphertext.split_at(ciphertext_len);
 
-    backend().decrypt_ccm(key, nonce, auth_data, ciphertext, mic)?;
-    Ok(ciphertext_len)
+    Ok((
+        ciphertext,
+        mic.try_into().expect("the MIC is exactly MIC_LENGTH bytes"),
+    ))
+}
+
+/// Reverse of [`encrypt_ccm`]: verify `mic` and decrypt `payload` in place.
+pub fn decrypt_ccm(
+    key: &Key,
+    nonce: &[u8; 13],
+    auth_data: &[u8],
+    payload: &mut [u8],
+    mic: &[u8; MIC_LENGTH],
+) -> Result<(), DecryptionError> {
+    backend().decrypt_ccm(key, nonce, auth_data, payload, mic)
 }
 
 fn software_decrypt_ccm(
@@ -337,14 +341,17 @@ mod test {
         ciphertext[8..].copy_from_slice(&mic);
         assert_ne!(&ciphertext[..8], &plaintext[..]);
 
-        let mut decrypted = ciphertext;
-        assert_eq!(decrypt_ccm(&key, &nonce, &aad, &mut decrypted), Ok(8));
-        assert_eq!(&decrypted[..8], &plaintext[..]);
+        let (encrypted, mic) = split_mic(&ciphertext).unwrap();
+        let mut decrypted = [0u8; 8];
+        decrypted.copy_from_slice(encrypted);
+        assert_eq!(decrypt_ccm(&key, &nonce, &aad, &mut decrypted, mic), Ok(()));
+        assert_eq!(decrypted, plaintext);
 
-        let mut tampered = ciphertext;
+        let mut tampered = [0u8; 8];
+        tampered.copy_from_slice(encrypted);
         tampered[0] ^= 0xff;
         assert_eq!(
-            decrypt_ccm(&key, &nonce, &aad, &mut tampered),
+            decrypt_ccm(&key, &nonce, &aad, &mut tampered, mic),
             Err(DecryptionError::InvalidMacTag)
         );
     }

@@ -6,7 +6,7 @@ use ziggurat_ieee_802154::types::{Eui64, Key};
 
 use crate::aps::frame::{
     ApsAckFrame, ApsAuxHeader, ApsCommandFrame, ApsDataFrame, EncryptedApsAckFrame,
-    EncryptedApsCommandFrame, EncryptedApsDataFrame,
+    EncryptedApsCommandFrame, EncryptedApsDataFrame, SecuredApsFrame,
 };
 use crate::crypto::{ezsp_tclk, key_load_key, key_transport_key, verify_key_hash, zstack_tclk};
 use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
@@ -344,12 +344,12 @@ impl ApsSecurity {
 
     /// Encrypt an APS command for a device, with the key class selected by `key_id`
     /// derived from the device's current link key.
-    pub fn encrypt_command(
+    pub fn encrypt_command<'f>(
         &mut self,
         destination: Eui64,
         key_id: NwkSecurityHeaderKeyId,
-        command: &ApsCommandFrame,
-    ) -> EncryptedApsCommandFrame {
+        command: &'f ApsCommandFrame,
+    ) -> SecuredApsFrame<'f, ApsCommandFrame> {
         let link_key = self.device_link_key(destination);
         self.encrypt_command_with_link_key(&link_key, key_id, command)
     }
@@ -357,29 +357,29 @@ impl ApsSecurity {
     /// Encrypt an APS command with an explicitly provided link key. Needed when the
     /// command must be protected with a key other than the device's current one, e.g.
     /// delivering a new link key encrypted with the key it replaces.
-    pub fn encrypt_command_with_link_key(
+    pub fn encrypt_command_with_link_key<'f>(
         &mut self,
         link_key: &Key,
         key_id: NwkSecurityHeaderKeyId,
-        command: &ApsCommandFrame,
-    ) -> EncryptedApsCommandFrame {
+        command: &'f ApsCommandFrame,
+    ) -> SecuredApsFrame<'f, ApsCommandFrame> {
         let key = Self::select_key(link_key, key_id)
             .expect("APS commands are encrypted with link key classes, not the network key");
         let aux_header = self.next_aux_header(key_id);
 
-        command.encrypt(&key, &aux_header)
+        SecuredApsFrame::new(command, &key, &aux_header)
     }
 
     /// Encrypt a command reply with the same key-pair entry that decrypted the request
     /// (spec 4.7.3.8 step 2). `None` when `applied` is the network key, which can't secure
     /// a command reply.
-    pub fn encrypt_command_with_applied_key(
+    pub fn encrypt_command_with_applied_key<'f>(
         &mut self,
         source: Eui64,
         applied: AppliedKey,
         key_id: NwkSecurityHeaderKeyId,
-        command: &ApsCommandFrame,
-    ) -> Option<EncryptedApsCommandFrame> {
+        command: &'f ApsCommandFrame,
+    ) -> Option<SecuredApsFrame<'f, ApsCommandFrame>> {
         let link_key = match applied {
             AppliedKey::Network => return None,
             AppliedKey::Device => self.device_link_key(source),
@@ -403,28 +403,28 @@ impl ApsSecurity {
     /// APS-encrypt a data frame for a device with its current link key (key identifier
     /// `DataKey`, spec 4.4.1.1 step 1a). `None` when the device's key may not be used
     /// for encryption yet.
-    pub fn encrypt_data(
+    pub fn encrypt_data<'f>(
         &mut self,
         destination: Eui64,
-        frame: &ApsDataFrame,
-    ) -> Option<EncryptedApsDataFrame> {
+        frame: &'f ApsDataFrame,
+    ) -> Option<SecuredApsFrame<'f, ApsDataFrame>> {
         let key = self.data_link_key(destination)?;
         let aux_header = self.next_aux_header(NwkSecurityHeaderKeyId::DataKey);
 
-        Some(frame.encrypt(&key, &aux_header))
+        Some(SecuredApsFrame::new(frame, &key, &aux_header))
     }
 
     /// APS-encrypt an acknowledgement; ACKs mirror the security of the frame they
     /// acknowledge. `None` when the device's key may not be used for encryption yet.
-    pub fn encrypt_ack(
+    pub fn encrypt_ack<'f>(
         &mut self,
         destination: Eui64,
-        ack: &ApsAckFrame,
-    ) -> Option<EncryptedApsAckFrame> {
+        ack: &'f ApsAckFrame,
+    ) -> Option<SecuredApsFrame<'f, ApsAckFrame>> {
         let key = self.data_link_key(destination)?;
         let aux_header = self.next_aux_header(NwkSecurityHeaderKeyId::DataKey);
 
-        Some(ack.encrypt(&key, &aux_header))
+        Some(SecuredApsFrame::new(ack, &key, &aux_header))
     }
 
     /// The auxiliary header for the next outgoing link-key-secured frame.
@@ -512,7 +512,7 @@ impl ApsSecurity {
     pub fn decrypt_command(
         &mut self,
         source: Eui64,
-        frame: &EncryptedApsCommandFrame,
+        frame: &EncryptedApsCommandFrame<'_>,
         network_key: &Key,
     ) -> Option<(ApsCommandFrame, AppliedKey)> {
         self.decrypt_frame(source, &frame.aux_header, network_key, |key| {
@@ -523,7 +523,7 @@ impl ApsSecurity {
     pub fn decrypt_data(
         &mut self,
         source: Eui64,
-        frame: &EncryptedApsDataFrame,
+        frame: &EncryptedApsDataFrame<'_>,
         network_key: &Key,
     ) -> Option<ApsDataFrame> {
         self.decrypt_frame(source, &frame.aux_header, network_key, |key| {
@@ -535,7 +535,7 @@ impl ApsSecurity {
     pub fn decrypt_ack(
         &mut self,
         source: Eui64,
-        frame: &EncryptedApsAckFrame,
+        frame: &EncryptedApsAckFrame<'_>,
         network_key: &Key,
     ) -> Option<ApsAckFrame> {
         self.decrypt_frame(source, &frame.aux_header, network_key, |key| {

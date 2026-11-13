@@ -880,7 +880,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     // exclusive access to shared state during frame processing.
     pub async fn run(&self) {
         loop {
-            let (packet, ieee802154_frame) = self.recv_frame().await;
+            let packet = self.recv_packet().await;
+            let Some(ieee802154_frame) = parse_802154_frame(&packet.psdu) else {
+                continue;
+            };
 
             if matches!(
                 ieee802154_frame,
@@ -1006,35 +1009,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    // We intentionally hold the receiver lock for the entire duration of this function
-    // to ensure exclusive access to the raw frame receiver.
-    #[allow(clippy::significant_drop_tightening)]
-    async fn recv_frame(&self) -> (RxFrame, Ieee802154Frame) {
+    async fn recv_packet(&self) -> RxFrame {
         let mut receiver = self
             .raw_frame_rx
             .try_lock()
             .expect("Raw frame receiver is locked");
 
-        loop {
-            let Some(packet) = receiver.recv().await else {
-                panic!("Radio frame sender hung up");
-            };
-
-            match Ieee802154Frame::from_bytes_without_fcs(&packet.psdu) {
-                Ok(frame) => {
-                    tracing::trace!("Received 802.15.4 frame: {frame:?}");
-                    return (packet, frame);
-                }
-                Err(e @ ParseError::Unsupported(_)) => {
-                    tracing::debug!("Ignoring unsupported IEEE 802.15.4 frame: {e:?}");
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");
-                    continue;
-                }
-            };
-        }
+        let Some(packet) = receiver.recv().await else {
+            panic!("Radio frame sender hung up");
+        };
+        packet
     }
 
     pub async fn start_network(&self) -> Result<(), RadioError> {
@@ -1438,5 +1422,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         advance.value
+    }
+}
+
+fn parse_802154_frame(psdu: &[u8]) -> Option<Ieee802154Frame<&[u8]>> {
+    match Ieee802154Frame::from_bytes_without_fcs(psdu) {
+        Ok(frame) => {
+            tracing::trace!("Received 802.15.4 frame: {frame:?}");
+            Some(frame)
+        }
+        Err(e @ ParseError::Unsupported(_)) => {
+            tracing::debug!("Ignoring unsupported IEEE 802.15.4 frame: {e:?}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Error parsing IEEE 802.15.4 frame: {e:?}");
+            None
+        }
     }
 }

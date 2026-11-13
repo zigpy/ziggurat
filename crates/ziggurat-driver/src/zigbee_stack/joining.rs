@@ -434,7 +434,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         destination_eui64: Eui64,
         join_kind: JoinKind,
-    ) -> EncryptedApsCommandFrame {
+    ) -> FrameBytes {
         let (network_key, key_seq_number) = {
             let core = self.core();
 
@@ -473,11 +473,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             core.aib.aps_security.device_link_key(destination_eui64)
         };
 
-        let encrypted = core.aib.aps_security.encrypt_command_with_link_key(
-            &link_key,
-            NwkSecurityHeaderKeyId::KeyTransportKey,
-            &transport_key_command,
-        );
+        let encrypted = core
+            .aib
+            .aps_security
+            .encrypt_command_with_link_key(
+                &link_key,
+                NwkSecurityHeaderKeyId::KeyTransportKey,
+                &transport_key_command,
+            )
+            .to_bytes();
         drop(core);
 
         self.persist_aps_frame_counter();
@@ -497,7 +501,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.build_encrypted_network_key_transport(destination_eui64, join_kind);
 
         let nwk_frame = self
-            .nwk_data_frame(destination, encrypted_command.to_bytes())
+            .nwk_data_frame(destination, encrypted_command)
             .unsecured();
 
         // A direct one-hop unicast without an APS ack: next-hop acceptance is the
@@ -1029,7 +1033,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             counter: self.next_aps_counter(),
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: device_eui64,
-                tunneled_frame: encrypted_transport_key.to_bytes(),
+                tunneled_frame: encrypted_transport_key,
             }),
         };
 

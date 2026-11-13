@@ -2,10 +2,12 @@ use abstract_bits::{AbstractBits, abstract_bits};
 use educe::Educe;
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, format_hex};
-use ziggurat_ieee_802154::{FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong};
+use ziggurat_ieee_802154::{
+    FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
+};
 
 use crate::ParseError;
-use crate::crypto::{decrypt_ccm, encrypt_ccm};
+use crate::crypto::{decrypt_ccm, encrypt_ccm, split_mic};
 use crate::nwk::frame::{NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel};
 
 #[abstract_bits(bits = 2)]
@@ -700,13 +702,6 @@ impl ApsCommandFrame {
         }
     }
 
-    /// The APS frame control byte and counter, i.e. the cleartext header preceding the
-    /// auxiliary header when APS security is applied.
-    fn serialize_header(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
-        writer.bits(&self.frame_control)?;
-        writer.push(self.counter)
-    }
-
     pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
         self.serialize_header(writer)?;
         self.serialize_payload(writer)
@@ -719,23 +714,20 @@ impl ApsCommandFrame {
         bytes
     }
 
-    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsCommandFrame {
-        let mut header = FrameBytes::new();
-        self.serialize_header(&mut FrameWriter::new(&mut header, MAX_PHY_PACKET_SIZE))
-            .expect("an APS header is frame-bounded");
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> FrameBytes {
+        SecuredApsFrame::new(self, key, aux_header).to_bytes()
+    }
+}
 
-        let mut payload = FrameBytes::new();
-        self.serialize_payload(&mut FrameWriter::new(&mut payload, MAX_PHY_PACKET_SIZE))
-            .expect("an APS command is frame-bounded");
+impl ApsSecuredFrame for ApsCommandFrame {
+    /// The APS frame control byte and counter.
+    fn serialize_header(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.bits(&self.frame_control)?;
+        writer.push(self.counter)
+    }
 
-        let ciphertext = encrypt_aps_payload(key, aux_header, &header, &payload);
-
-        EncryptedApsCommandFrame {
-            frame_control: self.frame_control.clone(),
-            counter: self.counter,
-            aux_header: aux_header.clone(),
-            ciphertext,
-        }
+    fn serialize_payload(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        Self::serialize_payload(self, writer)
     }
 }
 
@@ -828,29 +820,63 @@ impl ApsAuxHeader {
     }
 }
 
-/// CCM*-protect an APS frame payload (spec 4.4.1.1): the cleartext APS header and
-/// auxiliary header are authenticated, the payload is encrypted, and the encrypted MIC
-/// is appended. The security level is fixed network-wide and transmitted as 0 in the
-/// auxiliary header, so the real level is patched in for the computation.
-fn encrypt_aps_payload(
-    key: &Key,
-    aux_header: &ApsAuxHeader,
-    header: &[u8],
-    plaintext: &[u8],
-) -> FrameBytes {
-    let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
-    let source = aux_header
-        .extended_source
-        .expect("outgoing secured APS frames always carry an extended nonce");
-    let nonce = modified_aux_header.get_nonce(source);
-    let auth_data = aps_auth_data(header, &modified_aux_header);
+/// The two parts of an APS frame that APS security treats differently: the cleartext
+/// header, and the payload it encrypts.
+pub trait ApsSecuredFrame {
+    fn serialize_header(&self, writer: &mut FrameWriter) -> Result<(), TooLong>;
+    fn serialize_payload(&self, writer: &mut FrameWriter) -> Result<(), TooLong>;
+}
 
-    let mut buffer = FrameBytes::from_slice(plaintext).expect("plaintext is frame-bounded");
-    let mic = encrypt_ccm(key, &nonce, &auth_data, &mut buffer);
-    buffer
-        .extend_from_slice(&mic)
-        .expect("a frame always has room for its MIC");
-    buffer
+/// An APS frame that is secured as it is written (spec 4.4.1.1).
+pub struct SecuredApsFrame<'a, F> {
+    frame: &'a F,
+    key: Key,
+    aux_header: ApsAuxHeader,
+}
+
+impl<'a, F: ApsSecuredFrame> SecuredApsFrame<'a, F> {
+    pub fn new(frame: &'a F, key: &Key, aux_header: &ApsAuxHeader) -> Self {
+        Self {
+            frame,
+            key: key.clone(),
+            aux_header: aux_header.clone(),
+        }
+    }
+
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        // The APS header and the auxiliary header are authenticated, the payload is
+        // encrypted, and the encrypted MIC is appended. The auxiliary header is sent
+        // with security level 0; the network's real level is used only for the MIC.
+        let header_offset = writer.len();
+        self.frame.serialize_header(writer)?;
+        let header_end = writer.len();
+        self.aux_header.serialize(writer)?;
+        let payload_offset = writer.len();
+        self.frame.serialize_payload(writer)?;
+
+        let modified_aux_header = self.aux_header.get_modified(NwkSecurityLevel::EncMic32);
+        let source = self
+            .aux_header
+            .extended_source
+            .expect("outgoing secured APS frames always carry an extended nonce");
+        let nonce = modified_aux_header.get_nonce(source);
+        let auth_data = aps_auth_data(
+            &writer.written()[header_offset..header_end],
+            &modified_aux_header,
+        );
+
+        let mic = encrypt_ccm(
+            &self.key,
+            &nonce,
+            &auth_data,
+            &mut writer.written_mut()[payload_offset..],
+        );
+        writer.extend(&mic)
+    }
+
+    pub fn to_bytes(&self) -> FrameBytes {
+        write_frame(|writer| self.serialize(writer)).expect("a secured APS frame is frame-bounded")
+    }
 }
 
 /// The bytes CCM* authenticates: the cleartext APS header, then the auxiliary header.
@@ -864,7 +890,7 @@ fn aps_auth_data(header: &[u8], aux_header: &ApsAuxHeader) -> Psdu {
     auth_data
 }
 
-/// Reverse of [`encrypt_aps_payload`]: verify the MIC and return the decrypted payload.
+/// Reverse of [`SecuredApsFrame`]: verify the MIC and return the decrypted payload.
 /// `source` is the frame originator's EUI64, used for the CCM* nonce when the frame
 /// carries no extended nonce.
 fn decrypt_aps_payload(
@@ -878,25 +904,26 @@ fn decrypt_aps_payload(
     let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
     let auth_data = aps_auth_data(header, &modified_aux_header);
 
-    let mut buffer =
-        FrameBytes::from_slice(tagged_ciphertext).expect("ciphertext is frame-bounded");
-    let plaintext_len = decrypt_ccm(key, &nonce, &auth_data, &mut buffer)?;
-    buffer.truncate(plaintext_len);
-    Ok(buffer)
+    let (ciphertext, mic) = split_mic(tagged_ciphertext)?;
+    let mut plaintext = FrameBytes::from_slice(ciphertext).expect("ciphertext is frame-bounded");
+    decrypt_ccm(key, &nonce, &auth_data, &mut plaintext, mic)?;
+    Ok(plaintext)
 }
 
+/// A received APS-secured command frame.
 #[derive(Educe, Clone, PartialEq, Eq)]
 #[educe(Debug)]
-pub struct EncryptedApsCommandFrame {
+pub struct EncryptedApsCommandFrame<'a> {
     pub frame_control: ApsFrameControl,
     pub counter: u8,
     pub aux_header: ApsAuxHeader,
+    /// The encrypted command and the MIC, borrowed from the received frame
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: FrameBytes,
+    pub ciphertext: &'a [u8],
 }
 
-impl EncryptedApsCommandFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+impl<'a> EncryptedApsCommandFrame<'a> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         if bytes.len() < 7 {
             return Err(ParseError::UnexpectedEnd {
                 ty: "EncryptedApsCommandFrame",
@@ -911,8 +938,7 @@ impl EncryptedApsCommandFrame {
             frame_control,
             counter,
             aux_header,
-            ciphertext: FrameBytes::from_slice(remaining)
-                .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?,
+            ciphertext: remaining,
         })
     }
 
@@ -920,7 +946,7 @@ impl EncryptedApsCommandFrame {
         writer.bits(&self.frame_control)?;
         writer.push(self.counter)?;
         self.aux_header.serialize(writer)?;
-        writer.extend(&self.ciphertext)
+        writer.extend(self.ciphertext)
     }
 
     pub fn to_bytes(&self) -> FrameBytes {
@@ -946,13 +972,8 @@ impl EncryptedApsCommandFrame {
             .and_then(|()| writer.push(self.counter))
             .expect("an APS header is frame-bounded");
 
-        let plaintext = decrypt_aps_payload(
-            key,
-            &self.aux_header,
-            source,
-            &frame_bytes,
-            &self.ciphertext,
-        )?;
+        let plaintext =
+            decrypt_aps_payload(key, &self.aux_header, source, &frame_bytes, self.ciphertext)?;
         frame_bytes
             .extend_from_slice(&plaintext)
             .map_err(|_| ParseError::TooLong {
@@ -963,36 +984,37 @@ impl EncryptedApsCommandFrame {
     }
 }
 
-/// An APS-secured data frame (spec 4.4.1.1): the APS header is cleartext, the ASDU is
-/// encrypted.
+/// A received APS-secured data frame (spec 4.4.1.1).
 #[derive(Educe, Clone, PartialEq, Eq)]
 #[educe(Debug)]
-pub struct EncryptedApsDataFrame {
+pub struct EncryptedApsDataFrame<'a> {
     pub header: ApsDataHeader,
     pub aux_header: ApsAuxHeader,
+    /// The encrypted ASDU and the MIC, borrowed from the received frame
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: FrameBytes,
+    pub ciphertext: &'a [u8],
 }
 
-impl ApsDataFrame {
-    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsDataFrame {
-        let header = self.header();
-        let ciphertext = encrypt_aps_payload(key, aux_header, &header.to_bytes(), &self.asdu);
+impl ApsSecuredFrame for ApsDataFrame {
+    fn serialize_header(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.header().serialize(writer)
+    }
 
-        EncryptedApsDataFrame {
-            header,
-            aux_header: aux_header.clone(),
-            ciphertext,
-        }
+    fn serialize_payload(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.extend(&self.asdu)
     }
 }
 
-impl EncryptedApsDataFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+impl ApsDataFrame {
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> FrameBytes {
+        SecuredApsFrame::new(self, key, aux_header).to_bytes()
+    }
+}
+
+impl<'a> EncryptedApsDataFrame<'a> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         let (header, remaining) = ApsDataHeader::deserialize(bytes)?;
-        let (aux_header, remaining) = ApsAuxHeader::deserialize(remaining)?;
-        let ciphertext = FrameBytes::from_slice(remaining)
-            .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?;
+        let (aux_header, ciphertext) = ApsAuxHeader::deserialize(remaining)?;
 
         Ok(Self {
             header,
@@ -1004,7 +1026,7 @@ impl EncryptedApsDataFrame {
     pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
         self.header.serialize(writer)?;
         self.aux_header.serialize(writer)?;
-        writer.extend(&self.ciphertext)
+        writer.extend(self.ciphertext)
     }
 
     pub fn to_bytes(&self) -> FrameBytes {
@@ -1022,38 +1044,43 @@ impl EncryptedApsDataFrame {
             &self.aux_header,
             source,
             &self.header.to_bytes(),
-            &self.ciphertext,
+            self.ciphertext,
         )?;
 
         Ok(self.header.clone().into_frame(asdu))
     }
 }
 
-/// An APS-secured acknowledgement frame. ACKs carry no payload, so the ciphertext is
-/// just the encrypted MIC authenticating the headers.
+/// A received APS-secured acknowledgement frame.
 #[derive(Educe, Clone, PartialEq, Eq)]
 #[educe(Debug)]
-pub struct EncryptedApsAckFrame {
+pub struct EncryptedApsAckFrame<'a> {
     pub header: ApsAckFrame,
     pub aux_header: ApsAuxHeader,
+    /// ACKs carry no payload: only the encrypted MIC that authenticates the headers,
+    /// borrowed from the received frame
     #[educe(Debug(method(format_hex)))]
-    pub ciphertext: FrameBytes,
+    pub ciphertext: &'a [u8],
 }
 
-impl ApsAckFrame {
-    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsAckFrame {
-        let ciphertext = encrypt_aps_payload(key, aux_header, &self.to_bytes(), &[]);
+impl ApsSecuredFrame for ApsAckFrame {
+    fn serialize_header(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.serialize(writer)
+    }
 
-        EncryptedApsAckFrame {
-            header: self.clone(),
-            aux_header: aux_header.clone(),
-            ciphertext,
-        }
+    fn serialize_payload(&self, _writer: &mut FrameWriter) -> Result<(), TooLong> {
+        Ok(())
     }
 }
 
-impl EncryptedApsAckFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+impl ApsAckFrame {
+    pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> FrameBytes {
+        SecuredApsFrame::new(self, key, aux_header).to_bytes()
+    }
+}
+
+impl<'a> EncryptedApsAckFrame<'a> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         let header = ApsAckFrame::from_bytes(bytes)?;
         // `ApsAckFrame::from_bytes` ignores trailing bytes; the aux header starts
         // right after the fixed header fields, whose length only the ACK format
@@ -1068,15 +1095,14 @@ impl EncryptedApsAckFrame {
         Ok(Self {
             header,
             aux_header,
-            ciphertext: FrameBytes::from_slice(remaining)
-                .map_err(|_| ParseError::TooLong { ty: "ciphertext" })?,
+            ciphertext: remaining,
         })
     }
 
     pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
         self.header.serialize(writer)?;
         self.aux_header.serialize(writer)?;
-        writer.extend(&self.ciphertext)
+        writer.extend(self.ciphertext)
     }
 
     pub fn to_bytes(&self) -> FrameBytes {
@@ -1094,7 +1120,7 @@ impl EncryptedApsAckFrame {
             &self.aux_header,
             source,
             &self.header.to_bytes(),
-            &self.ciphertext,
+            self.ciphertext,
         )?;
 
         Ok(self.header.clone())
@@ -1102,16 +1128,16 @@ impl EncryptedApsAckFrame {
 }
 
 #[derive(Debug)]
-pub enum ApsFrame {
+pub enum ApsFrame<'a> {
     Data(ApsDataFrame),
-    EncryptedData(EncryptedApsDataFrame),
+    EncryptedData(EncryptedApsDataFrame<'a>),
     Ack(ApsAckFrame),
-    EncryptedAck(EncryptedApsAckFrame),
+    EncryptedAck(EncryptedApsAckFrame<'a>),
     Command(ApsCommandFrame),
-    EncryptedCommand(EncryptedApsCommandFrame),
+    EncryptedCommand(EncryptedApsCommandFrame<'a>),
 }
 
-pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame, ParseError> {
+pub fn parse_aps_frame(bytes: &[u8]) -> Result<ApsFrame<'_>, ParseError> {
     if bytes.is_empty() {
         return Err(ParseError::UnexpectedEnd { ty: "ApsFrame" });
     }
@@ -1263,13 +1289,13 @@ mod test {
         let key = key_transport_key(&Key::from_hex("5a6967426565416c6c69616e63653039"));
         let encrypted = command_frame.encrypt(&key, &aux_header);
 
-        let reparsed = EncryptedApsCommandFrame::from_bytes(&encrypted.to_bytes()).unwrap();
-        assert_eq!(reparsed, encrypted);
+        let reparsed = EncryptedApsCommandFrame::from_bytes(&encrypted).unwrap();
+        assert_eq!(reparsed.to_bytes(), encrypted);
 
-        let Ok(ApsFrame::EncryptedCommand(parsed)) = parse_aps_frame(&encrypted.to_bytes()) else {
+        let Ok(ApsFrame::EncryptedCommand(parsed)) = parse_aps_frame(&encrypted) else {
             panic!("Expected an encrypted command frame");
         };
-        assert_eq!(parsed, encrypted);
+        assert_eq!(parsed, reparsed);
 
         let decrypted = reparsed.decrypt(&key).unwrap();
         assert_eq!(decrypted, command_frame);
@@ -1317,10 +1343,10 @@ mod test {
         let key = Key::from_hex("5a6967426565416c6c69616e63653039");
         let encrypted = data_frame.encrypt(&key, &test_aux_header(Some(source)));
 
-        let Ok(ApsFrame::EncryptedData(parsed)) = parse_aps_frame(&encrypted.to_bytes()) else {
+        let Ok(ApsFrame::EncryptedData(parsed)) = parse_aps_frame(&encrypted) else {
             panic!("Expected an encrypted data frame");
         };
-        assert_eq!(parsed, encrypted);
+        assert_eq!(parsed.to_bytes(), encrypted);
 
         // The extended nonce makes the passed-in source irrelevant
         let other = Eui64::from_hex("ff:ff:ff:ff:ff:ff:ff:ff");
@@ -1354,10 +1380,10 @@ mod test {
         let key = Key::from_hex("5a6967426565416c6c69616e63653039");
         let encrypted = ack_frame.encrypt(&key, &test_aux_header(Some(source)));
 
-        let Ok(ApsFrame::EncryptedAck(parsed)) = parse_aps_frame(&encrypted.to_bytes()) else {
+        let Ok(ApsFrame::EncryptedAck(parsed)) = parse_aps_frame(&encrypted) else {
             panic!("Expected an encrypted ACK frame");
         };
-        assert_eq!(parsed, encrypted);
+        assert_eq!(parsed.to_bytes(), encrypted);
 
         let decrypted = parsed.decrypt(&key, source).unwrap();
         assert_eq!(decrypted, ack_frame);
@@ -1456,7 +1482,7 @@ mod test {
             counter: 13,
             command: ApsCommandFrameCommand::Tunnel(ApsTunnelCommandFrame {
                 destination_address: Eui64::from_hex("bc:02:6e:ff:fe:49:4a:31"),
-                tunneled_frame: FrameBytes::from_slice(&encrypted_inner.to_bytes()).unwrap(),
+                tunneled_frame: encrypted_inner,
             }),
         };
 
@@ -1509,8 +1535,7 @@ mod test {
         };
 
         let encrypted = confirm_frame.encrypt(&link_key, &aux_header);
-        let Ok(ApsFrame::EncryptedCommand(reparsed)) = parse_aps_frame(&encrypted.to_bytes())
-        else {
+        let Ok(ApsFrame::EncryptedCommand(reparsed)) = parse_aps_frame(&encrypted) else {
             panic!("Expected an encrypted command frame");
         };
         assert_eq!(reparsed.decrypt(&link_key).unwrap(), confirm_frame);
