@@ -503,19 +503,22 @@ impl<R: Runtime> SpinelClient<R> {
             self.request_left_queue(tid).await;
         }
 
-        if R::timeout(TIMEOUT, self.request_settled(tid))
+        let timed_out = R::timeout(TIMEOUT, self.request_settled(tid))
             .await
-            .is_err()
-        {
-            return Err(self.request_timed_out());
-        }
+            .is_err();
 
+        // Where the transaction stands decides the result, not the timer: a response
+        // can arrive between the timeout firing and this line
         match transaction.finish() {
             Transaction::Answered(frame) => Ok(frame),
             Transaction::Cancelled => Err(SpinelError::CancelledByReset),
-            // The link closed first
             Transaction::Queued | Transaction::AwaitingResponse | Transaction::Free => {
-                Err(SpinelError::TransportClosed)
+                if timed_out {
+                    Err(self.request_timed_out())
+                } else {
+                    // Nothing settled it, so the link closed
+                    Err(SpinelError::TransportClosed)
+                }
             }
         }
     }
