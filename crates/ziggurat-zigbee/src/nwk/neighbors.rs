@@ -611,7 +611,9 @@ impl Neighbors {
                 stale_neighbors.push(neighbor.network_address);
 
                 tracing::warn!(
-                    "Neighbor {neighbor:?} has ceased communicating, resetting link costs"
+                    "Neighbor {:?} ({:?}) has ceased communicating, resetting link costs",
+                    neighbor.network_address,
+                    neighbor.extended_address
                 )
             }
         }
