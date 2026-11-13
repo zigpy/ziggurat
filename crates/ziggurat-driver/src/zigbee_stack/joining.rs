@@ -101,11 +101,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
-        let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default().duration()
-        } else {
-            Duration::from_secs(0xFFFFFFFF)
-        };
+        let device_timeout = (device_type == NwkDeviceType::EndDevice)
+            .then(|| self.tunables.end_device_timeout_default().duration());
 
         self.core().nib.neighbors.upsert_child(
             neighbors::ChildDescriptor {
@@ -1145,11 +1142,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Spec 3.6.10.5: end device children start with the default keepalive
         // timeout; router children are not aged
-        let device_timeout = if device_type == NwkDeviceType::EndDevice {
-            self.tunables.end_device_timeout_default().duration()
-        } else {
-            Duration::from_secs(0xFFFFFFFF)
-        };
+        let device_timeout = (device_type == NwkDeviceType::EndDevice)
+            .then(|| self.tunables.end_device_timeout_default().duration());
 
         self.core().nib.neighbors.upsert_child(
             neighbors::ChildDescriptor {

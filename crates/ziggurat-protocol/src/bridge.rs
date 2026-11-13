@@ -197,7 +197,8 @@ pub fn apply_children<P: RadioPhy, R: Runtime>(
                 network_address: entry.nwk,
                 device_type,
                 rx_on_when_idle: entry.flags.rx_on_when_idle,
-                device_timeout: RESTORED_CHILD_TIMEOUT,
+                device_timeout: (device_type == NwkDeviceType::EndDevice)
+                    .then_some(RESTORED_CHILD_TIMEOUT),
                 relationship: Relationship::Child,
             },
             now,
