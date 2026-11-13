@@ -455,10 +455,18 @@ impl<R: Runtime> SpinelClient<R> {
                 Either::Right(_) => return SpinelError::WriteStalled,
             }
 
-            // The command's response timeout starts here
-            let tid = self.state.lock().writing.take();
+            // The command's response timeout starts here. One lock covers both steps: a
+            // command dropped in between would find its request neither being written
+            // nor sent, and free its id while the response is still to come
+            let tid = {
+                let mut state = self.state.lock();
+                let tid = state.writing.take();
+                if let Some(tid) = tid {
+                    state.protocol.request_written(tid);
+                }
+                tid
+            };
             if let Some(tid) = tid {
-                self.state.lock().protocol.request_written(tid);
                 self.transaction_changed[usize::from(tid)].notify_one();
             }
         }
