@@ -5,7 +5,9 @@ use abstract_bits::AbstractBits;
 use abstract_bits::abstract_bits;
 use abstract_bits::{BitReader, BitWriter};
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, format_hex};
-use ziggurat_ieee_802154::{FrameBytes, MAX_PHY_PACKET_SIZE, extend_abstract_bits};
+use ziggurat_ieee_802154::{
+    FrameBytes, FramePayload, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong,
+};
 
 use num_enum::TryFromPrimitive;
 
@@ -157,33 +159,36 @@ impl NwkHeader {
         ))
     }
 
-    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
-        extend_abstract_bits(bytes, &self.frame_control);
-        bytes.extend(self.destination.to_bytes());
-        bytes.extend(self.source.to_bytes());
-        bytes.push(self.radius);
-        bytes.push(self.sequence_number);
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.bits(&self.frame_control)?;
+        writer.extend(&self.destination.to_bytes())?;
+        writer.extend(&self.source.to_bytes())?;
+        writer.push(self.radius)?;
+        writer.push(self.sequence_number)?;
 
         if let Some(ieee) = &self.destination_ieee {
-            bytes.extend(ieee.to_bytes());
+            writer.extend(&ieee.to_bytes())?;
         }
 
         if let Some(ieee) = &self.source_ieee {
-            bytes.extend(ieee.to_bytes());
+            writer.extend(&ieee.to_bytes())?;
         }
 
         if let Some(control) = self.multicast_control {
-            bytes.push(control);
+            writer.push(control)?;
         }
 
         if let Some(source_route) = &self.source_route {
-            extend_abstract_bits(bytes, source_route);
+            writer.bits(source_route)?;
         }
+
+        Ok(())
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        self.serialize_into(&mut bytes);
+    pub fn to_bytes(&self) -> Psdu {
+        let mut bytes = Psdu::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("a NWK header is frame-bounded");
         bytes
     }
 }
@@ -284,21 +289,15 @@ impl NwkAuxHeader {
         ))
     }
 
-    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
-        bytes.extend(self.security_control.to_bytes());
-        bytes.extend(self.frame_counter.to_le_bytes());
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.extend(&self.security_control.to_bytes())?;
+        writer.extend(&self.frame_counter.to_le_bytes())?;
 
         if let Some(ieee) = self.extended_source {
-            bytes.extend(ieee.to_bytes());
+            writer.extend(&ieee.to_bytes())?;
         }
 
-        bytes.push(self.key_sequence_number);
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        self.serialize_into(&mut bytes);
-        bytes
+        writer.push(self.key_sequence_number)
     }
 }
 
@@ -338,14 +337,19 @@ impl core::fmt::Debug for NwkPayload {
 }
 
 impl NwkPayload {
-    /// The serialized command/opaque bytes that form the (to-be-encrypted) frame body.
-    pub fn to_bytes(&self) -> FrameBytes {
+    /// Write the frame body, which is encrypted afterwards on a secured frame.
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
         match self {
-            Self::Opaque(bytes) => bytes.clone(),
-            Self::Command(command) => {
-                FrameBytes::from_slice(&command.to_bytes()).expect("a NWK command is frame-bounded")
-            }
+            Self::Opaque(bytes) => writer.extend(bytes),
+            Self::Command(command) => command.serialize(writer),
         }
+    }
+
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("a NWK payload is frame-bounded");
+        bytes
     }
 
     /// Decode a decrypted frame body, using the frame type to decide whether it is a NWK
@@ -475,25 +479,30 @@ impl EncryptedNwkFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        ziggurat_ieee_802154::FramePayload::extend_frame_bytes(self, &mut bytes);
+    pub fn to_bytes(&self) -> Psdu {
+        let mut bytes = Psdu::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("a parsed NWK frame is frame-bounded");
         bytes
     }
 
     /// Consumes the frame: the ciphertext buffer is decrypted in place and becomes the
     /// payload, and the headers move into the decrypted frame.
-    pub fn decrypt(self, key: &Key) -> Result<NwkFrame, DecryptionError> {
+    pub fn decrypt(mut self, key: &Key) -> Result<NwkFrame, DecryptionError> {
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
 
-        let mut auth_data = Vec::new();
-        self.nwk_header.serialize_into(&mut auth_data);
-        aux_header.serialize_into(&mut auth_data);
+        let mut auth_data = Psdu::new();
+        let mut writer = FrameWriter::new(&mut auth_data, MAX_PHY_PACKET_SIZE);
+        self.nwk_header
+            .serialize(&mut writer)
+            .and_then(|()| aux_header.serialize(&mut writer))
+            .expect("a parsed NWK header is frame-bounded");
 
-        let payload_bytes = decrypt_ccm(key, &nonce, &auth_data, self.ciphertext)?;
+        let plaintext_len = decrypt_ccm(key, &nonce, &auth_data, &mut self.ciphertext)?;
+        self.ciphertext.truncate(plaintext_len);
         let payload =
-            NwkPayload::from_bytes(self.nwk_header.frame_control.frame_type, payload_bytes);
+            NwkPayload::from_bytes(self.nwk_header.frame_control.frame_type, self.ciphertext);
 
         Ok(NwkFrame {
             nwk_header: self.nwk_header,
@@ -503,15 +512,15 @@ impl EncryptedNwkFrame {
     }
 }
 
-impl ziggurat_ieee_802154::FramePayload for EncryptedNwkFrame {
-    fn extend_frame_bytes(&self, bytes: &mut Vec<u8>) {
-        self.nwk_header.serialize_into(bytes);
+impl FramePayload for EncryptedNwkFrame {
+    fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.nwk_header.serialize(writer)?;
 
         if let Some(aux_header) = &self.aux_header {
-            aux_header.serialize_into(bytes);
+            aux_header.serialize(writer)?;
         }
 
-        bytes.extend_from_slice(&self.ciphertext);
+        writer.extend(&self.ciphertext)
     }
 
     fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -545,19 +554,65 @@ impl NwkFrame {
         nonce
     }
 
-    pub fn encrypt(&self, key: &Key) -> EncryptedNwkFrame {
+    /// Write the frame, encrypting it under `key` when one is given. A frame sent
+    /// without a key goes out without its auxiliary header.
+    pub fn serialize(&self, writer: &mut FrameWriter, key: Option<&Key>) -> Result<(), TooLong> {
+        let header_offset = writer.len();
+        self.nwk_header.serialize(writer)?;
+
+        let Some(key) = key else {
+            return self.payload.serialize(writer);
+        };
+
         let aux_header = self.get_modified_aux_header(NwkSecurityLevel::EncMic32);
         let nonce = self.get_nonce(&aux_header);
 
-        let mut auth_data = Vec::new();
-        self.nwk_header.serialize_into(&mut auth_data);
-        aux_header.serialize_into(&mut auth_data);
+        let security_control_offset = writer.len();
+        aux_header.serialize(writer)?;
+        let payload_offset = writer.len();
+        self.payload.serialize(writer)?;
 
-        EncryptedNwkFrame {
-            nwk_header: self.nwk_header.clone(),
-            aux_header: self.aux_header.clone(),
-            ciphertext: encrypt_ccm(key, &nonce, &auth_data, self.payload.to_bytes()),
-        }
+        let (auth_data, payload) =
+            writer.written_mut()[header_offset..].split_at_mut(payload_offset - header_offset);
+        let mic = encrypt_ccm(key, &nonce, auth_data, payload);
+        writer.extend(&mic)?;
+
+        // Spec 4.3.1.1 step 8: the frame is sent with security level 0, and the
+        // receiver puts the network's level back before it decrypts
+        let mut sent_aux_header = aux_header;
+        sent_aux_header.security_control.security_level = NwkSecurityLevel::NoSecurity;
+        writer.written_mut()[security_control_offset] =
+            sent_aux_header.security_control.to_bytes()[0];
+
+        Ok(())
+    }
+
+    pub fn encrypt(&self, key: &Key) -> EncryptedNwkFrame {
+        let mut bytes = Psdu::new();
+        self.serialize(
+            &mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE),
+            Some(key),
+        )
+        .expect("the NWK frame fits in a PSDU");
+
+        EncryptedNwkFrame::from_bytes(&bytes).expect("an encrypted NWK frame parses")
+    }
+}
+
+/// A NWK frame ready to go into an 802.15.4 data frame, encrypted under `key` as it is
+/// written. Unsecured frames have no key.
+pub struct OutgoingNwkFrame<'a> {
+    pub frame: &'a NwkFrame,
+    pub key: Option<Key>,
+}
+
+impl FramePayload for OutgoingNwkFrame<'_> {
+    fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.frame.serialize(writer, self.key.as_ref())
+    }
+
+    fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self.frame)
     }
 }
 

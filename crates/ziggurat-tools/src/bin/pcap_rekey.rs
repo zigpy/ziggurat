@@ -352,7 +352,7 @@ fn rekey_phy(
         fcs: 0,
     });
 
-    Some(new_frame.to_bytes())
+    Some(new_frame.to_bytes().to_vec())
 }
 
 /// Swap `old_key` for `new_key` inside an APS Transport-Key command that transports the
@@ -399,7 +399,8 @@ fn rewrite_transport_key(
     Some(
         rewritten
             .encrypt(aps_transport_key, &encrypted.aux_header)
-            .to_bytes(),
+            .to_bytes()
+            .to_vec(),
     )
 }
 
@@ -512,7 +513,7 @@ fn transport_key_packet(
     let phy = mac_frame.to_bytes();
 
     match link_type {
-        LinkType::Raw => phy,
+        LinkType::Raw => phy.to_vec(),
         LinkType::Tap => {
             // A 12-byte TAP header: 4-byte base plus one FCS-type TLV declaring a 16-bit
             // FCS is present, so Wireshark validates the CRC we emit.

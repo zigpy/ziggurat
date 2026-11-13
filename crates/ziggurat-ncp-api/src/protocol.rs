@@ -424,7 +424,7 @@ async fn handle_packet_capture<P: RadioPhy>(
                             channel: frame.channel,
                             rssi: frame.rssi,
                             lqi: frame.lqi,
-                            psdu: frame.psdu,
+                            psdu: frame.psdu.to_vec(),
                         });
                         // Drop on a full queue: a sniffer must not block.
                         if let Some(bytes) = event.frame(request_id) {

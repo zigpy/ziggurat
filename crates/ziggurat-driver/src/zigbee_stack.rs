@@ -108,6 +108,8 @@ pub enum DeliveryError {
     CcaFailure,
     #[error("unexpected transmit failure: {0:?}")]
     TransmitFailed(TxResult),
+    #[error("frame does not fit in an 802.15.4 frame")]
+    FrameTooLong,
     #[error("aps ack timeout")]
     ApsAckTimeout,
     /// The send never reached the mesh within `handoff_timeout`: a stalled sender or

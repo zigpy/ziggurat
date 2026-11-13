@@ -1,25 +1,118 @@
 #![no_std]
 
-extern crate alloc;
-
 pub mod commands;
 pub mod types;
 
-use alloc::vec;
-use alloc::vec::Vec;
-
 use crate::types::{Eui64, Nwk, PanId, format_hex};
-use abstract_bits::{AbstractBits, BitReader, abstract_bits};
+use abstract_bits::{AbstractBits, BitReader, BitWriter, abstract_bits};
 use num_enum::TryFromPrimitive;
 
 /// `aMaxPhyPacketSize`: a full 802.15.4 frame, FCS included, fits in 127 bytes
 pub const MAX_PHY_PACKET_SIZE: usize = 127;
+
+pub const FCS_LENGTH: usize = 2;
+
+/// `aMaxMACPayloadSize`: the payload of a frame with the smallest MAC header
+pub const MAX_MAC_PAYLOAD_SIZE: usize = 118;
+
+/// A whole 802.15.4 frame. Frames are built in one of these and handed to the radio.
+pub type Psdu = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
 
 /// Frame-bounded byte storage: an owned, inline buffer for payloads and ciphertexts.
 ///
 /// Nothing carried within a single 802.15.4 frame can exceed its capacity. Fragmentation
 /// is ignored for now.
 pub type FrameBytes = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
+
+/// The frame does not fit in the room its layer has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("frame is too long")]
+pub struct TooLong;
+
+/// Write a frame, or a part of one, into a new buffer.
+pub fn write_frame(
+    serialize: impl FnOnce(&mut FrameWriter) -> Result<(), TooLong>,
+) -> Result<Psdu, TooLong> {
+    let mut psdu = Psdu::new();
+    serialize(&mut FrameWriter::new(&mut psdu, MAX_PHY_PACKET_SIZE))?;
+    Ok(psdu)
+}
+
+/// Appends one layer of a frame to a [`Psdu`].
+///
+/// Each layer gets a writer that starts where the layer starts and refuses to write
+/// past the layer's size limit, so a layer can read back and encrypt its own bytes.
+pub struct FrameWriter<'a> {
+    psdu: &'a mut Psdu,
+    start: usize,
+    end: usize,
+}
+
+impl<'a> FrameWriter<'a> {
+    /// A writer that appends to `psdu` and writes at most `max` bytes.
+    pub fn new(psdu: &'a mut Psdu, max: usize) -> Self {
+        let start = psdu.len();
+        let end = (start + max).min(MAX_PHY_PACKET_SIZE);
+        Self { psdu, start, end }
+    }
+
+    /// A writer for the next layer, which starts here and writes at most `max` bytes.
+    pub fn nested(&mut self, max: usize) -> FrameWriter<'_> {
+        let start = self.psdu.len();
+        let end = (start + max).min(self.end);
+        FrameWriter {
+            psdu: self.psdu,
+            start,
+            end,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.psdu.len() - self.start
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn extend(&mut self, bytes: &[u8]) -> Result<(), TooLong> {
+        if self.psdu.len() + bytes.len() > self.end {
+            return Err(TooLong);
+        }
+
+        self.psdu
+            .extend_from_slice(bytes)
+            .expect("the end is within the PSDU");
+        Ok(())
+    }
+
+    pub fn push(&mut self, byte: u8) -> Result<(), TooLong> {
+        self.extend(&[byte])
+    }
+
+    pub fn bits<T: AbstractBits>(&mut self, value: &T) -> Result<(), TooLong> {
+        let start = self.psdu.len();
+        self.psdu
+            .resize(self.end, 0)
+            .expect("the end is within the PSDU");
+
+        let mut writer = BitWriter::from(&mut self.psdu[start..]);
+        let result = value.write_abstract_bits(&mut writer);
+        let written = writer.bytes_written();
+
+        self.psdu.truncate(start + written);
+        result.map_err(|_| TooLong)
+    }
+
+    /// The bytes this writer has written.
+    pub fn written(&self) -> &[u8] {
+        &self.psdu[self.start..]
+    }
+
+    pub fn written_mut(&mut self) -> &mut [u8] {
+        &mut self.psdu[self.start..]
+    }
+}
 
 #[derive(Debug, Eq, PartialEq, Hash, Copy, Clone, PartialOrd, Ord)]
 pub enum Ieee802154Address {
@@ -163,7 +256,7 @@ pub struct Ieee802154BeaconFrame {
     pub superframe_specification: SuperframeSpecification,
     pub gts_specification: u8,
     pub pending_address_specification: u8,
-    pub beacon_payload: Vec<u8>,
+    pub beacon_payload: FrameBytes,
     pub fcs: u16,
 }
 
@@ -199,15 +292,14 @@ pub struct Ieee802154CommandFrame {
 
 /// A payload carried inside an 802.15.4 data frame.
 pub trait FramePayload {
-    /// Append the serialized payload to `bytes`.
-    fn extend_frame_bytes(&self, bytes: &mut Vec<u8>);
+    fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong>;
     /// Render the payload for `Debug`: hex for raw bytes, structured for frames.
     fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result;
 }
 
 impl FramePayload for FrameBytes {
-    fn extend_frame_bytes(&self, bytes: &mut Vec<u8>) {
-        bytes.extend_from_slice(self);
+    fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.extend(self)
     }
 
     fn fmt_payload(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -241,19 +333,6 @@ pub enum ParseError {
     Bits(#[from] abstract_bits::FromBytesError),
 }
 
-/// Append a structure's serialized form to `bytes`.
-///
-/// Avoids the intermediate Vec that [`AbstractBits::to_abstract_bytes`] allocates; the
-/// scratch buffer fits anything that can go on the air (a full 802.15.4 frame is at
-/// most 127 bytes).
-pub fn extend_abstract_bits<T: AbstractBits>(bytes: &mut Vec<u8>, value: &T) {
-    let mut buffer = [0u8; MAX_PHY_PACKET_SIZE];
-    let mut writer = abstract_bits::BitWriter::from(&mut buffer[..]);
-    value.write_abstract_bits(&mut writer).unwrap();
-    let written = writer.bytes_written();
-    bytes.extend_from_slice(&buffer[..written]);
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Ieee802154CommandPayload {
     AssociationRequest(commands::Ieee802154AssociationRequestCommand),
@@ -263,7 +342,7 @@ pub enum Ieee802154CommandPayload {
     BeaconRequest(commands::Ieee802154BeaconRequestCommand),
     /// A command we could not decode (unknown id, or a body that failed to parse), kept
     /// verbatim (command id byte included) so it round-trips.
-    Unknown(Vec<u8>),
+    Unknown(FrameBytes),
 }
 
 impl Ieee802154CommandPayload {
@@ -288,7 +367,9 @@ impl Ieee802154CommandPayload {
     /// body). An unknown id or a body that fails to parse is preserved verbatim as
     /// [`Ieee802154CommandPayload::Unknown`].
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self::try_parse(bytes).unwrap_or_else(|| Self::Unknown(bytes.to_vec()))
+        Self::try_parse(bytes).unwrap_or_else(|| {
+            Self::Unknown(FrameBytes::from_slice(bytes).expect("a MAC command is frame-bounded"))
+        })
     }
 
     fn try_parse(bytes: &[u8]) -> Option<Self> {
@@ -317,27 +398,36 @@ impl Ieee802154CommandPayload {
     }
 
     /// Encode into a MAC command frame payload: the command id byte followed by the body.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let (id, body) = match self {
-            Self::AssociationRequest(c) => (
-                Ieee802154CommandId::AssociationRequest,
-                c.to_abstract_bytes(),
-            ),
-            Self::AssociationResponse(c) => (
-                Ieee802154CommandId::AssociationResponse,
-                c.to_abstract_bytes(),
-            ),
-            Self::DisassociationNotification(c) => (
-                Ieee802154CommandId::DisassociationNotification,
-                c.to_abstract_bytes(),
-            ),
-            Self::DataRequest(c) => (Ieee802154CommandId::DataRequest, c.to_abstract_bytes()),
-            Self::BeaconRequest(c) => (Ieee802154CommandId::BeaconRequest, c.to_abstract_bytes()),
-            Self::Unknown(raw) => return raw.clone(),
-        };
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        match self {
+            Self::AssociationRequest(c) => {
+                writer.push(Ieee802154CommandId::AssociationRequest as u8)?;
+                writer.bits(c)
+            }
+            Self::AssociationResponse(c) => {
+                writer.push(Ieee802154CommandId::AssociationResponse as u8)?;
+                writer.bits(c)
+            }
+            Self::DisassociationNotification(c) => {
+                writer.push(Ieee802154CommandId::DisassociationNotification as u8)?;
+                writer.bits(c)
+            }
+            Self::DataRequest(c) => {
+                writer.push(Ieee802154CommandId::DataRequest as u8)?;
+                writer.bits(c)
+            }
+            Self::BeaconRequest(c) => {
+                writer.push(Ieee802154CommandId::BeaconRequest as u8)?;
+                writer.bits(c)
+            }
+            Self::Unknown(raw) => writer.extend(raw),
+        }
+    }
 
-        let mut bytes = vec![id as u8];
-        bytes.extend(body.unwrap());
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("a MAC command is frame-bounded");
         bytes
     }
 }
@@ -460,7 +550,8 @@ impl Ieee802154Frame<FrameBytes> {
                     SuperframeSpecification::from_abstract_bytes(&remaining[..4])?;
                 let gts_specification = remaining[2];
                 let pending_address_specification = remaining[3];
-                let beacon_payload = remaining[4..].to_vec();
+                let beacon_payload =
+                    FrameBytes::from_slice(&remaining[4..]).expect("the frame length was checked");
 
                 Ok(Self::Beacon(Ieee802154BeaconFrame {
                     header,
@@ -500,80 +591,83 @@ impl Ieee802154Frame<FrameBytes> {
     }
 
     pub fn from_bytes_without_fcs(data: &[u8]) -> Result<Self, ParseError> {
-        let mut data_with_fcs = Vec::new();
-        data_with_fcs.extend(data);
-        data_with_fcs.extend(&Self::compute_fcs(data).to_le_bytes());
+        let mut data_with_fcs = Psdu::new();
+        data_with_fcs
+            .extend_from_slice(data)
+            .and_then(|()| data_with_fcs.extend_from_slice(&Self::compute_fcs(data).to_le_bytes()))
+            .map_err(|_| ParseError::InvalidLength {
+                ty: "Ieee802154Frame",
+            })?;
 
         Self::from_bytes(&data_with_fcs)
     }
 }
 
 impl<P: FramePayload> Ieee802154Frame<P> {
-    pub fn to_bytes_without_fcs(&self) -> Vec<u8> {
-        let mut data = Vec::with_capacity(MAX_PHY_PACKET_SIZE);
-
+    /// Write the frame without its FCS, which the radio appends.
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
         let header = self.header();
 
-        // Serialize frame control
-        extend_abstract_bits(&mut data, &header.frame_control);
+        writer.bits(&header.frame_control)?;
 
-        // Serialize sequence number
         if let Some(seq) = header.sequence_number {
-            data.push(seq);
+            writer.push(seq)?;
         }
 
-        // Serialize destination
         if let Some(pan_id) = header.dest_pan_id {
-            data.extend(pan_id.to_bytes());
+            writer.extend(&pan_id.to_bytes())?;
         }
         if let Some(address) = &header.dest_address {
             match address {
-                Ieee802154Address::Nwk(addr) => data.extend(addr.to_bytes()),
-                Ieee802154Address::Eui64(addr) => data.extend(addr.to_bytes()),
+                Ieee802154Address::Nwk(addr) => writer.extend(&addr.to_bytes())?,
+                Ieee802154Address::Eui64(addr) => writer.extend(&addr.to_bytes())?,
             }
         }
 
-        // Serialize source
         if !header.frame_control.pan_id_compression
             && let Some(pan_id) = header.src_pan_id
         {
-            data.extend(pan_id.to_bytes());
+            writer.extend(&pan_id.to_bytes())?;
         }
 
         if let Some(address) = &header.src_address {
             match address {
-                Ieee802154Address::Nwk(addr) => data.extend(addr.to_bytes()),
-                Ieee802154Address::Eui64(addr) => data.extend(addr.to_bytes()),
+                Ieee802154Address::Nwk(addr) => writer.extend(&addr.to_bytes())?,
+                Ieee802154Address::Eui64(addr) => writer.extend(&addr.to_bytes())?,
             }
         }
 
-        // Add payload based on frame type
         match self {
             Self::Beacon(frame) => {
-                extend_abstract_bits(&mut data, &frame.superframe_specification);
-                data.push(frame.gts_specification);
-                data.push(frame.pending_address_specification);
-                data.extend(&frame.beacon_payload);
+                writer.bits(&frame.superframe_specification)?;
+                writer.push(frame.gts_specification)?;
+                writer.push(frame.pending_address_specification)?;
+                writer.extend(&frame.beacon_payload)
             }
-            Self::Data(frame) => {
-                frame.payload.extend_frame_bytes(&mut data);
-            }
-            Self::Ack(_) => {
-                // ACK frames have no payload
-            }
-            Self::Command(frame) => {
-                data.extend(frame.command_payload.to_bytes());
-            }
+            Self::Data(frame) => frame
+                .payload
+                .serialize(&mut writer.nested(MAX_MAC_PAYLOAD_SIZE)),
+            Self::Ack(_) => Ok(()),
+            Self::Command(frame) => frame.command_payload.serialize(writer),
         }
-
-        data
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut data = self.to_bytes_without_fcs();
-        data.extend(&Self::compute_fcs(&data).to_le_bytes());
+    pub fn to_bytes_without_fcs(&self) -> Psdu {
+        let mut psdu = Psdu::new();
+        self.serialize(&mut FrameWriter::new(
+            &mut psdu,
+            MAX_PHY_PACKET_SIZE - FCS_LENGTH,
+        ))
+        .expect("the frame fits in a PSDU");
+        psdu
+    }
 
-        data
+    pub fn to_bytes(&self) -> Psdu {
+        let mut psdu = self.to_bytes_without_fcs();
+        let fcs = Self::compute_fcs(&psdu).to_le_bytes();
+        psdu.extend_from_slice(&fcs)
+            .expect("room for the FCS was left");
+        psdu
     }
 
     pub const fn header(&self) -> &Ieee802154FrameHeader {
@@ -957,12 +1051,12 @@ mod test {
 
         // BeaconRequest command (no payload)
         let beacon_req = Ieee802154CommandPayload::BeaconRequest(Ieee802154BeaconRequestCommand);
-        assert_eq!(beacon_req.to_bytes(), vec![0x07]); // Command ID only
+        assert_eq!(beacon_req.to_bytes(), [0x07]); // Command ID only
         assert_eq!(Ieee802154CommandPayload::from_bytes(&[0x07]), beacon_req);
 
         // DataRequest command (no payload)
         let data_req = Ieee802154CommandPayload::DataRequest(Ieee802154DataRequestCommand);
-        assert_eq!(data_req.to_bytes(), vec![0x04]); // Command ID only
+        assert_eq!(data_req.to_bytes(), [0x04]); // Command ID only
         assert_eq!(Ieee802154CommandPayload::from_bytes(&[0x04]), data_req);
 
         // DisassociationNotification command with typed reason
@@ -971,7 +1065,7 @@ mod test {
                 disassociation_reason: Ieee802154DisassociationReason::CoordinatorWishesToLeave,
             },
         );
-        assert_eq!(disassoc_notif.to_bytes(), vec![0x03, 0x01]); // Command ID + reason code
+        assert_eq!(disassoc_notif.to_bytes(), [0x03, 0x01]); // Command ID + reason code
         assert_eq!(
             Ieee802154CommandPayload::from_bytes(&[0x03, 0x01]),
             disassoc_notif
@@ -983,7 +1077,7 @@ mod test {
                 disassociation_reason: Ieee802154DisassociationReason::DeviceWishesToLeave,
             },
         );
-        assert_eq!(disassoc_notif2.to_bytes(), vec![0x03, 0x02]); // Command ID + reason code
+        assert_eq!(disassoc_notif2.to_bytes(), [0x03, 0x02]); // Command ID + reason code
         assert_eq!(
             Ieee802154CommandPayload::from_bytes(&[0x03, 0x02]),
             disassoc_notif2
@@ -991,8 +1085,11 @@ mod test {
 
         // An unrecognized command id round-trips verbatim
         let unknown = Ieee802154CommandPayload::from_bytes(&[0xFF, 0xAA]);
-        assert_eq!(unknown, Ieee802154CommandPayload::Unknown(vec![0xFF, 0xAA]));
+        assert_eq!(
+            unknown,
+            Ieee802154CommandPayload::Unknown(FrameBytes::from_slice(&[0xFF, 0xAA]).unwrap())
+        );
         assert_eq!(unknown.command_id(), None);
-        assert_eq!(unknown.to_bytes(), vec![0xFF, 0xAA]);
+        assert_eq!(unknown.to_bytes(), [0xFF, 0xAA]);
     }
 }

@@ -7,8 +7,10 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154FrameVersion,
 };
 use abstract_bits::{AbstractBits, BitReader};
-use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Nwk, PanId};
+use ziggurat_ieee_802154::{
+    FCS_LENGTH, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
+};
 use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use ziggurat_zigbee::constants::GP_PROTOCOL_VERSION;
@@ -143,20 +145,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 pan_coordinator: self.state.role == NwkDeviceType::Coordinator,
                 association_permit: permitting_joins,
             },
-            beacon_payload: ZigbeeBeacon {
-                protocol_id: 0,
-                stack_profile: STACK_PROFILE,
-                protocol_version: PROTOCOL_VERSION,
-                reserved1: 0b00,
-                router_capacity: true,
-                device_depth: 0,
-                end_device_capacity,
-                extended_pan_id: self.state.extended_pan_id,
-                tx_offset: 0xFFFFFF,
-                update_id,
-            }
-            .to_abstract_bytes()
-            .unwrap(),
+            beacon_payload: write_frame(|writer| {
+                writer.bits(&ZigbeeBeacon {
+                    protocol_id: 0,
+                    stack_profile: STACK_PROFILE,
+                    protocol_version: PROTOCOL_VERSION,
+                    reserved1: 0b00,
+                    router_capacity: true,
+                    device_depth: 0,
+                    end_device_capacity,
+                    extended_pan_id: self.state.extended_pan_id,
+                    tx_offset: 0xFFFFFF,
+                    update_id,
+                })
+            })
+            .expect("a beacon payload is frame-bounded"),
             gts_specification: 0x00,
             pending_address_specification: 0x00,
             fcs: 0x0000,
@@ -201,7 +204,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    pub(super) fn beacon_request_psdu(&self) -> Vec<u8> {
+    pub(super) fn beacon_request_psdu(&self) -> Psdu {
         let sequence_number = {
             let mut core = self.core();
             core.mac.ieee802154_sequence_number =
@@ -445,10 +448,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         tracing::trace!("Sending 802.15.4 frame: {frame:?}");
-        tracing::trace!(
-            "Sending 802.15.4 frame bytes: {:02X?}",
-            frame.to_bytes_without_fcs()
-        );
+
+        let mut psdu = Psdu::new();
+        frame
+            .serialize(&mut FrameWriter::new(
+                &mut psdu,
+                MAX_PHY_PACKET_SIZE - FCS_LENGTH,
+            ))
+            .map_err(|TooLong| DeliveryError::FrameTooLong)?;
+
+        tracing::trace!("Sending 802.15.4 frame bytes: {:02X?}", psdu.as_slice());
 
         if self.state.hack_disable_tx {
             tracing::debug!("Not transmitting the frame, TX is disabled");
@@ -459,7 +468,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let result = self
             .radio
             .transmit(TxFrame {
-                psdu: frame.to_bytes_without_fcs(),
+                psdu,
                 channel: Some(channel),
                 csma_ca: true,
                 max_frame_retries: self.tunables.mac_max_frame_retries(),

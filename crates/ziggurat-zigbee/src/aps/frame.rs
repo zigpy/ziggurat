@@ -1,10 +1,8 @@
 use abstract_bits::{AbstractBits, abstract_bits};
-use alloc::vec;
-use alloc::vec::Vec;
 use educe::Educe;
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, format_hex};
-use ziggurat_ieee_802154::{FrameBytes, extend_abstract_bits};
+use ziggurat_ieee_802154::{FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong};
 
 use crate::ParseError;
 use crate::crypto::{decrypt_ccm, encrypt_ccm};
@@ -139,25 +137,28 @@ impl ApsAckFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        extend_abstract_bits(&mut bytes, &self.frame_control);
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.bits(&self.frame_control)?;
 
         if let Some(destination_endpoint) = self.destination_endpoint {
-            bytes.extend(destination_endpoint.to_le_bytes());
+            writer.push(destination_endpoint)?;
         }
         if let Some(cluster_id) = self.cluster_id {
-            bytes.extend(cluster_id.to_le_bytes());
+            writer.extend(&cluster_id.to_le_bytes())?;
         }
         if let Some(profile_id) = self.profile_id {
-            bytes.extend(profile_id.to_le_bytes());
+            writer.extend(&profile_id.to_le_bytes())?;
         }
         if let Some(source_endpoint) = self.source_endpoint {
-            bytes.extend(source_endpoint.to_le_bytes());
+            writer.push(source_endpoint)?;
         }
-        bytes.extend(self.counter.to_le_bytes());
+        writer.push(self.counter)
+    }
 
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("an APS ack is frame-bounded");
         bytes
     }
 }
@@ -268,26 +269,27 @@ impl ApsDataHeader {
         ))
     }
 
-    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
-        extend_abstract_bits(bytes, &self.frame_control);
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.bits(&self.frame_control)?;
 
         if let Some(group_id) = self.group_id {
-            bytes.extend(group_id.to_le_bytes());
+            writer.extend(&group_id.to_le_bytes())?;
         }
 
         if let Some(destination_endpoint) = self.destination_endpoint {
-            bytes.extend(destination_endpoint.to_le_bytes());
+            writer.push(destination_endpoint)?;
         }
 
-        bytes.extend(self.cluster_id.to_le_bytes());
-        bytes.extend(self.profile_id.to_le_bytes());
-        bytes.extend(self.source_endpoint.to_le_bytes());
-        bytes.extend(self.counter.to_le_bytes());
+        writer.extend(&self.cluster_id.to_le_bytes())?;
+        writer.extend(&self.profile_id.to_le_bytes())?;
+        writer.push(self.source_endpoint)?;
+        writer.push(self.counter)
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        self.serialize_into(&mut bytes);
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("an APS header is frame-bounded");
         bytes
     }
 
@@ -326,11 +328,15 @@ impl ApsDataFrame {
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        self.header().serialize_into(&mut bytes);
-        bytes.extend_from_slice(&self.asdu);
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.header().serialize(writer)?;
+        writer.extend(&self.asdu)
+    }
 
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("an APS data frame is frame-bounded");
         bytes
     }
 }
@@ -440,23 +446,14 @@ impl ApsTransportKeyCommandFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.push(self.standard_key_type as u8);
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.push(self.standard_key_type as u8)?;
 
         match &self.key_descriptor {
-            ApsTransportKeyDescriptor::TrustCenterLinkKey(desc) => {
-                bytes.extend(desc.to_abstract_bytes().unwrap());
-            }
-            ApsTransportKeyDescriptor::NetworkKey(desc) => {
-                bytes.extend(desc.to_abstract_bytes().unwrap());
-            }
-            ApsTransportKeyDescriptor::ApplicationLinkKey(desc) => {
-                bytes.extend(desc.to_abstract_bytes().unwrap());
-            }
+            ApsTransportKeyDescriptor::TrustCenterLinkKey(desc) => writer.bits(desc),
+            ApsTransportKeyDescriptor::NetworkKey(desc) => writer.bits(desc),
+            ApsTransportKeyDescriptor::ApplicationLinkKey(desc) => writer.bits(desc),
         }
-
-        bytes
     }
 }
 
@@ -527,14 +524,14 @@ impl ApsRequestKeyCommandFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![self.key_type as u8];
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.push(self.key_type as u8)?;
 
         if let Some(partner_address) = self.partner_address {
-            bytes.extend(partner_address.to_bytes());
+            writer.extend(&partner_address.to_bytes())?;
         }
 
-        bytes
+        Ok(())
     }
 }
 
@@ -568,12 +565,9 @@ impl ApsTunnelCommandFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend(self.destination_address.to_bytes());
-        bytes.extend(self.tunneled_frame.clone());
-
-        bytes
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.extend(&self.destination_address.to_bytes())?;
+        writer.extend(&self.tunneled_frame)
     }
 }
 
@@ -691,50 +685,50 @@ impl ApsCommandFrame {
 
     /// The APS command identifier and command payload, i.e. the portion of the frame
     /// that is encrypted when APS security is applied.
-    pub fn payload_to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![self.command.command_id() as u8];
+    pub fn serialize_payload(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.push(self.command.command_id() as u8)?;
 
-        bytes.extend(match &self.command {
-            ApsCommandFrameCommand::TransportKey(cmd) => cmd.to_bytes(),
-            ApsCommandFrameCommand::UpdateDevice(cmd) => cmd.to_abstract_bytes().unwrap(),
-            ApsCommandFrameCommand::RemoveDevice(cmd) => cmd.to_abstract_bytes().unwrap(),
-            ApsCommandFrameCommand::RequestKey(cmd) => cmd.to_bytes(),
-            ApsCommandFrameCommand::SwitchKey(cmd) => cmd.to_abstract_bytes().unwrap(),
-            ApsCommandFrameCommand::Tunnel(cmd) => cmd.to_bytes(),
-            ApsCommandFrameCommand::VerifyKey(cmd) => cmd.to_abstract_bytes().unwrap(),
-            ApsCommandFrameCommand::ConfirmKey(cmd) => cmd.to_abstract_bytes().unwrap(),
-        });
-
-        bytes
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        extend_abstract_bits(&mut bytes, &self.frame_control);
-        bytes.push(self.counter);
-        bytes.extend(self.payload_to_bytes());
-
-        bytes
+        match &self.command {
+            ApsCommandFrameCommand::TransportKey(cmd) => cmd.serialize(writer),
+            ApsCommandFrameCommand::UpdateDevice(cmd) => writer.bits(cmd),
+            ApsCommandFrameCommand::RemoveDevice(cmd) => writer.bits(cmd),
+            ApsCommandFrameCommand::RequestKey(cmd) => cmd.serialize(writer),
+            ApsCommandFrameCommand::SwitchKey(cmd) => writer.bits(cmd),
+            ApsCommandFrameCommand::Tunnel(cmd) => cmd.serialize(writer),
+            ApsCommandFrameCommand::VerifyKey(cmd) => writer.bits(cmd),
+            ApsCommandFrameCommand::ConfirmKey(cmd) => writer.bits(cmd),
+        }
     }
 
     /// The APS frame control byte and counter, i.e. the cleartext header preceding the
     /// auxiliary header when APS security is applied.
-    fn header_to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        extend_abstract_bits(&mut bytes, &self.frame_control);
-        bytes.push(self.counter);
+    fn serialize_header(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.bits(&self.frame_control)?;
+        writer.push(self.counter)
+    }
 
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.serialize_header(writer)?;
+        self.serialize_payload(writer)
+    }
+
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("an APS command is frame-bounded");
         bytes
     }
 
     pub fn encrypt(&self, key: &Key, aux_header: &ApsAuxHeader) -> EncryptedApsCommandFrame {
-        let ciphertext = encrypt_aps_payload(
-            key,
-            aux_header,
-            &self.header_to_bytes(),
-            &self.payload_to_bytes(),
-        );
+        let mut header = FrameBytes::new();
+        self.serialize_header(&mut FrameWriter::new(&mut header, MAX_PHY_PACKET_SIZE))
+            .expect("an APS header is frame-bounded");
+
+        let mut payload = FrameBytes::new();
+        self.serialize_payload(&mut FrameWriter::new(&mut payload, MAX_PHY_PACKET_SIZE))
+            .expect("an APS command is frame-bounded");
+
+        let ciphertext = encrypt_aps_payload(key, aux_header, &header, &payload);
 
         EncryptedApsCommandFrame {
             frame_control: self.frame_control.clone(),
@@ -799,23 +793,19 @@ impl ApsAuxHeader {
         ))
     }
 
-    pub fn serialize_into(&self, bytes: &mut Vec<u8>) {
-        bytes.extend(self.security_control.to_bytes());
-        bytes.extend(self.frame_counter.to_le_bytes());
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.extend(&self.security_control.to_bytes())?;
+        writer.extend(&self.frame_counter.to_le_bytes())?;
 
         if let Some(ieee) = self.extended_source {
-            bytes.extend(ieee.to_bytes());
+            writer.extend(&ieee.to_bytes())?;
         }
 
         if let Some(key_sequence_number) = self.key_sequence_number {
-            bytes.push(key_sequence_number);
+            writer.push(key_sequence_number)?;
         }
-    }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        self.serialize_into(&mut bytes);
-        bytes
+        Ok(())
     }
 
     pub fn get_modified(&self, security_level: NwkSecurityLevel) -> Self {
@@ -853,12 +843,25 @@ fn encrypt_aps_payload(
         .extended_source
         .expect("outgoing secured APS frames always carry an extended nonce");
     let nonce = modified_aux_header.get_nonce(source);
+    let auth_data = aps_auth_data(header, &modified_aux_header);
 
-    let mut auth_data = header.to_vec();
-    modified_aux_header.serialize_into(&mut auth_data);
+    let mut buffer = FrameBytes::from_slice(plaintext).expect("plaintext is frame-bounded");
+    let mic = encrypt_ccm(key, &nonce, &auth_data, &mut buffer);
+    buffer
+        .extend_from_slice(&mic)
+        .expect("a frame always has room for its MIC");
+    buffer
+}
 
-    let buffer = FrameBytes::from_slice(plaintext).expect("plaintext is frame-bounded");
-    encrypt_ccm(key, &nonce, &auth_data, buffer)
+/// The bytes CCM* authenticates: the cleartext APS header, then the auxiliary header.
+fn aps_auth_data(header: &[u8], aux_header: &ApsAuxHeader) -> Psdu {
+    let mut auth_data = Psdu::new();
+    let mut writer = FrameWriter::new(&mut auth_data, MAX_PHY_PACKET_SIZE);
+    writer
+        .extend(header)
+        .and_then(|()| aux_header.serialize(&mut writer))
+        .expect("APS headers are frame-bounded");
+    auth_data
 }
 
 /// Reverse of [`encrypt_aps_payload`]: verify the MIC and return the decrypted payload.
@@ -873,12 +876,13 @@ fn decrypt_aps_payload(
 ) -> Result<FrameBytes, ParseError> {
     let modified_aux_header = aux_header.get_modified(NwkSecurityLevel::EncMic32);
     let nonce = modified_aux_header.get_nonce(aux_header.extended_source.unwrap_or(source));
+    let auth_data = aps_auth_data(header, &modified_aux_header);
 
-    let mut auth_data = header.to_vec();
-    modified_aux_header.serialize_into(&mut auth_data);
-
-    let buffer = FrameBytes::from_slice(tagged_ciphertext).expect("ciphertext is frame-bounded");
-    Ok(decrypt_ccm(key, &nonce, &auth_data, buffer)?)
+    let mut buffer =
+        FrameBytes::from_slice(tagged_ciphertext).expect("ciphertext is frame-bounded");
+    let plaintext_len = decrypt_ccm(key, &nonce, &auth_data, &mut buffer)?;
+    buffer.truncate(plaintext_len);
+    Ok(buffer)
 }
 
 #[derive(Educe, Clone, PartialEq, Eq)]
@@ -912,14 +916,17 @@ impl EncryptedApsCommandFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        writer.bits(&self.frame_control)?;
+        writer.push(self.counter)?;
+        self.aux_header.serialize(writer)?;
+        writer.extend(&self.ciphertext)
+    }
 
-        extend_abstract_bits(&mut bytes, &self.frame_control);
-        bytes.push(self.counter);
-        self.aux_header.serialize_into(&mut bytes);
-        bytes.extend_from_slice(&self.ciphertext);
-
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("an APS command is frame-bounded");
         bytes
     }
 
@@ -932,15 +939,25 @@ impl EncryptedApsCommandFrame {
                 "APS command frames without an extended nonce",
             ))?;
 
-        let mut header = Vec::new();
-        extend_abstract_bits(&mut header, &self.frame_control);
-        header.push(self.counter);
+        let mut frame_bytes = FrameBytes::new();
+        let mut writer = FrameWriter::new(&mut frame_bytes, MAX_PHY_PACKET_SIZE);
+        writer
+            .bits(&self.frame_control)
+            .and_then(|()| writer.push(self.counter))
+            .expect("an APS header is frame-bounded");
 
-        let plaintext =
-            decrypt_aps_payload(key, &self.aux_header, source, &header, &self.ciphertext)?;
-
-        let mut frame_bytes = header;
-        frame_bytes.extend(plaintext);
+        let plaintext = decrypt_aps_payload(
+            key,
+            &self.aux_header,
+            source,
+            &frame_bytes,
+            &self.ciphertext,
+        )?;
+        frame_bytes
+            .extend_from_slice(&plaintext)
+            .map_err(|_| ParseError::TooLong {
+                ty: "ApsCommandFrame",
+            })?;
 
         ApsCommandFrame::from_bytes(&frame_bytes)
     }
@@ -984,11 +1001,16 @@ impl EncryptedApsDataFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = self.header.to_bytes();
-        self.aux_header.serialize_into(&mut bytes);
-        bytes.extend_from_slice(&self.ciphertext);
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.header.serialize(writer)?;
+        self.aux_header.serialize(writer)?;
+        writer.extend(&self.ciphertext)
+    }
 
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("an APS data frame is frame-bounded");
         bytes
     }
 
@@ -1051,11 +1073,16 @@ impl EncryptedApsAckFrame {
         })
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = self.header.to_bytes();
-        self.aux_header.serialize_into(&mut bytes);
-        bytes.extend_from_slice(&self.ciphertext);
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        self.header.serialize(writer)?;
+        self.aux_header.serialize(writer)?;
+        writer.extend(&self.ciphertext)
+    }
 
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("an APS ack is frame-bounded");
         bytes
     }
 
@@ -1144,7 +1171,7 @@ mod test {
         };
 
         assert_eq!(aps_frame, expected_aps_frame);
-        assert_eq!(aps_frame.to_bytes(), data.to_vec());
+        assert_eq!(aps_frame.to_bytes(), data);
     }
 
     #[test]

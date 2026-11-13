@@ -26,7 +26,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelTxFrame {
-    pub psdu: Vec<u8>,
+    pub psdu: FrameBytes,
     pub channel: Option<u8>,
     pub max_csma_backoffs: Option<u8>,
     pub max_frame_retries: Option<u8>,

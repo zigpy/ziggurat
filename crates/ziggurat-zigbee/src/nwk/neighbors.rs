@@ -833,9 +833,7 @@ mod test {
         assert!(!header.frame_control.end_device_initiator);
 
         // Only the End Device Initiator bit changes: frame control 0x2248 -> 0x0248
-        let mut bytes = Vec::new();
-        header.serialize_into(&mut bytes);
-        assert_eq!(bytes, hex!("4802fdff34121e05"));
+        assert_eq!(header.to_bytes(), hex!("4802fdff34121e05"));
     }
 
     #[test]

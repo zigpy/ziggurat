@@ -1,11 +1,10 @@
 #![allow(clippy::useless_conversion)]
-use alloc::vec;
 use alloc::vec::Vec;
 
 use abstract_bits::{AbstractBits, abstract_bits};
 use num_enum::TryFromPrimitive;
-use ziggurat_ieee_802154::FrameBytes;
 use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
+use ziggurat_ieee_802154::{FrameBytes, FrameWriter, MAX_PHY_PACKET_SIZE, TooLong};
 
 /// Zigbee spec 3.4
 #[abstract_bits(bits = 8)]
@@ -526,41 +525,50 @@ impl NwkCommand {
 
     /// Encode the command into a NWK command frame payload: the command identifier byte
     /// followed by the command body.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let (id, body) = match self {
-            Self::RouteRequest(c) => (NwkCommandId::RouteRequest, c.to_abstract_bytes()),
-            Self::RouteReply(c) => (NwkCommandId::RouteReply, c.to_abstract_bytes()),
-            Self::NetworkStatus(c) => (NwkCommandId::NetworkStatus, c.to_abstract_bytes()),
-            Self::Leave(c) => (NwkCommandId::Leave, c.to_abstract_bytes()),
-            Self::RouteRecord(c) => (NwkCommandId::RouteRecord, c.to_abstract_bytes()),
-            Self::RejoinRequest(c) => (NwkCommandId::RejoinRequest, c.to_abstract_bytes()),
-            Self::RejoinResponse(c) => (NwkCommandId::RejoinResponse, c.to_abstract_bytes()),
-            Self::LinkStatus(c) => (NwkCommandId::LinkStatus, c.to_abstract_bytes()),
-            Self::NetworkReport(c) => (NwkCommandId::NetworkReport, c.to_abstract_bytes()),
-            Self::NetworkUpdate(c) => (NwkCommandId::NetworkUpdate, c.to_abstract_bytes()),
+    pub fn serialize(&self, writer: &mut FrameWriter) -> Result<(), TooLong> {
+        match self {
+            Self::RouteRequest(c) => write_command(writer, NwkCommandId::RouteRequest, c),
+            Self::RouteReply(c) => write_command(writer, NwkCommandId::RouteReply, c),
+            Self::NetworkStatus(c) => write_command(writer, NwkCommandId::NetworkStatus, c),
+            Self::Leave(c) => write_command(writer, NwkCommandId::Leave, c),
+            Self::RouteRecord(c) => write_command(writer, NwkCommandId::RouteRecord, c),
+            Self::RejoinRequest(c) => write_command(writer, NwkCommandId::RejoinRequest, c),
+            Self::RejoinResponse(c) => write_command(writer, NwkCommandId::RejoinResponse, c),
+            Self::LinkStatus(c) => write_command(writer, NwkCommandId::LinkStatus, c),
+            Self::NetworkReport(c) => write_command(writer, NwkCommandId::NetworkReport, c),
+            Self::NetworkUpdate(c) => write_command(writer, NwkCommandId::NetworkUpdate, c),
             Self::EndDeviceTimeoutRequest(c) => {
-                (NwkCommandId::EndDeviceTimeoutRequest, c.to_abstract_bytes())
+                write_command(writer, NwkCommandId::EndDeviceTimeoutRequest, c)
             }
-            Self::EndDeviceTimeoutResponse(c) => (
-                NwkCommandId::EndDeviceTimeoutResponse,
-                c.to_abstract_bytes(),
-            ),
-            Self::LinkPowerDelta(c) => (NwkCommandId::LinkPowerDelta, c.to_abstract_bytes()),
-            Self::NetworkCommissioningRequest(c) => (
-                NwkCommandId::NetworkCommissioningRequest,
-                c.to_abstract_bytes(),
-            ),
-            Self::NetworkCommissioningResponse(c) => (
-                NwkCommandId::NetworkCommissioningResponse,
-                c.to_abstract_bytes(),
-            ),
-            Self::Unparsed(raw) => return raw.to_vec(),
-        };
+            Self::EndDeviceTimeoutResponse(c) => {
+                write_command(writer, NwkCommandId::EndDeviceTimeoutResponse, c)
+            }
+            Self::LinkPowerDelta(c) => write_command(writer, NwkCommandId::LinkPowerDelta, c),
+            Self::NetworkCommissioningRequest(c) => {
+                write_command(writer, NwkCommandId::NetworkCommissioningRequest, c)
+            }
+            Self::NetworkCommissioningResponse(c) => {
+                write_command(writer, NwkCommandId::NetworkCommissioningResponse, c)
+            }
+            Self::Unparsed(raw) => writer.extend(raw),
+        }
+    }
 
-        let mut bytes = vec![id as u8];
-        bytes.extend(body.unwrap());
+    pub fn to_bytes(&self) -> FrameBytes {
+        let mut bytes = FrameBytes::new();
+        self.serialize(&mut FrameWriter::new(&mut bytes, MAX_PHY_PACKET_SIZE))
+            .expect("a NWK command is frame-bounded");
         bytes
     }
+}
+
+fn write_command<T: AbstractBits>(
+    writer: &mut FrameWriter,
+    id: NwkCommandId,
+    body: &T,
+) -> Result<(), TooLong> {
+    writer.push(id as u8)?;
+    writer.bits(body)
 }
 
 fn parse_body<T: AbstractBits>(body: &[u8]) -> Option<T> {
@@ -589,7 +597,7 @@ mod test {
         });
 
         let bytes = command.to_bytes();
-        assert_eq!(bytes, vec![NwkCommandId::RejoinRequest as u8, 0x8E]);
+        assert_eq!(bytes, [NwkCommandId::RejoinRequest as u8, 0x8E]);
         assert_eq!(NwkCommand::from_bytes(&bytes), command);
     }
 
@@ -603,7 +611,7 @@ mod test {
         let bytes = command.to_bytes();
         assert_eq!(
             bytes,
-            vec![NwkCommandId::RejoinResponse as u8, 0x34, 0x12, 0x00]
+            [NwkCommandId::RejoinResponse as u8, 0x34, 0x12, 0x00]
         );
         assert_eq!(NwkCommand::from_bytes(&bytes), command);
     }
@@ -611,7 +619,7 @@ mod test {
     /// An unknown command id is preserved verbatim so the frame can still be relayed.
     #[test]
     fn test_unknown_command_round_trips_as_unparsed() {
-        let bytes = vec![0xFF, 0x01, 0x02, 0x03];
+        let bytes = [0xFF, 0x01, 0x02, 0x03];
         let command = NwkCommand::from_bytes(&bytes);
         assert_eq!(
             command,
@@ -626,7 +634,7 @@ mod test {
     #[test]
     fn test_malformed_body_round_trips_as_unparsed() {
         // A rejoin response is 3 body bytes; one byte is too short to parse
-        let bytes = vec![NwkCommandId::RejoinResponse as u8, 0x34];
+        let bytes = [NwkCommandId::RejoinResponse as u8, 0x34];
         let command = NwkCommand::from_bytes(&bytes);
         assert_eq!(
             command,

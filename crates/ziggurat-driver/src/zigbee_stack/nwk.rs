@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::FrameBytes;
-use ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
@@ -17,9 +17,9 @@ use ziggurat_zigbee::nwk::commands::{
 };
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_DEVICES, BROADCAST_ALL_ROUTERS_AND_COORDINATOR, BROADCAST_LOW_POWER_ROUTERS,
-    EncryptedNwkFrame, NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader,
-    NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId,
-    NwkSecurityLevel,
+    NwkAuxHeader, NwkFrame, NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload,
+    NwkRouteDiscovery, NwkSecurityHeaderControlField, NwkSecurityHeaderKeyId, NwkSecurityLevel,
+    OutgoingNwkFrame,
 };
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
@@ -338,12 +338,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// A NWK data frame originated by us; same defaults as [`Self::nwk_command_frame`]
     /// except data frames carry no extended source.
-    pub(super) fn nwk_data_frame(
-        &self,
-        destination: Nwk,
-        payload: Vec<u8>,
-    ) -> Result<NwkFrame, EnqueueError> {
-        Ok(NwkFrame {
+    pub(super) const fn nwk_data_frame(&self, destination: Nwk, payload: FrameBytes) -> NwkFrame {
+        NwkFrame {
             nwk_header: NwkHeader {
                 frame_control: NwkFrameControl {
                     frame_type: NwkFrameType::Data,
@@ -367,10 +363,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 source_route: None,
             },
             aux_header: None, // Applied at encryption time
-            payload: NwkPayload::Opaque(
-                FrameBytes::from_slice(&payload).map_err(|_| EnqueueError::PayloadTooLong)?,
-            ),
-        })
+            payload: NwkPayload::Opaque(payload),
+        }
     }
 
     /// Send a unicast: assign its NWK sequence number, resolve a next hop, and enqueue
@@ -472,7 +466,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.core().nib.next_sequence_number()
     }
 
-    fn apply_nwk_aux_header(&self, nwk_frame: &mut NwkFrame, security: NwkSecurityMode) {
+    /// Give the frame the auxiliary header for this attempt and return the key to
+    /// encrypt it with, or `None` for a frame sent unsecured.
+    fn secure_nwk_frame(&self, nwk_frame: &mut NwkFrame, security: NwkSecurityMode) -> Option<Key> {
         if security == NwkSecurityMode::NetworkKey {
             nwk_frame.aux_header = Some(NwkAuxHeader {
                 security_control: NwkSecurityHeaderControlField {
@@ -481,31 +477,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     extended_nonce: true,
                     require_verified_frame_counter: false,
                 },
-                frame_counter: 0, // This field is rewritten and is always up-to-date
+                // The encryption frame counter always increments
+                frame_counter: self.next_nwk_frame_counter(),
                 extended_source: Some(self.state.ieee_address),
                 key_sequence_number: self.core().nib.nwk_security.active_key_seq_number(),
             });
-        }
-    }
 
-    fn encrypt_nwk_frame(
-        &self,
-        nwk_frame: &mut NwkFrame,
-        security: NwkSecurityMode,
-    ) -> EncryptedNwkFrame {
-        match security {
-            NwkSecurityMode::NetworkKey => {
-                // The encryption frame counter always increments
-                nwk_frame.aux_header.as_mut().unwrap().frame_counter =
-                    self.next_nwk_frame_counter();
-
-                nwk_frame.encrypt(&self.core().nib.nwk_security.network_key())
-            }
-            NwkSecurityMode::Unsecured => EncryptedNwkFrame {
-                nwk_header: nwk_frame.nwk_header.clone(),
-                aux_header: None,
-                ciphertext: nwk_frame.payload.to_bytes(),
-            },
+            Some(self.core().nib.nwk_security.network_key())
+        } else {
+            None
         }
     }
 
@@ -570,11 +550,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         security: NwkSecurityMode,
         frame_pending: bool,
     ) -> Result<(), DeliveryError> {
-        self.apply_nwk_aux_header(nwk_frame, security);
-        let encrypted_nwk_frame = self.encrypt_nwk_frame(nwk_frame, security);
+        let key = self.secure_nwk_frame(nwk_frame, security);
         let mut ieee802154_frame = self.build_unicast_802154_data_frame(
             next_hop_address,
-            encrypted_nwk_frame,
+            OutgoingNwkFrame {
+                frame: nwk_frame,
+                key,
+            },
             frame_pending,
         );
 
@@ -788,9 +770,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: &mut NwkFrame,
         security: NwkSecurityMode,
     ) -> Result<(), DeliveryError> {
-        self.apply_nwk_aux_header(nwk_frame, security);
-
-        let encrypted_nwk_frame = self.encrypt_nwk_frame(nwk_frame, security);
+        let key = self.secure_nwk_frame(nwk_frame, security);
 
         let (ieee802154_sequence_number, pan_id) = {
             let core = self.core();
@@ -820,7 +800,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 src_pan_id: None,
                 src_address: Some(Ieee802154Address::Nwk(self.state.network_address)),
             },
-            payload: encrypted_nwk_frame,
+            payload: OutgoingNwkFrame {
+                frame: nwk_frame,
+                key,
+            },
             fcs: 0x0000, // It'll be replaced
         });
 

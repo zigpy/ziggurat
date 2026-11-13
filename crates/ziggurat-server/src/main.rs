@@ -891,7 +891,7 @@ impl ZigguratServer {
                     channel: frame.channel,
                     rssi: frame.rssi,
                     lqi: frame.lqi,
-                    psdu: frame.psdu,
+                    psdu: frame.psdu.to_vec(),
                 });
                 // A frame too large to encode is dropped; a closed queue ends the stream.
                 if let Some(bytes) = event.frame(request_id)

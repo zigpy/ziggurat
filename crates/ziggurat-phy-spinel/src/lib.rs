@@ -15,7 +15,7 @@ use core::time::Duration;
 
 use embedded_io_async::{Read, Write};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_ieee_802154::{FrameBytes, Ieee802154Frame};
+use ziggurat_ieee_802154::{FCS_LENGTH, FrameBytes, Ieee802154Frame};
 use ziggurat_phy::{
     ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
@@ -214,8 +214,10 @@ impl Streams {
         }
         let queue = self.rx.lock().queue.clone();
         if let Some(queue) = queue {
+            let mut psdu = frame.psdu;
+            psdu.truncate(psdu.len() - FCS_LENGTH);
             queue.push(RxFrame {
-                psdu: frame.psdu[..frame.psdu.len() - 2].to_vec(),
+                psdu,
                 channel: frame.channel,
                 rssi: frame.rssi,
                 lqi: frame.lqi,
@@ -420,7 +422,8 @@ fn tx_frame_to_spinel(frame: TxFrame, channel: u8) -> SpinelTxFrame {
     // The RCP's frame length must include the FCS.
     let mut psdu = frame.psdu;
     let fcs = Ieee802154Frame::<FrameBytes>::compute_fcs(&psdu).to_le_bytes();
-    psdu.extend_from_slice(&fcs);
+    psdu.extend_from_slice(&fcs)
+        .expect("the driver leaves room for the FCS");
 
     SpinelTxFrame {
         psdu,
