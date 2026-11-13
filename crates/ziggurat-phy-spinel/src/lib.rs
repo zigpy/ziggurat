@@ -162,7 +162,9 @@ impl Streams {
                     });
                 }
             }
-            SpinelEvent::Response(_) => unreachable!("responses stay inside the client"),
+            SpinelEvent::Response(_) | SpinelEvent::LateResponse(_) => {
+                unreachable!("responses stay inside the client")
+            }
         }
     }
 

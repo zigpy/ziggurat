@@ -8,6 +8,7 @@ extern crate std;
 pub mod client;
 
 use alloc::vec::Vec;
+use core::time::Duration;
 use crc_all::CrcAlgo;
 use num_enum::TryFromPrimitive;
 use thiserror::Error;
@@ -593,6 +594,9 @@ pub enum SpinelEvent {
     /// The response to the request with this transaction id arrived. It waits in
     /// its [`Transaction`] for the command to take it.
     Response(u8),
+    /// The response to an abandoned request arrived and was discarded. Its
+    /// transaction id is free again.
+    LateResponse(u8),
     /// An unsolicited property update.
     PropertyUpdate(SpinelFramePropValueIs),
     /// The RCP reset, or is presumed wedged. Every pending request was cancelled.
@@ -616,6 +620,10 @@ pub enum Transaction {
     Answered(SpinelFrame),
     /// An RCP reset cancelled the request.
     Cancelled,
+    /// The command left after its request was sent and before the response came. The
+    /// id stays out of use until that response arrives or `until` passes, so the
+    /// response cannot reach a later command.
+    Abandoned { until: Duration },
 }
 
 #[derive(Debug)]
@@ -775,6 +783,12 @@ impl SpinelProtocol {
             });
             self.consecutive_timeouts = 0;
             events.push(SpinelEvent::Response(tid));
+        } else if let Some(transaction @ Transaction::Abandoned { .. }) =
+            self.transactions.get_mut(usize::from(tid))
+        {
+            tracing::debug!("Discarding the response to an abandoned request: {command_id:?}");
+            *transaction = Transaction::Free;
+            events.push(SpinelEvent::LateResponse(tid));
         } else {
             tracing::warn!("Unsolicited or unmatched frame: {command_id:?} {payload:02X?}");
         }
@@ -814,7 +828,14 @@ impl SpinelProtocol {
     }
 
     /// Take a transaction id for a new request, or `None` while all seven are in use.
-    pub fn allocate_tid(&mut self) -> Option<u8> {
+    /// `now` is the time since any fixed moment.
+    pub fn allocate_tid(&mut self, now: Duration) -> Option<u8> {
+        for transaction in &mut self.transactions {
+            if matches!(transaction, Transaction::Abandoned { until } if *until <= now) {
+                *transaction = Transaction::Free;
+            }
+        }
+
         // Ids cycle from 1 to 7, so a released id is the last to be given out again.
         // A late response to a request that timed out then finds its id free
         let tid = (0..7)
@@ -863,14 +884,37 @@ impl SpinelProtocol {
         core::mem::replace(&mut self.transactions[usize::from(tid)], Transaction::Free)
     }
 
-    /// Cancel every request that has no response yet.
+    /// The command that holds `tid` left with its request sent and no response yet.
+    /// The id is kept out of use until `until`, on the clock of
+    /// [`Self::allocate_tid`]. Returns where the transaction stood.
+    pub fn abandon_request(&mut self, tid: u8, until: Duration) -> Transaction {
+        core::mem::replace(
+            &mut self.transactions[usize::from(tid)],
+            Transaction::Abandoned { until },
+        )
+    }
+
+    /// When the first abandoned transaction id comes back into use by itself.
+    pub fn next_abandoned_expiry(&self) -> Option<Duration> {
+        self.transactions
+            .iter()
+            .filter_map(|transaction| match transaction {
+                Transaction::Abandoned { until } => Some(*until),
+                _ => None,
+            })
+            .min()
+    }
+
+    /// The RCP reset: cancel every request that has no response yet. No response to
+    /// an abandoned request will come either.
     fn cancel_requests(&mut self) {
         for transaction in &mut self.transactions {
-            if matches!(
-                transaction,
-                Transaction::Queued | Transaction::AwaitingResponse
-            ) {
-                *transaction = Transaction::Cancelled;
+            match transaction {
+                Transaction::Queued | Transaction::AwaitingResponse => {
+                    *transaction = Transaction::Cancelled;
+                }
+                Transaction::Abandoned { .. } => *transaction = Transaction::Free,
+                Transaction::Free | Transaction::Answered(_) | Transaction::Cancelled => {}
             }
         }
     }
@@ -905,12 +949,14 @@ mod test {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
+    const NOW: Duration = Duration::from_secs(100);
+
     // A parsed response waits in the client until its command runs. Another request
     // made in between must not get the same transaction id.
     #[test]
     fn test_transaction_id_is_not_reused_until_its_request_is_released() {
         let mut protocol = SpinelProtocol::new();
-        let tid = protocol.allocate_tid().unwrap();
+        let tid = protocol.allocate_tid(NOW).unwrap();
         let header = SpinelHeader {
             flag: 0b10,
             network_link_id: 0,
@@ -922,7 +968,7 @@ mod test {
         assert_eq!(events, [SpinelEvent::Response(tid)]);
 
         for _ in 0..12 {
-            let other = protocol.allocate_tid().unwrap();
+            let other = protocol.allocate_tid(NOW).unwrap();
             assert_ne!(other, tid);
             protocol.release_request(other);
         }
@@ -932,7 +978,7 @@ mod test {
             Transaction::Answered(_)
         ));
         let reused = (0..7).any(|_| {
-            let other = protocol.allocate_tid().unwrap();
+            let other = protocol.allocate_tid(NOW).unwrap();
             protocol.release_request(other);
             other == tid
         });
@@ -942,14 +988,16 @@ mod test {
     #[test]
     fn test_no_transaction_id_is_given_while_all_seven_are_in_use() {
         let mut protocol = SpinelProtocol::new();
-        let mut tids: Vec<u8> = (0..7).map(|_| protocol.allocate_tid().unwrap()).collect();
+        let mut tids: Vec<u8> = (0..7)
+            .map(|_| protocol.allocate_tid(NOW).unwrap())
+            .collect();
         tids.sort_unstable();
         assert_eq!(tids, [1, 2, 3, 4, 5, 6, 7]);
 
-        assert_eq!(protocol.allocate_tid(), None);
+        assert_eq!(protocol.allocate_tid(NOW), None);
 
         protocol.release_request(4);
-        assert_eq!(protocol.allocate_tid(), Some(4));
+        assert_eq!(protocol.allocate_tid(NOW), Some(4));
     }
 
     /// A status notification that announces a reset.
@@ -969,9 +1017,9 @@ mod test {
     #[test]
     fn test_reset_cancels_the_requests_without_a_response() {
         let mut protocol = SpinelProtocol::new();
-        let queued = protocol.allocate_tid().unwrap();
-        let written = protocol.allocate_tid().unwrap();
-        let answered = protocol.allocate_tid().unwrap();
+        let queued = protocol.allocate_tid(NOW).unwrap();
+        let written = protocol.allocate_tid(NOW).unwrap();
+        let answered = protocol.allocate_tid(NOW).unwrap();
         protocol.request_written(written);
         protocol.request_written(answered);
 
@@ -996,6 +1044,67 @@ mod test {
             protocol.release_request(answered),
             Transaction::Answered(_)
         ));
+    }
+
+    /// Whether a transaction id is among the next seven given out.
+    fn is_given_out(protocol: &mut SpinelProtocol, tid: u8, now: Duration) -> bool {
+        let given: Vec<u8> = core::iter::from_fn(|| protocol.allocate_tid(now)).collect();
+        for other in &given {
+            protocol.release_request(*other);
+        }
+
+        given.contains(&tid)
+    }
+
+    // The response to an abandoned request must not reach a later command, so its
+    // transaction id is not given out until that response arrives.
+    #[test]
+    fn test_abandoned_transaction_id_returns_with_its_response() {
+        let mut protocol = SpinelProtocol::new();
+        let tid = protocol.allocate_tid(NOW).unwrap();
+        protocol.request_written(tid);
+        protocol.abandon_request(tid, NOW + Duration::from_secs(2));
+        assert!(!is_given_out(&mut protocol, tid, NOW));
+
+        let mut events = Vec::new();
+        let response = SpinelProtocol::request_frame(tid, SpinelCommandId::PropValueIs, vec![]);
+        protocol.handle_inbound_frame(response.header, response.command_id, &[], &mut events);
+
+        assert_eq!(events, [SpinelEvent::LateResponse(tid)]);
+        assert!(is_given_out(&mut protocol, tid, NOW));
+    }
+
+    #[test]
+    fn test_abandoned_transaction_id_returns_when_no_response_comes() {
+        let mut protocol = SpinelProtocol::new();
+        let tid = protocol.allocate_tid(NOW).unwrap();
+        protocol.request_written(tid);
+
+        let until = NOW + Duration::from_secs(2);
+        protocol.abandon_request(tid, until);
+        assert_eq!(protocol.next_abandoned_expiry(), Some(until));
+
+        assert!(!is_given_out(
+            &mut protocol,
+            tid,
+            until - Duration::from_millis(1)
+        ));
+        assert!(is_given_out(&mut protocol, tid, until));
+        assert_eq!(protocol.next_abandoned_expiry(), None);
+    }
+
+    #[test]
+    fn test_reset_frees_an_abandoned_transaction_id() {
+        let mut protocol = SpinelProtocol::new();
+        let tid = protocol.allocate_tid(NOW).unwrap();
+        protocol.request_written(tid);
+        protocol.abandon_request(tid, NOW + Duration::from_secs(2));
+
+        let (header, payload) = reset_notification();
+        let mut events = Vec::new();
+        protocol.handle_inbound_frame(header, SpinelCommandId::PropValueIs, &payload, &mut events);
+
+        assert!(is_given_out(&mut protocol, tid, NOW));
     }
 
     #[test]
@@ -1206,7 +1315,7 @@ mod test {
         protocol.next_tid = 3;
 
         let request = SpinelProtocol::request_frame(
-            protocol.allocate_tid().unwrap(),
+            protocol.allocate_tid(NOW).unwrap(),
             SpinelCommandId::PropValueGet,
             packed_uint21_to_bytes(SpinelPropertyId::NcpVersion as u32),
         );
