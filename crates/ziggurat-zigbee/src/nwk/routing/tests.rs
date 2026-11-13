@@ -400,9 +400,14 @@ fn test_removing_the_route_keeps_a_discovery_underway() {
     assert!(!routing.remove_route(DEVICE));
     assert!(!routing.forget_route_to(DEVICE));
 
-    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3);
+    let reply = reply(&mut routing, request_id, START);
     assert_eq!(reply.disposition, RouteReplyDisposition::Established);
     assert_eq!(routing.next_hop(DEVICE), Some(NEIGHBOR));
+}
+
+/// `DEVICE` answers our route request through `NEIGHBOR`.
+fn reply(routing: &mut Routing, request_id: RouteRequestId, now: Instant) -> RouteReplyOutcome {
+    routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3, now)
 }
 
 /// Start a discovery toward `DEVICE` and have the device answer it.
@@ -411,7 +416,7 @@ fn answered_discovery(routing: &mut Routing, attempts: u8) {
         .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, attempts)
         .unwrap();
 
-    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3);
+    let reply = reply(routing, request_id, START);
     assert_eq!(reply.disposition, RouteReplyDisposition::Established);
     assert_eq!(routing.next_hop(DEVICE), Some(NEIGHBOR));
 }
@@ -462,7 +467,7 @@ fn test_reply_with_the_highest_path_cost_answers_the_discovery() {
         .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
         .unwrap();
 
-    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, u8::MAX);
+    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, u8::MAX, START);
     assert_eq!(reply.disposition, RouteReplyDisposition::Established);
     assert_eq!(tick(&mut routing, START, false), DiscoveryTick::default());
 
@@ -499,6 +504,21 @@ fn test_forget_ends_our_discovery_toward_the_device() {
 
     assert_eq!(routing.next_discovery_lapse(OWN, START), None);
     assert!(want(&mut routing, START, 1));
+}
+
+// Nothing wakes the timer for a discovery no frame waits on, so its entry can outlive
+// its expiry. A reply must not find it.
+#[test]
+fn test_reply_to_a_lapsed_discovery_is_dropped() {
+    let mut routing = Routing::default();
+    let request_id = routing
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
+        .unwrap();
+
+    let late = reply(&mut routing, request_id, START + ROUTE_DISCOVERY_TIME);
+
+    assert_eq!(late.disposition, RouteReplyDisposition::Drop);
+    assert_eq!(routing.route_status(DEVICE), None);
 }
 
 /// One event in the life of our route discovery toward `DEVICE`.
@@ -671,8 +691,7 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                 );
             }
             Step::Reply if model.request_pending() => {
-                let reply =
-                    routing.accept_route_reply(OWN, OWN, request_id.unwrap(), DEVICE, NEIGHBOR, 3);
+                let reply = reply(&mut routing, request_id.unwrap(), now);
                 assert_eq!(
                     reply.disposition,
                     RouteReplyDisposition::Established,
@@ -682,6 +701,13 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                 // The held frames leave at the next pass, if the route is still there
                 model.status = Some(Status::Active);
                 model.replied = true;
+            }
+            // A reply that comes after its discovery lapsed is too late
+            Step::Reply if !model.live && request_id.is_some() => {
+                let reply = reply(&mut routing, request_id.unwrap(), now);
+                assert_eq!(reply.disposition, RouteReplyDisposition::Drop, "{steps:?}");
+
+                model.expire();
             }
             Step::Reply => {}
             Step::Relay => {

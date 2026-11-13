@@ -706,6 +706,7 @@ impl Routing {
     /// Process a received route reply against the discovery and route tables and
     /// decide whether to drop it, accept it for our own request, or relay it onward.
     /// `updated_path_cost` is the advertised cost plus the sender's outgoing link cost.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_route_reply(
         &mut self,
         own_address: Nwk,
@@ -714,7 +715,11 @@ impl Routing {
         responder: Nwk,
         sender: Nwk,
         updated_path_cost: u8,
+        now: Instant,
     ) -> RouteReplyOutcome {
+        // A reply to a discovery that has lapsed finds no entry and is dropped
+        self.expire_discoveries(now);
+
         let Some(discovery_entry) = self.discovery_table.get_mut(&(originator, request_id)) else {
             tracing::debug!("Route reply for unknown route discovery, ignoring");
             return RouteReplyOutcome {

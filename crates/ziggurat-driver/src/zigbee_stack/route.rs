@@ -35,6 +35,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // responder seeds the first hop and each relay adds the link it forwards across.
         let updated_path_cost = route_reply_cmd.path_cost;
 
+        let now = self.core_now();
         let outcome = self.core().nib.routing.accept_route_reply(
             self.state.network_address,
             route_reply_cmd.originator_nwk,
@@ -42,6 +43,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             route_reply_cmd.responder_nwk,
             nwk_frame.nwk_header.source,
             updated_path_cost,
+            now,
         );
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
