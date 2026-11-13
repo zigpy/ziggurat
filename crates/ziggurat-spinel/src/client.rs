@@ -287,6 +287,18 @@ impl<R: Runtime> Drop for HeldTransaction<'_, R> {
     }
 }
 
+/// Closes the link when [`SpinelClient::run`] ends, also when its future is dropped.
+/// The write loop may have taken a frame it will now never write, and its command
+/// must not wait for it.
+struct CloseOnDrop<'a, R: Runtime>(&'a SpinelClient<R>);
+
+impl<R: Runtime> Drop for CloseOnDrop<'_, R> {
+    fn drop(&mut self) {
+        self.0.state.lock().closed = true;
+        self.0.wake_all_waiters();
+    }
+}
+
 /// Receives the unsolicited events: property updates and resets.
 pub type EventHandler = Box<dyn Fn(SpinelEvent) + Send + Sync>;
 
@@ -341,20 +353,14 @@ impl<R: Runtime> SpinelClient<R> {
             state.closed = false;
             state.writing = None;
         }
+        let _closing = CloseOnDrop(self);
 
-        let error = {
-            let read = pin!(self.read_loop(reader));
-            let write = pin!(self.write_loop(writer));
+        let read = pin!(self.read_loop(reader));
+        let write = pin!(self.write_loop(writer));
 
-            match select(read, write).await {
-                Either::Left((error, _)) | Either::Right((error, _)) => error,
-            }
-        };
-
-        self.state.lock().closed = true;
-        self.wake_all_waiters();
-
-        error
+        match select(read, write).await {
+            Either::Left((error, _)) | Either::Right((error, _)) => error,
+        }
     }
 
     // `drain` keeps the event buffers' capacity across reads
