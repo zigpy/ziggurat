@@ -370,7 +370,12 @@ tunables! {
     /// the radio. It is `gp_tx_offset` minus the time the trigger takes to reach the
     /// stack and the time the reply takes to reach the radio. A reply later than this
     /// misses its window and waits for the next trigger.
-    gp_tx_handoff_window: Duration = Duration::from_millis(16),
+    //
+    // For an MG24 with OpenThread RCP at 460800 baud, latency is:
+    //   4.8 ms / 10.2ms / 13.6ms / 33ms (p50 / p99 / p99.9 / max)
+    // For embedded Ziggurat:
+    //   2.1ms / 2.2ms / 4.8ms (p50 / p99 / max)
+    gp_tx_handoff_window: Duration = Duration::from_millis(11),
 
     /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel
     /// before declaring a transmit failed.
