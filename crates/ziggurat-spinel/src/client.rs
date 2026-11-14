@@ -215,6 +215,8 @@ pub enum SpinelError {
     TransportClosed,
     #[error("the spinel transport stopped accepting bytes")]
     WriteStalled,
+    #[error("the RCP stopped answering")]
+    Unresponsive,
     #[error("timeout")]
     Timeout,
     #[error("spinel U21 parsing error")]
@@ -251,10 +253,19 @@ struct State {
     outbound: VecDeque<Outbound>,
     /// The transaction id of the request the write loop is writing right now.
     writing: Option<u8>,
-    /// [`SpinelClient::run`] was called. It runs once per client.
-    started: bool,
-    /// [`SpinelClient::run`] returned: nothing is read or written any more.
+    /// [`SpinelClient::run`] is running. It runs one link at a time.
+    running: bool,
+    /// How many times [`SpinelClient::run`] was called.
+    runs: u32,
+    /// [`SpinelClient::run`] returned and was not called again: nothing is read or
+    /// written.
     closed: bool,
+    /// Resets forwarded to the event handler, announced or not.
+    resets: u64,
+    /// End the link rather than forward a reset once requests keep timing out.
+    close_when_unresponsive: bool,
+    /// The link timed out too often and is to be closed.
+    unresponsive: bool,
 }
 
 /// A command's hold on its transaction id. The id and a frame the write loop has not
@@ -322,7 +333,11 @@ struct CloseOnDrop<'a, R: Runtime>(&'a SpinelClient<R>);
 
 impl<R: Runtime> Drop for CloseOnDrop<'_, R> {
     fn drop(&mut self) {
-        self.0.state.lock().closed = true;
+        {
+            let mut state = self.0.state.lock();
+            state.closed = true;
+            state.running = false;
+        }
         self.0.wake_all_waiters();
     }
 }
@@ -342,6 +357,8 @@ pub struct SpinelClient<R: Runtime> {
     /// the first of them waits on `tid_released`.
     tid_queue: AsyncMutex<()>,
     tid_released: Notify,
+    /// Woken when the link timed out too often and is to be closed.
+    link_unresponsive: Notify,
     on_event: EventHandler,
     /// Functional ownership of the radio (scan, reset recovery, channel retune), taken via
     /// [`Self::lock_radio`].
@@ -357,13 +374,18 @@ impl<R: Runtime> SpinelClient<R> {
                 protocol: SpinelProtocol::new(),
                 outbound: VecDeque::new(),
                 writing: None,
-                started: false,
+                running: false,
+                runs: 0,
                 closed: false,
+                resets: 0,
+                close_when_unresponsive: false,
+                unresponsive: false,
             }),
             transaction_changed: core::array::from_fn(|_| Notify::new()),
             outbound_ready: Notify::new(),
             tid_queue: AsyncMutex::new(()),
             tid_released: Notify::new(),
+            link_unresponsive: Notify::new(),
             on_event,
             exclusive_lock: AsyncMutex::new(()),
             epoch: R::now(),
@@ -375,24 +397,81 @@ impl<R: Runtime> SpinelClient<R> {
     }
 
     /// Drive the link: parse inbound bytes and write queued frames. Returns only when
-    /// the transport fails. Commands that wait then fail with `TransportClosed`.
+    /// the transport fails, or when the RCP stopped answering and
+    /// [`Self::set_close_when_unresponsive`] is on. Commands that wait then fail with
+    /// `TransportClosed`.
     ///
-    /// Runs once per client. A link that comes back may lead to another radio, so it
-    /// needs a new client.
+    /// Can be called again once it returned, with a new link to the same or another
+    /// radio. That run first resets the RCP; the reset is forwarded like any other, so
+    /// the radio is reconfigured. If the RCP does not announce it, a `ResetUnknown` is
+    /// forwarded after [`TIMEOUT`].
     pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> SpinelError {
-        {
+        let relinked = {
             let mut state = self.state.lock();
-            assert!(!state.started, "the Spinel link runs once per client");
-            state.started = true;
-        }
+            assert!(!state.running, "the Spinel link runs one at a time");
+            state.running = true;
+            state.closed = false;
+            state.unresponsive = false;
+            state.runs += 1;
+
+            let relinked = state.runs > 1;
+            if relinked {
+                state.protocol.link_restarted();
+                state
+                    .outbound
+                    .push_front(Outbound::Reset(SpinelResetReason::Stack));
+            }
+            relinked
+        };
         let _closing = CloseOnDrop(self);
 
         let read = pin!(self.read_loop(reader));
         let write = pin!(self.write_loop(writer));
+        let watch = pin!(self.watch_link(relinked));
 
-        match select(read, write).await {
-            Either::Left((error, _)) | Either::Right((error, _)) => error,
+        match select(select(read, write), watch).await {
+            Either::Left((Either::Left((error, _)) | Either::Right((error, _)), _))
+            | Either::Right((error, _)) => error,
         }
+    }
+
+    /// Watch the link from the side: presume a reset if a new link brings no reset
+    /// announcement, and end the link once it is unresponsive.
+    async fn watch_link(&self, relinked: bool) -> SpinelError {
+        if relinked {
+            let seen = self.state.lock().resets;
+            R::sleep(TIMEOUT).await;
+
+            let presumed = {
+                let mut state = self.state.lock();
+                (state.resets == seen).then(|| state.protocol.presume_reset())
+            };
+            if let Some(reset) = presumed {
+                tracing::warn!("The RCP announced no reset on the new link, presuming one");
+                self.forward_reset(reset);
+            }
+        }
+
+        loop {
+            if self.state.lock().unresponsive {
+                return SpinelError::Unresponsive;
+            }
+            self.link_unresponsive.notified().await;
+        }
+    }
+
+    /// End the link, rather than forward a `ResponseTimeout` reset, once requests keep
+    /// timing out. For links that can die without an error: a TCP peer that vanished,
+    /// or a serial-to-TCP bridge whose serial port went away. Off by default.
+    pub fn set_close_when_unresponsive(&self, close: bool) {
+        self.state.lock().close_when_unresponsive = close;
+    }
+
+    /// Hand a reset to the event handler. The protocol already cancelled the requests.
+    fn forward_reset(&self, reset: SpinelEvent) {
+        self.state.lock().resets += 1;
+        self.wake_all_waiters();
+        (self.on_event)(reset, &[]);
     }
 
     async fn read_loop<Rd: Read>(&self, mut reader: Rd) -> SpinelError {
@@ -421,10 +500,7 @@ impl<R: Runtime> SpinelClient<R> {
                         self.transaction_changed[usize::from(tid)].notify_one();
                     }
                     SpinelEvent::LateResponse(_) => self.tid_released.notify_one(),
-                    SpinelEvent::Reset(_) => {
-                        self.wake_all_waiters();
-                        (self.on_event)(event, &[]);
-                    }
+                    SpinelEvent::Reset(_) => self.forward_reset(event),
                     SpinelEvent::PropertyUpdate(_) => (self.on_event)(event, &update),
                 }
             }
@@ -668,11 +744,28 @@ impl<R: Runtime> SpinelClient<R> {
 
     /// Count a request that timed out, and start reset recovery once enough have.
     fn request_timed_out(&self) -> SpinelError {
-        let reset = self.state.lock().protocol.request_timed_out();
+        let reset = {
+            let mut state = self.state.lock();
+            let reset = state.protocol.request_timed_out();
+            if reset.is_some() && state.close_when_unresponsive {
+                state.unresponsive = true;
+                None
+            } else {
+                reset
+            }
+        };
 
-        if let Some(reset) = reset {
-            self.wake_all_waiters();
-            (self.on_event)(reset, &[]);
+        match reset {
+            Some(reset) => {
+                tracing::error!("Triggering reset recovery");
+                self.forward_reset(reset);
+            }
+            None if self.state.lock().unresponsive => {
+                tracing::error!("Closing the RCP link");
+                self.wake_all_waiters();
+                self.link_unresponsive.notify_one();
+            }
+            None => {}
         }
 
         SpinelError::Timeout
@@ -838,5 +931,264 @@ impl<R: Runtime> ExclusiveRadio<'_, R> {
         tx_frame: &SpinelTxFrame,
     ) -> Result<SpinelStatus, SpinelError> {
         self.client.transmit_frame_inner(tx_frame).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{HdlcLiteFrame, SpinelFrame, packed_uint21_to_bytes};
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use embedded_io_adapters::tokio_1::FromTokio;
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
+    use tokio::task::JoinHandle;
+    use ziggurat_runtime::runtime::TokioRuntime;
+
+    type Client = SpinelClient<TokioRuntime>;
+    type Link = (
+        FromTokio<ReadHalf<DuplexStream>>,
+        FromTokio<WriteHalf<DuplexStream>>,
+    );
+
+    /// The far end of a link, standing in for the RCP.
+    struct Rcp {
+        io: DuplexStream,
+        parser: SpinelProtocol,
+    }
+
+    impl Rcp {
+        /// The frames the client wrote, waiting up to `wait` for the first.
+        async fn frames(&mut self, wait: Duration) -> Vec<SpinelFrame> {
+            let mut buffer = [0u8; 512];
+            match tokio::time::timeout(wait, self.io.read(&mut buffer)).await {
+                Ok(Ok(n)) => self.parser.parse_frames_from_bytes(&buffer[..n]),
+                _ => Vec::new(),
+            }
+        }
+
+        async fn send(&mut self, tid: u8, command_id: SpinelCommandId, payload: Vec<u8>) {
+            let frame = SpinelFrame {
+                header: SpinelHeader {
+                    flag: 0b10,
+                    network_link_id: 0,
+                    transaction_id: tid,
+                },
+                command_id,
+                payload,
+            };
+            let bytes = HdlcLiteFrame {
+                data: frame.to_bytes(),
+            }
+            .to_bytes_with_flags();
+            self.io.write_all(&bytes).await.unwrap();
+        }
+
+        async fn announce_reset(&mut self) {
+            let mut payload = packed_uint21_to_bytes(SpinelPropertyId::LastStatus as u32);
+            payload.extend(packed_uint21_to_bytes(SpinelStatus::ResetSoftware as u32));
+            self.send(0, SpinelCommandId::PropValueIs, payload).await;
+        }
+
+        /// Answer the next request, a property get, with `value`.
+        async fn answer_get(&mut self, value: &[u8]) {
+            let frames = self.frames(TIMEOUT).await;
+            let request = frames
+                .iter()
+                .find(|frame| frame.command_id == SpinelCommandId::PropValueGet)
+                .expect("a property get");
+            let mut payload = request.payload.clone();
+            payload.extend_from_slice(value);
+            self.send(
+                request.header.transaction_id,
+                SpinelCommandId::PropValueIs,
+                payload,
+            )
+            .await;
+        }
+    }
+
+    fn link() -> (Link, Rcp) {
+        let (client_side, rcp_side) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(client_side);
+        let rcp = Rcp {
+            io: rcp_side,
+            parser: SpinelProtocol::new(),
+        };
+        ((FromTokio::new(reader), FromTokio::new(writer)), rcp)
+    }
+
+    fn client() -> (Arc<Client>, Arc<StdMutex<Vec<SpinelEvent>>>) {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let client = Client::new(Box::new(move |event, _| {
+            sink.lock().unwrap().push(event);
+        }));
+        (Arc::new(client), events)
+    }
+
+    fn run(client: &Arc<Client>, (reader, writer): Link) -> JoinHandle<SpinelError> {
+        let client = Arc::clone(client);
+        tokio::spawn(async move { client.run(reader, writer).await })
+    }
+
+    /// Run the client on a first link and lose it, then run it on a second one.
+    async fn relinked(client: &Arc<Client>) -> (JoinHandle<SpinelError>, Rcp) {
+        let (first, first_rcp) = link();
+        let first_run = run(client, first);
+        drop(first_rcp);
+        assert!(matches!(
+            first_run.await.unwrap(),
+            SpinelError::TransportClosed
+        ));
+
+        let (second, second_rcp) = link();
+        (run(client, second), second_rcp)
+    }
+
+    fn resets(events: &StdMutex<Vec<SpinelEvent>>) -> Vec<SpinelStatus> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                SpinelEvent::Reset(status) => Some(*status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn is_stack_reset(frame: &SpinelFrame) -> bool {
+        frame.command_id == SpinelCommandId::Reset
+            && frame.payload == [SpinelResetReason::Stack as u8]
+    }
+
+    /// Get a property the RCP never answers: two timeouts, as a get is retried once.
+    async fn get_unanswered(client: &Client) {
+        assert!(matches!(
+            client.prop_value_get(SpinelPropertyId::NcpVersion).await,
+            Err(SpinelError::Timeout)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_later_run_resets_the_rcp_over_the_new_link() {
+        let (client, _events) = client();
+        let (_run, mut rcp) = relinked(&client).await;
+
+        let frames = rcp.frames(TIMEOUT).await;
+        assert!(frames.first().is_some_and(is_stack_reset), "{frames:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_the_first_run_sends_no_reset() {
+        let (client, events) = client();
+        let (first, mut rcp) = link();
+        let _run = run(&client, first);
+
+        assert_eq!(rcp.frames(TIMEOUT * 2).await, vec![]);
+        assert_eq!(resets(&events), vec![]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_commands_get_responses_over_the_new_link() {
+        let (client, events) = client();
+        let (_run, mut rcp) = relinked(&client).await;
+        rcp.frames(TIMEOUT).await;
+        rcp.announce_reset().await;
+        // A command made before the reset arrives is cancelled by it
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(resets(&events), vec![SpinelStatus::ResetSoftware]);
+
+        let get = client.prop_value_get(SpinelPropertyId::NcpVersion);
+        let (value, ()) = tokio::join!(get, rcp.answer_get(b"OPENTHREAD"));
+        assert_eq!(value.unwrap(), b"OPENTHREAD");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_reset_announced_after_a_later_run_is_forwarded_once() {
+        let (client, events) = client();
+        let (_run, mut rcp) = relinked(&client).await;
+        rcp.frames(TIMEOUT).await;
+        rcp.announce_reset().await;
+
+        tokio::time::sleep(TIMEOUT * 2).await;
+        assert_eq!(resets(&events), vec![SpinelStatus::ResetSoftware]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_silent_rcp_after_a_later_run_gets_a_synthesized_reset() {
+        let (client, events) = client();
+        let (_run, mut rcp) = relinked(&client).await;
+        rcp.frames(TIMEOUT).await;
+
+        tokio::time::sleep(TIMEOUT - Duration::from_millis(100)).await;
+        assert_eq!(resets(&events), vec![]);
+        tokio::time::sleep(TIMEOUT).await;
+        assert_eq!(resets(&events), vec![SpinelStatus::ResetUnknown]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_commands_fail_while_no_run_is_active() {
+        let (client, _events) = client();
+        let (first, rcp) = link();
+        let first_run = run(&client, first);
+        drop(rcp);
+        first_run.await.unwrap();
+
+        assert!(matches!(
+            client.prop_value_get(SpinelPropertyId::NcpVersion).await,
+            Err(SpinelError::TransportClosed)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_an_unresponsive_link_is_closed_when_enabled() {
+        let (client, events) = client();
+        client.set_close_when_unresponsive(true);
+        let (first, _rcp) = link();
+        let first_run = run(&client, first);
+
+        get_unanswered(&client).await;
+        get_unanswered(&client).await;
+
+        assert!(matches!(
+            first_run.await.unwrap(),
+            SpinelError::Unresponsive
+        ));
+        assert_eq!(resets(&events), vec![]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_an_earlier_unresponsive_link_does_not_end_the_next_run() {
+        let (client, _events) = client();
+        client.set_close_when_unresponsive(true);
+        let (first, _first_rcp) = link();
+        let first_run = run(&client, first);
+        get_unanswered(&client).await;
+        get_unanswered(&client).await;
+        first_run.await.unwrap();
+
+        let (second, mut rcp) = link();
+        let second_run = run(&client, second);
+        rcp.frames(TIMEOUT).await;
+        rcp.announce_reset().await;
+
+        tokio::time::sleep(TIMEOUT * 4).await;
+        assert!(!second_run.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_an_unresponsive_link_gets_a_reset_by_default() {
+        let (client, events) = client();
+        let (first, _rcp) = link();
+        let first_run = run(&client, first);
+
+        get_unanswered(&client).await;
+        get_unanswered(&client).await;
+
+        assert_eq!(resets(&events), vec![SpinelStatus::ResponseTimeout]);
+        assert!(!first_run.is_finished());
     }
 }
