@@ -7,14 +7,14 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154FrameVersion,
 };
 use abstract_bits::{AbstractBits, BitReader};
-use ziggurat_ieee_802154::types::{Nwk, PanId};
+use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_ieee_802154::{
     FCS_LENGTH, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
 };
-use ziggurat_phy::{RadioPhy, TxFrame, TxResult};
+use ziggurat_phy::{ExclusiveRadio, RadioPhy, TxAt, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use ziggurat_zigbee::constants::GP_PROTOCOL_VERSION;
-use ziggurat_zigbee::gp::GpNwkFrameControl;
+use ziggurat_zigbee::gp::{GpNwkFrameControl, GpSecurityLevel, GpdfHeader};
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_ALL_ROUTERS_AND_COORDINATOR, EncryptedNwkFrame, Nsdu, NwkFrame, NwkPayload,
     NwkSecurityHeaderKeyId, NwkSecurityLevel,
@@ -23,8 +23,8 @@ use ziggurat_zigbee::nwk::frame::{
 use super::TrafficClass;
 
 use super::{
-    DeliveryError, Frame, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, Schedule, TxPolicy,
-    TxPriority, ZigbeeNotification, ZigbeeStack,
+    DeliveryError, Frame, GpdfTrigger, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, Schedule,
+    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
@@ -248,6 +248,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         data_frame: &Ieee802154DataFrame<&[u8]>,
         lqi: u8,
         rssi: i8,
+        timestamp_us: u64,
     ) -> Option<NwkFrame> {
         // 802.15.4 encrypted frames can't be Zigbee NWK
         if data_frame.header.frame_control.security_enabled {
@@ -261,7 +262,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if GpNwkFrameControl::read_abstract_bits(&mut BitReader::from(data_frame.payload))
             .is_ok_and(|control| control.protocol_version == GP_PROTOCOL_VERSION)
         {
-            self.process_gpdf(data_frame, pan_id, lqi, rssi);
+            self.process_gpdf(data_frame, pan_id, lqi, rssi, timestamp_us);
             return None;
         }
 
@@ -403,6 +404,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         pan_id: PanId,
         lqi: u8,
         rssi: i8,
+        timestamp_us: u64,
     ) {
         // A GPD is not part of the PAN and usually sends to the broadcast PAN ID
         // (GP A.1.4.1.1)
@@ -425,6 +427,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             _ => None,
         };
 
+        self.answer_gpdf(data_frame.payload, source_ieee, timestamp_us);
+
         self.push_notification(ZigbeeNotification::ReceivedGpdf {
             mac_sequence_number,
             source_ieee,
@@ -434,26 +438,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         });
     }
 
-    /// Assign the frame its MAC sequence number and hand it to the radio.
-    pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
+    fn assign_mac_sequence_number<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
         frame: &mut Ieee802154Frame<Payload>,
-    ) -> Result<(), DeliveryError> {
-        if !frame.header().frame_control.sequence_number_suppression {
-            // Hold the lock for the shortest time possible
-            let ieee802154_sequence_number = {
-                let mut core = self.core();
-                core.mac.ieee802154_sequence_number =
-                    core.mac.ieee802154_sequence_number.wrapping_add(1);
-
-                core.mac.ieee802154_sequence_number
-            };
-
-            frame.header_mut().sequence_number = Some(ieee802154_sequence_number);
+    ) {
+        if frame.header().frame_control.sequence_number_suppression {
+            return;
         }
 
-        tracing::trace!("Sending 802.15.4 frame: {frame:?}");
+        // Hold the lock for the shortest time possible
+        let ieee802154_sequence_number = {
+            let mut core = self.core();
+            core.mac.ieee802154_sequence_number =
+                core.mac.ieee802154_sequence_number.wrapping_add(1);
 
+            core.mac.ieee802154_sequence_number
+        };
+
+        frame.header_mut().sequence_number = Some(ieee802154_sequence_number);
+    }
+
+    fn serialize_psdu<Payload: ziggurat_ieee_802154::FramePayload>(
+        frame: &Ieee802154Frame<Payload>,
+    ) -> Result<Psdu, DeliveryError> {
         let mut psdu = Psdu::new();
         frame
             .serialize(&mut FrameWriter::new(
@@ -461,6 +468,97 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 MAX_PHY_PACKET_SIZE - FCS_LENGTH,
             ))
             .map_err(|TooLong| DeliveryError::FrameTooLong)?;
+
+        Ok(psdu)
+    }
+
+    /// Let the GPDF held for a GPD go out if the GPD listens after this GPDF. The reply
+    /// is unprotected, which a GPD only accepts after an unprotected GPDF (GP A.1.6.4.6),
+    /// so a protected one is not answered.
+    fn answer_gpdf(&self, stub: &[u8], source_ieee: Option<Eui64>, rx_timestamp_us: u64) {
+        let Ok((header, _)) = GpdfHeader::deserialize(stub, source_ieee) else {
+            return;
+        };
+
+        if !header.rx_after_tx() {
+            return;
+        }
+
+        let now = self.core_now();
+        let trigger = GpdfTrigger {
+            rx_timestamp_us,
+            send_by: now + self.tunables.gp_tx_handoff_window(),
+        };
+
+        let mut core = self.core();
+        core.sends
+            .gpdf_triggered(header.target(), trigger, now, |_| {
+                Ok(header.security_level() == GpSecurityLevel::None)
+            });
+        self.commit_sends(core);
+    }
+
+    /// Transmit a GPDF at its set time after the GPDF it answers, without CSMA, retries,
+    /// or an ACK (GP A.1.5.2.2).
+    pub(super) async fn transmit_gpdf(
+        &self,
+        frame: &mut Ieee802154Frame,
+        channel: u8,
+        trigger: GpdfTrigger,
+    ) -> Result<(), DeliveryError> {
+        self.assign_mac_sequence_number(frame);
+
+        tracing::trace!("Sending GPDF: {frame:?}");
+
+        let psdu = Self::serialize_psdu(frame)?;
+
+        if self.state.hack_disable_tx {
+            tracing::debug!("Not transmitting the GPDF, TX is disabled");
+            return Ok(());
+        }
+
+        // The radio sends a late timed frame at once, so check the window only once
+        // nothing else can hold the radio, such as a scan.
+        let radio = self.radio.lock().await;
+        if self.core_now() >= trigger.send_by {
+            return Err(DeliveryError::GpdfWindowMissed);
+        }
+
+        // TODO: the sender idles ~20 ms here; hand the GPDF over shortly before its
+        // start instead (OT would replace a waiting timed frame)
+        let result = radio
+            .transmit(TxFrame {
+                psdu,
+                channel: Some(channel),
+                csma_ca: false,
+                max_frame_retries: 0,
+                max_csma_backoffs: 0,
+                security_processed: true,
+                tx_at: Some(TxAt {
+                    base_us: trigger.rx_timestamp_us,
+                    delay_us: self.tunables.gp_tx_offset().as_micros() as u32,
+                }),
+            })
+            .await?;
+
+        match result {
+            // No ACK is requested
+            TxResult::Acked | TxResult::NoAck => Ok(()),
+            TxResult::ChannelAccessFailure => Err(DeliveryError::CcaFailure),
+            other => Err(DeliveryError::TransmitFailed(other)),
+        }
+    }
+
+    /// Assign the frame its MAC sequence number and hand it to the radio.
+    pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
+        &self,
+        frame: &mut Ieee802154Frame<Payload>,
+    ) -> Result<(), DeliveryError> {
+        self.assign_mac_sequence_number(frame);
+
+        tracing::trace!("Sending 802.15.4 frame: {frame:?}");
+
+        let psdu = Self::serialize_psdu(frame)?;
 
         tracing::trace!("Sending 802.15.4 frame bytes: {:02X?}", psdu.as_slice());
 
@@ -479,6 +577,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 max_frame_retries: self.tunables.mac_max_frame_retries(),
                 max_csma_backoffs: self.tunables.mac_max_csma_backoffs(),
                 security_processed: true,
+                tx_at: None,
             })
             .await?;
 

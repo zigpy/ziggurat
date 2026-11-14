@@ -430,18 +430,33 @@ fn tx_frame_to_spinel(frame: TxFrame, channel: u8) -> SpinelTxFrame {
     psdu.extend_from_slice(&fcs)
         .expect("the driver leaves room for the FCS");
 
+    let tx_channel = frame.channel.unwrap_or(channel);
+
+    // The fields are positional, so the receive channel needs the delay fields before
+    // it. OT receives on the transmit channel after an off-channel frame unless told
+    // otherwise; zero delay fields mean an untimed transmit.
+    let (tx_delay, tx_delay_base_time, rx_channel_after_tx) = match frame.tx_at {
+        Some(tx_at) => (
+            Some(tx_at.delay_us),
+            Some(tx_at.base_us as u32),
+            Some(channel),
+        ),
+        None if tx_channel != channel => (Some(0), Some(0), Some(channel)),
+        None => (None, None, None),
+    };
+
     SpinelTxFrame {
         psdu,
-        channel: Some(frame.channel.unwrap_or(channel)),
+        channel: Some(tx_channel),
         max_csma_backoffs: Some(frame.max_csma_backoffs),
         max_frame_retries: Some(frame.max_frame_retries),
         enable_csma_ca: Some(frame.csma_ca),
         is_header_updated: Some(true),
         is_a_retransmit: Some(false),
         is_security_processed: Some(frame.security_processed),
-        tx_delay: None,
-        tx_delay_base_time: None,
-        rx_channel_after_tx: None,
+        tx_delay,
+        tx_delay_base_time,
+        rx_channel_after_tx,
         tx_power: None,
     }
 }

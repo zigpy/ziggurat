@@ -1,6 +1,6 @@
 //! The send tables: every outgoing frame the stack holds, from admission to its verdict.
 //!
-//! A send is one record in exactly one of three tables, and its frame lives only in
+//! A send is one record in exactly one of four tables, and its frame lives only in
 //! that record, or on loan to the radio while it is transmitted. Once the record is
 //! settled (removed) there is nothing left to transmit.
 //!
@@ -12,8 +12,10 @@
 //!   on, and the sends held for it fail.
 //! - [`Broadcasts`](broadcasts::Broadcasts): a frame sent once, or rebroadcast on a
 //!   schedule until its passive-ack quorum is heard.
+//! - [`Gpdfs`](gpdfs::Gpdfs): a Green Power frame held until its GPD listens, then sent
+//!   at a set time after the GPDF that said so.
 //!
-//! [`Sends`] fronts the three with one id space: the sender dequeues the highest
+//! [`Sends`] fronts the four with one id space: the sender dequeues the highest
 //! priority ready frame across them, and a cancel or a transmit report is routed to the
 //! table holding the id.
 //!
@@ -27,6 +29,7 @@
 //! deadline fails with the error its state implies.
 
 mod broadcasts;
+mod gpdfs;
 #[cfg(test)]
 mod tests;
 mod unicasts;
@@ -43,12 +46,15 @@ use crate::Instant;
 use crate::aps::frame::ApsAckFrame;
 use crate::constants::Tunables;
 use crate::flat_map::{FlatMap, FlatSet};
+use crate::gp::GpdfTarget;
 
 pub use broadcasts::{Broadcast, Schedule};
+pub use gpdfs::{Gpdf, GpdfTrigger};
 pub use unicasts::Unicast;
 pub use unrouted::UnroutedUnicast;
 
 use broadcasts::Broadcasts;
+use gpdfs::Gpdfs;
 use unicasts::Unicasts;
 use unrouted::UnroutedUnicasts;
 
@@ -72,6 +78,9 @@ pub enum TxPriority {
     UserHigh,
     UserCritical,
     StackCritical,
+    /// A frame that misses its deadline if it waits behind any other, such as a GPDF
+    /// timed to its GPD's brief receive window.
+    Realtime,
 }
 
 impl TxPriority {
@@ -125,6 +134,10 @@ pub enum SendFailure {
     },
     RouteDiscoveryTimeout,
     Cancelled,
+    /// The GPD never listened before the GPDF expired.
+    GpdfExpired,
+    /// A newer GPDF for the same GPD took its place.
+    GpdfReplaced,
 }
 
 /// Why the sender failed to transmit a lent frame.
@@ -156,6 +169,8 @@ pub enum Transmit {
         frame_pending: bool,
     },
     Broadcast,
+    /// A GPDF timed from its trigger, without CSMA, retries, or an ACK.
+    Gpdf(GpdfTrigger),
 }
 
 /// A send on loan to the radio.
@@ -227,7 +242,7 @@ impl SrcMatchTable {
     }
 }
 
-/// The three send tables behind one id space.
+/// The four send tables behind one id space.
 ///
 /// Mutations queue the actions they cause instead of returning them. The driver takes
 /// them with [`Sends::next_action`] after every mutation, while it still holds the
@@ -238,6 +253,7 @@ pub struct Sends<F: SendFrame, E> {
     unicasts: Unicasts<F, E>,
     unrouted_unicasts: UnroutedUnicasts<F, E>,
     broadcasts: Broadcasts<F, E>,
+    gpdfs: Gpdfs<F, E>,
     /// The broadcast carrying the latest route request toward a destination, while it
     /// still has copies to send. Kept to stop those copies when the discovery is
     /// replaced or abandoned.
@@ -252,6 +268,7 @@ impl<F: SendFrame, E> Default for Sends<F, E> {
             unicasts: Unicasts::default(),
             unrouted_unicasts: UnroutedUnicasts::default(),
             broadcasts: Broadcasts::default(),
+            gpdfs: Gpdfs::default(),
             route_requests: FlatMap::new(),
             outbox: VecDeque::new(),
         }
@@ -323,29 +340,61 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         id
     }
 
+    /// Hold a GPDF until its GPD listens, replacing the one still held for it.
+    pub fn enqueue_gpdf(&mut self, gpdf: Gpdf<F>, now: Instant) -> SendId {
+        let id = self.next_id();
+        self.gpdfs.enqueue(id, gpdf, now, &mut self.outbox);
+        id
+    }
+
+    /// A GPDF after which `target` listens. `accept` decides on the frame held for it:
+    /// `Ok(true)` queues it to answer `trigger`, `Ok(false)` ignores the trigger, and an
+    /// error fails the send.
+    pub fn gpdf_triggered(
+        &mut self,
+        target: GpdfTarget,
+        trigger: GpdfTrigger,
+        now: Instant,
+        accept: impl FnOnce(&F) -> Result<bool, E>,
+    ) {
+        self.gpdfs
+            .triggered(target, trigger, now, accept, &mut self.outbox);
+    }
+
     /// Lend the highest-priority queued frame (oldest first within a priority) to the
     /// sender, which must hand it back through `transmitted`. A frame past its deadline
     /// is never lent: once in the radio its deadline no longer applies.
     pub fn dequeue(&mut self, now: Instant) -> Option<InFlight<F>> {
+        #[derive(Clone, Copy)]
+        enum Table {
+            Unicasts,
+            Broadcasts,
+            Gpdfs,
+        }
+
         let unicast = self
             .unicasts
             .best_queued(now)
-            .map(|(id, priority)| (id, priority, true));
+            .map(|(id, priority)| (id, priority, Table::Unicasts));
         let broadcast = self
             .broadcasts
             .best_queued(now)
-            .map(|(id, priority)| (id, priority, false));
+            .map(|(id, priority)| (id, priority, Table::Broadcasts));
+        let gpdf = self
+            .gpdfs
+            .best_queued(now)
+            .map(|(id, priority)| (id, priority, Table::Gpdfs));
 
         // Higher priority first; between equal priorities the older send (lower id)
-        let (id, _, from_unicasts) = [unicast, broadcast]
+        let (id, _, table) = [unicast, broadcast, gpdf]
             .into_iter()
             .flatten()
             .max_by_key(|(id, priority, _)| (*priority, Reverse(*id)))?;
 
-        Some(if from_unicasts {
-            self.unicasts.dequeue(id)
-        } else {
-            self.broadcasts.dequeue(id)
+        Some(match table {
+            Table::Unicasts => self.unicasts.dequeue(id),
+            Table::Broadcasts => self.broadcasts.dequeue(id),
+            Table::Gpdfs => self.gpdfs.dequeue(id),
         })
     }
 
@@ -367,7 +416,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
             transmit,
         } = in_flight;
 
-        // A MAC unicast only ever comes from the unicasts, a broadcast from the broadcasts
+        // Each kind of transmit only ever comes from its own table
         match transmit {
             Transmit::Unicast { .. } => {
                 self.unicasts
@@ -382,6 +431,10 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
                     passive_ack_interval,
                     &mut self.outbox,
                 );
+            }
+            Transmit::Gpdf(_) => {
+                self.gpdfs
+                    .transmitted(id, frame, result, now, &mut self.outbox);
             }
         }
     }
@@ -466,6 +519,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         self.unicasts.abandon(&mut self.outbox);
         self.unrouted_unicasts.abandon(&mut self.outbox);
         self.broadcasts.abandon(&mut self.outbox);
+        self.gpdfs.abandon(&mut self.outbox);
         self.route_requests.clear();
     }
 
@@ -478,6 +532,8 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         } else if self.unrouted_unicasts.contains(id) {
             self.unrouted_unicasts.cancel(id, &mut self.outbox);
             true
+        } else if self.gpdfs.contains(id) {
+            self.gpdfs.cancel(id, &mut self.outbox)
         } else {
             self.cancel_broadcast(id)
         }
@@ -496,7 +552,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         true
     }
 
-    /// The timer pass over the three tables.
+    /// The timer pass over the four tables.
     pub fn tick(
         &mut self,
         now: Instant,
@@ -511,6 +567,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
 
         self.unicasts.tick(now, &mut self.outbox);
         self.broadcasts.tick(now, &mut self.outbox);
+        self.gpdfs.tick(now, &mut self.outbox);
 
         // A route request with no copy left to send needs no stopping
         self.route_requests
@@ -523,6 +580,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
             self.unicasts.next_wake(),
             self.unrouted_unicasts.next_wake(),
             self.broadcasts.next_wake(),
+            self.gpdfs.next_wake(),
         ]
         .into_iter()
         .flatten()

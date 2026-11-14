@@ -361,6 +361,17 @@ tunables! {
     /// persistence.
     handoff_timeout: Duration = Duration::from_secs(30),
 
+    /// When a GPDF to a GPD starts after the start of the GPDF it answers. The GPD
+    /// listens from 20 ms on and the reply must start by 25 ms (`gpTxOffset` and
+    /// `gpMaxTxOffsetVariation`, GP A.1.5.2.1.2-3).
+    gp_tx_offset: Duration = Duration::from_millis(21),
+
+    /// How long after the stack gets a GPDF's trigger a reply may still be handed to
+    /// the radio. It is `gp_tx_offset` minus the time the trigger takes to reach the
+    /// stack and the time the reply takes to reach the radio. A reply later than this
+    /// misses its window and waits for the next trigger.
+    gp_tx_handoff_window: Duration = Duration::from_millis(16),
+
     /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel
     /// before declaring a transmit failed.
     mac_max_csma_backoffs: u8 = 2,
