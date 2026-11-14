@@ -25,6 +25,9 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "
 tokio-serial = "5.5"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+
 [[bin]]
 name = "ziggurat"
 path = "src/main.rs"

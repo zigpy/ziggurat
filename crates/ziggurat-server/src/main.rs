@@ -1,3 +1,5 @@
+mod reconnect;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,6 +26,8 @@ use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_protocol::{self as proto};
+
+use reconnect::ReconnectPolicy;
 
 type Phy = SpinelPhy<TokioRuntime>;
 type Stack = ZigbeeStack<Phy, TokioRuntime>;
@@ -76,8 +80,9 @@ struct Sends {
 pub struct ZigguratServer {
     serial: SerialConfig,
     /// The radio transport owns the RCP link for the lifetime of the process: it is
-    /// opened lazily by the first command that needs it and never reopened, so stack
-    /// replacement cannot race a straggling handle — a serial port re-open failing
+    /// opened lazily by the first command that needs it and reopened only after it was
+    /// lost (see [`run_link`]), never for a new stack, so stack replacement cannot race
+    /// a straggling handle — a serial port re-open failing
     /// with `EBUSY`, or a second concurrent connection to the same TCP endpoint
     phy: AsyncMutex<Option<Arc<Phy>>>,
     stack: Mutex<Option<Arc<Stack>>>,
@@ -174,19 +179,11 @@ impl ZigguratServer {
             return Ok(phy.clone());
         }
 
-        let (reader, writer) = tokio::io::split(open_transport(&self.serial).await?);
+        let transport = open_transport(&self.serial).await?;
         let new_phy = Arc::new(Phy::new());
+        new_phy.set_close_when_unresponsive(self.serial.reconnect_on_unresponsive);
 
-        // Link death (USB yank, EOF) exits the whole process: the supervisor (Docker)
-        // restarts us. A half-dead process with a deaf radio is the worst failure mode.
-        let link_phy = new_phy.clone();
-        tokio::spawn(async move {
-            let error = link_phy
-                .run(FromTokio::new(reader), FromTokio::new(writer))
-                .await;
-            tracing::error!("RCP link failed ({error}), exiting");
-            std::process::exit(1);
-        });
+        tokio::spawn(run_link(new_phy.clone(), self.serial.clone(), transport));
 
         *phy = Some(new_phy.clone());
         drop(phy);
@@ -943,11 +940,60 @@ impl From<FlowControlMode> for FlowControl {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SerialConfig {
     device: String,
     baudrate: u32,
     flow_control: FlowControlMode,
+    /// How long to keep reopening a lost RCP link; zero exits at once
+    reconnect_timeout: Duration,
+    /// Also reopen the link when the RCP stops answering commands
+    reconnect_on_unresponsive: bool,
+}
+
+/// Drive the RCP link, reopening it with backoff when it is lost. The stack keeps its
+/// state; the reopened link resets the radio and the stack reconfigures it.
+///
+/// Once the link cannot be reopened the whole process exits: the supervisor (Docker)
+/// restarts us. A half-dead process with a deaf radio is the worst failure mode.
+async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTransport>) {
+    let policy = ReconnectPolicy {
+        give_up_after: serial.reconnect_timeout,
+        ..ReconnectPolicy::default()
+    };
+    let mut transport = transport;
+
+    loop {
+        let (reader, writer) = tokio::io::split(transport);
+        let error = phy
+            .run_link(FromTokio::new(reader), FromTokio::new(writer))
+            .await;
+
+        if serial.reconnect_timeout.is_zero() {
+            tracing::error!("RCP link failed ({error}), exiting");
+            std::process::exit(1);
+        }
+        tracing::error!("RCP link failed ({error}), reopening it");
+
+        let reopened = reconnect::reopen(&policy, || {
+            // Logged per attempt: a re-enumerated board shows up on a new tty behind the
+            // same `/dev/serial/by-id/` symlink
+            match std::fs::canonicalize(&serial.device) {
+                Ok(path) => {
+                    tracing::info!("Reopening RCP link {} ({})", serial.device, path.display());
+                }
+                Err(_) => tracing::info!("Reopening RCP link {}", serial.device),
+            }
+            open_transport(&serial)
+        })
+        .await;
+
+        let Some(reopened) = reopened else {
+            tracing::error!("RCP link lost, exiting");
+            std::process::exit(1);
+        };
+        transport = reopened;
+    }
 }
 
 /// A local network hop should establish in well under this; past it, something (a
@@ -1029,6 +1075,18 @@ struct Args {
     #[arg(long, value_enum, default_value_t = FlowControlMode::Hardware)]
     flow_control: FlowControlMode,
 
+    /// Seconds to keep reopening the RCP link (with backoff) after it is lost, e.g. a
+    /// USB blip; the process exits once they run out. 0 exits at once
+    #[arg(long, default_value_t = 60)]
+    reconnect_timeout: u64,
+
+    /// Also treat the RCP link as lost, and reopen it, when the RCP stops answering
+    /// commands. For links that die without an EOF, e.g. a `tcp://` peer that vanished
+    /// or a serial-to-TCP bridge whose serial side went away. Needs a nonzero
+    /// --reconnect-timeout
+    #[arg(long)]
+    reconnect_on_unresponsive: bool,
+
     /// WebSocket listen address: `host:port` for TCP, `unix:/path/to.sock` for a
     /// UNIX socket
     #[arg(long, default_value = "0.0.0.0:9999")]
@@ -1069,6 +1127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             device: args.device,
             baudrate: args.baudrate,
             flow_control: args.flow_control,
+            reconnect_timeout: Duration::from_secs(args.reconnect_timeout),
+            reconnect_on_unresponsive: args.reconnect_on_unresponsive,
         }));
 
         match args.api {

@@ -1858,12 +1858,14 @@ name = "ziggurat-spinel"
 version = "0.1.0"
 dependencies = [
  "crc_all",
+ "embedded-io-adapters",
  "embedded-io-async",
  "futures",
  "hex-literal",
  "num_enum",
  "rand",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "ziggurat-ieee-802154",
  "ziggurat-runtime",

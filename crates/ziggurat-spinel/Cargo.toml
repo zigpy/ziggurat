@@ -25,5 +25,7 @@ tokio = ["ziggurat-runtime/tokio"]
 embassy = ["ziggurat-runtime/embassy"]
 
 [dev-dependencies]
+embedded-io-adapters = { version = "0.7", features = ["tokio-1"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "time", "io-util", "test-util"] }
 hex-literal = "1.1.0"
 rand = "0.10.2"
