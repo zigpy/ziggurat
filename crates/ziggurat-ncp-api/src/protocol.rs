@@ -69,13 +69,10 @@ async fn dispatch<P: RadioPhy>(
 ) -> Result<Response, Error> {
     match request {
         Request::Reset(payload) => handle_reset(app, payload),
-        Request::GetFirmwareInfo => {
-            let version = concat!("ziggurat/", env!("CARGO_PKG_VERSION"));
-            Ok(Response::FirmwareInfo(FirmwareInfoPayload {
-                protocol_version: PROTOCOL_VERSION,
-                version: version.as_bytes().to_vec(),
-            }))
-        }
+        Request::GetFirmwareInfo => Ok(Response::FirmwareInfo(FirmwareInfoPayload {
+            protocol_version: PROTOCOL_VERSION,
+            version: proto::version_string(app.platform.platform_info()).into_bytes(),
+        })),
         Request::GetHwAddress => Ok(Response::HwAddress(HwAddressPayload {
             ieee: app.platform.hw_eui64(),
         })),

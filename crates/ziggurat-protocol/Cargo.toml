@@ -1,6 +1,6 @@
 [package]
 name = "ziggurat-protocol"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "The binary Ziggurat control protocol, shared by the embedded firmware and the host server"
 license = "Apache-2.0"
@@ -16,3 +16,6 @@ abstract-bits = { git = "https://github.com/puddly/abstract-bits.git", rev = "1f
 arbitrary-int = "2.2.0"
 num_enum = { version = "0.7.6", default-features = false }
 tracing = { version = "0.1", default-features = false }
+
+[build-dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["now"] }
