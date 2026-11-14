@@ -155,7 +155,7 @@ impl<F: SendFrame, E: From<SendFailure>> Gpdfs<F, E> {
     }
 
     /// A GPDF is sent once. A failed transmit waits for the next trigger instead, until
-    /// the GPDF expires.
+    /// the GPDF expires or a newer GPDF for its GPD replaces it.
     pub(super) fn transmitted(
         &mut self,
         id: SendId,
@@ -170,10 +170,18 @@ impl<F: SendFrame, E: From<SendFailure>> Gpdfs<F, E> {
             .expect("a transmitting send is never settled from outside");
         debug_assert_eq!(record.stage, Stage::Transmitting);
         record.frame = Some(frame);
+        let target = record.target;
+        let deadline = record.deadline;
 
         match result {
-            Err(TransmitError::Failed(_)) if now < record.deadline => {
-                record.stage = Stage::AwaitingTrigger;
+            // A newer GPDF was enqueued while this one was in the radio
+            Err(TransmitError::Failed(_))
+                if now < deadline && self.waiting_for(target).is_some() =>
+            {
+                self.settle(id, Err(SendFailure::GpdfReplaced.into()), outbox);
+            }
+            Err(TransmitError::Failed(_)) if now < deadline => {
+                self.records.get_mut(&id).unwrap().stage = Stage::AwaitingTrigger;
             }
             Ok(()) => self.settle(id, Ok(()), outbox),
             Err(TransmitError::Failed(err) | TransmitError::Rejected(err)) => {

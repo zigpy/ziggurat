@@ -409,6 +409,27 @@ fn test_gpdf_replaced_while_transmitting() {
     assert_eq!(fixture.transmitted(in_flight), [(second, Ok(()))]);
 }
 
+// A failed transmit does not bring back a GPDF replaced while it was in the radio.
+#[test]
+fn test_gpdf_replaced_while_transmitting_then_failed() {
+    let mut fixture = Fixture::new();
+    let (first, _) = fixture.hold_gpdf("first");
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+
+    let (second, settled) = fixture.hold_gpdf("second");
+    assert!(settled.is_empty());
+    let failed = Err(TransmitError::Failed(SendFailure::Cancelled));
+    assert_eq!(
+        fixture.report(in_flight, failed),
+        [(first, Err(SendFailure::GpdfReplaced))]
+    );
+
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    assert_eq!(fixture.transmitted(in_flight), [(second, Ok(()))]);
+}
+
 // Past its window the sender no longer takes the GPDF, and the timer puts it back to
 // wait for the next trigger.
 #[test]
