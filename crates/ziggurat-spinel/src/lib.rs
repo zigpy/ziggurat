@@ -243,6 +243,10 @@ pub enum SpinelStatus {
     ResetOther = 118,
     ResetUnknown = 119,
     ResetWatchdog = 120,
+    /// OpenThread's `OT_ERROR_ABORT`. OpenThread sends an error that has no spinel
+    /// status as `STACK_NATIVE__BEGIN` (16384) plus the error number. A timed transmit
+    /// whose start time has already passed fails with it.
+    StackNativeAbort = 16384 + 11,
 }
 
 impl SpinelStatus {

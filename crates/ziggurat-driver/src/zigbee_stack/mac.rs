@@ -545,6 +545,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // No ACK is requested
             TxResult::Acked | TxResult::NoAck => Ok(()),
             TxResult::ChannelAccessFailure => Err(DeliveryError::CcaFailure),
+            // The radio drops a timed frame whose start time has already passed
+            TxResult::Aborted => Err(DeliveryError::GpdfWindowMissed),
             other => Err(DeliveryError::TransmitFailed(other)),
         }
     }

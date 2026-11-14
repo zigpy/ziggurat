@@ -327,6 +327,7 @@ const fn map_status(status: SpinelStatus) -> TxResult {
         SpinelStatus::Ok => TxResult::Acked,
         SpinelStatus::NoAck => TxResult::NoAck,
         SpinelStatus::CcaFailure => TxResult::ChannelAccessFailure,
+        SpinelStatus::StackNativeAbort => TxResult::Aborted,
         _ => TxResult::Failed,
     }
 }
