@@ -366,11 +366,11 @@ tunables! {
     /// `gpMaxTxOffsetVariation`, GP A.1.5.2.1.2-3).
     gp_tx_offset: Duration = Duration::from_millis(21),
 
-    /// The time a GPDF's trigger takes to reach the stack plus the time a timed GPDF
-    /// takes to reach the radio. A GPDF not handed to the radio by `gp_tx_offset` minus
-    /// this, counted from when the stack got its trigger, misses its window and waits
-    /// for the next one.
-    gp_tx_lead_time: Duration = Duration::from_millis(5),
+    /// How long after the stack gets a GPDF's trigger a reply may still be handed to
+    /// the radio. It is `gp_tx_offset` minus the time the trigger takes to reach the
+    /// stack and the time the reply takes to reach the radio. A reply later than this
+    /// misses its window and waits for the next trigger.
+    gp_tx_handoff_window: Duration = Duration::from_millis(16),
 
     /// `macMaxCSMABackoffs`: how many times the radio backs off on a busy channel
     /// before declaring a transmit failed.

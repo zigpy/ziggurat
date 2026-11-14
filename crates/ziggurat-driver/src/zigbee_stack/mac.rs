@@ -487,7 +487,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let now = self.core_now();
         let trigger = GpdfTrigger {
             rx_timestamp_us,
-            send_by: now + (self.tunables.gp_tx_offset() - self.tunables.gp_tx_lead_time()),
+            send_by: now + self.tunables.gp_tx_handoff_window(),
         };
 
         let mut core = self.core();
