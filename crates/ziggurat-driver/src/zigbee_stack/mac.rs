@@ -11,7 +11,7 @@ use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_ieee_802154::{
     FCS_LENGTH, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
 };
-use ziggurat_phy::{RadioPhy, TxAt, TxFrame, TxResult};
+use ziggurat_phy::{ExclusiveRadio, RadioPhy, TxAt, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use ziggurat_zigbee::constants::GP_PROTOCOL_VERSION;
 use ziggurat_zigbee::gp::{GpNwkFrameControl, GpSecurityLevel, GpdfHeader};
@@ -517,10 +517,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return Ok(());
         }
 
-        // TODO: the sender idles ~20 ms here; hand the GPDF over `gp_tx_lead_time`
-        // before its start instead (OT would replace a waiting timed frame)
-        let result = self
-            .radio
+        // The radio sends a late timed frame at once, so check the window only once
+        // nothing else can hold the radio, such as a scan.
+        let radio = self.radio.lock().await;
+        if self.core_now() >= trigger.send_by {
+            return Err(DeliveryError::GpdfWindowMissed);
+        }
+
+        // TODO: the sender idles ~20 ms here; hand the GPDF over shortly before its
+        // start instead (OT would replace a waiting timed frame)
+        let result = radio
             .transmit(TxFrame {
                 psdu,
                 channel: Some(channel),

@@ -129,6 +129,9 @@ pub enum DeliveryError {
     GpdfExpired,
     #[error("GPDF replaced by a newer one for the same GPD")]
     GpdfReplaced,
+    /// The GPD's receive window closed before the GPDF reached the radio.
+    #[error("GPDF missed the GPD's receive window")]
+    GpdfWindowMissed,
 }
 
 impl From<SendFailure> for DeliveryError {

@@ -459,6 +459,9 @@ pub(crate) const fn send_status(result: &Result<(), DeliveryError>) -> SendStatu
             DeliveryError::Radio(_) => SendStatus::RadioError,
             DeliveryError::GpdfExpired => SendStatus::GpdfExpired,
             DeliveryError::GpdfReplaced => SendStatus::GpdfReplaced,
+            // A missed window is retried until the GPDF expires, so it is only ever
+            // the verdict of an expired GPDF
+            DeliveryError::GpdfWindowMissed => SendStatus::GpdfExpired,
         },
     }
 }
