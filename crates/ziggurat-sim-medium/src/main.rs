@@ -2,6 +2,8 @@
 //! transmits is relayed to all the others. Radios filter by their own channel and
 //! receive state; the medium keeps no radio state.
 
+mod zep;
+
 use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,6 +19,8 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ziggurat_ieee_802154::types::Eui64;
 use ziggurat_sim_proto::{Frame, MediumMessage, NodeMessage, read_message, write_message};
 
+use crate::zep::Zep;
+
 /// Frames queued for a node that is not reading are dropped past this, like a radio
 /// whose receive buffer overflows. It also keeps one stalled node from stalling the air.
 const RX_QUEUE_SIZE: usize = 256;
@@ -27,6 +31,11 @@ struct Args {
     /// TCP listen address for simulated radios
     #[arg(long, default_value = "0.0.0.0:9997")]
     listen: SocketAddr,
+
+    /// Also send every frame as ZEP to this UDP address, for Wireshark: a multicast
+    /// group such as 239.255.0.1:17754, or 127.0.0.1:17754
+    #[arg(long)]
+    zep: Option<SocketAddr>,
 
     /// Log level (RUST_LOG still overrides, with per-module filters)
     #[arg(long, default_value_t = LevelFilter::INFO)]
@@ -39,9 +48,9 @@ struct Node {
     rx_queue: mpsc::Sender<Frame>,
 }
 
-#[derive(Default)]
 struct Medium {
     nodes: Mutex<HashMap<u64, Node>>,
+    zep: Option<Zep>,
 }
 
 impl Medium {
@@ -65,6 +74,10 @@ impl Medium {
     /// see transmissions in the same order.
     fn transmit(&self, sender: u64, frame: &Frame) {
         let nodes = self.nodes.lock().unwrap();
+
+        if let Some(zep) = &self.zep {
+            zep.send(sender as u16, frame);
+        }
 
         for (_, node) in nodes.iter().filter(|(id, _)| **id != sender) {
             if node.rx_queue.try_send(frame.clone()).is_err() {
@@ -106,7 +119,7 @@ async fn serve_node(medium: Arc<Medium>, id: u64, stream: TcpStream, peer: Socke
         return;
     }
 
-    info!("{name} ({eui64:?}, {peer}): joined");
+    info!("{name} ({eui64:?}, {peer}): joined as ZEP device {id}");
 
     let forward = tokio::spawn(forward_frames(writer, rx_receiver));
     let result = relay_frames(&medium, id, &name, &mut reader).await;
@@ -165,7 +178,14 @@ async fn main() {
     let listener = TcpListener::bind(args.listen).await.unwrap();
     info!("Listening on {}", args.listen);
 
-    let medium = Arc::new(Medium::default());
+    if let Some(zep) = args.zep {
+        info!("Sending frames as ZEP to {zep}");
+    }
+
+    let medium = Arc::new(Medium {
+        nodes: Mutex::new(HashMap::new()),
+        zep: args.zep.map(Zep::new),
+    });
 
     let mut next_id = 0;
 
