@@ -63,26 +63,36 @@ an OpenThread RCP radio:
 5. Done.
 
 ### Ziggurat on device
-Ziggurat is small enough to fit on larger microcontrollers, there are example firmwares
-for the Silicon Labs EFR32MG24 or Espressif ESP32-C6. The architecture for this
+Ziggurat is small enough to fit on larger microcontrollers. The architecture for this
 firmware is a little special: we embed Ziggurat _inside_ of OpenThread RCP and tunnel
 its protocol through a vendor Spinel property (0x3D5A). This special build of OpenThread
-RCP can be used for a OpenThread border router, Ziggurat on host, and Ziggurat on device.
+RCP can be used for an OpenThread border router, Ziggurat on host, and Ziggurat on device.
+
+Three platforms are supported. They share the platform layer in `firmwares/glue`:
+
+| Chip | Board | SDK | Firmware |
+|---|---|---|---|
+| Silicon Labs EFR32MG24 | Home Assistant Connect ZBT-2 | Simplicity SDK | [`firmwares/efr32mg24`](firmwares/efr32mg24) |
+| Espressif ESP32-C6 | ESP32-C6 DevKit | ESP-IDF | [`firmwares/esp32-c6`](firmwares/esp32-c6) |
+| Nordic nRF52840 | nRF52840 Dongle (PCA10059) | [ot-nrf528xx](https://github.com/openthread/ot-nrf528xx) | [`firmwares/nrf52840`](firmwares/nrf52840) |
 
 ZHA can communicate directly with Ziggurat running on a microcontroller via serial. Set
 it up as you would any other radio in ZHA.
 
-1. Flash your Zigbee radio with Ziggurat + OpenThread RCP firmware
-  - Home Assistant Connect ZBT-2 firmwares are built as part of CI. Find the latest one
-    from [GitHub Actions](https://github.com/zigpy/ziggurat/actions?query=branch%3Adev)
-    and flash the `.gbl` file to your ZBT-2 with the [OHF Device Toolbox](https://toolbox.openhomefoundation.org/home-assistant-connect-zbt-2/install/)
-    or [`universal-silabs-flasher`](https://github.com/NabuCasa/universal-silabs-flasher)
+1. Flash your Zigbee radio with Ziggurat + OpenThread RCP firmware:
+   - **EFR32MG24**: Home Assistant Connect ZBT-2 firmwares are built as part of CI. Find
+     the latest one from [GitHub Actions](https://github.com/zigpy/ziggurat/actions?query=branch%3Adev)
+     and flash the `.gbl` file to your ZBT-2 with the [OHF Device Toolbox](https://toolbox.openhomefoundation.org/home-assistant-connect-zbt-2/install/)
+     or [`universal-silabs-flasher`](https://github.com/NabuCasa/universal-silabs-flasher).
+   - **ESP32-C6**: run `firmwares/esp32-c6/build.sh`, then `idf.py -p <port> flash`.
+   - **nRF52840**: run `firmwares/nrf52840/build.sh`. It builds a DFU package and prints
+     the command to flash it over the Dongle's USB bootloader.
 2. Plug it into your Home Assistant OS box.
 3. Set up ZHA and pick the Ziggurat serial port.
 4. ZHA will try to probe the protocol spoken by your radio. This will take a minute and
    is expected to fail.
-5. Select `Ziggurat` as the radio type and then fill in the serial port details. The
-   default baudrate is 460800 and hardware flow control should be enabled.
+5. Select `Ziggurat` as the radio type and then fill in the serial port details. For the
+   ZBT-2, the baudrate is 460800 and hardware flow control should be enabled.
 6. Done.
 
 Keep in mind the host stack is the recommended way to run Ziggurat, as running it on a
@@ -91,7 +101,7 @@ Ziggurat continues development.
 
 ### Development
 Ziggurat aims to implement the portions of a Zigbee stack used by normal Home Assistant
-users, not the entire binder of Zigbee specification verbatim. It is nearly feature-complete
+users, not the entire binder of Zigbee specification verbatim. It is feature-complete
 in terms of functionality exposed by consumer Zigbee devices:
 
 - [x] 802.15.4, Zigbee APS, and Zigbee NWK layers are implemented, cryptography included
@@ -101,7 +111,7 @@ in terms of functionality exposed by consumer Zigbee devices:
 - [x] Device joining
 - [x] Child device message holding and management
 - [x] Zigbee Green Power: direct reception of GPDFs, which are passed unprocessed to zigpy
-- [ ] Zigbee Green Power: transmission of GPDFs (needed for bidirectional GPDs)
+- [x] Zigbee Green Power: transmission of GPDFs (needed for bidirectional GPDs)
 
 Zigbee R23 and R23.1 support (i.e. Zigbee 4.0) are low on the list but planned for the
 future. Keep in mind Zigbee is both forward and backward compatible and practically nothing

@@ -3,8 +3,9 @@
  * ot::Timer, ot::Tasklet, ot::Crypto, and otLinkRaw radio operations on the RCP's
  * single otInstance. All Ziggurat callbacks run from OpenThread main-loop context.
  *
- * Platform-specific remainder (ESP_PLATFORM selects ESP-IDF, otherwise the Silabs
- * EFR32 build): the otInstance accessor, panic capture, and post-mortem reporting.
+ * Platform-specific remainder (ESP_PLATFORM selects ESP-IDF, ZIGGURAT_NRF52 the
+ * ot-nrf528xx build, otherwise the Silabs EFR32 build): the otInstance accessor, panic
+ * capture, and post-mortem reporting.
  */
 
 #include "openthread-core-config.h"
@@ -43,6 +44,8 @@
 #include "aes/esp_aes.h"
 #endif
 
+#elif defined(ZIGGURAT_NRF52)
+
 #else // Silabs EFR32
 
 // The legacy-HAL fault dump: sl_ot_crash_handler_init() classifies every reset and
@@ -66,6 +69,8 @@ otInstance *instance(void)
 {
 #if defined(ESP_PLATFORM)
     return esp_openthread_get_instance();
+#elif defined(ZIGGURAT_NRF52)
+    return &ot::Instance::Get();
 #else
     return otGetInstance();
 #endif
@@ -272,6 +277,81 @@ extern "C" size_t ziggurat_platform_last_reset(uint8_t *buf, size_t cap)
     return static_cast<size_t>(len) < cap ? static_cast<size_t>(len) : cap - 1;
 }
 
+#elif defined(ZIGGURAT_NRF52)
+
+// The formatted Rust panic message, tagged so that the next boot can tell a panic from
+// an ordinary software reset. The startup code zeroes only .bss, and a system reset
+// keeps RAM, so .noinit survives the reset.
+constexpr uint32_t kPanicMagic = 0x5A494747; // "ZIGG"
+
+__attribute__((section(".noinit"), used)) volatile uint32_t ziggurat_panic_magic;
+__attribute__((section(".noinit"), used)) volatile char     ziggurat_panic_message[256];
+
+extern "C" void ziggurat_platform_panic(const uint8_t *msg, size_t len)
+{
+    size_t n = len < sizeof(ziggurat_panic_message) - 1 ? len : sizeof(ziggurat_panic_message) - 1;
+    for (size_t i = 0; i < n; i++)
+    {
+        ziggurat_panic_message[i] = static_cast<char>(msg[i]);
+    }
+    ziggurat_panic_message[n] = '\0';
+    ziggurat_panic_magic      = kPanicMagic;
+
+    // The build turns off pseudo-reset, so this is a system reset.
+    otPlatReset(instance());
+    while (true)
+    {
+    }
+}
+
+extern "C" size_t ziggurat_platform_last_reset(uint8_t *buf, size_t cap)
+{
+    static bool sReported;
+
+    const char *what = nullptr;
+    char       *out  = reinterpret_cast<char *>(buf);
+    int         len  = 0;
+
+    if (sReported)
+    {
+        return 0;
+    }
+    sReported = true;
+
+    switch (otPlatGetResetReason(instance()))
+    {
+    case OT_PLAT_RESET_REASON_SOFTWARE:
+        // On a power-on reset the RAM is random, so check the tag only after a software reset.
+        if (ziggurat_panic_magic != kPanicMagic)
+        {
+            return 0;
+        }
+        ziggurat_panic_magic = 0;
+        len                  = snprintf(out, cap, "panic: %s", const_cast<const char *>(ziggurat_panic_message));
+        break;
+    case OT_PLAT_RESET_REASON_FAULT:
+        what = "lockup";
+        break;
+    case OT_PLAT_RESET_REASON_WATCHDOG:
+        what = "watchdog";
+        break;
+    default:
+        return 0;
+    }
+
+    if (what != nullptr)
+    {
+        len = snprintf(out, cap, "abnormal reset (%s)", what);
+    }
+
+    if (len < 0)
+    {
+        return 0;
+    }
+
+    return static_cast<size_t>(len) < cap ? static_cast<size_t>(len) : cap - 1;
+}
+
 #else // Silabs EFR32
 
 // The formatted Rust panic message. The crash handler's assert machinery persists
@@ -424,6 +504,25 @@ extern "C" int32_t ziggurat_platform_ccm_crypt(bool           encrypt,
                                                uint8_t       *tag,
                                                size_t         tag_len)
 {
+    // OpenThread replaced the streaming AesCcm interface with the one-shot Perform during
+    // API 605 (#13215); 606 is the first version that always has Perform.
+#if OPENTHREAD_API_VERSION >= 606
+    ot::Crypto::Key aesKey;
+
+    aesKey.Set(key, 16);
+
+    if (encrypt)
+    {
+        ot::Crypto::AesCcm::Perform(ot::Crypto::AesCcm::kEncrypt, aesKey, static_cast<uint8_t>(tag_len), nonce, 13,
+                                    auth, auth_len, const_cast<uint8_t *>(input), output, len, tag);
+        return 0;
+    }
+
+    uint8_t expected[16];
+
+    ot::Crypto::AesCcm::Perform(ot::Crypto::AesCcm::kDecrypt, aesKey, static_cast<uint8_t>(tag_len), nonce, 13, auth,
+                                auth_len, output, const_cast<uint8_t *>(input), len, expected);
+#else
     ot::Crypto::AesCcm ccm;
 
     ccm.SetKey(key, 16);
@@ -441,6 +540,8 @@ extern "C" int32_t ziggurat_platform_ccm_crypt(bool           encrypt,
 
     ccm.Payload(output, const_cast<uint8_t *>(input), len, ot::Crypto::AesCcm::kDecrypt);
     ccm.Finalize(expected);
+#endif
+
     return memcmp(expected, tag, tag_len) == 0 ? 0 : -1;
 }
 

@@ -28,6 +28,7 @@ critical-section = "1"
 cortex-m = { version = "0.7.9", features = ["critical-section-single-core", "inline-asm"], optional = true }
 # Single-hart machine-mode critical section.
 riscv = { version = "0.16", features = ["critical-section-single-hart"], optional = true }
+embedded-alloc = { version = "0.7", default-features = false, features = ["tlsf"], optional = true }
 
 # Exactly one platform feature must be enabled for a firmware build; lib.rs rejects
 # none or both at compile time.
@@ -36,6 +37,8 @@ riscv = { version = "0.16", features = ["critical-section-single-hart"], optiona
 efr32 = ["dep:cortex-m"]
 # ESP-IDF (firmwares/esp32-c6): allocate from the IDF heap.
 esp-idf = ["dep:riscv"]
+# Nordic nRF52 (firmwares/nrf52840): allocate from the RAM ot-nrf528xx leaves unused.
+nrf52 = ["dep:cortex-m", "dep:embedded-alloc"]
 
 [build-dependencies]
 cbindgen = "0.29"
