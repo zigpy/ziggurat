@@ -96,6 +96,7 @@ fn data_frame(dst: u16, src: u16, ack: bool) -> TxFrame {
         max_frame_retries: 3,
         max_csma_backoffs: 4,
         security_processed: true,
+        tx_at: None,
     }
 }
 
