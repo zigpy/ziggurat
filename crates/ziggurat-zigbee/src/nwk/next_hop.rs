@@ -36,7 +36,8 @@ pub enum RouteDirective {
     /// discovery). What all stack-originated traffic passes.
     StackDecides,
     /// Use the supplied route only when the stack has no route of its own; it stands in
-    /// for route discovery rather than triggering it. A known route still wins.
+    /// for route discovery rather than triggering it. A known route still wins, and
+    /// once a delivery toward the destination fails its hints are ignored.
     Hint(HostRoute),
     /// Use the supplied route unconditionally, overriding even a known route and
     /// suppressing discovery.
@@ -137,8 +138,12 @@ pub fn resolve(
         return NextHop::Resolved(destination);
     }
 
-    // No usable route. A host hint stands in for discovery rather than triggering it.
-    if let RouteDirective::Hint(route) = directive {
+    // No usable route. A host hint stands in for discovery rather than triggering it,
+    // unless a delivery toward the destination already failed: the hint may be the
+    // path that failed, and a failed hint teaches the tables nothing.
+    if let RouteDirective::Hint(route) = directive
+        && routing.host_hints_trusted(destination)
+    {
         return apply_host_route(frame, route);
     }
 
@@ -170,4 +175,132 @@ fn apply_source_route(frame: &mut NwkFrame, relays: Vec<Nwk>) -> NextHop {
         relays,
     });
     NextHop::Resolved(next_hop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nwk::frame::{NwkFrameControl, NwkFrameType, NwkHeader, NwkPayload};
+
+    const OWN: Nwk = Nwk(0x0000);
+    const DEVICE: Nwk = Nwk(0x1111);
+    const OTHER_DEVICE: Nwk = Nwk(0x2222);
+    const HINTED_HOP: Nwk = Nwk(0x3333);
+    const NOW: Instant = Instant::from_micros(0);
+    const POLICY: Policy = Policy {
+        is_concentrator: true,
+        force_route_discovery: false,
+        max_source_route: 11,
+        new_router_child_window: Duration::from_secs(30),
+    };
+
+    fn data_frame_to(destination: Nwk) -> NwkFrame {
+        NwkFrame {
+            nwk_header: NwkHeader {
+                frame_control: NwkFrameControl {
+                    frame_type: NwkFrameType::Data,
+                    protocol_version: 2,
+                    discover_route: NwkRouteDiscovery::Enable,
+                    multicast: false,
+                    security: true,
+                    source_route: false,
+                    destination: false,
+                    extended_source: false,
+                    end_device_initiator: false,
+                    reserved1: 0,
+                },
+                destination,
+                source: OWN,
+                radius: 30,
+                sequence_number: 1,
+                destination_ieee: None,
+                source_ieee: None,
+                multicast_control: None,
+                source_route: None,
+            },
+            aux_header: None,
+            payload: NwkPayload::Opaque(Default::default()),
+        }
+    }
+
+    fn resolve_with(routing: &Routing, destination: Nwk, directive: RouteDirective) -> NextHop {
+        resolve(
+            routing,
+            &Neighbors::default(),
+            &mut data_frame_to(destination),
+            &SendMode::Route(directive),
+            POLICY,
+            NOW,
+        )
+    }
+
+    fn hint() -> RouteDirective {
+        RouteDirective::Hint(HostRoute::NextHop(HINTED_HOP))
+    }
+
+    #[test]
+    fn test_hint_stands_in_for_discovery_without_a_route() {
+        let routing = Routing::default();
+        assert_eq!(
+            resolve_with(&routing, DEVICE, hint()),
+            NextHop::Resolved(HINTED_HOP)
+        );
+    }
+
+    // A host hint built from a stale topology (a device that moved) failed. Nothing
+    // was written into the tables, so without distrust every hinted frame retried it.
+    #[test]
+    fn test_hint_ignored_after_a_delivery_failure() {
+        let mut routing = Routing::default();
+        routing.distrust_host_hints(DEVICE);
+        assert_eq!(
+            resolve_with(&routing, DEVICE, hint()),
+            NextHop::NeedDiscovery
+        );
+    }
+
+    #[test]
+    fn test_hint_ignored_after_a_route_failure_status() {
+        let mut routing = Routing::default();
+        routing.forget_route_to(DEVICE);
+        assert_eq!(
+            resolve_with(&routing, DEVICE, hint()),
+            NextHop::NeedDiscovery
+        );
+    }
+
+    #[test]
+    fn test_distrust_keeps_hints_for_other_destinations() {
+        let mut routing = Routing::default();
+        routing.distrust_host_hints(DEVICE);
+        assert_eq!(
+            resolve_with(&routing, OTHER_DEVICE, hint()),
+            NextHop::Resolved(HINTED_HOP)
+        );
+    }
+
+    #[test]
+    fn test_hint_trusted_again_once_the_device_is_forgotten() {
+        let mut routing = Routing::default();
+        routing.distrust_host_hints(DEVICE);
+        routing.forget(OWN, DEVICE);
+        assert_eq!(
+            resolve_with(&routing, DEVICE, hint()),
+            NextHop::Resolved(HINTED_HOP)
+        );
+    }
+
+    #[test]
+    fn test_forced_route_still_applies_after_a_delivery_failure() {
+        let mut routing = Routing::default();
+        routing.distrust_host_hints(DEVICE);
+        assert_eq!(
+            resolve_with(
+                &routing,
+                DEVICE,
+                RouteDirective::Force(HostRoute::NextHop(HINTED_HOP))
+            ),
+            NextHop::Resolved(HINTED_HOP)
+        );
+    }
 }

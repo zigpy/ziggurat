@@ -243,6 +243,11 @@ pub struct Routing {
     /// only in the two spec tables above.
     discoveries_left: FlatMap<Nwk, u8>,
 
+    /// Destinations a delivery of ours failed toward. A host route hint for them no
+    /// longer stands in for discovery: hints are never written into the tables, so
+    /// nothing else learns from a failed one, and every hinted frame would retry it.
+    hints_distrusted: FlatMap<Nwk, ()>,
+
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
     /// originating in a particular router; the latter is used to identify stale routing
@@ -452,6 +457,7 @@ impl Routing {
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
         self.discoveries_left.remove(&nwk);
+        self.hints_distrusted.remove(&nwk);
 
         // Only our own discoveries toward it are dropped. Discoveries we relay stay
         // until they expire: they are the only duplicate check for late copies of
@@ -519,12 +525,25 @@ impl Routing {
         self.route_record_table.remove(&destination).is_some()
     }
 
+    /// A delivery of ours toward `destination` failed: host route hints for it are
+    /// ignored from now on, so a frame without a route of ours discovers one.
+    pub fn distrust_host_hints(&mut self, destination: Nwk) {
+        self.hints_distrusted.insert(destination, ());
+    }
+
+    /// Whether a host route hint may stand in for discovery toward `destination`.
+    pub fn host_hints_trusted(&self, destination: Nwk) -> bool {
+        !self.hints_distrusted.contains_key(&destination)
+    }
+
     /// Spec 3.6.4.8.1: a router could not deliver a frame of ours toward `destination`.
     /// The route record goes with the routing entry: it wins over the routing table, so
-    /// a stale one would keep the broken path in use. Returns whether a route record
+    /// a stale one would keep the broken path in use. A host hint may have been the
+    /// broken path, so hints for it are distrusted too. Returns whether a route record
     /// was removed.
     pub fn forget_route_to(&mut self, destination: Nwk) -> bool {
         self.remove_route(destination);
+        self.distrust_host_hints(destination);
         self.remove_route_record(destination)
     }
 
