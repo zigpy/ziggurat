@@ -981,6 +981,25 @@ impl SpinelProtocol {
         }
     }
 
+    /// A new link to the RCP starts, and the RCP is to be reset over it: bytes of a
+    /// frame the old link cut off are dropped, requests from the old link are cancelled,
+    /// and its timeouts no longer count.
+    pub fn link_restarted(&mut self) {
+        self.buffer.clear();
+        self.ignoring_until_next_flag = true;
+        self.consecutive_timeouts = 0;
+        self.cancel_requests();
+    }
+
+    /// Presume the RCP reset without its announcement, as after a new link it did not
+    /// announce one. Cancels the pending requests like an announced reset.
+    pub fn presume_reset(&mut self) -> SpinelEvent {
+        self.consecutive_timeouts = 0;
+        self.cancel_requests();
+
+        SpinelEvent::Reset(SpinelStatus::ResetUnknown)
+    }
+
     /// A request got no response in time. Returns the reset to recover from once
     /// enough consecutive requests have timed out; that reset cancels the others.
     pub fn request_timed_out(&mut self) -> Option<SpinelEvent> {
@@ -991,7 +1010,7 @@ impl SpinelProtocol {
         }
 
         tracing::error!(
-            "RCP unresponsive after {} consecutive command timeouts, triggering reset recovery",
+            "RCP unresponsive after {} consecutive command timeouts",
             self.consecutive_timeouts
         );
         self.consecutive_timeouts = 0;

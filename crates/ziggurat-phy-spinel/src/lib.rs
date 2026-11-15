@@ -274,7 +274,25 @@ impl<R: Runtime> SpinelPhy<R> {
     /// PHY: when it ends, returned or dropped, every stream ends too.
     pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> RadioError {
         let _closing = CloseStreamsOnDrop(&self.streams);
+        self.run_link(reader, writer).await
+    }
+
+    /// Like [`Self::run`], but the streams stay open when it ends, so it can be called
+    /// again with a new link. That run resets the radio, and the reset is delivered on
+    /// the reset stream, so the radio gets reconfigured.
+    pub async fn run_link<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> RadioError {
         map_err(self.client.run(reader, writer).await)
+    }
+
+    /// Make [`Self::run_link`] return once the radio stops answering, instead of
+    /// reporting a reset. Off by default.
+    pub fn set_close_when_unresponsive(&self, close: bool) {
+        self.client.set_close_when_unresponsive(close);
+    }
+
+    /// Whether the radio sent anything over the current link, or the last one.
+    pub fn rcp_answered(&self) -> bool {
+        self.client.rcp_answered()
     }
 
     /// The radio's factory-programmed EUI64, readable before any network is configured.
