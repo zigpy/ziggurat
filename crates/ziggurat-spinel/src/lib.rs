@@ -27,6 +27,38 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 4;
 /// OpenThread's `SPINEL_FRAME_MAX_SIZE`: no spinel frame exceeds this unescaped.
 pub const SPINEL_FRAME_MAX_SIZE: usize = 1300;
 
+/// The Spinel protocol version. An OpenThread host requires exactly this one.
+pub const SPINEL_PROTOCOL_VERSION_MAJOR: u32 = 4;
+pub const SPINEL_PROTOCOL_VERSION_MINOR: u32 = 3;
+
+/// The RCP API version an RCP implements, and the oldest host API it works with.
+pub const SPINEL_RCP_API_VERSION: u32 = 11;
+pub const SPINEL_MIN_HOST_SUPPORTED_RCP_API_VERSION: u32 = 4;
+
+/// Received-frame metadata flag: the RCP acknowledged the frame with frame pending set.
+pub const SPINEL_MD_FLAG_ACKED_FP: u16 = 0x0010;
+
+/// Capabilities an RCP lists in `CAPS`.
+#[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
+#[repr(u32)]
+pub enum SpinelCapability {
+    ConfigRadio = 34,
+    RcpApiVersion = 64,
+    RcpMinHostApiVersion = 65,
+    MacRaw = 513,
+}
+
+/// `RADIO_CAPS` bits, OpenThread's `otRadioCaps`.
+pub mod radio_caps {
+    pub const ACK_TIMEOUT: u32 = 1 << 0;
+    pub const ENERGY_SCAN: u32 = 1 << 1;
+    pub const TRANSMIT_RETRIES: u32 = 1 << 2;
+    pub const CSMA_BACKOFF: u32 = 1 << 3;
+    pub const SLEEP_TO_TX: u32 = 1 << 4;
+    pub const TRANSMIT_SEC: u32 = 1 << 5;
+    pub const TRANSMIT_TIMING: u32 = 1 << 6;
+}
+
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SpinelCommandId {
@@ -89,6 +121,7 @@ pub enum SpinelPropertyId {
     PhyTxPower = 37,
     PhyRssi = 38,
     PhyRxSensitivity = 39,
+    PhyChanPreferred = 41,
 
     // MAC Properties
     MacScanState = 48,
@@ -109,6 +142,14 @@ pub enum SpinelPropertyId {
     MacSrcMatchEnabled = 4867,
     MacSrcMatchShortAddresses = 4868,
     MacSrcMatchExtendedAddresses = 4869,
+
+    // PHY extension properties
+    RadioCaps = 4619,
+    RadioCoexEnable = 4621,
+
+    // RCP properties
+    RcpApiVersion = 176,
+    RcpMinHostApiVersion = 177,
 
     // NET Properties
     NetSaved = 64,
@@ -637,49 +678,36 @@ pub enum Transaction {
     Abandoned { until: Duration },
 }
 
+/// Splits an HDLC-lite byte stream into frames.
 #[derive(Debug)]
-pub struct SpinelProtocol {
-    pub buffer: Vec<u8>,
-    /// Reused for the unescaped form of every inbound frame: the transport needs
-    /// exactly one frame's worth of scratch, since frames arrive serially.
-    unescape_scratch: Vec<u8>,
-    pub ignoring_until_next_flag: bool,
-    pub next_tid: u8,
-    /// Indexed by transaction id. We use ids 1 to 7; id 0 marks unsolicited frames
-    /// and stays `Free`.
-    transactions: [Transaction; 8],
-    /// Each transaction's request frame and response payload, indexed like
-    /// `transactions`. They keep their capacity, so a request allocates only when it is
-    /// larger than any before it under the same id.
-    requests: [Vec<u8>; 8],
-    responses: [Vec<u8>; 8],
-    consecutive_timeouts: u32,
+pub struct HdlcDecoder {
+    buffer: Vec<u8>,
+    ignoring_until_next_flag: bool,
 }
 
-impl Default for SpinelProtocol {
+impl Default for HdlcDecoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SpinelProtocol {
-    pub fn new() -> Self {
+impl HdlcDecoder {
+    pub const fn new() -> Self {
         Self {
             buffer: Vec::new(),
-            unescape_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
             ignoring_until_next_flag: true,
-            next_tid: 1,
-            transactions: [const { Transaction::Free }; 8],
-            requests: [const { Vec::new() }; 8],
-            responses: [const { Vec::new() }; 8],
-            consecutive_timeouts: 0,
         }
+    }
+
+    /// Buffer bytes read from the stream. [`Self::next_frame_into`] takes the frames.
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.buffer.extend(bytes);
     }
 
     /// Extract the next complete HDLC frame from the accumulation buffer into
     /// `scratch`, returning `false` once no complete frame remains. Garbage between
     /// flags (bad CRC, runts, post-resync noise) is discarded silently.
-    fn next_frame_into(&mut self, scratch: &mut Vec<u8>) -> bool {
+    pub fn next_frame_into(&mut self, scratch: &mut Vec<u8>) -> bool {
         loop {
             let Some(index) = self
                 .buffer
@@ -712,14 +740,52 @@ impl SpinelProtocol {
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub struct SpinelProtocol {
+    hdlc: HdlcDecoder,
+    /// Reused for the unescaped form of every inbound frame: the transport needs
+    /// exactly one frame's worth of scratch, since frames arrive serially.
+    unescape_scratch: Vec<u8>,
+    pub next_tid: u8,
+    /// Indexed by transaction id. We use ids 1 to 7; id 0 marks unsolicited frames
+    /// and stays `Free`.
+    transactions: [Transaction; 8],
+    /// Each transaction's request frame and response payload, indexed like
+    /// `transactions`. They keep their capacity, so a request allocates only when it is
+    /// larger than any before it under the same id.
+    requests: [Vec<u8>; 8],
+    responses: [Vec<u8>; 8],
+    consecutive_timeouts: u32,
+}
+
+impl Default for SpinelProtocol {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpinelProtocol {
+    pub fn new() -> Self {
+        Self {
+            hdlc: HdlcDecoder::new(),
+            unescape_scratch: Vec::with_capacity(SPINEL_FRAME_MAX_SIZE),
+            next_tid: 1,
+            transactions: [const { Transaction::Free }; 8],
+            requests: [const { Vec::new() }; 8],
+            responses: [const { Vec::new() }; 8],
+            consecutive_timeouts: 0,
+        }
+    }
 
     pub fn parse_frames_from_bytes(&mut self, bytes: &[u8]) -> Vec<SpinelFrame> {
-        self.buffer.extend(bytes);
+        self.hdlc.push(bytes);
 
         let mut scratch = core::mem::take(&mut self.unescape_scratch);
         let mut frames = Vec::new();
 
-        while self.next_frame_into(&mut scratch) {
+        while self.hdlc.next_frame_into(&mut scratch) {
             if let Ok(frame) = SpinelFrame::from_bytes(&scratch) {
                 frames.push(frame);
             }
@@ -732,7 +798,7 @@ impl SpinelProtocol {
     /// Buffer bytes read from the RCP. [`Self::next_event`] takes what they produce.
     pub fn receive(&mut self, bytes: &[u8]) {
         tracing::trace!("RX bytes: {bytes:?}");
-        self.buffer.extend(bytes);
+        self.hdlc.push(bytes);
     }
 
     /// The next event the buffered bytes produce, or `None` once they hold no complete
@@ -743,7 +809,7 @@ impl SpinelProtocol {
         let mut scratch = core::mem::take(&mut self.unescape_scratch);
 
         let event = loop {
-            if !self.next_frame_into(&mut scratch) {
+            if !self.hdlc.next_frame_into(&mut scratch) {
                 break None;
             }
 
