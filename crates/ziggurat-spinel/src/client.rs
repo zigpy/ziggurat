@@ -150,9 +150,9 @@ impl<'a> FieldReader<'a> {
     }
 
     /// A Spinel struct (`t`): a little-endian `u16` length, then that many bytes.
-    fn spinel_struct(&mut self) -> Result<FieldReader<'a>, SpinelRadioFrameError> {
+    fn spinel_struct(&mut self) -> Result<Self, SpinelRadioFrameError> {
         let length = self.u16()?;
-        self.take(usize::from(length)).map(FieldReader::new)
+        self.take(usize::from(length)).map(Self::new)
     }
 
     /// A PSDU (`d`): a little-endian `u16` length, then the bytes, FCS included.
