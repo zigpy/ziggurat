@@ -236,6 +236,9 @@ pub enum SpinelPropertyId {
     TrngRaw32 = 4103,
 
     NestStreamMfg = 0x3BC0,
+
+    // Silicon Labs vendor properties. The value starts with a sub-command byte.
+    SilabsVendorCoex = 0x3C01,
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]

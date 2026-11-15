@@ -309,6 +309,9 @@ impl Rcp {
             SpinelCommandId::PropValueSet if property == SpinelPropertyId::StreamRaw => {
                 self.start_transmit(reply, value, now);
             }
+            SpinelCommandId::PropValueSet if property == SpinelPropertyId::SilabsVendorCoex => {
+                self.send(reply, SpinelCommandId::PropValueIs, property, value);
+            }
             SpinelCommandId::PropValueSet => {
                 self.set(property, value, reply, now);
                 let value = self.get(property);
