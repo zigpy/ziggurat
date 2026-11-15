@@ -1055,8 +1055,7 @@ impl SpinelProtocol {
     /// frame the old link cut off are dropped, requests from the old link are cancelled,
     /// and its timeouts no longer count.
     pub fn link_restarted(&mut self) {
-        self.buffer.clear();
-        self.ignoring_until_next_flag = true;
+        self.hdlc = HdlcDecoder::new();
         self.consecutive_timeouts = 0;
         self.cancel_requests();
     }
