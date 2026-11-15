@@ -717,7 +717,6 @@ impl<P: FramePayload> Ieee802154Frame<P> {
             Self::Command(frame) => frame.fcs,
         }
     }
-
 }
 
 #[cfg(test)]
