@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
+use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult};
 
@@ -673,7 +674,8 @@ fn process_datagram(
     if header.kind != KIND_DATA && header.kind != KIND_PROBE {
         return None;
     }
-    let psdu = buf[HEADER_LEN..].to_vec();
+    // An oversized datagram cannot be an 802.15.4 frame
+    let psdu = Psdu::from_slice(&buf[HEADER_LEN..]).ok()?;
     let (deliver, ack_to) = {
         let mut shared = shared.lock();
         let identity = shared.identity?;

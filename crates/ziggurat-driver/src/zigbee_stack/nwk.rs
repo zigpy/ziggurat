@@ -379,9 +379,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     fn deliver_locally(&self, nwk_frame: &NwkFrame) -> SendHandle {
         use ziggurat_zigbee::aps::frame::{ApsFrame, parse_aps_frame};
 
-        let slot = Arc::new(super::SendSlot::default());
         let id = self.core().sends.local_id();
-        slot.settled(Ok(()));
+        let handle = SendHandle::new(id, &self.send_watches);
+        self.send_watches.settled(id, Ok(()));
 
         if let Some(payload) = nwk_frame.payload.as_opaque()
             && let Ok(ApsFrame::Data(aps_frame)) = parse_aps_frame(payload)
@@ -405,7 +405,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 data: aps_frame.asdu.to_vec(),
             });
         }
-        SendHandle::new(id, slot)
+        handle
     }
 
     /// Send a unicast: assign its NWK sequence number, resolve a next hop, and enqueue

@@ -47,7 +47,7 @@ impl RadioPhy for FakeRadio {
         Ok(())
     }
     async fn transmit(&self, frame: TxFrame) -> Result<TxResult, RadioError> {
-        self.0.sent.lock().push(frame.psdu);
+        self.0.sent.lock().push(frame.psdu.to_vec());
         Ok(TxResult::NoAck)
     }
     async fn energy_detect(&self, _: u8, _: Duration) -> Result<i8, RadioError> {
@@ -90,7 +90,7 @@ fn data_frame(dst: u16, src: u16, ack: bool) -> TxFrame {
     psdu.extend_from_slice(&src.to_le_bytes());
     psdu.extend_from_slice(b"hello");
     TxFrame {
-        psdu,
+        psdu: ziggurat_ieee_802154::Psdu::from_slice(&psdu).unwrap(),
         channel: None,
         csma_ca: true,
         max_frame_retries: 3,
