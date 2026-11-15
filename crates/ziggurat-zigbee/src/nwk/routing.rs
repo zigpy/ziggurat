@@ -246,6 +246,8 @@ pub struct Routing {
     /// Destinations a delivery of ours failed toward. A host route hint for them no
     /// longer stands in for discovery: hints are never written into the tables, so
     /// nothing else learns from a failed one, and every hinted frame would retry it.
+    /// A fresh route to the destination (a route record, or our discovery answered)
+    /// trusts its hints again, as does forgetting the device.
     hints_distrusted: FlatMap<Nwk, ()>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
@@ -503,6 +505,13 @@ impl Routing {
         }
         if let Some(&last) = relays.last() {
             relay_changed |= self.replace_route_record(last, Vec::new());
+        }
+
+        // The record is a fresh path to the source and each relay: the host learns it
+        // too, so its hints for them can be trusted again
+        self.hints_distrusted.remove(&source);
+        for relay in &relays {
+            self.hints_distrusted.remove(relay);
         }
 
         let source_changed = self.replace_route_record(source, relays);
@@ -834,6 +843,8 @@ impl Routing {
             routing_entry.next_hop_address = sender;
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = Some(updated_path_cost);
+            // Our discovery found a fresh route: hints for the responder are trusted again
+            self.hints_distrusted.remove(&responder);
 
             let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
                 destination: responder,

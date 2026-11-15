@@ -936,3 +936,37 @@ fn test_equal_cost_copy_is_fresh_after_an_unhandled_cheaper_copy() {
     routing.note_route_request_handled(DEVICE, 1);
     assert!(!receive_copy(&mut routing, 2).fresh);
 }
+
+// A distrusted hint must not outlive the failure it came from: once a fresh route to
+// the device is known, the host's hints for it are trusted again.
+#[test]
+fn test_route_record_trusts_hints_for_the_source_again() {
+    let mut routing = Routing::default();
+    routing.distrust_host_hints(DEVICE);
+    routing.store_route_record(DEVICE, vec![ROUTER]);
+    assert!(routing.host_hints_trusted(DEVICE));
+}
+
+#[test]
+fn test_route_record_trusts_hints_for_its_relays_again() {
+    let mut routing = Routing::default();
+    routing.distrust_host_hints(ROUTER);
+    routing.store_route_record(DEVICE, vec![ROUTER]);
+    assert!(routing.host_hints_trusted(ROUTER));
+}
+
+#[test]
+fn test_answered_discovery_trusts_hints_again() {
+    let mut routing = Routing::default();
+    routing.distrust_host_hints(DEVICE);
+    answered_discovery(&mut routing, 1);
+    assert!(routing.host_hints_trusted(DEVICE));
+}
+
+#[test]
+fn test_route_record_from_another_device_keeps_hints_distrusted() {
+    let mut routing = Routing::default();
+    routing.distrust_host_hints(DEVICE);
+    routing.store_route_record(OTHER_DEVICE, vec![ROUTER]);
+    assert!(!routing.host_hints_trusted(DEVICE));
+}
