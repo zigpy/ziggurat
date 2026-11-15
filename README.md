@@ -101,7 +101,7 @@ Ziggurat continues development.
 
 ### Development
 Ziggurat aims to implement the portions of a Zigbee stack used by normal Home Assistant
-users, not the entire binder of Zigbee specification verbatim. It is nearly feature-complete
+users, not the entire binder of Zigbee specification verbatim. It is feature-complete
 in terms of functionality exposed by consumer Zigbee devices:
 
 - [x] 802.15.4, Zigbee APS, and Zigbee NWK layers are implemented, cryptography included
@@ -111,7 +111,7 @@ in terms of functionality exposed by consumer Zigbee devices:
 - [x] Device joining
 - [x] Child device message holding and management
 - [x] Zigbee Green Power: direct reception of GPDFs, which are passed unprocessed to zigpy
-- [ ] Zigbee Green Power: transmission of GPDFs (needed for bidirectional GPDs)
+- [x] Zigbee Green Power: transmission of GPDFs (needed for bidirectional GPDs)
 
 Zigbee R23 and R23.1 support (i.e. Zigbee 4.0) are low on the list but planned for the
 future. Keep in mind Zigbee is both forward and backward compatible and practically nothing
