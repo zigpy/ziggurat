@@ -516,9 +516,12 @@ extern "C" int32_t ziggurat_platform_radio_src_match_add_ext(const uint8_t *addr
 extern "C" int32_t ziggurat_platform_radio_transmit(const uint8_t *psdu,
                                                     size_t         len,
                                                     uint8_t        channel,
+                                                    uint8_t        rx_channel,
                                                     bool           csma_ca,
                                                     uint8_t        max_frame_retries,
-                                                    uint8_t        max_csma_backoffs)
+                                                    uint8_t        max_csma_backoffs,
+                                                    uint32_t       tx_delay,
+                                                    uint32_t       tx_delay_base_time)
 {
     otInstance   *inst  = instance();
     otRadioFrame *frame = otLinkRawGetTransmitBuffer(inst);
@@ -534,9 +537,9 @@ extern "C" int32_t ziggurat_platform_radio_transmit(const uint8_t *psdu,
     frame->mInfo.mTxInfo.mCsmaCaEnabled        = csma_ca;
     frame->mInfo.mTxInfo.mMaxFrameRetries      = max_frame_retries;
     frame->mInfo.mTxInfo.mMaxCsmaBackoffs      = max_csma_backoffs;
-    frame->mInfo.mTxInfo.mTxDelay              = 0;
-    frame->mInfo.mTxInfo.mTxDelayBaseTime      = 0;
-    frame->mInfo.mTxInfo.mRxChannelAfterTxDone = channel;
+    frame->mInfo.mTxInfo.mTxDelay              = tx_delay;
+    frame->mInfo.mTxInfo.mTxDelayBaseTime      = tx_delay_base_time;
+    frame->mInfo.mTxInfo.mRxChannelAfterTxDone = rx_channel;
     frame->mInfo.mTxInfo.mIsSecurityProcessed  = true; // ziggurat frames arrive encrypted
     frame->mInfo.mTxInfo.mIsHeaderUpdated      = true;
 

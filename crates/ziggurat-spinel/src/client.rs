@@ -235,7 +235,7 @@ pub enum SpinelError {
     #[error("response payload was empty")]
     EmptyResponse,
     #[error("invalid spinel status {status}")]
-    InvalidStatus { status: u8 },
+    InvalidStatus { status: u32 },
 }
 
 /// A frame waiting for the write loop.
@@ -922,10 +922,12 @@ impl<R: Runtime> SpinelClient<R> {
                     });
                 }
 
-                let &[status, ..] = value else {
+                if value.is_empty() {
                     return Err(SpinelError::EmptyResponse);
-                };
+                }
 
+                let (status, _) =
+                    packed_uint21_deserialize(value).map_err(SpinelError::U21ParsingError)?;
                 SpinelStatus::try_from(status).map_err(|_| SpinelError::InvalidStatus { status })
             },
         )

@@ -5,6 +5,7 @@ use ziggurat_ieee_802154::types::Nwk;
 
 use crate::Instant;
 use crate::constants::Tunables;
+use crate::gp::{GpdId, GpdfTarget};
 
 use super::*;
 
@@ -21,6 +22,13 @@ type Verdict = (SendId, Result<(), SendFailure>);
 
 const DESTINATION: Nwk = Nwk(0x1234);
 const NEXT_HOP: Nwk = Nwk(0x5678);
+const GPD: GpdfTarget = GpdfTarget::Gpd(GpdId::SrcId(0x87654321));
+
+/// How long a held GPDF waits for its GPD to listen.
+const GPDF_LIFETIME: Duration = Duration::from_secs(1);
+
+/// How long after its trigger a GPDF can still be handed to the radio.
+const GPDF_WINDOW: Duration = Duration::from_millis(16);
 
 const fn timed_out(held: SendId) -> Verdict {
     (held, Err(SendFailure::RouteDiscoveryTimeout))
@@ -117,9 +125,57 @@ impl Fixture {
 
     /// Report a successful transmit. Returns what it settles.
     fn transmitted(&mut self, in_flight: InFlight<&'static str>) -> Vec<Verdict> {
+        self.report(in_flight, Ok(()))
+    }
+
+    /// Report a transmit. Returns what it settles.
+    fn report(
+        &mut self,
+        in_flight: InFlight<&'static str>,
+        result: Result<(), TransmitError<SendFailure>>,
+    ) -> Vec<Verdict> {
         self.sends
-            .transmitted(in_flight, Ok(()), self.now, Duration::ZERO, Duration::ZERO);
+            .transmitted(in_flight, result, self.now, Duration::ZERO, Duration::ZERO);
         self.settled()
+    }
+
+    /// Hold a GPDF for `GPD` until it listens. Returns the send and what holding it
+    /// settles.
+    fn hold_gpdf(&mut self, frame: &'static str) -> (SendId, Vec<Verdict>) {
+        let id = self.sends.enqueue_gpdf(
+            Gpdf {
+                frame,
+                target: GPD,
+                lifetime: GPDF_LIFETIME,
+            },
+            self.now,
+        );
+        (id, self.settled())
+    }
+
+    /// The trigger of a GPDF received now.
+    fn gpdf_trigger(&self) -> GpdfTrigger {
+        GpdfTrigger {
+            rx_timestamp_us: 1234,
+            send_by: self.now + GPDF_WINDOW,
+        }
+    }
+
+    /// `target` sent a GPDF and now listens, and `accept` decides on the frame held for
+    /// it. Returns what that settles.
+    fn gpd_listens_with(
+        &mut self,
+        target: GpdfTarget,
+        accept: impl FnOnce(&&'static str) -> Result<bool, SendFailure>,
+    ) -> Vec<Verdict> {
+        let trigger = self.gpdf_trigger();
+        self.sends.gpdf_triggered(target, trigger, self.now, accept);
+        self.settled()
+    }
+
+    /// `target` sent a GPDF and now listens. Returns what that settles.
+    fn gpd_listens(&mut self, target: GpdfTarget) -> Vec<Verdict> {
+        self.gpd_listens_with(target, |_| Ok(true))
     }
 
     /// Transmit the next frame that is due. Returns what that settles.
@@ -259,4 +315,208 @@ fn test_new_route_request_stops_the_one_it_replaces() {
     assert!(fixture.pass(None).is_empty());
     assert!(fixture.transmit_next().is_empty());
     assert!(fixture.dequeue().is_none());
+}
+
+// A GPDF waits until its GPD listens, then goes out once, timed from the trigger.
+#[test]
+fn test_gpdf_sent_after_trigger() {
+    let mut fixture = Fixture::new();
+    let (gpdf, settled) = fixture.hold_gpdf("gpdf");
+    assert!(settled.is_empty());
+    assert_eq!(fixture.sends.next_wake(), Some(fixture.now + GPDF_LIFETIME));
+    assert!(fixture.dequeue().is_none());
+
+    assert!(fixture.gpd_listens(GPD).is_empty());
+    let trigger = fixture.gpdf_trigger();
+    assert_eq!(fixture.sends.next_wake(), Some(trigger.send_by));
+
+    let in_flight = fixture.dequeue().unwrap();
+    assert!(matches!(in_flight.transmit(), Transmit::Gpdf(t) if t == trigger));
+    assert_eq!(fixture.sends.next_wake(), None);
+
+    // In the radio: not cancellable, and a repeated trigger changes nothing
+    assert!(!fixture.sends.cancel(gpdf));
+    assert!(fixture.gpd_listens(GPD).is_empty());
+
+    assert_eq!(fixture.transmitted(in_flight), [(gpdf, Ok(()))]);
+    assert!(fixture.dequeue().is_none());
+}
+
+// A triggered GPDF must go out before its window closes, so it goes ahead of every
+// other frame, even an older stack-critical one.
+#[test]
+fn test_gpdf_goes_ahead_of_other_frames() {
+    let mut fixture = Fixture::new();
+    fixture.sends.enqueue_broadcast(
+        Broadcast {
+            frame: "broadcast",
+            priority: TxPriority::StackCritical,
+            schedule: Schedule::Once,
+        },
+        fixture.now,
+        &fixture.tunables,
+    );
+    fixture.hold_gpdf("gpdf");
+    fixture.gpd_listens(GPD);
+
+    assert_eq!(*fixture.dequeue().unwrap().frame_mut(), "gpdf");
+}
+
+// A trigger from another GPD, or a Maintenance frame, does not release the GPDF.
+#[test]
+fn test_gpdf_other_targets() {
+    let mut fixture = Fixture::new();
+    fixture.hold_gpdf("gpdf");
+
+    assert!(
+        fixture
+            .gpd_listens(GpdfTarget::Gpd(GpdId::SrcId(1)))
+            .is_empty()
+    );
+    assert!(fixture.gpd_listens(GpdfTarget::Maintenance).is_empty());
+    assert!(fixture.dequeue().is_none());
+}
+
+// A GPD has at most one GPDF waiting: a new one replaces it.
+#[test]
+fn test_gpdf_replaced() {
+    let mut fixture = Fixture::new();
+    let (first, _) = fixture.hold_gpdf("first");
+
+    let (second, settled) = fixture.hold_gpdf("second");
+    assert_eq!(settled, [(first, Err(SendFailure::GpdfReplaced))]);
+
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    assert_eq!(fixture.transmitted(in_flight), [(second, Ok(()))]);
+}
+
+// The GPDF in the radio finishes on its own. The new one waits for the next trigger.
+#[test]
+fn test_gpdf_replaced_while_transmitting() {
+    let mut fixture = Fixture::new();
+    let (first, _) = fixture.hold_gpdf("first");
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+
+    let (second, settled) = fixture.hold_gpdf("second");
+    assert!(settled.is_empty());
+    assert_eq!(fixture.transmitted(in_flight), [(first, Ok(()))]);
+    assert!(fixture.dequeue().is_none());
+
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    assert_eq!(fixture.transmitted(in_flight), [(second, Ok(()))]);
+}
+
+// A failed transmit does not bring back a GPDF replaced while it was in the radio.
+#[test]
+fn test_gpdf_replaced_while_transmitting_then_failed() {
+    let mut fixture = Fixture::new();
+    let (first, _) = fixture.hold_gpdf("first");
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+
+    let (second, settled) = fixture.hold_gpdf("second");
+    assert!(settled.is_empty());
+    let failed = Err(TransmitError::Failed(SendFailure::Cancelled));
+    assert_eq!(
+        fixture.report(in_flight, failed),
+        [(first, Err(SendFailure::GpdfReplaced))]
+    );
+
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    assert_eq!(fixture.transmitted(in_flight), [(second, Ok(()))]);
+}
+
+// Past its window the sender no longer takes the GPDF, and the timer puts it back to
+// wait for the next trigger.
+#[test]
+fn test_gpdf_window_missed() {
+    let mut fixture = Fixture::new();
+    let (gpdf, _) = fixture.hold_gpdf("gpdf");
+    let deadline = fixture.now + GPDF_LIFETIME;
+    fixture.gpd_listens(GPD);
+
+    fixture.advance(GPDF_WINDOW);
+    assert!(fixture.dequeue().is_none());
+    assert!(fixture.pass(None).is_empty());
+    assert_eq!(fixture.sends.next_wake(), Some(deadline));
+
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    assert_eq!(fixture.transmitted(in_flight), [(gpdf, Ok(()))]);
+}
+
+#[test]
+fn test_gpdf_expired() {
+    let mut fixture = Fixture::new();
+    let (gpdf, _) = fixture.hold_gpdf("gpdf");
+
+    fixture.advance(GPDF_LIFETIME - Duration::from_millis(1));
+    assert!(fixture.pass(None).is_empty());
+    fixture.advance(Duration::from_millis(1));
+    assert_eq!(fixture.pass(None), [(gpdf, Err(SendFailure::GpdfExpired))]);
+}
+
+// The driver ignores a trigger it cannot answer, or fails the send.
+#[test]
+fn test_gpdf_trigger_accepted_or_not() {
+    let mut fixture = Fixture::new();
+    let (gpdf, _) = fixture.hold_gpdf("gpdf");
+
+    assert!(fixture.gpd_listens_with(GPD, |_| Ok(false)).is_empty());
+    assert!(fixture.dequeue().is_none());
+
+    assert_eq!(
+        fixture.gpd_listens_with(GPD, |_| Err(SendFailure::Cancelled)),
+        [cancelled(gpdf)]
+    );
+}
+
+// A failed transmit waits for the next trigger until the deadline. After it, the
+// failure is the verdict.
+#[test]
+fn test_gpdf_transmit_failed() {
+    let mut fixture = Fixture::new();
+    let (gpdf, _) = fixture.hold_gpdf("gpdf");
+
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    let failed = Err(TransmitError::Failed(SendFailure::Cancelled));
+    assert!(fixture.report(in_flight, failed).is_empty());
+
+    fixture.advance(GPDF_LIFETIME - GPDF_WINDOW);
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    fixture.advance(GPDF_WINDOW);
+    let failed = Err(TransmitError::Failed(SendFailure::Cancelled));
+    assert_eq!(fixture.report(in_flight, failed), [cancelled(gpdf)]);
+}
+
+// A frame the radio can never send fails at once, even before the deadline.
+#[test]
+fn test_gpdf_transmit_rejected() {
+    let mut fixture = Fixture::new();
+    let (gpdf, _) = fixture.hold_gpdf("gpdf");
+
+    fixture.gpd_listens(GPD);
+    let in_flight = fixture.dequeue().unwrap();
+    let rejected = Err(TransmitError::Rejected(SendFailure::Cancelled));
+    assert_eq!(fixture.report(in_flight, rejected), [cancelled(gpdf)]);
+}
+
+#[test]
+fn test_gpdf_cancel_and_abandon() {
+    let mut fixture = Fixture::new();
+    let (first, _) = fixture.hold_gpdf("first");
+
+    assert!(fixture.sends.cancel(first));
+    assert_eq!(fixture.settled(), [cancelled(first)]);
+    assert!(!fixture.sends.cancel(first));
+
+    let (second, _) = fixture.hold_gpdf("second");
+    fixture.sends.abandon();
+    assert_eq!(fixture.settled(), [cancelled(second)]);
 }

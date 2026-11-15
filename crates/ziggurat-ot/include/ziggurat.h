@@ -200,14 +200,17 @@ extern int32_t ziggurat_platform_radio_src_match_add_ext(const uint8_t *address)
 /*
  Submit one frame; `psdu` excludes the FCS (account for it in mLength).
  Completion must call `ziggurat_radio_tx_done`. One in flight at a time.
- Nonzero = failure.
+ The receiver returns to `rx_channel` afterwards.
  */
 extern int32_t ziggurat_platform_radio_transmit(const uint8_t *psdu,
                                                 size_t len,
                                                 uint8_t channel,
+                                                uint8_t rx_channel,
                                                 bool csma_ca,
                                                 uint8_t max_frame_retries,
-                                                uint8_t max_csma_backoffs);
+                                                uint8_t max_csma_backoffs,
+                                                uint32_t tx_delay,
+                                                uint32_t tx_delay_base_time);
 
 /*
  Start an energy scan; completion must call

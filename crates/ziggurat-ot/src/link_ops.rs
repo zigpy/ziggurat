@@ -4,7 +4,7 @@ use alloc::string::String;
 use core::time::Duration;
 
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioConfig, RadioError};
+use ziggurat_phy::{RadioConfig, RadioError, TxAt};
 use ziggurat_phy_otlink::LinkOps;
 
 use crate::platform::{self, ZigguratRadioConfig};
@@ -76,19 +76,27 @@ impl LinkOps for PlatformLinkOps {
         &self,
         psdu: &[u8],
         channel: u8,
+        rx_channel: u8,
         csma_ca: bool,
         max_frame_retries: u8,
         max_csma_backoffs: u8,
+        tx_at: Option<TxAt>,
     ) -> Result<(), RadioError> {
+        let (tx_delay, tx_delay_base_time) =
+            tx_at.map_or((0, 0), |tx_at| (tx_at.delay_us, tx_at.base_us as u32));
+
         check(
             unsafe {
                 platform::ziggurat_platform_radio_transmit(
                     psdu.as_ptr(),
                     psdu.len(),
                     channel,
+                    rx_channel,
                     csma_ca,
                     max_frame_retries,
                     max_csma_backoffs,
+                    tx_delay,
+                    tx_delay_base_time,
                 )
             },
             "radio_transmit failed",

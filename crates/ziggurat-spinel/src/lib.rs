@@ -205,8 +205,9 @@ pub enum SpinelResetReason {
     Bootloader = 3,
 }
 
+/// A spinel status, sent as a packed integer.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, TryFromPrimitive)]
-#[repr(u8)]
+#[repr(u32)]
 pub enum SpinelStatus {
     Ok = 0,
     Failure = 1,
@@ -242,11 +243,15 @@ pub enum SpinelStatus {
     ResetOther = 118,
     ResetUnknown = 119,
     ResetWatchdog = 120,
+    /// OpenThread's `OT_ERROR_ABORT`. OpenThread sends an error that has no spinel
+    /// status as `STACK_NATIVE__BEGIN` (16384) plus the error number. A timed transmit
+    /// whose start time has already passed fails with it.
+    StackNativeAbort = 16384 + 11,
 }
 
 impl SpinelStatus {
     pub const fn is_reset(self) -> bool {
-        self as u8 >= Self::ResetPowerOn as u8
+        self as u32 >= Self::ResetPowerOn as u32 && self as u32 <= Self::ResetWatchdog as u32
     }
 }
 
@@ -829,15 +834,11 @@ impl SpinelProtocol {
     fn handle_unsolicited_last_status(&mut self, value: &[u8]) -> Option<SpinelEvent> {
         let status = match packed_uint21_deserialize(value) {
             Ok((status_int, _)) => {
-                match u8::try_from(status_int)
-                    .ok()
-                    .and_then(|s| SpinelStatus::try_from(s).ok())
-                {
-                    Some(status) => status,
-                    None => {
-                        tracing::warn!("Unknown unsolicited status: {status_int}");
-                        return None;
-                    }
+                if let Ok(status) = SpinelStatus::try_from(status_int) {
+                    status
+                } else {
+                    tracing::warn!("Unknown unsolicited status: {status_int}");
+                    return None;
                 }
             }
             Err(err) => {
