@@ -537,7 +537,11 @@ impl Routing {
     /// A delivery of ours toward `destination` failed: host route hints for it are
     /// ignored from now on, so a frame without a route of ours discovers one.
     pub fn distrust_host_hints(&mut self, destination: Nwk) {
-        self.hints_distrusted.insert(destination, ());
+        if self.hints_distrusted.insert(destination, ()).is_none() {
+            tracing::debug!(
+                "Delivery toward {destination:?} failed, ignoring host route hints for it until a fresh route is known"
+            );
+        }
     }
 
     /// Whether a host route hint may stand in for discovery toward `destination`.
