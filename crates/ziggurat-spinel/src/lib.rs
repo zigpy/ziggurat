@@ -981,10 +981,14 @@ impl SpinelProtocol {
         }
     }
 
-    /// A new link to the RCP starts: bytes of a frame the old link cut off are dropped.
+    /// A new link to the RCP starts, and the RCP is to be reset over it: bytes of a
+    /// frame the old link cut off are dropped, requests from the old link are cancelled,
+    /// and its timeouts no longer count.
     pub fn link_restarted(&mut self) {
         self.buffer.clear();
         self.ignoring_until_next_flag = true;
+        self.consecutive_timeouts = 0;
+        self.cancel_requests();
     }
 
     /// Presume the RCP reset without its announcement, as after a new link it did not

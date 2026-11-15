@@ -290,6 +290,11 @@ impl<R: Runtime> SpinelPhy<R> {
         self.client.set_close_when_unresponsive(close);
     }
 
+    /// Whether the radio sent anything over the current link, or the last one.
+    pub fn rcp_answered(&self) -> bool {
+        self.client.rcp_answered()
+    }
+
     /// The radio's factory-programmed EUI64, readable before any network is configured.
     pub async fn hw_address(&self) -> Result<Eui64, RadioError> {
         self.client.get_hw_address().await.map_err(map_err)

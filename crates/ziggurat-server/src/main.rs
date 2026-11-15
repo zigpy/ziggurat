@@ -27,7 +27,7 @@ use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_protocol::{self as proto};
 
-use reconnect::ReconnectPolicy;
+use reconnect::{Outage, ReconnectPolicy};
 
 type Phy = SpinelPhy<TokioRuntime>;
 type Stack = ZigbeeStack<Phy, TokioRuntime>;
@@ -962,6 +962,7 @@ async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTra
         ..ReconnectPolicy::default()
     };
     let mut transport = transport;
+    let mut outage: Option<Outage> = None;
 
     loop {
         let (reader, writer) = tokio::io::split(transport);
@@ -975,18 +976,26 @@ async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTra
         }
         tracing::error!("RCP link failed ({error}), reopening it");
 
-        let reopened = reconnect::reopen(&policy, || {
-            // Logged per attempt: a re-enumerated board shows up on a new tty behind the
-            // same `/dev/serial/by-id/` symlink
-            match std::fs::canonicalize(&serial.device) {
-                Ok(path) => {
-                    tracing::info!("Reopening RCP link {} ({})", serial.device, path.display());
+        // A link the RCP never answered on does not end the outage: a peer that
+        // accepts and drops connections must not keep the process alive forever
+        if phy.rcp_answered() {
+            outage = None;
+        }
+        let outage = outage.get_or_insert_with(Outage::start);
+
+        let reopened = outage
+            .reopen(&policy, || {
+                // Logged per attempt: a re-enumerated board shows up on a new tty behind the
+                // same `/dev/serial/by-id/` symlink
+                match std::fs::canonicalize(&serial.device) {
+                    Ok(path) => {
+                        tracing::info!("Reopening RCP link {} ({})", serial.device, path.display());
+                    }
+                    Err(_) => tracing::info!("Reopening RCP link {}", serial.device),
                 }
-                Err(_) => tracing::info!("Reopening RCP link {}", serial.device),
-            }
-            open_transport(&serial)
-        })
-        .await;
+                open_transport(&serial)
+            })
+            .await;
 
         let Some(reopened) = reopened else {
             tracing::error!("RCP link lost, exiting");

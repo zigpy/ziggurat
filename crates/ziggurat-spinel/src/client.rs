@@ -264,6 +264,8 @@ struct State {
     resets: u64,
     /// End the link rather than forward a reset once requests keep timing out.
     close_when_unresponsive: bool,
+    /// The RCP sent a frame on the current run, or the last one.
+    answered: bool,
     /// The link timed out too often and is to be closed.
     unresponsive: bool,
 }
@@ -380,6 +382,7 @@ impl<R: Runtime> SpinelClient<R> {
                 resets: 0,
                 close_when_unresponsive: false,
                 unresponsive: false,
+                answered: false,
             }),
             transaction_changed: core::array::from_fn(|_| Notify::new()),
             outbound_ready: Notify::new(),
@@ -406,22 +409,23 @@ impl<R: Runtime> SpinelClient<R> {
     /// the radio is reconfigured. If the RCP does not announce it, a `ResetUnknown` is
     /// forwarded after [`TIMEOUT`].
     pub async fn run<Rd: Read, Wr: Write>(&self, reader: Rd, writer: Wr) -> SpinelError {
+        // The reset count before this run, if it is a later one
         let relinked = {
             let mut state = self.state.lock();
             assert!(!state.running, "the Spinel link runs one at a time");
             state.running = true;
             state.closed = false;
             state.unresponsive = false;
+            state.answered = false;
             state.runs += 1;
 
-            let relinked = state.runs > 1;
-            if relinked {
+            (state.runs > 1).then(|| {
                 state.protocol.link_restarted();
                 state
                     .outbound
                     .push_front(Outbound::Reset(SpinelResetReason::Stack));
-            }
-            relinked
+                state.resets
+            })
         };
         let _closing = CloseOnDrop(self);
 
@@ -437,9 +441,9 @@ impl<R: Runtime> SpinelClient<R> {
 
     /// Watch the link from the side: presume a reset if a new link brings no reset
     /// announcement, and end the link once it is unresponsive.
-    async fn watch_link(&self, relinked: bool) -> SpinelError {
-        if relinked {
-            let seen = self.state.lock().resets;
+    /// `relinked` is the reset count before a later run started.
+    async fn watch_link(&self, relinked: Option<u64>) -> SpinelError {
+        if let Some(seen) = relinked {
             R::sleep(TIMEOUT).await;
 
             let presumed = {
@@ -467,6 +471,12 @@ impl<R: Runtime> SpinelClient<R> {
         self.state.lock().close_when_unresponsive = close;
     }
 
+    /// Whether the RCP sent anything on the current run, or the last one if none is
+    /// active. A presumed reset does not count.
+    pub fn rcp_answered(&self) -> bool {
+        self.state.lock().answered
+    }
+
     /// Hand a reset to the event handler. The protocol already cancelled the requests.
     fn forward_reset(&self, reset: SpinelEvent) {
         self.state.lock().resets += 1;
@@ -490,7 +500,12 @@ impl<R: Runtime> SpinelClient<R> {
 
             loop {
                 // One frame at a time, so events are handled outside the lock
-                let event = self.state.lock().protocol.next_event(&mut update);
+                let event = {
+                    let mut state = self.state.lock();
+                    let event = state.protocol.next_event(&mut update);
+                    state.answered |= event.is_some();
+                    event
+                };
                 let Some(event) = event else {
                     break;
                 };
@@ -934,7 +949,8 @@ impl<R: Runtime> ExclusiveRadio<'_, R> {
     }
 }
 
-#[cfg(test)]
+// The tests run on tokio
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use super::*;
     use crate::{HdlcLiteFrame, SpinelFrame, packed_uint21_to_bytes};
@@ -1190,5 +1206,112 @@ mod tests {
 
         assert_eq!(resets(&events), vec![SpinelStatus::ResponseTimeout]);
         assert!(!first_run.is_finished());
+    }
+
+    /// Poll `future` once, without waiting for it.
+    async fn poll_once<F: Future + Unpin>(future: &mut F) {
+        core::future::poll_fn(|cx| {
+            let _ = core::pin::Pin::new(&mut *future).poll(cx);
+            core::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_request_from_the_earlier_link_is_cancelled_by_a_later_run() {
+        let (client, _events) = client();
+        let ((reader, writer), mut first_rcp) = link();
+        let runner = Arc::clone(&client);
+        let mut first_run = Box::pin(async move { runner.run(reader, writer).await });
+
+        let getter = Arc::clone(&client);
+        let get =
+            tokio::spawn(async move { getter.prop_value_get(SpinelPropertyId::NcpVersion).await });
+        tokio::select! {
+            _ = &mut first_run => panic!("the first run ended"),
+            frames = first_rcp.frames(TIMEOUT) => assert_eq!(frames.len(), 1),
+        }
+
+        // The link is lost and a new run starts before the waiting command resumes
+        drop(first_run);
+        let ((reader, writer), _second_rcp) = link();
+        let runner = Arc::clone(&client);
+        let mut second_run = Box::pin(async move { runner.run(reader, writer).await });
+        poll_once(&mut second_run).await;
+        let _second_run = tokio::spawn(second_run);
+
+        // At once, not when a timeout or a presumed reset gets to it
+        let result = tokio::time::timeout(TIMEOUT / 2, get).await;
+        assert!(
+            matches!(result, Ok(Ok(Err(SpinelError::CancelledByReset)))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeouts_from_the_earlier_link_do_not_count_on_a_later_run() {
+        let (client, events) = client();
+        let (first, first_rcp) = link();
+        let first_run = run(&client, first);
+        get_unanswered(&client).await;
+        drop(first_rcp);
+        first_run.await.unwrap();
+
+        let (second, mut rcp) = link();
+        let _second_run = run(&client, second);
+        rcp.frames(TIMEOUT).await;
+        rcp.announce_reset().await;
+        // A command made before the reset arrives is cancelled by it
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        get_unanswered(&client).await;
+
+        assert_eq!(resets(&events), vec![SpinelStatus::ResetSoftware]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_reset_already_waiting_on_the_new_link_is_not_presumed_again() {
+        let (client, events) = client();
+        let (first, first_rcp) = link();
+        let first_run = run(&client, first);
+        drop(first_rcp);
+        first_run.await.unwrap();
+
+        let (second, mut rcp) = link();
+        rcp.announce_reset().await;
+        let _second_run = run(&client, second);
+
+        tokio::time::sleep(TIMEOUT * 2).await;
+        assert_eq!(resets(&events), vec![SpinelStatus::ResetSoftware]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_the_rcp_has_not_answered_before_it_sends_a_frame() {
+        let (client, _events) = client();
+        let (_run, mut rcp) = relinked(&client).await;
+        rcp.frames(TIMEOUT).await;
+
+        assert!(!client.rcp_answered());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_the_rcp_has_answered_once_it_sent_a_frame_on_the_run() {
+        let (client, _events) = client();
+        let (_run, mut rcp) = relinked(&client).await;
+        rcp.frames(TIMEOUT).await;
+        rcp.announce_reset().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(client.rcp_answered());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_presumed_reset_is_no_answer_from_the_rcp() {
+        let (client, events) = client();
+        let (_run, mut rcp) = relinked(&client).await;
+        rcp.frames(TIMEOUT).await;
+        tokio::time::sleep(TIMEOUT * 2).await;
+
+        assert_eq!(resets(&events), vec![SpinelStatus::ResetUnknown]);
+        assert!(!client.rcp_answered());
     }
 }
