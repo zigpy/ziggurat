@@ -459,7 +459,7 @@ impl Routing {
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
         self.discoveries_left.remove(&nwk);
-        self.hints_distrusted.remove(&nwk);
+        self.trust_host_hints(nwk);
 
         // Only our own discoveries toward it are dropped. Discoveries we relay stay
         // until they expire: they are the only duplicate check for late copies of
@@ -509,9 +509,9 @@ impl Routing {
 
         // The record is a fresh path to the source and each relay: the host learns it
         // too, so its hints for them can be trusted again
-        self.hints_distrusted.remove(&source);
-        for relay in &relays {
-            self.hints_distrusted.remove(relay);
+        self.trust_host_hints(source);
+        for &relay in &relays {
+            self.trust_host_hints(relay);
         }
 
         let source_changed = self.replace_route_record(source, relays);
@@ -541,6 +541,14 @@ impl Routing {
             tracing::debug!(
                 "Delivery toward {destination:?} failed, ignoring host route hints for it until a fresh route is known"
             );
+        }
+    }
+
+    /// A fresh route to `destination` is known, or the device is forgotten: its host
+    /// route hints may stand in for discovery again.
+    fn trust_host_hints(&mut self, destination: Nwk) {
+        if self.hints_distrusted.remove(&destination).is_some() {
+            tracing::debug!("Trusting host route hints toward {destination:?} again");
         }
     }
 
@@ -848,7 +856,7 @@ impl Routing {
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = Some(updated_path_cost);
             // Our discovery found a fresh route: hints for the responder are trusted again
-            self.hints_distrusted.remove(&responder);
+            self.trust_host_hints(responder);
 
             let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
                 destination: responder,
