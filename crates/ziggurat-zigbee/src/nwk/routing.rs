@@ -246,8 +246,9 @@ pub struct Routing {
     /// Destinations a delivery of ours failed toward. A host route hint for them no
     /// longer stands in for discovery: hints are never written into the tables, so
     /// nothing else learns from a failed one, and every hinted frame would retry it.
-    /// A fresh route to the destination (a route record, or our discovery answered)
-    /// trusts its hints again, as does forgetting the device.
+    /// A fresh route to the destination (a route record, a route request it
+    /// originated, or our discovery answered) trusts its hints again, as does
+    /// forgetting the device.
     hints_distrusted: FlatMap<Nwk, ()>,
 
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
@@ -762,6 +763,10 @@ impl Routing {
             next_hop: sender,
             path_cost: updated_path_cost,
         });
+
+        // The request is a fresh path from its originator, like a route record: its
+        // host hints can be trusted again
+        self.trust_host_hints(originator);
 
         RouteRequestOutcome {
             accepted: true,

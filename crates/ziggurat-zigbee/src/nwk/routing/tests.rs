@@ -970,3 +970,31 @@ fn test_route_record_from_another_device_keeps_hints_distrusted() {
     routing.store_route_record(OTHER_DEVICE, vec![ROUTER]);
     assert!(!routing.host_hints_trusted(DEVICE));
 }
+
+// A device that comes back sends its own route request toward us before any route
+// record: the reverse route it leaves is fresh too.
+#[test]
+fn test_route_request_from_the_device_trusts_hints_again() {
+    let mut routing = Routing::default();
+    routing.distrust_host_hints(DEVICE);
+    let request = RouteRequest {
+        originator: DEVICE,
+        destination: OWN,
+        path_cost: 3,
+    };
+    assert!(receive(&mut routing, request, START));
+    assert!(routing.host_hints_trusted(DEVICE));
+}
+
+#[test]
+fn test_route_request_from_another_device_keeps_hints_distrusted() {
+    let mut routing = Routing::default();
+    routing.distrust_host_hints(DEVICE);
+    let request = RouteRequest {
+        originator: OTHER_DEVICE,
+        destination: OWN,
+        path_cost: 3,
+    };
+    assert!(receive(&mut routing, request, START));
+    assert!(!routing.host_hints_trusted(DEVICE));
+}
