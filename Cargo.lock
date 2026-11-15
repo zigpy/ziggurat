@@ -1854,6 +1854,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ziggurat-sim-medium"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ziggurat-ieee-802154",
+ "ziggurat-sim-proto",
+]
+
+[[package]]
+name = "ziggurat-sim-proto"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tokio",
+ "ziggurat-ieee-802154",
+]
+
+[[package]]
 name = "ziggurat-spinel"
 version = "0.1.0"
 dependencies = [
