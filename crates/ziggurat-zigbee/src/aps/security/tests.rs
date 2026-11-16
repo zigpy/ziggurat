@@ -26,45 +26,6 @@ fn advance(security: &mut ApsSecurity, frames: u32) {
     }
 }
 
-#[test]
-fn test_counter_is_persisted_once_per_interval() {
-    let mut security = security();
-
-    advance(&mut security, PERSIST_INTERVAL - 1);
-    assert_eq!(security.take_counter_to_persist(), None);
-
-    advance(&mut security, 1);
-    assert_eq!(security.take_counter_to_persist(), Some(PERSIST_INTERVAL));
-    assert_eq!(security.take_counter_to_persist(), None);
-}
-
-// A caller that did not ask in time still gets the value, and the next one is a full
-// interval after it.
-#[test]
-fn test_missed_call_persists_the_counter_at_the_next_one() {
-    let mut security = security();
-
-    advance(&mut security, PERSIST_INTERVAL + 30);
-    assert_eq!(
-        security.take_counter_to_persist(),
-        Some(PERSIST_INTERVAL + 30)
-    );
-
-    advance(&mut security, PERSIST_INTERVAL - 1);
-    assert_eq!(security.take_counter_to_persist(), None);
-}
-
-// The restored value may be one the client never stored, such as its own margin on top
-// of what it had. The first frame after it tells the client where the counter is.
-#[test]
-fn test_restored_counter_is_persisted_at_the_first_frame() {
-    let mut security = security();
-    security.restore_outgoing_frame_counter(12_345);
-
-    advance(&mut security, 1);
-    assert_eq!(security.take_counter_to_persist(), Some(12_346));
-}
-
 /// A device's trust center link key request, APS-secured with `key_id` and encrypted
 /// with `key` (the raw key, not derived further here).
 fn request_key_secured_with(key_id: NwkSecurityHeaderKeyId, key: &Key, source: Eui64) -> Nsdu {
@@ -127,4 +88,43 @@ fn test_request_key_under_the_network_key_is_not_link_key_secured() {
     assert_eq!(applied, AppliedKey::Global);
     assert!(applied.is_link_key());
     assert!(AppliedKey::Device.is_link_key());
+}
+
+#[test]
+fn test_counter_is_persisted_once_per_interval() {
+    let mut security = security();
+
+    advance(&mut security, PERSIST_INTERVAL - 1);
+    assert_eq!(security.take_counter_to_persist(), None);
+
+    advance(&mut security, 1);
+    assert_eq!(security.take_counter_to_persist(), Some(PERSIST_INTERVAL));
+    assert_eq!(security.take_counter_to_persist(), None);
+}
+
+// A caller that did not ask in time still gets the value, and the next one is a full
+// interval after it.
+#[test]
+fn test_missed_call_persists_the_counter_at_the_next_one() {
+    let mut security = security();
+
+    advance(&mut security, PERSIST_INTERVAL + 30);
+    assert_eq!(
+        security.take_counter_to_persist(),
+        Some(PERSIST_INTERVAL + 30)
+    );
+
+    advance(&mut security, PERSIST_INTERVAL - 1);
+    assert_eq!(security.take_counter_to_persist(), None);
+}
+
+// The restored value may be one the client never stored, such as its own margin on top
+// of what it had. The first frame after it tells the client where the counter is.
+#[test]
+fn test_restored_counter_is_persisted_at_the_first_frame() {
+    let mut security = security();
+    security.restore_outgoing_frame_counter(12_345);
+
+    advance(&mut security, 1);
+    assert_eq!(security.take_counter_to_persist(), Some(12_346));
 }
