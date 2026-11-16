@@ -404,10 +404,7 @@ tunables! {
     /// An intentional spec deviation: while permitting joins, spray a beacon every 5 ms
     /// for this long after each beacon request, to out-compete neighbouring networks
     /// that permanently permit joins. Zero disables it (a single beacon per request,
-    /// the spec behaviour). A change applies from the next beacon request, which re-arms
-    /// the window with the new value (zero leaves an open window to run out). A value
-    /// shorter than the beacon-spam task's wake-up latency can expire before the task
-    /// runs, leaving that request without a beacon.
+    /// the spec behaviour).
     hack_beacon_spam_duration: Duration = Duration::from_millis(100),
 }
 
