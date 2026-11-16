@@ -15,6 +15,7 @@ use num_enum::TryFromPrimitive;
 use educe::Educe;
 
 use crate::ParseError;
+use crate::constants::MAX_DEPTH;
 use crate::nwk::commands::NwkCommand;
 
 use crate::crypto::{DecryptionError, MIC_LENGTH, decrypt_ccm, encrypt_ccm, split_mic};
@@ -398,6 +399,12 @@ impl NwkFrame {
         self
     }
 
+    /// Set the radius from an `NLDE-DATA.request` Radius parameter: 0 keeps the default
+    /// of twice `nwkcMaxDepth` (spec 3.2.1.1.3), anything else is used as is.
+    pub const fn with_requested_radius(self, radius: u8) -> Self {
+        self.with_radius(if radius == 0 { 2 * MAX_DEPTH } else { radius })
+    }
+
     /// Frames sent via `transmit_*` (relays, retried route request broadcasts) keep
     /// this sequence number; frames sent via `send_*` have it rewritten.
     pub const fn with_sequence_number(mut self, sequence_number: u8) -> Self {
@@ -754,5 +761,51 @@ mod test {
         // Make sure encryption is round trip
         assert_eq!(nwk_frame.to_bytes(), bytes);
         assert_eq!(decrypted_nwk_frame.encrypt(&key), bytes);
+    }
+
+    #[test]
+    fn test_requested_radius_zero_selects_default() {
+        let frame = NwkFrame {
+            nwk_header: NwkHeader {
+                frame_control: NwkFrameControl {
+                    frame_type: NwkFrameType::Data,
+                    protocol_version: 2,
+                    discover_route: NwkRouteDiscovery::Enable,
+                    multicast: false,
+                    security: true,
+                    source_route: false,
+                    destination: false,
+                    extended_source: false,
+                    end_device_initiator: false,
+                    reserved1: 0,
+                },
+                destination: Nwk(0x1234),
+                source: Nwk(0x0000),
+                radius: 7,
+                sequence_number: 0,
+                destination_ieee: None,
+                source_ieee: None,
+                multicast_control: None,
+                source_route: None,
+            },
+            aux_header: None,
+            payload: NwkPayload::Opaque(Nsdu::new()),
+        };
+
+        let radius = |requested| {
+            frame
+                .clone()
+                .with_requested_radius(requested)
+                .nwk_header
+                .radius
+        };
+
+        // Spec 3.2.1.1.3: a radius of 0 means twice nwkcMaxDepth
+        assert_eq!(radius(0), 2 * MAX_DEPTH);
+
+        // Any other radius is used as is
+        assert_eq!(radius(1), 1);
+        assert_eq!(radius(10), 10);
+        assert_eq!(radius(u8::MAX), u8::MAX);
     }
 }

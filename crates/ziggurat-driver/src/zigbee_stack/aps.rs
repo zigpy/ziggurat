@@ -8,7 +8,6 @@ use ziggurat_zigbee::aps::frame::{
 use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteDiscovery};
 
 use alloc::vec::Vec;
-use core::cmp;
 use core::time::Duration;
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::flat_map::Entry;
@@ -258,7 +257,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let nwk_frame = self
             .nwk_data_frame(destination, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
-            .with_radius(cmp::max(radius, 1));
+            .with_requested_radius(radius);
 
         // With an APS ack, next-hop acceptance is the handoff and the ack arrival (or
         // its timeout, counted from the handoff) is the delivery. Without one, next-hop
@@ -336,7 +335,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let nwk_frame = self
             .nwk_data_frame(destination, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
-            .with_radius(cmp::max(radius, 1));
+            .with_requested_radius(radius);
 
         self.send_broadcast(Broadcast {
             frame: nwk_frame,
@@ -391,7 +390,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let nwk_frame = self
             .nwk_data_frame(BROADCAST_RX_ON_WHEN_IDLE, aps_payload)
             .with_discover_route(NwkRouteDiscovery::Enable)
-            .with_radius(cmp::max(radius, 1));
+            .with_requested_radius(radius);
 
         self.send_broadcast(Broadcast {
             frame: nwk_frame,

@@ -463,6 +463,7 @@ pub struct SendUnicastPayload {
     /// assigns one, so host sends cannot collide with stack-originated frames (ZDP, APS
     /// commands).
     pub aps_seq: u8,
+    /// The NWK radius (maximum hops); 0 selects the default, twice `nwkcMaxDepth` (30).
     pub radius: u8,
     pub priority: i8,
     pub route: RouteControl,
@@ -505,6 +506,7 @@ pub struct SendBroadcastPayload {
     pub dst_ep: u8,
     /// Ignored: the stack owns the APS counter space.
     pub _aps_seq: u8,
+    /// The NWK radius (maximum hops); 0 selects the default, twice `nwkcMaxDepth` (30).
     pub radius: u8,
     pub priority: i8,
     pub asdu_len: u16,
@@ -530,6 +532,7 @@ pub struct SendGroupcastPayload {
     pub src_ep: u8,
     /// Ignored: the stack owns the APS counter space.
     pub _aps_seq: u8,
+    /// The NWK radius (maximum hops); 0 selects the default, twice `nwkcMaxDepth` (30).
     pub radius: u8,
     pub priority: i8,
     pub asdu_len: u16,
