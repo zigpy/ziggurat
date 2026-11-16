@@ -708,11 +708,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         tracing::info!("Sending a new trust center link key to {source_ieee:?}");
 
-        let new_key = self
-            .core()
-            .aib
-            .aps_security
-            .issue_device_key(source_ieee, Key(crate::rng::random_array::<R, 16>()));
+        let new_key = self.core().aib.aps_security.issue_device_key(
+            source_ieee,
+            Key(crate::rng::random_array::<R, 16>()),
+            applied_key,
+        );
 
         // The key is persisted only once the device proves possession via Verify-Key
         // (see `handle_verify_key`); a device that never completes the exchange must not

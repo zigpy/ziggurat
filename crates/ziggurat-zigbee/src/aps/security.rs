@@ -88,6 +88,11 @@ struct DeviceState {
     /// this is promoted, so a device that never verifies is never stranded without a
     /// usable key (spec 4.7.3.3 / 4.7.3.8).
     pending_key: Option<Key>,
+    /// The key that secured the Transport-Key carrying `pending_key`; meaningless
+    /// while no key is pending. `AppliedKey::Device` names whatever `key` holds (the
+    /// seed-derived key while it holds none), so setting a different `key` drops the
+    /// pending key.
+    pending_key_sent_under: Option<AppliedKey>,
     /// Incoming security frame counter, spec 4.4.1.2 steps 4 and 9: a frame secured
     /// with a unique link key must carry a counter no smaller than this stored value,
     /// which is one past the last accepted counter. Kept in memory only: losing it
@@ -162,7 +167,13 @@ impl ApsSecurity {
 
     /// Restore a key negotiated in an earlier session and persisted by the client.
     pub fn restore_device_key(&mut self, eui64: Eui64, key: Key) {
-        self.devices.entry(eui64).or_default().key = Some(DeviceLinkKey {
+        let entry = self.devices.entry(eui64).or_default();
+        // A pending key went out under the key this replaces, so a request under this
+        // one must not get it back (with a TCLK seed the derived key is issued anyway)
+        if entry.key.as_ref().is_none_or(|old| old.key != key) {
+            entry.pending_key = None;
+        }
+        entry.key = Some(DeviceLinkKey {
             key,
             attributes: KeyAttributes::Verified,
         });
@@ -197,7 +208,13 @@ impl ApsSecurity {
     /// for a device expected to join: an `apsDeviceKeyPairSet` entry with
     /// `PROVISIONAL_KEY` attributes, replacing the well-known key for that device.
     pub fn set_provisional_key(&mut self, eui64: Eui64, key: Key) {
-        self.devices.entry(eui64).or_default().key = Some(DeviceLinkKey {
+        let entry = self.devices.entry(eui64).or_default();
+        // A pending key went out under the key this replaces, so a request under this
+        // one must not get it back (with a TCLK seed the derived key is issued anyway)
+        if entry.key.as_ref().is_none_or(|old| old.key != key) {
+            entry.pending_key = None;
+        }
+        entry.key = Some(DeviceLinkKey {
             key,
             attributes: KeyAttributes::Provisional,
         });
@@ -243,18 +260,41 @@ impl ApsSecurity {
             .filter_map(|(eui64, entry)| entry.key.as_ref().map(|key| (*eui64, key)))
     }
 
-    /// Issue a fresh unique link key for a device, held as *pending* until the device
-    /// proves possession via a Verify-Key exchange. The device's current key (if any)
-    /// stays usable until then, so a device that never verifies is not stranded.
+    /// Issue a unique link key for a device, held as *pending* until the device proves
+    /// possession via a Verify-Key exchange. The device's current key (if any) stays
+    /// usable until then, so a device that never verifies is not stranded.
     /// `fresh_key` is caller-generated randomness, used only when no TCLK seed is
     /// configured.
-    pub fn issue_device_key(&mut self, eui64: Eui64, fresh_key: Key) -> Key {
-        let key = self
-            .tclk_seed
-            .as_ref()
-            .map_or(fresh_key, |seed| seed.derive(eui64));
+    ///
+    /// A key already pending is issued again if the request is secured with the key
+    /// that carried it (`sent_under`, the key the reply goes out under): a device
+    /// retrying its Request-Key, or one whose request crossed our Transport-Key, may
+    /// have installed that key and will verify it, not a newer one. A request under
+    /// any other key gets a fresh key, so a pending key never goes out under a key
+    /// other than the one that first carried it (such as the well-known key, after an
+    /// install-code key). A device whose Verify-Key was lost and that asks again
+    /// under the same key is offered the key it already holds, as it always is with a
+    /// TCLK seed. The key stays pending until it is verified, replaced by a request
+    /// under another key, dropped when the device joins fresh (`begin_join`) or its
+    /// `key` changes, or lost on a restart.
+    pub fn issue_device_key(
+        &mut self,
+        eui64: Eui64,
+        fresh_key: Key,
+        sent_under: AppliedKey,
+    ) -> Key {
+        let seed = self.tclk_seed.as_ref();
+        let entry = self.devices.entry(eui64).or_default();
 
-        self.devices.entry(eui64).or_default().pending_key = Some(key.clone());
+        if let Some(pending) = &entry.pending_key
+            && entry.pending_key_sent_under == Some(sent_under)
+        {
+            return pending.clone();
+        }
+
+        let key = seed.map_or(fresh_key, |seed| seed.derive(eui64));
+        entry.pending_key = Some(key.clone());
+        entry.pending_key_sent_under = Some(sent_under);
 
         key
     }
