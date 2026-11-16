@@ -173,6 +173,16 @@ pub struct NeighborLink {
     pub incoming_cost: u8,
 }
 
+/// What a received link status changed in the sender's entry, for route maintenance.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LinkStatusOutcome {
+    /// The sender's address, if its outgoing cost collapsed to zero: the link is
+    /// considered broken and routes through it must be invalidated (spec 3.6.4.4.2).
+    pub lost_link: Option<Nwk>,
+    /// The sender's previous network address, if the link status came from a new one.
+    pub replaced_address: Option<Nwk>,
+}
+
 /// The neighbor table: link quality accounting, link status digestion, and aging.
 #[derive(Debug, Default)]
 pub struct Neighbors {
@@ -683,9 +693,7 @@ impl Neighbors {
     }
 
     /// Digest a received link status command, updating the sender's entry (creating a
-    /// sibling entry for previously unseen routers). Returns the sender's address if
-    /// its outgoing cost collapsed to zero, meaning the link is considered broken and
-    /// routes through it must be invalidated (spec 3.6.4.4.2).
+    /// sibling entry for previously unseen routers).
     pub fn on_link_status(
         &mut self,
         own_address: Nwk,
@@ -694,7 +702,7 @@ impl Neighbors {
         lqi: u8,
         link_status_cmd: &NwkLinkStatusCommand,
         now: Instant,
-    ) -> Option<Nwk> {
+    ) -> LinkStatusOutcome {
         // Collect the set of already-connected neighbors before mutating the state, for
         // the neighbor set diversity computation
         let neighbors_with_nonzero_outgoing_cost = self
@@ -710,7 +718,37 @@ impl Neighbors {
             .collect::<FlatSet<Nwk>>();
 
         // Fold any LQI samples buffered for this address before its entry existed.
-        let buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();
+        let mut buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();
+
+        // Spec 3.3.1.7: a frame carrying its source IEEE address, as every link status
+        // does (3.4.8.2), SHOULD be checked against the neighbor table. A router that
+        // changed its address (address conflict, rejoin) and whose Device_annce we
+        // missed would otherwise keep its old address here. Our own address, or one
+        // another neighbor still holds, is in conflict: the entry keeps its address
+        // until the conflict resolves, rather than two devices sharing one.
+        let replaced_address = self
+            .table
+            .get(&source_ieee)
+            .map(|entry| entry.network_address)
+            .filter(|&previous| previous != source_nwk)
+            .filter(|_| source_nwk != own_address && !self.has_network_address(source_nwk));
+
+        if replaced_address.is_some() {
+            self.update_network_address(source_ieee, source_nwk);
+
+            // The samples the receive path buffered under the new address are this
+            // router's. A full buffer replaces the older samples outright, which also
+            // keeps the ring's order.
+            if let Some(entry) = self.table.get_mut(&source_ieee) {
+                if buffered_lqas.is_full() {
+                    entry.lqas = core::mem::take(&mut buffered_lqas);
+                } else {
+                    for &sample in buffered_lqas.values() {
+                        entry.lqas.push(sample);
+                    }
+                }
+            }
+        }
 
         let neighbor_entry = self.table.entry(source_ieee).or_insert_with(|| {
             tracing::info!("Creating new neighbor entry for {source_ieee:?}");
@@ -798,7 +836,10 @@ impl Neighbors {
 
         let lost_link = previous_outgoing_cost > 0 && neighbor_entry.outgoing_cost == 0;
 
-        lost_link.then_some(neighbor_entry.network_address)
+        LinkStatusOutcome {
+            lost_link: lost_link.then_some(neighbor_entry.network_address),
+            replaced_address,
+        }
     }
 }
 
@@ -867,6 +908,119 @@ mod test {
 
         assert!(!neighbors.clear_end_device_initiator_for_relay(&mut header));
         assert_eq!(header, expected);
+    }
+
+    fn link_status_listing(own: Nwk) -> NwkLinkStatusCommand {
+        NwkLinkStatusCommand {
+            is_first_frame: true,
+            is_last_frame: true,
+            link_statuses: vec![NwkLinkStatus {
+                address: own,
+                incoming_cost: 1,
+                outgoing_cost: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_link_status_refreshes_router_network_address() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let own = Nwk(0x0000);
+        let (old, new) = (Nwk(0x1111), Nwk(0x2222));
+        let now = Instant::from_micros(0);
+        let link_status = link_status_listing(own);
+        let mut neighbors = Neighbors::default();
+
+        let outcome = neighbors.on_link_status(own, router, old, 200, &link_status, now);
+        assert_eq!(outcome, LinkStatusOutcome::default());
+        neighbors.record_lqa(old, 200);
+        neighbors.record_lqa(old, 200);
+        assert_eq!(neighbors.link(old).unwrap().eui64, router);
+
+        // The router moved to a new address and we missed its Device_annce: the
+        // receive path buffers the LQI of its frames under the new address, then its
+        // link status carries the new address with the router's EUI64
+        neighbors.record_lqa(new, 40);
+        neighbors.record_lqa(new, 40);
+        let outcome = neighbors.on_link_status(own, router, new, 40, &link_status, now);
+        assert_eq!(
+            outcome,
+            LinkStatusOutcome {
+                lost_link: None,
+                replaced_address: Some(old),
+            }
+        );
+
+        assert!(!neighbors.has_network_address(old));
+        assert!(neighbors.link(old).is_none());
+        let link = neighbors.link(new).unwrap();
+        assert_eq!(link.eui64, router);
+        assert_eq!(link.outgoing_cost, 1);
+        // The buffered samples joined the router's own: median of [200, 40, 40]
+        assert_eq!(link.incoming_cost, lqi_to_link_cost(40));
+        assert_eq!(neighbors.entries().count(), 1);
+
+        let advertised: Vec<Nwk> = neighbors
+            .link_status_entries()
+            .iter()
+            .map(|status| status.address)
+            .collect();
+        assert_eq!(advertised, vec![new]);
+
+        // A later link status from the same address changes nothing
+        let outcome = neighbors.on_link_status(own, router, new, 40, &link_status, now);
+        assert_eq!(outcome, LinkStatusOutcome::default());
+    }
+
+    #[test]
+    fn test_link_status_keeps_address_another_neighbor_holds() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let other = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
+        let own = Nwk(0x0000);
+        let (old, contested) = (Nwk(0x1111), Nwk(0x2222));
+        let now = Instant::from_micros(0);
+        let link_status = link_status_listing(own);
+        let mut neighbors = Neighbors::default();
+
+        neighbors.on_link_status(own, router, old, 200, &link_status, now);
+        neighbors.on_link_status(own, other, contested, 200, &link_status, now);
+
+        // The router's link status from an address the other neighbor holds, or from
+        // our own address, is an address conflict: the router keeps its entry's address
+        for conflicting in [contested, own] {
+            let outcome =
+                neighbors.on_link_status(own, router, conflicting, 200, &link_status, now);
+            assert_eq!(outcome, LinkStatusOutcome::default());
+            assert_eq!(neighbors.link(old).unwrap().eui64, router);
+            assert_eq!(neighbors.link(contested).unwrap().eui64, other);
+            assert!(!neighbors.has_network_address(own));
+        }
+    }
+
+    #[test]
+    fn test_link_status_address_refresh_keeps_ring_order() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let own = Nwk(0x0000);
+        let (old, new) = (Nwk(0x1111), Nwk(0x2222));
+        let now = Instant::from_micros(0);
+        let link_status = link_status_listing(own);
+        let mut neighbors = Neighbors::default();
+
+        neighbors.on_link_status(own, router, old, 10, &link_status, now);
+
+        // More samples than the window buffered under the new address: the ring wraps
+        for lqi in [10, 20, 200, 220] {
+            neighbors.record_lqa(new, lqi);
+        }
+        neighbors.on_link_status(own, router, new, 220, &link_status, now);
+
+        // The window is [20, 200, 220] and its oldest (20) is replaced next, giving
+        // [200, 220, 30]: a scrambled order would replace 220 and drop the median to 30
+        neighbors.record_lqa(new, 30);
+        assert_eq!(
+            neighbors.link(new).unwrap().incoming_cost,
+            lqi_to_link_cost(200)
+        );
     }
 
     #[test]
