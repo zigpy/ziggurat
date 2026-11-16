@@ -1,5 +1,6 @@
 mod reconnect;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -110,8 +111,37 @@ pub struct ZigguratServer {
     /// without it a `configure` could replace the stack while a `start_network` on it
     /// is still awaiting the radio.
     lifecycle: AsyncMutex<()>,
+    /// The outgoing counters the last stopped stack ended on. A successor continues
+    /// from them: a client's persisted counters can be older than what the stack
+    /// transmitted since, and restarting below it would reuse an encryption nonce.
+    retired_counters: Mutex<RetiredCounters>,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
     notification_forwarder: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// The highest outgoing frame counters any stopped stack has ended on. The NWK counter
+/// belongs to one network key sent from one address, so it is tracked per such pair and
+/// survives Configures for other networks in between.
+#[derive(Default)]
+struct RetiredCounters {
+    nwk: HashMap<([u8; 16], [u8; 8]), u32>,
+    /// Shared by all link-key frames
+    aps: u32,
+}
+
+impl RetiredCounters {
+    fn record(&mut self, stack: &Stack) {
+        let core = stack.state.core.lock();
+        let nwk = self
+            .nwk
+            .entry((
+                core.nib.nwk_security.network_key().0,
+                stack.state.ieee_address.0,
+            ))
+            .or_default();
+        *nwk = (*nwk).max(core.nib.nwk_security.outgoing_frame_counter());
+        self.aps = self.aps.max(core.aib.aps_security.outgoing_frame_counter());
+    }
 }
 
 impl ZigguratServer {
@@ -126,6 +156,7 @@ impl ZigguratServer {
             stack: Mutex::new(None),
             started: AtomicBool::new(false),
             lifecycle: AsyncMutex::new(()),
+            retired_counters: Mutex::new(RetiredCounters::default()),
             notification_tx,
             notification_forwarder: Mutex::new(None),
         }
@@ -733,13 +764,23 @@ impl ZigguratServer {
         tracing::info!("Initializing Zigbee stack with new settings...");
         let phy = self.phy().await.map_err(radio_error)?;
 
-        let aps_frame_counter = payload.state.aps_frame_counter;
-        let stack = ZigbeeStack::new(
-            phy,
-            proto::network_config(&payload),
-            Tunables::default(),
-            TokioSpawner::default(),
-        );
+        // Never start below what the previous stack already transmitted. The APS
+        // counter is shared by all link-key frames, and the NWK counter belongs to one
+        // key sent from one address.
+        let mut aps_frame_counter = payload.state.aps_frame_counter;
+        let mut config = proto::network_config(&payload);
+        {
+            let retired = self.retired_counters.lock().unwrap();
+            aps_frame_counter = aps_frame_counter.max(retired.aps);
+            if let Some(&nwk) = retired
+                .nwk
+                .get(&(config.network_key.0, config.ieee_address.0))
+            {
+                config.network_key_tx_counter = config.network_key_tx_counter.max(nwk);
+            }
+        }
+
+        let stack = ZigbeeStack::new(phy, config, Tunables::default(), TokioSpawner::default());
         stack
             .state
             .core
@@ -802,12 +843,14 @@ impl ZigguratServer {
         Ok(proto::Response::Empty)
     }
 
-    /// Stop and drop the running stack and its notification forwarder, if any.
+    /// Stop and drop the running stack and its notification forwarder, if any,
+    /// recording the counters it ended on.
     async fn teardown_stack(&self) {
         let old_stack = self.stack.lock().unwrap().take();
         if let Some(old_stack) = old_stack {
             tracing::info!("Stopping the running Zigbee stack");
             old_stack.shutdown().await;
+            self.retired_counters.lock().unwrap().record(&old_stack);
         }
 
         let old_forwarder = self.notification_forwarder.lock().unwrap().take();
@@ -1307,5 +1350,78 @@ mod tests {
             }))
         ));
         assert!(!start.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_configure_continues_from_the_replaced_stacks_counters() {
+        let server = test_server();
+        let configured = spawn_request(&server, configure(0x1234)).await.unwrap();
+        assert!(configured.is_ok());
+
+        // The stack transmits past what the client persisted
+        let stack = server.current_stack().unwrap();
+        {
+            let mut core = stack.state.core.lock();
+            core.aib.aps_security.restore_outgoing_frame_counter(50);
+            for _ in 0..40 {
+                let _ = core.nib.nwk_security.next_outgoing_frame_counter();
+            }
+        }
+
+        // The client reconfigures from its older counters (0 in `configure`)
+        let reconfigured = spawn_request(&server, configure(0x1234)).await.unwrap();
+        assert!(reconfigured.is_ok());
+        assert_eq!(counters(&server), (40, 50));
+
+        // Neither does a Configure for another network in between
+        let proto::Request::Configure(mut other) = configure(0x1234) else {
+            unreachable!()
+        };
+        other.state.network_key = Key([9; 16]);
+        let other = spawn_request(&server, proto::Request::Configure(other))
+            .await
+            .unwrap();
+        assert!(other.is_ok());
+        assert_eq!(counters(&server).0, 0);
+
+        // A stop in between does not forget them either
+        server.teardown_stack().await;
+        let reconfigured = spawn_request(&server, configure(0x1234)).await.unwrap();
+        assert!(reconfigured.is_ok());
+        assert_eq!(counters(&server), (40, 50));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_configure_with_another_network_key_starts_its_nwk_counter_fresh() {
+        let server = test_server();
+        let configured = spawn_request(&server, configure(0x1234)).await.unwrap();
+        assert!(configured.is_ok());
+        {
+            let stack = server.current_stack().unwrap();
+            let mut core = stack.state.core.lock();
+            for _ in 0..40 {
+                let _ = core.nib.nwk_security.next_outgoing_frame_counter();
+            }
+        }
+
+        let proto::Request::Configure(mut payload) = configure(0x1234) else {
+            unreachable!()
+        };
+        payload.state.network_key = Key([9; 16]);
+        let reconfigured = spawn_request(&server, proto::Request::Configure(payload))
+            .await
+            .unwrap();
+        assert!(reconfigured.is_ok());
+        assert_eq!(counters(&server).0, 0);
+    }
+
+    /// The current stack's outgoing NWK and APS frame counters.
+    fn counters(server: &ZigguratServer) -> (u32, u32) {
+        let stack = server.current_stack().unwrap();
+        let core = stack.state.core.lock();
+        (
+            core.nib.nwk_security.outgoing_frame_counter(),
+            core.aib.aps_security.outgoing_frame_counter(),
+        )
     }
 }
