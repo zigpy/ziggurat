@@ -146,6 +146,10 @@ pub struct DiscoveryEntry {
     /// identifying a route for. This isn't mentioned in the spec as being a required
     /// field.
     pub destination_address: Nwk,
+    /// A copy at `forward_cost` was relayed or replied to (our own requests start
+    /// handled). Until one is, an equal-cost copy is still fresh: the copies so far may
+    /// have arrived with no radius left to relay them. Not in the spec.
+    pub handled: bool,
 }
 
 /// An outbound routing decision for a frame we originate.
@@ -183,13 +187,16 @@ pub struct RouteUpdate {
 /// it is worth replying to or relaying, and any route it established.
 #[derive(Debug)]
 pub struct RouteRequestOutcome {
-    /// Not a strictly worse duplicate: the route back to the originator was updated.
+    /// Not a strictly worse duplicate: the discovery entry now names its sender, and
+    /// the route back to the originator through it was considered (it may still be
+    /// declined, see `update`).
     pub accepted: bool,
-    /// The first copy of the request, or one with a strictly better forward cost. Only
-    /// these are replied to or relayed. This deviates from spec 3.6.4.5.1.2, which
-    /// drops only costlier copies: an equal-cost copy (an originator's or a relay's
-    /// retry) adds no path information, yet relaying it again, with its own retries,
-    /// multiplies every discovery.
+    /// The first copy of the request, one with a strictly better forward cost, or an
+    /// equal-cost copy while no copy at that cost was relayed or replied to yet (see
+    /// `Routing::note_route_request_handled`). Only these are replied to or relayed.
+    /// This deviates from spec 3.6.4.5.1.2, which drops only costlier copies: an
+    /// equal-cost copy (an originator's or a relay's retry) adds no path information,
+    /// yet relaying it again, with its own retries, multiplies every discovery.
     pub fresh: bool,
     pub update: Option<RouteUpdate>,
 }
@@ -591,6 +598,7 @@ impl Routing {
                 residual_cost: None,
                 expiration_time: now + route_discovery_time,
                 destination_address: destination,
+                handled: true,
             });
 
         tracing::trace!("Route discovery entry: [{key:?}] = {discovery_entry:?}");
@@ -623,6 +631,7 @@ impl Routing {
                 residual_cost: None,
                 expiration_time: now + route_discovery_time,
                 destination_address: BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                handled: true,
             },
         );
 
@@ -634,7 +643,8 @@ impl Routing {
     /// (our own requests, seeded at cost 0, still never echo back); an equal-cost
     /// request updates the reverse path to the latest sender, and any accepted request
     /// establishes the route back to the originator through the sending device
-    /// (spec 3.6.4.5.1.2).
+    /// (spec 3.6.4.5.1.2). The caller reports a fresh copy it relayed or replied to with
+    /// `note_route_request_handled`.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_route_request(
         &mut self,
@@ -663,7 +673,13 @@ impl Routing {
                 let better = updated_path_cost < discovery_entry.forward_cost;
                 discovery_entry.forward_cost = updated_path_cost;
                 discovery_entry.sender_address = sender;
-                better
+
+                // Nothing was relayed or replied at a strictly better cost yet
+                if better {
+                    discovery_entry.handled = false;
+                }
+
+                !discovery_entry.handled
             }
             None => {
                 self.discovery_table.insert(
@@ -676,6 +692,7 @@ impl Routing {
                         residual_cost: None,
                         expiration_time: now + route_discovery_time,
                         destination_address: destination,
+                        handled: false,
                     },
                 );
                 true
@@ -710,6 +727,14 @@ impl Routing {
             accepted: true,
             fresh,
             update,
+        }
+    }
+
+    /// A fresh copy of a route request was relayed or replied to: later copies at the
+    /// same cost are duplicates.
+    pub fn note_route_request_handled(&mut self, originator: Nwk, request_id: RouteRequestId) {
+        if let Some(discovery_entry) = self.discovery_table.get_mut(&(originator, request_id)) {
+            discovery_entry.handled = true;
         }
     }
 
