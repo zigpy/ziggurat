@@ -706,6 +706,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         };
 
+        // Spec 4.7.3.8 step 2: the request must be secured with the device's key-pair
+        // entry. The network key is no such entry and any device on the network holds
+        // it, so it must not replace a pending key the device may already have received.
+        if !applied_key.is_link_key() {
+            tracing::warn!("Ignoring request key from {source_ieee:?} not secured with a link key");
+            return;
+        }
+
         tracing::info!("Sending a new trust center link key to {source_ieee:?}");
 
         let new_key = self

@@ -74,6 +74,15 @@ pub enum AppliedKey {
     Global,
 }
 
+impl AppliedKey {
+    /// Whether the frame was secured with a link key of an `apsDeviceKeyPairSet` entry
+    /// (the device's own or the well-known one) rather than the network key, which
+    /// belongs to no key-pair entry.
+    pub const fn is_link_key(self) -> bool {
+        !matches!(self, Self::Network)
+    }
+}
+
 /// What we track per peer device. The two have independent lifetimes (a seed-derived
 /// device has a counter but no stored key, and reissuing a key
 /// (`issue_device_key`) must not reset the counter) so each field is independently
