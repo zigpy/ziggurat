@@ -133,6 +133,69 @@ fn test_forget_keeps_the_duplicate_check_for_a_request_toward_the_device() {
     assert!(!receive(&mut routing, late_copy, START));
 }
 
+// A device that rejoins while we relay another router's discovery toward it can answer
+// that discovery. Forgetting its old route must leave the reply a routing entry to
+// land on, or we drop it and the other router gets no route through us.
+#[test]
+fn test_forget_keeps_a_relayed_discovery_toward_the_device_answerable() {
+    let mut routing = Routing::default();
+    let request = RouteRequest {
+        originator: ROUTER,
+        destination: DEVICE,
+        path_cost: 5,
+    };
+    assert!(receive(&mut routing, request, START));
+    routing.note_relayed_discovery(DEVICE);
+
+    routing.forget(OWN, DEVICE);
+    assert_eq!(
+        routing.route_status(DEVICE),
+        Some(Status::DiscoveryUnderway)
+    );
+
+    let reply = routing.accept_route_reply(OWN, ROUTER, 1, DEVICE, DEVICE, 1, START);
+    assert_eq!(
+        reply.disposition,
+        RouteReplyDisposition::Relay {
+            next_hop: NEIGHBOR,
+            path_cost: 1
+        }
+    );
+    assert_eq!(routing.next_hop(DEVICE), Some(DEVICE));
+}
+
+// The placeholder holds no route: once the relayed discovery lapses, it goes too.
+#[test]
+fn test_forget_placeholder_for_a_relayed_discovery_expires_with_it() {
+    let mut routing = Routing::default();
+    let request = RouteRequest {
+        originator: ROUTER,
+        destination: DEVICE,
+        path_cost: 5,
+    };
+    assert!(receive(&mut routing, request, START));
+    routing.restore_route(DEVICE, OTHER_DEVICE, 3);
+    routing.note_relayed_discovery(DEVICE);
+
+    routing.forget(OWN, DEVICE);
+    assert_eq!(routing.next_hop(DEVICE), None);
+    assert_eq!(
+        routing.route_status(DEVICE),
+        Some(Status::DiscoveryUnderway)
+    );
+
+    // Any later request runs the expiry
+    let unrelated = RouteRequest {
+        originator: OTHER_DEVICE,
+        destination: NEIGHBOR,
+        path_cost: 5,
+    };
+    let after_expiry = START + ROUTE_DISCOVERY_TIME + Duration::from_secs(1);
+    receive(&mut routing, unrelated, after_expiry);
+
+    assert_eq!(routing.route_status(DEVICE), None);
+}
+
 // A relayed request marks its destination `DiscoveryUnderway`. Only the expiry of the
 // discovery entry retires that mark, so the entry must survive forgetting the
 // originator.
