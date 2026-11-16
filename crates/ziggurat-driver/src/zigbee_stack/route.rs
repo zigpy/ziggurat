@@ -264,7 +264,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .mul_f32(crate::rng::random_f32::<R>()))
             * 2;
 
-        let attempts = self.tunables.rreq_retries() + 1;
+        let attempts = self.tunables.rreq_retries().saturating_add(1);
         let mut core = self.core();
         self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
         self.commit_sends(core);
@@ -478,7 +478,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let request = self.broadcast_route_request(
             core,
             route_request_frame,
-            self.tunables.initial_rreq_retries() + 1,
+            self.tunables.initial_rreq_retries().saturating_add(1),
             Duration::ZERO,
         );
         core.sends.route_request_sent(destination, request);

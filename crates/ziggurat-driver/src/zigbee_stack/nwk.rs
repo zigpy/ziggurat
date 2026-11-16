@@ -733,7 +733,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             policy,
             Schedule::PassiveAck {
                 key,
-                copies_remaining: self.tunables.max_broadcast_retries() + 1,
+                copies_remaining: self.tunables.max_broadcast_retries().saturating_add(1),
                 next_attempt: self.core_now(),
             },
         );
@@ -1058,7 +1058,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             Schedule::PassiveAck {
                 key,
-                copies_remaining: self.tunables.max_broadcast_retries() + 1,
+                copies_remaining: self.tunables.max_broadcast_retries().saturating_add(1),
                 next_attempt: self.core_now() + self.broadcast_jitter(),
             },
         );

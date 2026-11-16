@@ -81,7 +81,7 @@ struct Record<F, E> {
     /// the send; a broadcast is never delivered without reaching the air once.
     quorum_heard: bool,
     /// The last copy's radio failure: the verdict if the copies run out before one is
-    /// handed off.
+    /// handed off. `None` then means no copy was ever sent, a handoff timeout.
     last_error: Option<E>,
     deadline: Instant,
 }
@@ -349,10 +349,15 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
                 match due {
                     Due::Copy => record.copy = CopyState::Queued,
                     Due::Over => {
+                        // A schedule that started with no copies has no radio
+                        // failure to report: no copy ever reached the radio
                         return Some(if record.handed_off {
                             Ok(())
                         } else {
-                            Err(record.last_error.take().unwrap())
+                            Err(record
+                                .last_error
+                                .take()
+                                .unwrap_or_else(|| SendFailure::HandoffTimeout.into()))
                         });
                     }
                 }
