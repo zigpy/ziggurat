@@ -442,9 +442,6 @@ impl Routing {
 
     /// The device at `nwk` left or joined again, clear associated state.
     pub fn forget(&mut self, own_address: Nwk, nwk: Nwk) {
-        // TODO: a discovery toward `nwk` that we relay for another router loses its
-        // route entry here, so `accept_route_reply` drops the reply as coming from an
-        // unknown responder. That router gets no route through us for that discovery.
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
         self.discoveries_left.remove(&nwk);
@@ -455,6 +452,21 @@ impl Routing {
         self.discovery_table.retain(|_, entry| {
             entry.source_address != own_address || entry.destination_address != nwk
         });
+
+        // A discovery another router started toward it can still be answered, by the
+        // device that just joined again. Without a routing entry the reply is dropped
+        // (spec 3.6.4.5.2), so the old route makes way for a `DiscoveryUnderway` entry,
+        // which the discovery's expiry retires.
+        if self
+            .discovery_table
+            .values()
+            .any(|entry| entry.destination_address == nwk)
+        {
+            self.route_table.insert(
+                nwk,
+                TableEntry::new(nwk, Status::DiscoveryUnderway, UNKNOWN_NEXT_HOP),
+            );
+        }
     }
 
     /// Seed an active routing entry restored by the client on startup. Unlike a route
