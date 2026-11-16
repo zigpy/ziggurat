@@ -77,7 +77,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         };
 
-        let lost_link = self.core().nib.neighbors.on_link_status(
+        let outcome = self.core().nib.neighbors.on_link_status(
             self.state.network_address,
             source_ieee,
             nwk_frame.nwk_header.source,
@@ -86,9 +86,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.core_now(),
         );
 
+        // The neighbor no longer answers at its old address, so routes through it
+        // there would only fail on their next frame. Another neighbor at that address
+        // (the one the router moved away from in a conflict) keeps its routes.
+        if let Some(old_nwk) = outcome.replaced_address
+            && !self.core().nib.neighbors.has_network_address(old_nwk)
+        {
+            self.invalidate_routes_via(old_nwk);
+        }
+
         // Spec 3.6.4.4.2: when the outgoing cost collapses to zero the link is
         // considered broken, and routes through this neighbor with it
-        if let Some(neighbor_nwk) = lost_link {
+        if let Some(neighbor_nwk) = outcome.lost_link {
             self.invalidate_routes_via(neighbor_nwk);
         }
 
