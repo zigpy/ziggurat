@@ -344,7 +344,8 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
         }
     }
 
-    /// Fail every frame awaiting a device's poll: it is no longer a child.
+    /// Fail the frames awaiting a device's poll under `nwk`, and under `eui64` when
+    /// given: it is no longer a child, or it rejoined.
     pub(super) fn drop_indirect(
         &mut self,
         eui64: Option<Eui64>,

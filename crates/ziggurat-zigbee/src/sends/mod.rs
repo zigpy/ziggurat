@@ -507,7 +507,8 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         self.broadcasts.deliver(heard, &mut self.outbox);
     }
 
-    /// Fail every frame awaiting a device's poll: it is no longer a child.
+    /// Fail the frames awaiting a device's poll under `nwk`, and under `eui64` when
+    /// given: it is no longer a child, or it rejoined.
     pub fn drop_indirect_unicasts(&mut self, eui64: Option<Eui64>, nwk: Nwk) {
         self.unicasts.drop_indirect(eui64, nwk, &mut self.outbox);
     }
