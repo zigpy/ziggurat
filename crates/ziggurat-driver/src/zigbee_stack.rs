@@ -467,10 +467,6 @@ pub struct State {
     /// Instead of caching route information, always perform route discovery. This is
     /// much slower but ensures that routing logic is always followed.
     pub hack_force_route_discovery: bool,
-    /// While permitting joins, spray a beacon every 5 ms for this long after each beacon
-    /// request, to out-compete neighbouring networks that permanently permit joins. Zero
-    /// disables it (a single beacon per request, the spec behaviour).
-    pub hack_beacon_spam_duration: Duration,
 
     pub role: NwkDeviceType,
     pub capability_information: NwkCapabilityInformation,
@@ -547,7 +543,6 @@ impl State {
             hack_ignore_broadcast_startup_wait_period: true,
             hack_disable_tx: false,
             hack_force_route_discovery: false,
-            hack_beacon_spam_duration: Duration::from_millis(100),
 
             role: config.role,
             capability_information: NwkCapabilityInformation {
