@@ -111,7 +111,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 device_type,
                 rx_on_when_idle: request.receive_on_when_idle,
                 device_timeout,
-                relationship: neighbors::Relationship::Child,
+                // Spec 3.6.1.4.1: only a NWK-secured rejoin authenticates a child on
+                // attachment; an associated one is authenticated by its first
+                // NWK-secured frame (4.3.1.2 step 8)
+                relationship: neighbors::Relationship::UnauthenticatedChild,
             },
             self.core_now(),
         );
