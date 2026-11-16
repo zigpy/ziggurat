@@ -324,13 +324,28 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     pub async fn periodic_many_to_one_route_request_task(&self) {
-        // Receivers drop route requests from senders with a zero outgoing cost, so
-        // the first advertisement waits until link status exchanges establish a
-        // neighbor link, bounded by a fixed ceiling in case the network is silent
-        let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period();
+        // Receivers drop route requests from senders with a zero outgoing cost, and the
+        // empty link status sent at startup has just zeroed it on every neighbor. Listen
+        // for one link status period, so every router neighbor gets to send its link
+        // status, then tell them all their side with one of our own before the first
+        // advertisement. A router that answers at once is not enough: the others would
+        // still drop it. Without any router heard by the ceiling, advertise anyway, in
+        // case the network is silent; costs kept from before a restart do not count.
+        let since = self.core_now();
+        self.sleep_until_core(since + self.tunables.link_status_period())
+            .await;
 
+        let startup_deadline = since + 2 * self.tunables.link_status_period();
         loop {
-            if self.core().nib.neighbors.any_live_router_link() {
+            if self
+                .core()
+                .nib
+                .neighbors
+                .any_router_link_confirmed_since(since)
+            {
+                if let Ok(link_status) = self.send_link_status_broadcast(false) {
+                    let _ = link_status.delivered().await;
+                }
                 break;
             }
 

@@ -579,12 +579,15 @@ impl Neighbors {
         }
     }
 
-    /// Whether any router neighbor has established a bidirectional link with us,
-    /// i.e. a received link status lists us with a nonzero cost.
-    pub fn any_live_router_link(&self) -> bool {
-        self.table
-            .values()
-            .any(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
+    /// Whether a router neighbor sent a link status after `since` that lists us with a
+    /// nonzero cost. Costs from before (a table kept across a restart) do not count:
+    /// the empty link status a restart sends has zeroed the neighbors' side.
+    pub fn any_router_link_confirmed_since(&self, since: Instant) -> bool {
+        self.table.values().any(|entry| {
+            entry.device_type == NwkDeviceType::Router
+                && entry.outgoing_cost > 0
+                && entry.last_link_status_timestamp > since
+        })
     }
 
     /// The earliest end device child keepalive deadline, for scheduling the eviction
@@ -1034,6 +1037,53 @@ mod test {
             neighbors.link(new).unwrap().incoming_cost,
             lqi_to_link_cost(200)
         );
+    }
+
+    const OWN: Nwk = Nwk(0x0000);
+    const ROUTER_NWK: Nwk = Nwk(0x4965);
+
+    fn link_status_from_router(neighbors: &mut Neighbors, listing: Nwk, at: Instant) {
+        let cmd = NwkLinkStatusCommand {
+            is_first_frame: true,
+            is_last_frame: true,
+            link_statuses: vec![NwkLinkStatus {
+                address: listing,
+                incoming_cost: 1,
+                outgoing_cost: 1,
+            }],
+        };
+        neighbors.on_link_status(
+            OWN,
+            Eui64::from_hex("20:6e:f1:ff:fe:0a:d8:8c"),
+            ROUTER_NWK,
+            255,
+            &cmd,
+            at,
+        );
+    }
+
+    #[test]
+    fn test_router_link_heard_before_the_instant_is_not_confirmed() {
+        let mut neighbors = Neighbors::default();
+        link_status_from_router(&mut neighbors, OWN, Instant::from_micros(0));
+
+        assert!(!neighbors.any_router_link_confirmed_since(Instant::from_micros(1)));
+    }
+
+    #[test]
+    fn test_router_link_status_listing_us_after_the_instant_confirms_the_link() {
+        let mut neighbors = Neighbors::default();
+        link_status_from_router(&mut neighbors, OWN, Instant::from_micros(2));
+
+        assert!(neighbors.any_router_link_confirmed_since(Instant::from_micros(1)));
+    }
+
+    #[test]
+    fn test_router_link_status_not_listing_us_does_not_confirm_the_link() {
+        let mut neighbors = Neighbors::default();
+        link_status_from_router(&mut neighbors, Nwk(0x1111), Instant::from_micros(2));
+
+        assert!(!neighbors.any_router_link_confirmed_since(Instant::from_micros(1)));
     }
 
     #[test]
