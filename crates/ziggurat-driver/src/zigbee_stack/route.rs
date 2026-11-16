@@ -145,8 +145,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .saturating_add(contributing_path_cost);
 
         // Deduplicate route requests and track the best path back to the originator.
-        // An equal-cost copy only refreshes that path; only the first copy or one
-        // advertising a strictly better forward cost is replied to or relayed.
+        // Only the first copy, one advertising a strictly better forward cost, or an
+        // equal-cost copy while no copy at that cost was relayed (the earlier ones had
+        // no radius left) is replied to or relayed. Other equal-cost copies only
+        // refresh that path.
         let outcome = self.core().nib.routing.accept_route_request(
             nwk_frame.nwk_header.source,
             route_request_cmd.route_request_identifier,
@@ -186,7 +188,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.end_device_child_eui64(route_request_cmd.destination_address)
         };
 
+        let originator = nwk_frame.nwk_header.source;
+        let request_id = route_request_cmd.route_request_identifier;
+
         if let Some(responder_eui64) = responder_eui64 {
+            // Mark it handled, so an equal-cost copy is never replied to again
+            self.core()
+                .nib
+                .routing
+                .note_route_request_handled(originator, request_id);
+
             // Spec 3.4.2.2: the reply is addressed hop-by-hop, starting with the
             // neighbor we accepted the request from, and accumulates its own path cost
             // on the way back
@@ -266,6 +277,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let attempts = self.tunables.rreq_retries() + 1;
         let mut core = self.core();
+
+        // Equal-cost copies are duplicates only once one of them was relayed
+        core.nib
+            .routing
+            .note_route_request_handled(originator, request_id);
         self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
         self.commit_sends(core);
     }

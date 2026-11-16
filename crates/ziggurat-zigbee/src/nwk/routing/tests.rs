@@ -777,6 +777,7 @@ fn test_own_discovery_matches_the_model_with_two_attempts() {
 }
 
 /// Receive a copy of the same route request at `path_cost`, as relayed by `NEIGHBOR`.
+/// The caller marks it handled if it relayed or replied to it.
 fn receive_copy(routing: &mut Routing, path_cost: u8) -> RouteRequestOutcome {
     routing.accept_route_request(
         DEVICE,
@@ -805,6 +806,7 @@ fn test_first_copy_of_a_route_request_is_fresh() {
 fn test_equal_cost_copy_is_accepted_but_not_fresh() {
     let mut routing = Routing::default();
     let _ = receive_copy(&mut routing, 3);
+    routing.note_route_request_handled(DEVICE, 1);
     let outcome = receive_copy(&mut routing, 3);
     assert!(outcome.accepted);
     assert!(!outcome.fresh);
@@ -834,4 +836,40 @@ fn test_equal_cost_copy_keeps_the_route_back_to_the_originator() {
     let _ = receive_copy(&mut routing, 3);
     let _ = receive_copy(&mut routing, 3);
     assert_eq!(routing.next_hop(DEVICE), Some(NEIGHBOR));
+}
+
+// A first copy that arrives with radius 1 is accepted but cannot be relayed. A later
+// copy at the same cost, with radius to spare, has to be relayed in its place, or the
+// request goes no further than this router.
+#[test]
+fn test_equal_cost_copy_is_fresh_while_no_copy_was_handled() {
+    let mut routing = Routing::default();
+    let _ = receive_copy(&mut routing, 3);
+    let outcome = receive_copy(&mut routing, 3);
+    assert!(outcome.accepted);
+    assert!(outcome.fresh);
+}
+
+#[test]
+fn test_equal_cost_copy_after_a_handled_copy_is_not_fresh() {
+    let mut routing = Routing::default();
+    let _ = receive_copy(&mut routing, 3);
+    let _ = receive_copy(&mut routing, 3);
+    routing.note_route_request_handled(DEVICE, 1);
+    let outcome = receive_copy(&mut routing, 3);
+    assert!(outcome.accepted);
+    assert!(!outcome.fresh);
+}
+
+// A cheaper copy that cannot be relayed either leaves the cheaper cost unrelayed, even
+// though a costlier copy was relayed before it.
+#[test]
+fn test_equal_cost_copy_is_fresh_after_an_unhandled_cheaper_copy() {
+    let mut routing = Routing::default();
+    let _ = receive_copy(&mut routing, 3);
+    routing.note_route_request_handled(DEVICE, 1);
+    assert!(receive_copy(&mut routing, 2).fresh);
+    assert!(receive_copy(&mut routing, 2).fresh);
+    routing.note_route_request_handled(DEVICE, 1);
+    assert!(!receive_copy(&mut routing, 2).fresh);
 }
