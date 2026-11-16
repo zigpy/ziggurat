@@ -86,7 +86,8 @@ impl AppliedKey {
 /// What we track per peer device. The two have independent lifetimes (a seed-derived
 /// device has a counter but no stored key, and reissuing a key
 /// (`issue_device_key`) must not reset the counter) so each field is independently
-/// optional. An entry with both fields empty is pruned.
+/// optional. An entry with both fields empty is pruned. The counter restarts only
+/// with a different key (`verify_device_key`) or a fresh join (`begin_join`).
 #[derive(Debug, Default)]
 struct DeviceState {
     /// The unique trust center link key negotiated with this device, if any. Absent
@@ -99,8 +100,9 @@ struct DeviceState {
     pending_key: Option<Key>,
     /// Incoming security frame counter, spec 4.4.1.2 steps 4 and 9: a frame secured
     /// with a unique link key must carry a counter no smaller than this stored value,
-    /// which is one past the last accepted counter. Kept in memory only: losing it
-    /// across a restart merely suspends replay protection until the next valid frame.
+    /// which is one past the last accepted counter. The client persists it along with
+    /// stored keys; losing it merely suspends replay protection until the next valid
+    /// frame.
     incoming_frame_counter: Option<u32>,
 }
 
@@ -221,18 +223,26 @@ impl ApsSecurity {
 
         // A key issued but not yet verified is stale once the device rejoins fresh.
         entry.pending_key = None;
+        // So is its incoming frame counter: a factory-new device may count its frames
+        // from scratch, and the old value would reject them all as replays. This also
+        // holds when its key stays the same (a provisional key, or a TCLK seed): a
+        // spoofed join while joins are permitted can then reopen replays under that
+        // key, which needs the network key.
+        entry.incoming_frame_counter = None;
 
-        match &entry.key {
+        let provisional_key = match &entry.key {
             Some(link_key) if link_key.attributes == KeyAttributes::Provisional => {
                 Some(link_key.key.clone())
             }
             Some(_) => {
                 entry.key = None;
-                self.prune_if_empty(eui64);
                 None
             }
             None => None,
-        }
+        };
+
+        self.prune_if_empty(eui64);
+        provisional_key
     }
 
     /// Whether a device shares a key with us other than the well-known one. With a
@@ -303,12 +313,21 @@ impl ApsSecurity {
     /// Zigbee spec 4.4.8.1: check a device's keyed hash proving possession of its link
     /// key, marking the key verified on success. `None` means no key is on record.
     pub fn verify_device_key(&mut self, eui64: Eui64, hash: &[u8; 16]) -> Option<bool> {
+        let current_key = self.device_link_key(eui64);
         let entry = self.devices.get_mut(&eui64)?;
 
         // A just-issued pending key is verified first and, on success, promoted to the
         // device's active key; otherwise the device is re-verifying its current key.
         if let Some(pending) = entry.pending_key.clone() {
             if verify_key_hash(&pending).ct_eq(hash).into() {
+                // Spec 4.4.8.1.3 step 6: the counter restarts with the confirmed key, as
+                // the device may restart its own (BDB 9.2 step 3). Unlike step 6, not for
+                // a re-issued identical key (from a TCLK seed), mirroring the same-key
+                // exception of spec 4.6.3.5.3.1: Verify-Key is sent unencrypted, so a
+                // replayed one must not reset replay protection.
+                if pending != current_key {
+                    entry.incoming_frame_counter = None;
+                }
                 entry.key = Some(DeviceLinkKey {
                     key: pending,
                     attributes: KeyAttributes::Verified,
