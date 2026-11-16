@@ -317,6 +317,42 @@ fn test_new_route_request_stops_the_one_it_replaces() {
     assert!(fixture.dequeue().is_none());
 }
 
+// A schedule with no copies at all never reaches the air: it fails as a handoff timeout
+// on its first pass instead of looking for a radio failure that never happened.
+#[test]
+fn test_broadcast_without_copies_fails_on_first_pass() {
+    let mut fixture = Fixture::new();
+    let schedules = [
+        Schedule::PassiveAck {
+            key: (DESTINATION, 1),
+            copies_remaining: 0,
+            next_attempt: fixture.now,
+        },
+        Schedule::FixedInterval {
+            interval: Duration::from_millis(254),
+            copies_remaining: 0,
+            next_attempt: fixture.now,
+        },
+    ];
+    let ids = schedules.map(|schedule| {
+        fixture.sends.enqueue_broadcast(
+            Broadcast {
+                frame: "broadcast",
+                priority: TxPriority::UserNormal,
+                schedule,
+            },
+            fixture.now,
+            &fixture.tunables,
+        )
+    });
+
+    assert_eq!(
+        fixture.pass(None),
+        ids.map(|id| (id, Err(SendFailure::HandoffTimeout)))
+    );
+    assert!(fixture.dequeue().is_none());
+}
+
 // A GPDF waits until its GPD listens, then goes out once, timed from the trigger.
 #[test]
 fn test_gpdf_sent_after_trigger() {
