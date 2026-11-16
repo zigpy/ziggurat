@@ -24,6 +24,10 @@ const DESTINATION: Nwk = Nwk(0x1234);
 const NEXT_HOP: Nwk = Nwk(0x5678);
 const GPD: GpdfTarget = GpdfTarget::Gpd(GpdId::SrcId(0x87654321));
 
+/// A sleepy device polling for its frames.
+const CHILD_NWK: Nwk = Nwk(0x2468);
+const CHILD_EUI64: Eui64 = Eui64([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+
 /// How long a held GPDF waits for its GPD to listen.
 const GPDF_LIFETIME: Duration = Duration::from_secs(1);
 
@@ -56,6 +60,40 @@ impl Fixture {
 
     fn advance(&mut self, duration: Duration) {
         self.now = self.now + duration;
+    }
+
+    /// Hold a frame for the child until it polls under `poll_address`.
+    fn hold_for_poll(&mut self, frame: &'static str, poll_address: Ieee802154Address) -> SendId {
+        let id = self.sends.enqueue_unicast(
+            Unicast {
+                frame,
+                priority: TxPriority::StackCritical,
+                confirm: Confirm::OnHandoff,
+                next_hop: CHILD_NWK,
+                poll_address: Some(poll_address),
+            },
+            self.now,
+            &self.tunables,
+        );
+        assert!(self.settled().is_empty());
+
+        id
+    }
+
+    /// The child polls, as the driver reports a MAC Data Request: under both of its
+    /// addresses. Returns the frame the poll extracts, transmitted, and what that
+    /// settles.
+    fn child_polls(&mut self) -> Option<(&'static str, Vec<Verdict>)> {
+        if !self
+            .sends
+            .poll(Some(CHILD_EUI64), Some(CHILD_NWK), self.now)
+        {
+            return None;
+        }
+
+        let mut in_flight = self.dequeue().unwrap();
+        let frame = *in_flight.frame_mut();
+        Some((frame, self.transmitted(in_flight)))
     }
 
     /// Hold a unicast to `DESTINATION` until a route to it is known.
@@ -555,4 +593,48 @@ fn test_gpdf_cancel_and_abandon() {
     let (second, _) = fixture.hold_gpdf("second");
     fixture.sends.abandon();
     assert_eq!(fixture.settled(), [cancelled(second)]);
+}
+
+// The leave answering a poll from an unknown device waits under its short address,
+// every other held frame under the EUI64. A poll matches both and extracts the oldest
+// first.
+#[test]
+fn test_poll_extracts_the_oldest_frame_under_either_address() {
+    let mut fixture = Fixture::new();
+    let leave = fixture.hold_for_poll("stale leave", Ieee802154Address::Nwk(CHILD_NWK));
+    let response = fixture.hold_for_poll("rejoin response", Ieee802154Address::Eui64(CHILD_EUI64));
+
+    let (frame, settled) = fixture.child_polls().unwrap();
+    assert_eq!(frame, "stale leave");
+    assert_eq!(settled, [(leave, Ok(()))]);
+    let (frame, settled) = fixture.child_polls().unwrap();
+    assert_eq!(frame, "rejoin response");
+    assert_eq!(settled, [(response, Ok(()))]);
+    assert!(fixture.child_polls().is_none());
+}
+
+// A rejoin drops the leave held under the device's short address, so the device's
+// next poll extracts its rejoin response instead of being told to leave again. The
+// frames held under its EUI64 are kept.
+#[test]
+fn test_dropping_by_short_address_keeps_frames_held_under_the_eui64() {
+    let mut fixture = Fixture::new();
+    let leave = fixture.hold_for_poll("stale leave", Ieee802154Address::Nwk(CHILD_NWK));
+    let response = fixture.hold_for_poll("rejoin response", Ieee802154Address::Eui64(CHILD_EUI64));
+
+    fixture.sends.drop_indirect_unicasts(None, CHILD_NWK);
+    assert_eq!(
+        fixture.settled(),
+        [(
+            leave,
+            Err(SendFailure::IndirectExpired {
+                destination: Ieee802154Address::Nwk(CHILD_NWK)
+            })
+        )]
+    );
+
+    let (frame, settled) = fixture.child_polls().unwrap();
+    assert_eq!(frame, "rejoin response");
+    assert_eq!(settled, [(response, Ok(()))]);
+    assert!(fixture.child_polls().is_none());
 }

@@ -1149,6 +1149,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         tracing::info!("Device {source_ieee:?} is rejoining as {assigned_nwk:?}");
 
+        // A poll the device sent while it had no neighbor entry queued a leave under
+        // its short address, telling it to rejoin. It just did, and a poll extracts the
+        // oldest frame first: a sleepy device would get that leave ahead of its rejoin
+        // response and leave again. Only such leaves wait for a poll under a short
+        // address (every other held frame waits under the EUI64). One meant for another
+        // device claiming the same address is queued again on that device's next poll.
+        self.drop_indirect_transactions(None, requested_nwk);
+
         self.update_nwk_eui64_mapping(assigned_nwk, source_ieee);
 
         // Spec 3.6.10.5: end device children start with the default keepalive

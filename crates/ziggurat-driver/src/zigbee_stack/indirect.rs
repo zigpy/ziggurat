@@ -69,7 +69,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Fail every frame awaiting a device's poll: it is no longer a child.
+    /// Fail the frames awaiting a device's poll under `nwk`, and under `eui64` when
+    /// given: it is no longer a child, or it rejoined.
     pub(super) fn drop_indirect_transactions(&self, eui64: Option<Eui64>, nwk: Nwk) {
         let mut core = self.core();
         core.sends.drop_indirect_unicasts(eui64, nwk);
