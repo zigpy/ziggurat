@@ -12,7 +12,7 @@ use ziggurat_zigbee::nwk::frame::{
 use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
     ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
-    ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus,
+    ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus, mgmt_table_page,
 };
 
 use super::TrafficClass;
@@ -75,10 +75,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let mut entries: Vec<&neighbors::TableEntry> = core.nib.neighbors.entries().collect();
             entries.sort_by_key(|entry| entry.network_address.as_u16());
 
-            let descriptors: Vec<NeighborDescriptor> = entries
+            let (total, page) = mgmt_table_page(
+                &entries,
+                request.start_index,
+                MGMT_LQI_DESCRIPTORS_PER_FRAME,
+            );
+
+            let descriptors: Vec<NeighborDescriptor> = page
                 .iter()
-                .skip(usize::from(request.start_index))
-                .take(MGMT_LQI_DESCRIPTORS_PER_FRAME)
                 .map(|entry| NeighborDescriptor {
                     extended_pan_id: self.state.extended_pan_id,
                     extended_address: entry.extended_address,
@@ -109,12 +113,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 })
                 .collect();
 
-            (entries.len(), descriptors)
+            (total, descriptors)
         };
 
         let response = MgmtLqiRsp {
             status: ZdpStatus::Success,
-            neighbor_table_entries: total as u8,
+            neighbor_table_entries: total,
             start_index: request.start_index,
             neighbor_table_list: descriptors,
         };
@@ -147,10 +151,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let mut entries: Vec<&routing::TableEntry> = core.nib.routing.entries().collect();
             entries.sort_by_key(|entry| entry.destination.as_u16());
 
-            let descriptors: Vec<RoutingDescriptor> = entries
+            let (total, page) = mgmt_table_page(
+                &entries,
+                request.start_index,
+                MGMT_RTG_DESCRIPTORS_PER_FRAME,
+            );
+
+            let descriptors: Vec<RoutingDescriptor> = page
                 .iter()
-                .skip(usize::from(request.start_index))
-                .take(MGMT_RTG_DESCRIPTORS_PER_FRAME)
                 .map(|entry| RoutingDescriptor {
                     destination_address: entry.destination,
                     status: match entry.status {
@@ -166,12 +174,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 })
                 .collect();
 
-            (entries.len(), descriptors)
+            (total, descriptors)
         };
 
         let response = MgmtRtgRsp {
             status: ZdpStatus::Success,
-            routing_table_entries: total as u8,
+            routing_table_entries: total,
             start_index: request.start_index,
             routing_table_list: descriptors,
         };
