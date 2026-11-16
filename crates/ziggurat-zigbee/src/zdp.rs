@@ -236,6 +236,20 @@ impl ZdpCommand for MgmtRtgRsp {
     const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtRtgRsp;
 }
 
+/// Spec 2.4.4.3.2 / 2.4.4.3.3: one page of a Mgmt_Lqi_rsp or Mgmt_Rtg_rsp table.
+///
+/// Returns the table size to report and at most `per_frame` records from
+/// `start_index`. The size field is a byte wide and describes at most 255 entries, so
+/// a larger table is reported as its first 255: the size saturates instead of
+/// wrapping, and no page reaches past the size it reports.
+pub fn mgmt_table_page<T>(entries: &[T], start_index: u8, per_frame: usize) -> (u8, &[T]) {
+    let total = u8::try_from(entries.len()).unwrap_or(u8::MAX);
+    let reported = &entries[..usize::from(total)];
+    let rest = reported.get(usize::from(start_index)..).unwrap_or(&[]);
+
+    (total, &rest[..rest.len().min(per_frame)])
+}
+
 fn deserialize<T: AbstractBits>(bytes: &[u8]) -> Result<(u8, T), DeserializeError> {
     let [tsn, payload @ ..] = bytes else {
         return Err(DeserializeError::ZeroBytes);
@@ -249,4 +263,53 @@ fn deserialize<T: AbstractBits>(bytes: &[u8]) -> Result<(u8, T), DeserializeErro
         })?;
 
     Ok((*tsn, command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mgmt_table_page_slices_from_the_start_index() {
+        let entries: Vec<u16> = (0..5).collect();
+
+        assert_eq!(mgmt_table_page(&entries, 0, 2), (5, &entries[0..2]));
+        assert_eq!(mgmt_table_page(&entries, 4, 2), (5, &entries[4..5]));
+        // A start index at or past the end is an empty page, not an error
+        assert_eq!(mgmt_table_page(&entries, 5, 2), (5, &entries[5..5]));
+        assert_eq!(mgmt_table_page(&entries, 200, 2), (5, &entries[5..5]));
+    }
+
+    #[test]
+    fn mgmt_table_page_keeps_a_255_entry_table_whole() {
+        let entries: Vec<u16> = (0..255).collect();
+
+        assert_eq!(
+            mgmt_table_page(&entries, 250, 10),
+            (255, &entries[250..255])
+        );
+        assert_eq!(mgmt_table_page(&entries, 255, 10), (255, &entries[255..]));
+    }
+
+    #[test]
+    fn mgmt_table_page_saturates_a_table_past_255_entries() {
+        // 256 entries would wrap to 0 in a byte: an empty table to the client
+        let entries: Vec<u16> = (0..256).collect();
+        assert_eq!(mgmt_table_page(&entries, 0, 2), (255, &entries[0..2]));
+        assert_eq!(mgmt_table_page(&entries, 254, 2), (255, &entries[254..255]));
+
+        let entries: Vec<u16> = (0..260).collect();
+
+        // 260 entries would wrap to 4 in a byte, ending a paging client's scan early
+        assert_eq!(mgmt_table_page(&entries, 0, 10), (255, &entries[0..10]));
+        // No page reaches past the reported size
+        assert_eq!(
+            mgmt_table_page(&entries, 250, 10),
+            (255, &entries[250..255])
+        );
+        assert_eq!(
+            mgmt_table_page(&entries, 255, 10),
+            (255, &entries[255..255])
+        );
+    }
 }
