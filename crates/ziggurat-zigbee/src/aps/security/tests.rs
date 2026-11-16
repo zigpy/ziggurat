@@ -330,7 +330,7 @@ fn test_same_key_replay_is_rejected() {
 fn test_verified_new_key_resets_incoming_counter() {
     let mut security = device_with_used_key();
 
-    security.issue_device_key(device(), NEW_KEY);
+    security.issue_device_key(device(), NEW_KEY, AppliedKey::Global);
     assert_eq!(
         security.verify_device_key(device(), &verify_key_hash(&NEW_KEY)),
         Some(true)
@@ -349,7 +349,7 @@ fn test_fresh_join_resets_incoming_counter() {
     assert_eq!(security.begin_join(device()), None);
     assert_eq!(security.incoming_frame_counter(device()), None);
 
-    security.issue_device_key(device(), NEW_KEY);
+    security.issue_device_key(device(), NEW_KEY, AppliedKey::Global);
     assert_eq!(
         security.verify_device_key(device(), &verify_key_hash(&NEW_KEY)),
         Some(true)
@@ -386,7 +386,7 @@ fn test_reissued_seed_key_keeps_incoming_counter() {
     let seed_key = security.device_link_key(device());
     security.restore_incoming_frame_counter(device(), 4097);
 
-    let issued = security.issue_device_key(device(), NEW_KEY);
+    let issued = security.issue_device_key(device(), NEW_KEY, AppliedKey::Device);
     assert_eq!(issued, seed_key);
     assert_eq!(
         security.verify_device_key(device(), &verify_key_hash(&issued)),
