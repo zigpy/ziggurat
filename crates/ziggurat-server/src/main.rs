@@ -25,12 +25,17 @@ use ziggurat_driver::zigbee_stack::{SendHandle, Tunables, ZigbeeNotification, Zi
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
+use ziggurat_phy_trel::{DenyList, TrelConfig, TrelPhy};
+
 use ziggurat_protocol::{self as proto};
 
 use reconnect::{Outage, ReconnectPolicy};
 
-type Phy = SpinelPhy<TokioRuntime>;
-type Stack = ZigbeeStack<Phy, TokioRuntime>;
+mod satellite;
+
+/// SPIKE: every radio is wrapped in the (optionally disabled) TREL-like backbone.
+pub type Phy = TrelPhy<SpinelPhy<TokioRuntime>>;
+pub type Stack = ZigbeeStack<Phy, TokioRuntime>;
 
 /// Outbound frames a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -86,6 +91,7 @@ pub struct ZigguratServer {
     /// with `EBUSY`, or a second concurrent connection to the same TCP endpoint
     phy: AsyncMutex<Option<Arc<Phy>>>,
     stack: Mutex<Option<Arc<Stack>>>,
+    trel: TrelConfig,
     started: AtomicBool,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
     notification_forwarder: Mutex<Option<JoinHandle<()>>>,
@@ -94,11 +100,12 @@ pub struct ZigguratServer {
 impl ZigguratServer {
     /// The RCP transport is not opened and the Zigbee stack is not created until a
     /// client sends a command that needs them.
-    pub fn new(serial: SerialConfig) -> Self {
+    pub fn new(serial: SerialConfig, trel: TrelConfig) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_HUB_DEPTH);
 
         Self {
             serial,
+            trel,
             phy: AsyncMutex::new(None),
             stack: Mutex::new(None),
             started: AtomicBool::new(false),
@@ -172,7 +179,7 @@ impl ZigguratServer {
     }
 
     /// The process-lifetime radio transport, opening the RCP link on first use.
-    async fn phy(&self) -> std::io::Result<Arc<Phy>> {
+    pub(crate) async fn phy(&self) -> std::io::Result<Arc<Phy>> {
         let mut phy = self.phy.lock().await;
 
         if let Some(phy) = &*phy {
@@ -180,8 +187,10 @@ impl ZigguratServer {
         }
 
         let transport = open_transport(&self.serial).await?;
-        let new_phy = Arc::new(Phy::new());
-        new_phy.set_close_when_unresponsive(self.serial.reconnect_on_unresponsive);
+        let new_phy = Arc::new(TrelPhy::new(SpinelPhy::new(), self.trel.clone()).await?);
+        new_phy
+            .inner()
+            .set_close_when_unresponsive(self.serial.reconnect_on_unresponsive);
 
         tokio::spawn(run_link(new_phy.clone(), self.serial.clone(), transport));
 
@@ -671,7 +680,7 @@ impl ZigguratServer {
 
     async fn handle_get_hw_address(&self) -> Result<proto::Response, proto::Error> {
         let phy = self.phy().await.map_err(radio_error)?;
-        let ieee = phy.hw_address().await.map_err(radio_error)?;
+        let ieee = phy.inner().hw_address().await.map_err(radio_error)?;
         Ok(proto::Response::HwAddress(proto::HwAddressPayload { ieee }))
     }
 
@@ -690,7 +699,7 @@ impl ZigguratServer {
     /// (Re)initializes the Zigbee stack, but does not start it: `load_*` then
     /// `start_network` follow. The stack deliberately outlives client connections;
     /// reconfiguring replaces it wholesale.
-    async fn handle_configure(
+    pub(crate) async fn handle_configure(
         &self,
         payload: proto::ConfigurePayload,
     ) -> Result<proto::Response, proto::Error> {
@@ -702,6 +711,17 @@ impl ZigguratServer {
         let phy = self.phy().await.map_err(radio_error)?;
 
         let aps_frame_counter = payload.state.aps_frame_counter;
+        // SPIKE: ZLOE peers are scoped by the extended PAN ID (TREL's `xp`)
+        phy.set_extended_pan_id(payload.state.extended_pan_id);
+        // SPIKE: secure ZLOE derives its network CA from the network key
+        if let Err(e) = phy.set_network_key(
+            &payload.state.network_key.0,
+            payload.state.extended_pan_id,
+            payload.state.ieee_address,
+            payload.role == proto::NodeRole::Coordinator,
+        ) {
+            tracing::warn!("ZLOE/QUIC: cannot set up security: {e}");
+        }
         let stack = ZigbeeStack::new(
             phy,
             proto::network_config(&payload),
@@ -726,7 +746,7 @@ impl ZigguratServer {
     /// permission to send commands: the network must be fully up (RCP reset handled,
     /// radio programmed) before replying, or the client's first command would race
     /// with the boot-time reset.
-    async fn handle_start_network(&self) -> Result<proto::Response, proto::Error> {
+    pub(crate) async fn handle_start_network(&self) -> Result<proto::Response, proto::Error> {
         let stack = self.loadable()?;
 
         if let Err(e) = stack.start_network().await {
@@ -737,6 +757,27 @@ impl ZigguratServer {
         stack.spawn_tracked(|arc_self| async move {
             arc_self.run().await;
         });
+
+        // SPIKE: secure ZLOE accepts enrollment without a code while joins are open
+        let pairing_stack = Arc::downgrade(&stack);
+        stack.radio.set_pairing_open(Arc::new(move || {
+            pairing_stack
+                .upgrade()
+                .is_some_and(|s| s.trust_center_permitting_joins())
+        }));
+
+        // SPIKE: on the trusted ZLOE backbone a coordinator hands its settings to any
+        // satellite that asks
+        let weak = Arc::downgrade(&stack);
+        stack.radio.set_netinfo_provider(Arc::new(move || {
+            let stack = weak.upgrade()?;
+            if stack.state.role != ziggurat_driver::zigbee_stack::NwkDeviceType::Coordinator {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            proto::append(&mut bytes, &proto::network_info_payload(&stack, true));
+            Some(bytes)
+        }));
 
         // Drain the stack's notification outbox into the server-level hub. The task is
         // aborted when the stack is replaced, so it doesn't need to observe a closed
@@ -972,6 +1013,7 @@ async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTra
     loop {
         let (reader, writer) = tokio::io::split(transport);
         let error = phy
+            .inner()
             .run_link(FromTokio::new(reader), FromTokio::new(writer))
             .await;
 
@@ -983,7 +1025,7 @@ async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTra
 
         // A link the RCP never answered on does not end the outage: a peer that
         // accepts and drops connections must not keep the process alive forever
-        if phy.rcp_answered() {
+        if phy.inner().rcp_answered() {
             outage = None;
         }
         let outage = outage.get_or_insert_with(Outage::start);
@@ -1106,6 +1148,95 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:9999")]
     listen: String,
 
+    /// SPIKE: UDP port of the ZLOE (Zigbee Link Over Ethernet) backbone; 0 disables it
+    #[arg(long, alias = "backbone-port", default_value_t = 0)]
+    zloe_port: u16,
+
+    /// SPIKE: network interface the ZLOE backbone is confined to (e.g. `eth0`): UDP
+    /// binds its IPv4 address and mDNS runs only there. Default: all interfaces
+    #[arg(long, alias = "backbone-interface")]
+    zloe_interface: Option<String>,
+
+    /// SPIKE: a ZLOE peer reachable without mDNS (`host:port`), repeatable
+    #[arg(long, alias = "backbone-peer")]
+    zloe_peer: Vec<std::net::SocketAddr>,
+
+    /// SPIKE: reach ZLOE peers over IPv4 when they advertise both (default: IPv6
+    /// link-local)
+    #[arg(long)]
+    zloe_ipv4: bool,
+
+    /// SPIKE: UDP port of the ZLOE multicast group, announced over mDNS (TXT `mc`);
+    /// needs --zloe-interface. 0 disables multicast
+    #[arg(long, default_value_t = 19789)]
+    zloe_mcast_port: u16,
+
+    /// SPIKE test hook: while this file exists, drop datagrams arriving on the ZLOE
+    /// multicast groups (simulates a network that stopped delivering multicast). An
+    /// empty file blocks both groups; containing "v4" or "v6" blocks only that one
+    #[arg(long)]
+    zloe_test_mcast_block_file: Option<std::path::PathBuf>,
+
+    /// SPIKE: ZLOE security: `none` (trusted backbone) or `quic` (authenticated
+    /// QUIC peer links, keys derived from the network key)
+    #[arg(long, default_value = "none")]
+    zloe_security: String,
+
+    /// SPIKE: UDP port of the ZLOE QUIC endpoint (default: --zloe-port + 1)
+    #[arg(long, default_value_t = 0)]
+    zloe_quic_port: u16,
+
+    /// SPIKE: with --zloe-satellite and --zloe-security quic, enroll with this code
+    /// from the coordinator, or `auto` while the network is in pairing mode
+    #[arg(long)]
+    zloe_enroll: Option<String>,
+
+    /// SPIKE: coordinator in --zloe-security quic: write the current enrollment code
+    /// to this file
+    #[arg(long)]
+    zloe_enroll_code_file: Option<std::path::PathBuf>,
+
+    /// SPIKE test hook: behave like a host without IPv6
+    #[arg(long)]
+    zloe_test_ipv4_only: bool,
+
+    /// SPIKE: disable mDNS discovery of ZLOE peers
+    #[arg(long, alias = "no-mdns")]
+    zloe_no_mdns: bool,
+
+    /// SPIKE: fake "out of radio range" for a device, by EUI64 (16 hex digits) or NWK
+    /// address (4 hex digits), repeatable
+    #[arg(long)]
+    deny: Vec<String>,
+
+    /// SPIKE: run as a satellite router: fetch the network from this coordinator's
+    /// Ziggurat API (`ws://host:port`) and start in router role
+    #[arg(long)]
+    zloe_satellite_of: Option<String>,
+
+    /// SPIKE: start as coordinator of a private test network kept in this file
+    /// (created on first use), instead of waiting for a client to configure us
+    #[arg(long)]
+    test_network: Option<String>,
+
+    /// SPIKE: channel for a newly created --test-network
+    #[arg(long, default_value_t = 25)]
+    test_channel: u8,
+
+    /// SPIKE: run as a satellite router: find the coordinator on the ZLOE backbone,
+    /// fetch the network settings from it and start in router role
+    #[arg(long)]
+    zloe_satellite: bool,
+
+    /// SPIKE: with --zloe-satellite, only use a coordinator on this extended PAN ID
+    /// (16 hex digits)
+    #[arg(long)]
+    zloe_satellite_epan: Option<String>,
+
+    /// SPIKE: the satellite's NWK address (hex); derived from its EUI64 by default
+    #[arg(long)]
+    zloe_satellite_nwk: Option<String>,
+
     /// Log level (RUST_LOG still overrides, with per-module filters)
     #[arg(long, default_value_t = LevelFilter::DEBUG)]
     log_level: LevelFilter,
@@ -1137,13 +1268,140 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .init();
         }
 
-        let server = Arc::new(ZigguratServer::new(SerialConfig {
-            device: args.device,
-            baudrate: args.baudrate,
-            flow_control: args.flow_control,
-            reconnect_timeout: Duration::from_secs(args.reconnect_timeout),
-            reconnect_on_unresponsive: args.reconnect_on_unresponsive,
-        }));
+        let mut deny = DenyList::default();
+        for entry in &args.deny {
+            match entry.len() {
+                16 => {
+                    deny.eui64.insert(Eui64::try_from_hex(entry)?);
+                }
+                4 => {
+                    deny.nwk.insert(Nwk::try_from_hex(entry)?);
+                }
+                _ => return Err(format!("bad --deny entry {entry:?}").into()),
+            }
+        }
+
+        let server = Arc::new(ZigguratServer::new(
+            SerialConfig {
+                device: args.device,
+                baudrate: args.baudrate,
+                flow_control: args.flow_control,
+                reconnect_timeout: Duration::from_secs(args.reconnect_timeout),
+                reconnect_on_unresponsive: args.reconnect_on_unresponsive,
+            },
+            TrelConfig {
+                port: args.zloe_port,
+                static_peers: args.zloe_peer,
+                mdns: !args.zloe_no_mdns,
+                interface: args.zloe_interface,
+                prefer_ipv4: args.zloe_ipv4,
+                mcast_port: args.zloe_mcast_port,
+                mcast_block_file: args.zloe_test_mcast_block_file,
+                ipv4_only: args.zloe_test_ipv4_only,
+                quic: match args.zloe_security.as_str() {
+                    "quic" => Some(ziggurat_phy_trel::QuicConfig {
+                        port: if args.zloe_quic_port != 0 {
+                            args.zloe_quic_port
+                        } else {
+                            args.zloe_port + 1
+                        },
+                        code_file: args.zloe_enroll_code_file.clone(),
+                    }),
+                    "none" => None,
+                    other => {
+                        return Err(
+                            format!("--zloe-security must be none or quic, not {other:?}").into(),
+                        );
+                    }
+                },
+                deny,
+            },
+        ));
+
+        if args.zloe_port != 0 {
+            let server = server.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    let Some(stack) = server.current_stack() else {
+                        continue;
+                    };
+                    if let Some(stats) = stack.radio.stats() {
+                        tracing::info!("[diag] backbone {stats}");
+                    }
+                    for peer in stack.radio.peers() {
+                        tracing::info!("[diag] backbone peer {peer}");
+                    }
+                    let core = stack.state.core.lock();
+                    for n in core.nib.neighbors.entries() {
+                        if n.device_type == ziggurat_driver::zigbee_stack::NwkDeviceType::EndDevice
+                        {
+                            continue;
+                        }
+                        tracing::info!(
+                            "[diag] neighbor {:?} {:?} lqa={:?} in_cost={} out_cost={}",
+                            n.network_address,
+                            n.extended_address,
+                            n.lqa(),
+                            n.incoming_link_cost(),
+                            n.outgoing_cost
+                        );
+                    }
+                }
+            });
+        }
+
+        if let Some(path) = args.test_network {
+            let server = server.clone();
+            let channel = args.test_channel;
+            tokio::spawn(async move {
+                if let Err(e) = satellite::test_coordinator(&server, &path, channel).await {
+                    tracing::error!("Test network bring-up failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+        }
+
+        if args.zloe_satellite && args.zloe_satellite_of.is_none() {
+            let nwk = args
+                .zloe_satellite_nwk
+                .as_deref()
+                .map(Nwk::try_from_hex)
+                .transpose()?;
+            let epan = args
+                .zloe_satellite_epan
+                .as_deref()
+                .map(Eui64::try_from_hex)
+                .transpose()?;
+            let enroll = args.zloe_enroll.clone();
+            let server = server.clone();
+            tokio::spawn(async move {
+                let result = match enroll {
+                    Some(code) => satellite::bootstrap_enroll(&server, epan, nwk, &code).await,
+                    None => satellite::bootstrap_zloe(&server, epan, nwk).await,
+                };
+                if let Err(e) = result {
+                    tracing::error!("Satellite bootstrap failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+        }
+
+        if let Some(coordinator) = args.zloe_satellite_of {
+            let nwk = args
+                .zloe_satellite_nwk
+                .as_deref()
+                .map(Nwk::try_from_hex)
+                .transpose()?;
+            let server = server.clone();
+            tokio::spawn(async move {
+                if let Err(e) = satellite::bootstrap(&server, &coordinator, nwk).await {
+                    tracing::error!("Satellite bootstrap failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+        }
 
         match args.api {
             ApiMode::Ws => server.run(&args.listen).await?,
