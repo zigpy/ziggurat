@@ -111,8 +111,8 @@ pub struct ZigguratServer {
     /// without it a `configure` could replace the stack while a `start_network` on it
     /// is still awaiting the radio.
     lifecycle: AsyncMutex<()>,
-    /// The outgoing counters the last stopped stack ended on. A successor continues
-    /// from them: a client's persisted counters can be older than what the stack
+    /// The highest outgoing counters the stopped stacks ended on. A successor continues
+    /// from them: a client's persisted counters can be older than what a stack
     /// transmitted since, and restarting below it would reuse an encryption nonce.
     retired_counters: Mutex<RetiredCounters>,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
