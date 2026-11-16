@@ -179,11 +179,18 @@ pub struct RouteUpdate {
     pub path_cost: u8,
 }
 
-/// The result of processing a received route request: whether it was accepted (only
-/// accepted requests are replied to / relayed) and any route it established.
+/// The result of processing a received route request: whether it was accepted, whether
+/// it is worth replying to or relaying, and any route it established.
 #[derive(Debug)]
 pub struct RouteRequestOutcome {
+    /// Not a strictly worse duplicate: the route back to the originator was updated.
     pub accepted: bool,
+    /// The first copy of the request, or one with a strictly better forward cost. Only
+    /// these are replied to or relayed. This deviates from spec 3.6.4.5.1.2, which
+    /// drops only costlier copies: an equal-cost copy (an originator's or a relay's
+    /// retry) adds no path information, yet relaying it again, with its own retries,
+    /// multiplies every discovery.
+    pub fresh: bool,
     pub update: Option<RouteUpdate>,
 }
 
@@ -630,18 +637,21 @@ impl Routing {
     ) -> RouteRequestOutcome {
         self.expire_discoveries(now);
 
-        match self.discovery_table.get_mut(&(originator, request_id)) {
+        let fresh = match self.discovery_table.get_mut(&(originator, request_id)) {
             Some(discovery_entry) => {
                 if updated_path_cost > discovery_entry.forward_cost {
                     tracing::debug!("Ignoring route request with a worse cost");
                     return RouteRequestOutcome {
                         accepted: false,
+                        fresh: false,
                         update: None,
                     };
                 }
 
+                let better = updated_path_cost < discovery_entry.forward_cost;
                 discovery_entry.forward_cost = updated_path_cost;
                 discovery_entry.sender_address = sender;
+                better
             }
             None => {
                 self.discovery_table.insert(
@@ -656,8 +666,9 @@ impl Routing {
                         destination_address: destination,
                     },
                 );
+                true
             }
-        }
+        };
 
         // Spec 3.6.4.5.1.2: the route back to the originator runs through the device we
         // accepted the request from, subject to the 3.6.4.5.3 suitability rule.
@@ -685,6 +696,7 @@ impl Routing {
 
         RouteRequestOutcome {
             accepted: true,
+            fresh,
             update,
         }
     }

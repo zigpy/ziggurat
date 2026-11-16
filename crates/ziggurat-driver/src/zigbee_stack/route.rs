@@ -145,8 +145,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .saturating_add(contributing_path_cost);
 
         // Deduplicate route requests and track the best path back to the originator.
-        // Only requests advertising a strictly better forward cost are processed
-        // further; this also stops our own requests from echoing back at us.
+        // An equal-cost copy only refreshes that path; only the first copy or one
+        // advertising a strictly better forward cost is replied to or relayed.
         let outcome = self.core().nib.routing.accept_route_request(
             nwk_frame.nwk_header.source,
             route_request_cmd.route_request_identifier,
@@ -162,7 +162,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
+        // The route back to the originator may release frames held for it
         self.send_timer_wake.notify_one();
+
+        if !outcome.fresh {
+            tracing::debug!("Not relaying or replying to an equal-cost duplicate route request");
+            return;
+        }
 
         // TODO: what do we do if the address and the EUI64 don't agree? This would be
         // an error, some device on the network is storing invalid information about
