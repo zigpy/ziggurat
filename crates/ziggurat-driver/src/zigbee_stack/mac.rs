@@ -29,7 +29,7 @@ use super::{
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
 ///
-/// [`hack_beacon_spam_duration`]: super::State::hack_beacon_spam_duration
+/// [`hack_beacon_spam_duration`]: super::Tunables::hack_beacon_spam_duration
 const BEACON_SPAM_INTERVAL: Duration = Duration::from_millis(5);
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -65,7 +65,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         match &command_frame.command_payload {
             ziggurat_ieee_802154::Ieee802154CommandPayload::BeaconRequest(_) => {
-                let spam = self.state.hack_beacon_spam_duration;
+                let spam = self.tunables.hack_beacon_spam_duration();
                 if spam.is_zero() || !self.permitting_joins() {
                     self.send_802154_beacon();
                 } else {
@@ -189,7 +189,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// extends the window; the fixed sleep (rather than racing the wake) is what caps
     /// the rate at one beacon per interval no matter how many requests arrive.
     ///
-    /// [`hack_beacon_spam_duration`]: super::State::hack_beacon_spam_duration
+    /// [`hack_beacon_spam_duration`]: super::Tunables::hack_beacon_spam_duration
     pub(super) async fn beacon_spam_task(&self) {
         loop {
             let until = self.core().beacon_spam_until;

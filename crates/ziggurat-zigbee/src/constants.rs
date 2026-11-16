@@ -400,4 +400,44 @@ tunables! {
     /// Broadcast tokens reserved for relayed (transit) broadcasts above the host floor,
     /// so a host flood cannot stop us relaying the mesh's own broadcasts.
     broadcast_forwarding_reserve: u8 = 2,
+
+    /// An intentional spec deviation: while permitting joins, spray a beacon every 5 ms
+    /// for this long after each beacon request, to out-compete neighbouring networks
+    /// that permanently permit joins. Zero disables it (a single beacon per request,
+    /// the spec behaviour). A change applies from the next beacon request, which re-arms
+    /// the window with the new value (zero leaves an open window to run out). A value
+    /// shorter than the beacon-spam task's wake-up latency can expire before the task
+    /// runs, leaving that request without a beacon.
+    hack_beacon_spam_duration: Duration = Duration::from_millis(100),
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_set_hack_beacon_spam_duration() {
+        let tunables = Tunables::default();
+        assert_eq!(
+            tunables.hack_beacon_spam_duration(),
+            Duration::from_millis(100)
+        );
+
+        // Durations go over the wire in microseconds.
+        tunables.set("hack_beacon_spam_duration", 250_000).unwrap();
+        assert_eq!(
+            tunables.hack_beacon_spam_duration(),
+            Duration::from_millis(250)
+        );
+
+        tunables.set("hack_beacon_spam_duration", 0).unwrap();
+        assert!(tunables.hack_beacon_spam_duration().is_zero());
+
+        // Beyond the `AtomicDuration` backing width: rejected, value unchanged.
+        assert_eq!(
+            tunables.set("hack_beacon_spam_duration", u64::from(u32::MAX) + 1),
+            Err(TunableError::InvalidValue)
+        );
+        assert!(tunables.hack_beacon_spam_duration().is_zero());
+    }
 }
