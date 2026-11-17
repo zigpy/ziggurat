@@ -315,6 +315,14 @@ tunables! {
     /// The time between link status command frames.
     link_status_period: Duration = Duration::from_secs(15),
 
+    /// `nwkcMinRouterBootstrapJitter`: the shortest delay before a gratuitous link
+    /// status.
+    min_router_bootstrap_jitter: Duration = Duration::from_millis(500),
+
+    /// `nwkcMaxRouterBootstrapJitter`: the longest delay before a gratuitous link
+    /// status.
+    max_router_bootstrap_jitter: Duration = Duration::from_secs(1),
+
     /// The number of missed link status command frames before resetting the link costs
     /// to zero.
     router_age_limit: u8 = 3,

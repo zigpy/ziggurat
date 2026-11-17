@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
+use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -102,6 +103,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.invalidate_routes_via(neighbor_nwk);
         }
 
+        if outcome.gratuitous_link_status_due {
+            // Spec 3.6.4.4.2: the answer goes out after a random delay
+            let min_jitter = self.tunables.min_router_bootstrap_jitter();
+            let max_jitter = self.tunables.max_router_bootstrap_jitter();
+            let jitter = min_jitter
+                + max_jitter
+                    .saturating_sub(min_jitter)
+                    .mul_f32(crate::rng::random_f32::<R>());
+
+            self.send_link_status_by(self.core_now() + jitter);
+        }
+
         self.link_status_received.notify_one();
     }
 
@@ -186,19 +199,42 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
+    /// Move the next link status broadcast earlier, to `at`. It stays where it is if
+    /// it is already due sooner.
+    fn send_link_status_by(&self, at: CoreInstant) {
+        let mut next = self.next_link_status_at.lock();
+
+        if at < *next {
+            *next = at;
+            drop(next);
+
+            self.link_status_wake.notify_one();
+        }
+    }
+
     pub async fn periodic_link_status_broadcast_task(&self) {
-        let mut next = self.core_now() + self.tunables.link_status_period();
+        *self.next_link_status_at.lock() = self.core_now() + self.tunables.link_status_period();
 
         loop {
-            self.sleep_until_core(next).await;
+            let next = *self.next_link_status_at.lock();
+            let due = core::pin::pin!(self.sleep_until_core(next));
+            let moved = core::pin::pin!(self.link_status_wake.notified());
+
+            // The broadcast moved earlier: sleep again, until its new time
+            if let futures::future::Either::Right(((), _)) =
+                futures::future::select(due, moved).await
+            {
+                continue;
+            }
+
+            // Spec 3.6.4.4.1: the next one follows within a period
+            *self.next_link_status_at.lock() = self.core_now() + self.tunables.link_status_period();
 
             // The link status broadcast has a radius of 1 so delivery does not wait for
             // a relay quorum.
             if let Ok(link_status) = self.send_link_status_broadcast(false) {
                 let _ = link_status.delivered().await;
             }
-
-            next = next + self.tunables.link_status_period();
         }
     }
 }

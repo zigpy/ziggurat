@@ -189,6 +189,9 @@ pub struct LinkStatusOutcome {
     pub lost_link: Option<Nwk>,
     /// The sender's previous network address, if the link status came from a new one.
     pub replaced_address: Option<Nwk>,
+    /// A router we did not know sent an empty list: it just started, and we owe it a
+    /// link status of our own (spec 3.6.4.4.2).
+    pub gratuitous_link_status_due: bool,
 }
 
 /// The neighbor table: link quality accounting, link status digestion, and aging.
@@ -782,6 +785,9 @@ impl Neighbors {
             }
         }
 
+        let gratuitous_link_status_due =
+            link_status_cmd.link_statuses.is_empty() && !self.table.contains_key(&source_ieee);
+
         let neighbor_entry = self.table.entry(source_ieee).or_insert_with(|| {
             tracing::info!("Creating new neighbor entry for {source_ieee:?}");
 
@@ -873,11 +879,6 @@ impl Neighbors {
             }
         }
 
-        if link_status_cmd.link_statuses.is_empty() {
-            // TODO: Initiate a gratuitous link status broadcast, jittered by
-            // nwkcMinRouterBootstrapJitter < nwkcMaxRouterBootstrapJitter
-        }
-
         tracing::trace!("Updated neighbor table entry: {neighbor_entry:?}");
 
         let lost_link = previous_outgoing_cost > 0 && neighbor_entry.outgoing_cost == 0;
@@ -885,6 +886,7 @@ impl Neighbors {
         LinkStatusOutcome {
             lost_link: lost_link.then_some(neighbor_entry.network_address),
             replaced_address,
+            gratuitous_link_status_due,
         }
     }
 }
@@ -998,6 +1000,7 @@ mod test {
             LinkStatusOutcome {
                 lost_link: None,
                 replaced_address: Some(old),
+                gratuitous_link_status_due: false,
             }
         );
 
@@ -1061,6 +1064,31 @@ mod test {
     }
 
     #[test]
+    fn test_empty_link_status_from_unknown_router_is_owed_an_answer() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
+        let now = Instant::from_micros(0);
+        let empty = link_status_frame(true, true, &[]);
+        let mut neighbors = Neighbors::default();
+
+        let outcome =
+            neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ROUTER_AGE_LIMIT);
+        assert_eq!(
+            outcome,
+            LinkStatusOutcome {
+                lost_link: None,
+                replaced_address: None,
+                gratuitous_link_status_due: true,
+            }
+        );
+
+        // The router is known now
+        let outcome =
+            neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ROUTER_AGE_LIMIT);
+        assert_eq!(outcome, LinkStatusOutcome::default());
+    }
+
+    #[test]
     fn test_link_status_leaving_us_out_zeroes_outgoing_cost() {
         let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
         let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
@@ -1094,6 +1122,7 @@ mod test {
             LinkStatusOutcome {
                 lost_link: Some(router_nwk),
                 replaced_address: None,
+                gratuitous_link_status_due: false,
             }
         );
         assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 0);

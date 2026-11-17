@@ -723,6 +723,11 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
     pub(crate) link_status_received: Notify,
+    /// When the next link status broadcast is due: one period after the last, or
+    /// sooner when a gratuitous one was asked for
+    pub(crate) next_link_status_at: Mutex<CoreInstant>,
+    /// Wakes the link status task when `next_link_status_at` moved earlier
+    pub(crate) link_status_wake: Notify,
     pub(crate) address_conflict_wake: Notify,
     /// Wakes the beacon-spam reactor when a beacon request opens its spray window.
     pub(crate) beacon_spam_wake: Notify,
@@ -843,6 +848,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             parent_annce_received: Mutex::new(None),
             mtorr_kick: Notify::new(),
             link_status_received: Notify::new(),
+            next_link_status_at: Mutex::new(CoreInstant::from_micros(0)),
+            link_status_wake: Notify::new(),
             address_conflict_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),
