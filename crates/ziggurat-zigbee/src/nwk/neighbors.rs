@@ -25,6 +25,33 @@ const PENDING_LQA_CAP: usize = 64;
 /// a heap buffer per neighbor would fragment a small arena.
 pub type LqaSamples = RingBuffer<u8, LINK_QUALITY_SAMPLES>;
 
+impl LqaSamples {
+    /// Spec 3.6.3: the link quality is the median of the samples held. A window that
+    /// is not full yet still counts, down to a single sample. `None` when there is no
+    /// sample.
+    pub fn median(&self) -> Option<u8> {
+        let samples = self.values();
+
+        if samples.is_empty() {
+            return None;
+        }
+
+        let mut sorted = [0; LINK_QUALITY_SAMPLES];
+        let sorted = &mut sorted[..samples.len()];
+        sorted.copy_from_slice(samples);
+        sorted.sort_unstable();
+
+        let middle = sorted.len() / 2;
+
+        if sorted.len() % 2 == 1 {
+            Some(sorted[middle])
+        } else {
+            // Average of the two middle elements for an even sample count
+            Some(((sorted[middle - 1] as u16 + sorted[middle] as u16) / 2) as u8)
+        }
+    }
+}
+
 /// Compute the link cost (1-7) based on the LQI (0-255).
 const fn lqi_to_link_cost(lqi: u8) -> u8 {
     match lqi {
@@ -105,28 +132,8 @@ pub struct TableEntry {
 }
 
 impl TableEntry {
-    pub fn lqa(&self) -> Option<u8> {
-        if !self.lqas.is_full() {
-            return None;
-        }
-
-        let mut sorted = [0; LINK_QUALITY_SAMPLES];
-        sorted.copy_from_slice(self.lqas.values());
-        sorted.sort_unstable();
-
-        // The median of the sample window
-        if LINK_QUALITY_SAMPLES % 2 == 1 {
-            Some(sorted[LINK_QUALITY_SAMPLES / 2])
-        } else {
-            // Average of the two middle elements for an even sample count
-            let mid1 = sorted[LINK_QUALITY_SAMPLES / 2 - 1];
-            let mid2 = sorted[LINK_QUALITY_SAMPLES / 2];
-            Some(((mid1 as u16 + mid2 as u16) / 2) as u8)
-        }
-    }
-
     pub fn incoming_link_cost(&self) -> u8 {
-        self.lqa().map_or(0, lqi_to_link_cost)
+        self.lqas.median().map_or(0, lqi_to_link_cost)
     }
 
     pub const fn is_child(&self) -> bool {
@@ -694,9 +701,8 @@ impl Neighbors {
             // sleepy end devices that cannot be routed through.
             .filter(|neighbor| neighbor.device_type == NwkDeviceType::Router)
             .filter_map(|neighbor| {
-                // We only calculate link statuses for neighbors for which we have
-                // seen more than a few packets
-                neighbor.lqa().map(|lqa| NwkLinkStatus {
+                // A neighbor we have not heard from yet has no cost to report
+                neighbor.lqas.median().map(|lqa| NwkLinkStatus {
                     address: neighbor.network_address,
                     incoming_cost: lqi_to_link_cost(lqa),
                     outgoing_cost: neighbor.outgoing_cost,
@@ -1118,6 +1124,39 @@ mod test {
         // Listed as the entry two frames share
         let listed = link_status_frame(false, false, &[0x3000, 0x4000]);
         assert_eq!(outgoing_cost_after(own, &listed), 3);
+    }
+
+    #[test]
+    fn test_link_cost_uses_the_samples_held() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
+        let now = Instant::from_micros(0);
+        let link_status = link_status_listing(own);
+        let mut neighbors = Neighbors::default();
+
+        let incoming_cost =
+            |neighbors: &Neighbors| neighbors.link(router_nwk).unwrap().incoming_cost;
+
+        // One sample is the link quality, and the router is listed at once
+        neighbors.on_link_status(own, router, router_nwk, 200, &link_status, now);
+        assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(200));
+        assert_eq!(neighbors.link_status_entries().len(), 1);
+
+        // Two samples: their average
+        neighbors.record_lqa(router_nwk, 40);
+        assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(120));
+
+        // Three samples: the median
+        neighbors.record_lqa(router_nwk, 40);
+        assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(40));
+    }
+
+    #[test]
+    fn test_restored_child_without_samples_has_no_link_cost() {
+        let neighbors = neighbors_with(NwkDeviceType::Router);
+
+        assert_eq!(neighbors.link(CHILD_NWK).unwrap().incoming_cost, 0);
+        assert!(neighbors.link_status_entries().is_empty());
     }
 
     #[test]
