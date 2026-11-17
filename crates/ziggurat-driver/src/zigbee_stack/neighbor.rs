@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
+use ziggurat_zigbee::nwk::NwkDeviceType;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -17,7 +18,38 @@ const MAX_LINK_STATUSES: usize = 7;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
-        self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
+        let link_status_due = self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
+
+        if link_status_due {
+            self.request_link_status_for_new_router();
+        }
+    }
+
+    /// Send the next link status soon: a router it will newly list waits for it to
+    /// learn its cost.
+    fn request_link_status_for_new_router(&self) {
+        // Coordinator only. Routers must not run this as it is: every router that
+        // hears a new neighbor would send within the same half second, each with its
+        // whole list, and most of those frames would collide.
+        if self.state.role == NwkDeviceType::Coordinator {
+            self.request_early_link_status();
+        }
+    }
+
+    /// Send the next link status after the delay of a gratuitous one (spec 3.6.4.4.2).
+    fn request_early_link_status(&self) {
+        let min_jitter = self.tunables.min_router_bootstrap_jitter();
+        let max_jitter = self.tunables.max_router_bootstrap_jitter();
+        let jitter = min_jitter
+            + max_jitter
+                .saturating_sub(min_jitter)
+                .mul_f32(crate::rng::random_f32::<R>());
+
+        let at = self.core_now() + jitter;
+
+        if self.core().nib.link_status_debouncer.request(at) {
+            self.link_status_wake.notify_one();
+        }
     }
 
     pub(super) fn end_device_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
@@ -102,25 +134,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.invalidate_routes_via(neighbor_nwk);
         }
 
-        if outcome.gratuitous_link_status_due {
-            // Spec 3.6.4.4.2: the answer goes out after a random delay
-            let min_jitter = self.tunables.min_router_bootstrap_jitter();
-            let max_jitter = self.tunables.max_router_bootstrap_jitter();
-            let jitter = min_jitter
-                + max_jitter
-                    .saturating_sub(min_jitter)
-                    .mul_f32(crate::rng::random_f32::<R>());
-
-            let answer_at = self.core_now() + jitter;
-
-            if self
-                .core()
-                .nib
-                .link_status_schedule
-                .bring_forward(answer_at)
-            {
-                self.link_status_wake.notify_one();
-            }
+        if outcome.link_status_answer_due {
+            self.request_early_link_status();
+        } else if outcome.link_status_due {
+            self.request_link_status_for_new_router();
         }
 
         self.link_status_received.notify_one();
@@ -211,7 +228,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let now = self.core_now();
         let period = self.tunables.link_status_period();
 
-        self.core().nib.link_status_schedule.restart(now, period);
+        self.core().nib.link_status_debouncer.fired(now, period);
     }
 
     pub async fn periodic_link_status_broadcast_task(&self) {
@@ -219,7 +236,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.restart_link_status_period();
 
         loop {
-            let next = self.core().nib.link_status_schedule.next();
+            let next = self.core().nib.link_status_debouncer.next();
             let due = core::pin::pin!(self.sleep_until_core(next));
             let moved = core::pin::pin!(self.link_status_wake.notified());
 

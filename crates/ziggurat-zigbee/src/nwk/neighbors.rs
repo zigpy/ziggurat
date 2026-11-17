@@ -133,6 +133,12 @@ pub struct TableEntry {
 }
 
 impl TableEntry {
+    /// Whether our link status lists this neighbor: a router we have heard from. A
+    /// neighbor without a sample has no cost to report.
+    pub fn is_in_link_status(&self) -> bool {
+        self.device_type == NwkDeviceType::Router && !self.lqas.is_empty()
+    }
+
     pub fn incoming_link_cost(&self) -> u8 {
         self.lqas.median().map_or(0, lqi_to_link_cost)
     }
@@ -189,9 +195,13 @@ pub struct LinkStatusOutcome {
     pub lost_link: Option<Nwk>,
     /// The sender's previous network address, if the link status came from a new one.
     pub replaced_address: Option<Nwk>,
-    /// A router we did not know sent an empty list: it just started, and we owe it a
-    /// link status of our own (spec 3.6.4.4.2).
-    pub gratuitous_link_status_due: bool,
+    /// Our link status lists the sender from now on and did not before, so the sender
+    /// has yet to learn its cost from us.
+    pub link_status_due: bool,
+    /// The sender's list was empty: it just started and asks who its neighbors are.
+    /// The spec owes an answer only to an unknown sender (3.6.4.4.2). We answer a
+    /// known one too so a restarted neighbor hears us at once.
+    pub link_status_answer_due: bool,
 }
 
 /// The neighbor table: link quality accounting, link status digestion, and aging.
@@ -208,14 +218,18 @@ pub struct Neighbors {
 impl Neighbors {
     /// Record an LQI sample for the device that transmitted a frame to us. LQA is a
     /// property of the radio link to the MAC transmitter; the frame's NWK originator
-    /// may be several hops away.
-    pub fn record_lqa(&mut self, sender_nwk: Nwk, lqi: u8) {
+    /// may be several hops away. Returns whether a link status is due: ours lists the
+    /// sender from now on and did not before.
+    pub fn record_lqa(&mut self, sender_nwk: Nwk, lqi: u8) -> bool {
         if let Some(entry) = self
             .table
             .values_mut()
             .find(|entry| entry.network_address == sender_nwk)
         {
+            let was_in_link_status = entry.is_in_link_status();
             entry.lqas.push(lqi);
+
+            !was_in_link_status && entry.is_in_link_status()
         } else {
             // No neighbor entry yet (e.g. a sibling router that has not sent a link
             // status command). Buffer the sample so the entry starts with usable link
@@ -227,6 +241,8 @@ impl Neighbors {
             }
 
             self.pending_lqas.entry(sender_nwk).or_default().push(lqi);
+
+            false
         }
     }
 
@@ -713,14 +729,11 @@ impl Neighbors {
             .values()
             // Only include routers in the link status list. Otherwise, we advertise
             // sleepy end devices that cannot be routed through.
-            .filter(|neighbor| neighbor.device_type == NwkDeviceType::Router)
-            .filter_map(|neighbor| {
-                // A neighbor we have not heard from yet has no cost to report
-                neighbor.lqas.median().map(|lqa| NwkLinkStatus {
-                    address: neighbor.network_address,
-                    incoming_cost: lqi_to_link_cost(lqa),
-                    outgoing_cost: neighbor.outgoing_cost,
-                })
+            .filter(|neighbor| neighbor.is_in_link_status())
+            .map(|neighbor| NwkLinkStatus {
+                address: neighbor.network_address,
+                incoming_cost: neighbor.incoming_link_cost(),
+                outgoing_cost: neighbor.outgoing_cost,
             })
             .collect()
     }
@@ -785,8 +798,10 @@ impl Neighbors {
             }
         }
 
-        let gratuitous_link_status_due =
-            link_status_cmd.link_statuses.is_empty() && !self.table.contains_key(&source_ieee);
+        let was_in_link_status = self
+            .table
+            .get(&source_ieee)
+            .is_some_and(TableEntry::is_in_link_status);
 
         let neighbor_entry = self.table.entry(source_ieee).or_insert_with(|| {
             tracing::info!("Creating new neighbor entry for {source_ieee:?}");
@@ -886,7 +901,8 @@ impl Neighbors {
         LinkStatusOutcome {
             lost_link: lost_link.then_some(neighbor_entry.network_address),
             replaced_address,
-            gratuitous_link_status_due,
+            link_status_due: !was_in_link_status && neighbor_entry.is_in_link_status(),
+            link_status_answer_due: link_status_cmd.link_statuses.is_empty(),
         }
     }
 }
@@ -981,9 +997,7 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        let outcome =
-            neighbors.on_link_status(own, router, old, 200, &link_status, now, ROUTER_AGE_LIMIT);
-        assert_eq!(outcome, LinkStatusOutcome::default());
+        neighbors.on_link_status(own, router, old, 200, &link_status, now, ROUTER_AGE_LIMIT);
         neighbors.record_lqa(old, 200);
         neighbors.record_lqa(old, 200);
         assert_eq!(neighbors.link(old).unwrap().eui64, router);
@@ -1000,7 +1014,8 @@ mod test {
             LinkStatusOutcome {
                 lost_link: None,
                 replaced_address: Some(old),
-                gratuitous_link_status_due: false,
+                link_status_due: false,
+                link_status_answer_due: false,
             }
         );
 
@@ -1059,12 +1074,12 @@ mod test {
             ROUTER_AGE_LIMIT,
         );
 
-        assert_eq!(outcome, LinkStatusOutcome::default());
+        assert_eq!(outcome.lost_link, None);
         assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 1);
     }
 
     #[test]
-    fn test_empty_link_status_from_unknown_router_is_owed_an_answer() {
+    fn test_link_status_from_unknown_router_makes_ours_due() {
         let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
         let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
         let now = Instant::from_micros(0);
@@ -1078,20 +1093,74 @@ mod test {
             LinkStatusOutcome {
                 lost_link: None,
                 replaced_address: None,
-                gratuitous_link_status_due: true,
+                link_status_due: true,
+                link_status_answer_due: true,
             }
         );
 
-        // The router is known now
+        // The router is known now: its empty list is still owed an answer
         let outcome =
             neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ROUTER_AGE_LIMIT);
-        assert_eq!(outcome, LinkStatusOutcome::default());
+        assert_eq!(
+            outcome,
+            LinkStatusOutcome {
+                lost_link: None,
+                replaced_address: None,
+                link_status_due: false,
+                link_status_answer_due: true,
+            }
+        );
 
-        // Another unknown router is owed one too
+        // Another unknown router makes one due too, whatever its list holds
         let other = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
-        let outcome =
-            neighbors.on_link_status(own, other, Nwk(0x2222), 200, &empty, now, ROUTER_AGE_LIMIT);
-        assert!(outcome.gratuitous_link_status_due);
+        let listing = link_status_listing(own);
+        let outcome = neighbors.on_link_status(
+            own,
+            other,
+            Nwk(0x2222),
+            200,
+            &listing,
+            now,
+            ROUTER_AGE_LIMIT,
+        );
+        assert!(outcome.link_status_due);
+        assert!(!outcome.link_status_answer_due);
+    }
+
+    #[test]
+    fn test_first_frame_from_a_router_without_samples_makes_our_link_status_due() {
+        let mut neighbors = neighbors_with(NwkDeviceType::Router);
+
+        assert!(neighbors.record_lqa(CHILD_NWK, 200));
+        assert!(!neighbors.record_lqa(CHILD_NWK, 200));
+    }
+
+    #[test]
+    fn test_frames_from_other_senders_do_not_make_our_link_status_due() {
+        // An end device is never listed
+        let mut neighbors = neighbors_with(NwkDeviceType::EndDevice);
+        assert!(!neighbors.record_lqa(CHILD_NWK, 200));
+
+        // Neither is a sender without a neighbor entry
+        assert!(!neighbors.record_lqa(Nwk(0x2222), 200));
+    }
+
+    #[test]
+    fn test_link_status_from_a_heard_end_device_makes_ours_due() {
+        // A child restored without its device type is loaded as an end device
+        let mut neighbors = neighbors_with(NwkDeviceType::EndDevice);
+        neighbors.record_lqa(CHILD_NWK, 200);
+
+        let outcome = neighbors.on_link_status(
+            Nwk(0x0000),
+            Eui64::from_hex("00:11:22:33:44:55:66:77"),
+            CHILD_NWK,
+            200,
+            &link_status_listing(Nwk(0x0000)),
+            Instant::from_micros(0),
+            ROUTER_AGE_LIMIT,
+        );
+        assert!(outcome.link_status_due);
     }
 
     #[test]
@@ -1128,7 +1197,8 @@ mod test {
             LinkStatusOutcome {
                 lost_link: Some(router_nwk),
                 replaced_address: None,
-                gratuitous_link_status_due: false,
+                link_status_due: false,
+                link_status_answer_due: false,
             }
         );
         assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 0);

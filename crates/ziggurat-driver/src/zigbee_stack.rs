@@ -22,6 +22,7 @@ use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
+use ziggurat_zigbee::debouncer::Debouncer;
 use ziggurat_zigbee::flat_map::FlatMap;
 use ziggurat_zigbee::nwk::frame::{NwkFrame, NwkSecurityHeaderKeyId};
 
@@ -53,7 +54,6 @@ pub use ziggurat_zigbee::nwk::broadcast_budget::{
     BroadcastAdmission, BroadcastBudget, TrafficClass,
 };
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
-pub use ziggurat_zigbee::nwk::link_status_schedule::LinkStatusSchedule;
 pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
 pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
 pub use ziggurat_zigbee::nwk::routing::Routing;
@@ -352,7 +352,7 @@ pub struct Nib {
     /// The neighbor table: link quality accounting, link status digestion, aging
     pub neighbors: Neighbors,
     /// When the next link status broadcast is due
-    pub link_status_schedule: LinkStatusSchedule,
+    pub link_status_debouncer: Debouncer,
     /// NWK routing state and decision logic (route/discovery/record tables)
     pub routing: Routing,
     /// Broadcast deduplication and passive acknowledgment accounting
@@ -511,7 +511,7 @@ impl State {
                     update_id: config.update_id,
                     tx_total: 0,
                     neighbors: Neighbors::default(),
-                    link_status_schedule: LinkStatusSchedule::default(),
+                    link_status_debouncer: Debouncer::default(),
                     routing: Routing::default(),
                     broadcasts: Broadcasts::default(),
                     nwk_security: NwkSecurity::new(
