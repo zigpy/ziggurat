@@ -142,7 +142,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         if outcome.link_status_answer_due {
             self.request_early_link_status();
-        } else if outcome.link_status_due {
+        } else if outcome.link_status_due
+            && self.tunables.hack_early_link_status_for_unknown_routers()
+        {
             self.request_link_status_for_new_router();
         }
 
