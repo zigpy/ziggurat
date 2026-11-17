@@ -5,6 +5,7 @@ pub mod broadcast_budget;
 pub mod broadcasts;
 pub mod commands;
 pub mod frame;
+pub mod link_status_schedule;
 pub mod neighbors;
 pub mod next_hop;
 pub mod routing;

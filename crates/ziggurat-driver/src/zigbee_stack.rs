@@ -53,6 +53,7 @@ pub use ziggurat_zigbee::nwk::broadcast_budget::{
     BroadcastAdmission, BroadcastBudget, TrafficClass,
 };
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
+pub use ziggurat_zigbee::nwk::link_status_schedule::LinkStatusSchedule;
 pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
 pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
 pub use ziggurat_zigbee::nwk::routing::Routing;
@@ -350,6 +351,8 @@ pub struct Nib {
 
     /// The neighbor table: link quality accounting, link status digestion, aging
     pub neighbors: Neighbors,
+    /// When the next link status broadcast is due
+    pub link_status_schedule: LinkStatusSchedule,
     /// NWK routing state and decision logic (route/discovery/record tables)
     pub routing: Routing,
     /// Broadcast deduplication and passive acknowledgment accounting
@@ -508,6 +511,7 @@ impl State {
                     update_id: config.update_id,
                     tx_total: 0,
                     neighbors: Neighbors::default(),
+                    link_status_schedule: LinkStatusSchedule::default(),
                     routing: Routing::default(),
                     broadcasts: Broadcasts::default(),
                     nwk_security: NwkSecurity::new(
@@ -723,10 +727,7 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
     pub(crate) link_status_received: Notify,
-    /// When the next link status broadcast is due: one period after the last, or
-    /// sooner when a gratuitous one was asked for
-    pub(crate) next_link_status_at: Mutex<CoreInstant>,
-    /// Wakes the link status task when `next_link_status_at` moved earlier
+    /// Wakes the link status task when the next link status broadcast moved earlier
     pub(crate) link_status_wake: Notify,
     pub(crate) address_conflict_wake: Notify,
     /// Wakes the beacon-spam reactor when a beacon request opens its spray window.
@@ -848,7 +849,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             parent_annce_received: Mutex::new(None),
             mtorr_kick: Notify::new(),
             link_status_received: Notify::new(),
-            next_link_status_at: Mutex::new(CoreInstant::from_micros(0)),
             link_status_wake: Notify::new(),
             address_conflict_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),

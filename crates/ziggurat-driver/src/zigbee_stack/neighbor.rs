@@ -3,7 +3,6 @@ use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
-use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -112,7 +111,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     .saturating_sub(min_jitter)
                     .mul_f32(crate::rng::random_f32::<R>());
 
-            self.send_link_status_by(self.core_now() + jitter);
+            let answer_at = self.core_now() + jitter;
+
+            if self
+                .core()
+                .nib
+                .link_status_schedule
+                .bring_forward(answer_at)
+            {
+                self.link_status_wake.notify_one();
+            }
         }
 
         self.link_status_received.notify_one();
@@ -199,24 +207,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Move the next link status broadcast earlier, to `at`. It stays where it is if
-    /// it is already due sooner.
-    fn send_link_status_by(&self, at: CoreInstant) {
-        let mut next = self.next_link_status_at.lock();
+    fn restart_link_status_period(&self) {
+        let now = self.core_now();
+        let period = self.tunables.link_status_period();
 
-        if at < *next {
-            *next = at;
-            drop(next);
-
-            self.link_status_wake.notify_one();
-        }
+        self.core().nib.link_status_schedule.restart(now, period);
     }
 
     pub async fn periodic_link_status_broadcast_task(&self) {
-        *self.next_link_status_at.lock() = self.core_now() + self.tunables.link_status_period();
+        // The network start has just sent one
+        self.restart_link_status_period();
 
         loop {
-            let next = *self.next_link_status_at.lock();
+            let next = self.core().nib.link_status_schedule.next();
             let due = core::pin::pin!(self.sleep_until_core(next));
             let moved = core::pin::pin!(self.link_status_wake.notified());
 
@@ -227,8 +230,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 continue;
             }
 
-            // Spec 3.6.4.4.1: the next one follows within a period
-            *self.next_link_status_at.lock() = self.core_now() + self.tunables.link_status_period();
+            self.restart_link_status_period();
 
             // The link status broadcast has a radius of 1 so delivery does not wait for
             // a relay quorum.

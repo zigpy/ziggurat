@@ -1086,6 +1086,12 @@ mod test {
         let outcome =
             neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ROUTER_AGE_LIMIT);
         assert_eq!(outcome, LinkStatusOutcome::default());
+
+        // Another unknown router is owed one too
+        let other = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
+        let outcome =
+            neighbors.on_link_status(own, other, Nwk(0x2222), 200, &empty, now, ROUTER_AGE_LIMIT);
+        assert!(outcome.gratuitous_link_status_due);
     }
 
     #[test]
