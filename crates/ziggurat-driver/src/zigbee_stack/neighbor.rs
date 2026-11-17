@@ -84,6 +84,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             lqi,
             &link_status_cmd,
             self.core_now(),
+            self.tunables.router_age_limit(),
         );
 
         // The neighbor no longer answers at its old address, so routes through it

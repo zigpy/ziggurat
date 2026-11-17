@@ -53,7 +53,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     pub(super) fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
-        core.nib.routing.forget(self.state.network_address, nwk);
+        core.nib.routing.forget(
+            self.state.network_address,
+            nwk,
+            self.tunables.router_age_limit(),
+        );
         core.sends.fail_unrouted(nwk);
         self.commit_sends(core);
     }
@@ -442,6 +446,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     now,
                     self.tunables.route_discovery_time(),
                     self.tunables.pending_route_discovery_attempts(),
+                    self.tunables.router_age_limit(),
                 );
                 if let Some(route_request_identifier) = route_request_identifier {
                     self.broadcast_discovery_request(

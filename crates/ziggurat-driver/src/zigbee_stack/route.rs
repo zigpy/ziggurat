@@ -44,6 +44,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source,
             updated_path_cost,
             now,
+            self.tunables.router_age_limit(),
         );
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
@@ -158,6 +159,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             route_request_cmd.many_to_one,
             self.core_now(),
             self.tunables.route_discovery_time(),
+            self.tunables.router_age_limit(),
         );
 
         if !outcome.accepted {
@@ -233,10 +235,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // many-to-one requests are addressed to a broadcast address, so there is no
         // destination to track for them.
         if !many_to_one {
-            self.core()
-                .nib
-                .routing
-                .note_relayed_discovery(route_request_cmd.destination_address);
+            self.core().nib.routing.note_relayed_discovery(
+                route_request_cmd.destination_address,
+                self.tunables.router_age_limit(),
+            );
         }
 
         let rebroadcast_radius = nwk_frame.nwk_header.radius.saturating_sub(1);

@@ -73,7 +73,12 @@ pub struct TableEntry {
 }
 
 impl TableEntry {
-    const fn new(destination: Nwk, status: Status, next_hop_address: Nwk) -> Self {
+    const fn new(
+        destination: Nwk,
+        status: Status,
+        next_hop_address: Nwk,
+        router_age_limit: u8,
+    ) -> Self {
         Self {
             destination,
             status,
@@ -84,7 +89,7 @@ impl TableEntry {
             next_hop_address,
             path_cost: u8::MAX,
             total_usage_count: 0,
-            recent_activity: 0,
+            recent_activity: router_age_limit,
         }
     }
 
@@ -335,6 +340,7 @@ impl Routing {
         now: Instant,
         route_discovery_time: Duration,
         attempts: u8,
+        router_age_limit: u8,
     ) -> Option<RouteRequestId> {
         if self.discoveries_left.contains_key(&destination) {
             return None;
@@ -347,7 +353,13 @@ impl Routing {
             return None;
         }
 
-        Some(self.begin_discovery(own_address, destination, now, route_discovery_time))
+        Some(self.begin_discovery(
+            own_address,
+            destination,
+            now,
+            route_discovery_time,
+            router_age_limit,
+        ))
     }
 
     /// Decide what becomes of each destination our frames wait for a route to.
@@ -358,6 +370,7 @@ impl Routing {
         own_address: Nwk,
         now: Instant,
         route_discovery_time: Duration,
+        router_age_limit: u8,
         wanted: impl Fn(Nwk) -> bool,
     ) -> DiscoveryTick {
         let mut tick = DiscoveryTick::default();
@@ -381,8 +394,13 @@ impl Routing {
             // route was lost before the frame could use it
             if *discoveries_left > 0 {
                 *discoveries_left -= 1;
-                let request_id =
-                    self.begin_discovery(own_address, destination, now, route_discovery_time);
+                let request_id = self.begin_discovery(
+                    own_address,
+                    destination,
+                    now,
+                    route_discovery_time,
+                    router_age_limit,
+                );
                 tick.restarted.push((destination, request_id));
                 true
             } else {
@@ -448,7 +466,7 @@ impl Routing {
     }
 
     /// The device at `nwk` left or joined again, clear associated state.
-    pub fn forget(&mut self, own_address: Nwk, nwk: Nwk) {
+    pub fn forget(&mut self, own_address: Nwk, nwk: Nwk, router_age_limit: u8) {
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
         self.discoveries_left.remove(&nwk);
@@ -471,15 +489,26 @@ impl Routing {
         {
             self.route_table.insert(
                 nwk,
-                TableEntry::new(nwk, Status::DiscoveryUnderway, UNKNOWN_NEXT_HOP),
+                TableEntry::new(
+                    nwk,
+                    Status::DiscoveryUnderway,
+                    UNKNOWN_NEXT_HOP,
+                    router_age_limit,
+                ),
             );
         }
     }
 
     /// Seed an active routing entry restored by the client on startup. Unlike a route
     /// learned at runtime, this does not record a change (the client already has it).
-    pub fn restore_route(&mut self, destination: Nwk, next_hop: Nwk, path_cost: u8) {
-        let mut entry = TableEntry::new(destination, Status::Active, next_hop);
+    pub fn restore_route(
+        &mut self,
+        destination: Nwk,
+        next_hop: Nwk,
+        path_cost: u8,
+        router_age_limit: u8,
+    ) {
+        let mut entry = TableEntry::new(destination, Status::Active, next_hop, router_age_limit);
         entry.path_cost = path_cost;
         self.route_table.insert(destination, entry);
     }
@@ -571,16 +600,21 @@ impl Routing {
         destination: Nwk,
         now: Instant,
         route_discovery_time: Duration,
+        router_age_limit: u8,
     ) -> RouteRequestId {
         // Expire stale discoveries before establishing the new one. A just-expired
         // discovery toward this same destination would otherwise tear down the
         // `DiscoveryUnderway` route entry created below.
         self.expire_discoveries(now);
 
-        let route_table_entry = self
-            .route_table
-            .entry(destination)
-            .or_insert_with(|| TableEntry::new(destination, Status::Inactive, UNKNOWN_NEXT_HOP));
+        let route_table_entry = self.route_table.entry(destination).or_insert_with(|| {
+            TableEntry::new(
+                destination,
+                Status::Inactive,
+                UNKNOWN_NEXT_HOP,
+                router_age_limit,
+            )
+        });
         route_table_entry.status = Status::DiscoveryUnderway;
 
         self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
@@ -656,6 +690,7 @@ impl Routing {
         many_to_one: NwkRouteRequestManyToOne,
         now: Instant,
         route_discovery_time: Duration,
+        router_age_limit: u8,
     ) -> RouteRequestOutcome {
         self.expire_discoveries(now);
 
@@ -701,10 +736,14 @@ impl Routing {
 
         // Spec 3.6.4.5.1.2: the route back to the originator runs through the device we
         // accepted the request from, subject to the 3.6.4.5.3 suitability rule.
-        let originator_entry = self
-            .route_table
-            .entry(originator)
-            .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
+        let originator_entry = self.route_table.entry(originator).or_insert_with(|| {
+            TableEntry::new(
+                originator,
+                Status::Inactive,
+                UNKNOWN_NEXT_HOP,
+                router_age_limit,
+            )
+        });
 
         let route_changed = originator_entry.consider_route(sender, updated_path_cost);
 
@@ -740,7 +779,7 @@ impl Routing {
 
     /// Before relaying a route request: mark the destination's entry as
     /// `DiscoveryUnderway`, so the reply we relay back finds it (spec 3.6.4.5.1.2).
-    pub fn note_relayed_discovery(&mut self, destination: Nwk) {
+    pub fn note_relayed_discovery(&mut self, destination: Nwk, router_age_limit: u8) {
         self.route_table
             .entry(destination)
             .and_modify(|entry| {
@@ -749,7 +788,12 @@ impl Routing {
                 }
             })
             .or_insert_with(|| {
-                TableEntry::new(destination, Status::DiscoveryUnderway, UNKNOWN_NEXT_HOP)
+                TableEntry::new(
+                    destination,
+                    Status::DiscoveryUnderway,
+                    UNKNOWN_NEXT_HOP,
+                    router_age_limit,
+                )
             });
     }
 
@@ -766,6 +810,7 @@ impl Routing {
         sender: Nwk,
         updated_path_cost: u8,
         now: Instant,
+        router_age_limit: u8,
     ) -> RouteReplyOutcome {
         // A reply to a discovery that has lapsed finds no entry and is dropped
         self.expire_discoveries(now);
@@ -857,10 +902,14 @@ impl Routing {
         // Spec 3.6.4.5.2.1: relaying the reply also establishes the reverse route
         // toward the originator of the route request, subject to the 3.6.4.5.3
         // suitability rule so a worse path never replaces a good ACTIVE route.
-        let reverse_entry = self
-            .route_table
-            .entry(originator)
-            .or_insert_with(|| TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP));
+        let reverse_entry = self.route_table.entry(originator).or_insert_with(|| {
+            TableEntry::new(
+                originator,
+                Status::Inactive,
+                UNKNOWN_NEXT_HOP,
+                router_age_limit,
+            )
+        });
 
         let update = reverse_entry
             .consider_route(next_hop, forward_cost)
