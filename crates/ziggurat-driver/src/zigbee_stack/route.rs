@@ -47,6 +47,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.activity_params(),
         );
 
+        // A reply to our refresh counts as an answer even when it does not replace the
+        // route, so it is noted before the disposition can drop it
+        if route_reply_cmd.originator_nwk == self.state.network_address {
+            self.note_refresh_reply(route_reply_cmd.responder_nwk, outcome.update);
+        }
+
         let (next_hop_nwk, path_cost) = match outcome.disposition {
             RouteReplyDisposition::Drop => return,
             RouteReplyDisposition::Established => {
@@ -408,8 +414,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
+    /// Every active route through `next_hop` fails. Their destinations are noted as
+    /// displaced from it, so route refresh tries them again when the hop recovers.
     pub(super) fn invalidate_routes_via(&self, next_hop: Nwk) {
-        self.core().nib.routing.invalidate_via(next_hop);
+        let now = self.core_now();
+        let mut guard = self.core();
+        let nib = &mut guard.nib;
+
+        for destination in nib.routing.invalidate_via(next_hop) {
+            nib.route_refresh.note_displaced(destination, next_hop, now);
+        }
+        drop(guard);
     }
 
     /// Zigbee spec 3.6.4.8.1: another router could not deliver a frame we originated;

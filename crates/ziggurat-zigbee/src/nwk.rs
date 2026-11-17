@@ -7,6 +7,7 @@ pub mod commands;
 pub mod frame;
 pub mod neighbors;
 pub mod next_hop;
+pub mod route_refresh;
 pub mod routing;
 pub mod security;
 

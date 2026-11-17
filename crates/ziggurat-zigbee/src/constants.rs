@@ -345,6 +345,27 @@ tunables! {
     /// together.
     pending_route_discovery_attempts: u8 = 1,
 
+    /// Route refresh: look again for cheaper routes in the background, without
+    /// dropping the route in use, after the neighbors settle following a start, for
+    /// destinations only a host route hint reached, and for routes that failed through
+    /// a hop that works again.
+    route_refresh: bool = true,
+
+    /// The least time between two route refreshes. It bounds the broadcasts route
+    /// refresh adds to the network.
+    route_refresh_spacing: Duration = Duration::from_secs(2),
+
+    /// How long a destination that did not answer a route refresh waits before the
+    /// next one. Each later miss doubles it, up to `route_refresh_backoff_max`.
+    route_refresh_backoff: Duration = Duration::from_secs(60),
+
+    /// The longest wait between route refreshes of a destination that does not answer.
+    route_refresh_backoff_max: Duration = Duration::from_secs(30 * 60),
+
+    /// How long after its route failed through a hop a destination is refreshed when
+    /// that hop works again.
+    displaced_route_retention: Duration = Duration::from_secs(10 * 60),
+
     /// The default timeout for any end device child that does not negotiate a
     /// different value via the End Device Timeout Request command (spec 3.6.10.2).
     end_device_timeout_default: EndDeviceTimeout = EndDeviceTimeout::Minutes256,

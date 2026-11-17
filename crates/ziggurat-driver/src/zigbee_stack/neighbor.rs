@@ -148,6 +148,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.request_link_status_for_new_router();
         }
 
+        // The link works again: the routes that failed through it may be cheaper
+        // through it than on their detour
+        if let Some(neighbor_nwk) = outcome.restored_link {
+            self.note_hop_recovered(neighbor_nwk);
+        }
+
         self.link_status_received.notify_one();
     }
 
