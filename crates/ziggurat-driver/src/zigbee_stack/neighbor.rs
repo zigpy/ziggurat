@@ -1,5 +1,6 @@
 use crate::runtime::Runtime;
 use alloc::vec::Vec;
+use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
@@ -47,7 +48,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let at = self.core_now() + jitter;
 
-        if self.core().nib.link_status_debouncer.request(at) {
+        if self
+            .core()
+            .nib
+            .link_status_debouncer
+            .request(at, Duration::ZERO)
+        {
             self.link_status_wake.notify_one();
         }
     }
@@ -236,16 +242,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.restart_link_status_period();
 
         loop {
-            let next = self.core().nib.link_status_debouncer.next();
-            let due = core::pin::pin!(self.sleep_until_core(next));
-            let moved = core::pin::pin!(self.link_status_wake.notified());
-
-            // The broadcast moved earlier: sleep again, until its new time
-            if let futures::future::Either::Right(((), _)) =
-                futures::future::select(due, moved).await
-            {
-                continue;
-            }
+            self.wait_for_debouncer(|nib| &nib.link_status_debouncer, &self.link_status_wake)
+                .await;
 
             self.restart_link_status_period();
 
