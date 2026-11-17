@@ -434,15 +434,14 @@ impl Routing {
         }
     }
 
-    /// Decay the `recent_activity` of every active routing table entry by the time
-    /// passed since the last call, at one count per `period` (`nwkLinkStatusPeriod`).
+    /// Decay the `recent_activity` of every routing table entry by the time passed
+    /// since the last call, at one count per `period` (`nwkLinkStatusPeriod`).
     pub fn decay_activity(&mut self, now: Instant, period: Duration) {
         let steps = take_decay_steps(&mut self.activity_decayed_at, now, period);
 
+        // Spec Table 3-77: "decremented unconditionally", whatever the route's status
         for entry in self.route_table.values_mut() {
-            if entry.status == Status::Active {
-                entry.recent_activity.decay(steps);
-            }
+            entry.recent_activity.decay(steps);
         }
     }
 

@@ -67,6 +67,20 @@ fn test_forget_drops_our_discovery_toward_the_device() {
 }
 
 #[test]
+fn test_recent_activity_decays_on_an_inactive_route() {
+    let period = Duration::from_secs(15);
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3, ROUTER_AGE_LIMIT);
+    routing.invalidate_via(NEIGHBOR);
+    assert_eq!(routing.route_status(DEVICE), Some(Status::Inactive));
+
+    routing.decay_activity(START + period, period);
+
+    let entry = routing.entries().next().unwrap();
+    assert_eq!(entry.recent_activity, Activity::new(ROUTER_AGE_LIMIT - 1));
+}
+
+#[test]
 fn test_forget_drops_the_route_and_the_route_record() {
     let mut routing = Routing::default();
     routing.restore_route(DEVICE, NEIGHBOR, 3, ROUTER_AGE_LIMIT);
