@@ -816,7 +816,13 @@ impl Neighbors {
         if link_status_cmd.is_first_frame {
             neighbor_entry.router_connectivity = 0;
             neighbor_entry.router_neighbor_set_diversity = 0;
-            neighbor_entry.outgoing_cost = 0; // If we do not find it in the list, it is 0
+
+            // A list that leaves us out means the sender does not hear us. An empty
+            // list is no measurement: the sender just started and knows no neighbor
+            // yet, so the cost it gave us before stands until it ages out.
+            if !link_status_cmd.link_statuses.is_empty() {
+                neighbor_entry.outgoing_cost = 0;
+            }
         }
 
         for link_status in link_status_cmd.link_statuses.iter() {
@@ -983,6 +989,57 @@ mod test {
         // A later link status from the same address changes nothing
         let outcome = neighbors.on_link_status(own, router, new, 40, &link_status, now);
         assert_eq!(outcome, LinkStatusOutcome::default());
+    }
+
+    #[test]
+    fn test_empty_link_status_keeps_outgoing_cost() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
+        let mut neighbors = Neighbors::default();
+
+        let listing = link_status_listing(own);
+        neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            200,
+            &listing,
+            Instant::from_micros(0),
+        );
+
+        let empty = NwkLinkStatusCommand {
+            is_first_frame: true,
+            is_last_frame: true,
+            link_statuses: vec![],
+        };
+        let later = Instant::from_micros(1);
+        let outcome = neighbors.on_link_status(own, router, router_nwk, 200, &empty, later);
+
+        assert_eq!(outcome, LinkStatusOutcome::default());
+        assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 1);
+    }
+
+    #[test]
+    fn test_link_status_leaving_us_out_zeroes_outgoing_cost() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
+        let now = Instant::from_micros(0);
+        let mut neighbors = Neighbors::default();
+
+        let listing = link_status_listing(own);
+        neighbors.on_link_status(own, router, router_nwk, 200, &listing, now);
+
+        let without_us = link_status_listing(Nwk(0x2222));
+        let outcome = neighbors.on_link_status(own, router, router_nwk, 200, &without_us, now);
+
+        assert_eq!(
+            outcome,
+            LinkStatusOutcome {
+                lost_link: Some(router_nwk),
+                replaced_address: None,
+            }
+        );
+        assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 0);
     }
 
     #[test]
