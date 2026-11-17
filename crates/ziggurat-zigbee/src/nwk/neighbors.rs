@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::cmp;
 
 use crate::Instant;
-use crate::nwk::activity::{Activity, take_decay_steps};
+use crate::nwk::activity::{Activity, ActivityParams, take_decay_steps};
 use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
 use crate::nwk::frame::NwkHeader;
 use crate::ring_buffer::RingBuffer;
@@ -544,14 +544,19 @@ impl Neighbors {
     /// across attachment retries. The fields a device may change between attachments
     /// are refreshed even on existing entries: a device may re-attach with different
     /// capabilities (e.g. re-flashed from router to end device).
-    pub fn upsert_child(&mut self, child: ChildDescriptor, now: Instant, router_age_limit: u8) {
-        self.upsert(child, now, Some(now), router_age_limit);
+    pub fn upsert_child(&mut self, child: ChildDescriptor, now: Instant, activity: ActivityParams) {
+        self.upsert(child, now, Some(now), activity);
     }
 
     /// Seed a child entry restored by the client on startup. Unlike a device that
     /// associates or rejoins, a restored child did not just attach to us.
-    pub fn restore_child(&mut self, child: ChildDescriptor, now: Instant, router_age_limit: u8) {
-        self.upsert(child, now, None, router_age_limit);
+    pub fn restore_child(
+        &mut self,
+        child: ChildDescriptor,
+        now: Instant,
+        activity: ActivityParams,
+    ) {
+        self.upsert(child, now, None, activity);
     }
 
     fn upsert(
@@ -559,8 +564,10 @@ impl Neighbors {
         child: ChildDescriptor,
         now: Instant,
         attached_at: Option<Instant>,
-        router_age_limit: u8,
+        activity: ActivityParams,
     ) {
+        self.decay_activity(now, activity.period);
+
         let entry = self.table.entry(child.eui64).or_insert_with(|| TableEntry {
             extended_address: child.eui64,
             network_address: child.network_address,
@@ -583,8 +590,8 @@ impl Neighbors {
             attached_at,
             router_connectivity: 0,
             router_neighbor_set_diversity: 0,
-            router_outbound_activity: Activity::new(router_age_limit),
-            router_inbound_activity: Activity::new(router_age_limit),
+            router_outbound_activity: Activity::new(activity.initial_count),
+            router_inbound_activity: Activity::new(activity.initial_count),
             security_timer: 0,
         });
 
@@ -685,6 +692,10 @@ impl Neighbors {
     pub fn decay_activity(&mut self, now: Instant, period: Duration) {
         let steps = take_decay_steps(&mut self.activity_decayed_at, now, period);
 
+        if steps == 0 {
+            return;
+        }
+
         for entry in self.table.values_mut() {
             entry.router_outbound_activity.decay(steps);
             entry.router_inbound_activity.decay(steps);
@@ -692,14 +703,18 @@ impl Neighbors {
     }
 
     /// A unicast was forwarded through this neighbor.
-    pub fn record_outbound_activity(&mut self, eui64: Eui64) {
+    pub fn record_outbound_activity(&mut self, eui64: Eui64, now: Instant, period: Duration) {
+        self.decay_activity(now, period);
+
         if let Some(entry) = self.table.get_mut(&eui64) {
             entry.router_outbound_activity.record_use();
         }
     }
 
     /// A unicast from this neighbor was received for relaying.
-    pub fn record_inbound_activity(&mut self, nwk: Nwk) {
+    pub fn record_inbound_activity(&mut self, nwk: Nwk, now: Instant, period: Duration) {
+        self.decay_activity(now, period);
+
         if let Some(entry) = self
             .table
             .values_mut()
@@ -749,8 +764,10 @@ impl Neighbors {
         lqi: u8,
         link_status_cmd: &NwkLinkStatusCommand,
         now: Instant,
-        router_age_limit: u8,
+        activity: ActivityParams,
     ) -> LinkStatusOutcome {
+        self.decay_activity(now, activity.period);
+
         // Collect the set of already-connected neighbors before mutating the state, for
         // the neighbor set diversity computation
         let neighbors_with_nonzero_outgoing_cost = self
@@ -828,8 +845,8 @@ impl Neighbors {
                 attached_at: None,
                 router_connectivity: 0,
                 router_neighbor_set_diversity: 0,
-                router_outbound_activity: Activity::new(router_age_limit),
-                router_inbound_activity: Activity::new(router_age_limit),
+                router_outbound_activity: Activity::new(activity.initial_count),
+                router_inbound_activity: Activity::new(activity.initial_count),
                 security_timer: 0,
             };
 
@@ -914,7 +931,10 @@ mod test {
     use hex_literal::hex;
 
     const CHILD_NWK: Nwk = Nwk(0x1234);
-    const ROUTER_AGE_LIMIT: u8 = 3;
+    const ACTIVITY: ActivityParams = ActivityParams {
+        initial_count: 3,
+        period: Duration::from_secs(15),
+    };
 
     fn neighbors_with(device_type: NwkDeviceType) -> Neighbors {
         let mut neighbors = Neighbors::default();
@@ -928,7 +948,7 @@ mod test {
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),
-            ROUTER_AGE_LIMIT,
+            ACTIVITY,
         );
         neighbors
     }
@@ -997,7 +1017,7 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        neighbors.on_link_status(own, router, old, 200, &link_status, now, ROUTER_AGE_LIMIT);
+        neighbors.on_link_status(own, router, old, 200, &link_status, now, ACTIVITY);
         neighbors.record_lqa(old, 200);
         neighbors.record_lqa(old, 200);
         assert_eq!(neighbors.link(old).unwrap().eui64, router);
@@ -1007,8 +1027,7 @@ mod test {
         // link status carries the new address with the router's EUI64
         neighbors.record_lqa(new, 40);
         neighbors.record_lqa(new, 40);
-        let outcome =
-            neighbors.on_link_status(own, router, new, 40, &link_status, now, ROUTER_AGE_LIMIT);
+        let outcome = neighbors.on_link_status(own, router, new, 40, &link_status, now, ACTIVITY);
         assert_eq!(
             outcome,
             LinkStatusOutcome {
@@ -1036,8 +1055,7 @@ mod test {
         assert_eq!(advertised, vec![new]);
 
         // A later link status from the same address changes nothing
-        let outcome =
-            neighbors.on_link_status(own, router, new, 40, &link_status, now, ROUTER_AGE_LIMIT);
+        let outcome = neighbors.on_link_status(own, router, new, 40, &link_status, now, ACTIVITY);
         assert_eq!(outcome, LinkStatusOutcome::default());
     }
 
@@ -1055,7 +1073,7 @@ mod test {
             200,
             &listing,
             Instant::from_micros(0),
-            ROUTER_AGE_LIMIT,
+            ACTIVITY,
         );
 
         let empty = NwkLinkStatusCommand {
@@ -1064,15 +1082,8 @@ mod test {
             link_statuses: vec![],
         };
         let later = Instant::from_micros(1);
-        let outcome = neighbors.on_link_status(
-            own,
-            router,
-            router_nwk,
-            200,
-            &empty,
-            later,
-            ROUTER_AGE_LIMIT,
-        );
+        let outcome =
+            neighbors.on_link_status(own, router, router_nwk, 200, &empty, later, ACTIVITY);
 
         assert_eq!(outcome.lost_link, None);
         assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 1);
@@ -1086,8 +1097,7 @@ mod test {
         let empty = link_status_frame(true, true, &[]);
         let mut neighbors = Neighbors::default();
 
-        let outcome =
-            neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ROUTER_AGE_LIMIT);
+        let outcome = neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ACTIVITY);
         assert_eq!(
             outcome,
             LinkStatusOutcome {
@@ -1099,8 +1109,7 @@ mod test {
         );
 
         // The router is known now: its empty list is still owed an answer
-        let outcome =
-            neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ROUTER_AGE_LIMIT);
+        let outcome = neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ACTIVITY);
         assert_eq!(
             outcome,
             LinkStatusOutcome {
@@ -1114,15 +1123,8 @@ mod test {
         // Another unknown router makes one due too, whatever its list holds
         let other = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
         let listing = link_status_listing(own);
-        let outcome = neighbors.on_link_status(
-            own,
-            other,
-            Nwk(0x2222),
-            200,
-            &listing,
-            now,
-            ROUTER_AGE_LIMIT,
-        );
+        let outcome =
+            neighbors.on_link_status(own, other, Nwk(0x2222), 200, &listing, now, ACTIVITY);
         assert!(outcome.link_status_due);
         assert!(!outcome.link_status_answer_due);
     }
@@ -1158,7 +1160,7 @@ mod test {
             200,
             &link_status_listing(Nwk(0x0000)),
             Instant::from_micros(0),
-            ROUTER_AGE_LIMIT,
+            ACTIVITY,
         );
         assert!(outcome.link_status_due);
     }
@@ -1171,26 +1173,11 @@ mod test {
         let mut neighbors = Neighbors::default();
 
         let listing = link_status_listing(own);
-        neighbors.on_link_status(
-            own,
-            router,
-            router_nwk,
-            200,
-            &listing,
-            now,
-            ROUTER_AGE_LIMIT,
-        );
+        neighbors.on_link_status(own, router, router_nwk, 200, &listing, now, ACTIVITY);
 
         let without_us = link_status_listing(Nwk(0x2222));
-        let outcome = neighbors.on_link_status(
-            own,
-            router,
-            router_nwk,
-            200,
-            &without_us,
-            now,
-            ROUTER_AGE_LIMIT,
-        );
+        let outcome =
+            neighbors.on_link_status(own, router, router_nwk, 200, &without_us, now, ACTIVITY);
 
         assert_eq!(
             outcome,
@@ -1231,16 +1218,8 @@ mod test {
         let mut neighbors = Neighbors::default();
 
         let listing = link_status_listing(own);
-        neighbors.on_link_status(
-            own,
-            router,
-            router_nwk,
-            200,
-            &listing,
-            now,
-            ROUTER_AGE_LIMIT,
-        );
-        neighbors.on_link_status(own, router, router_nwk, 200, frame, now, ROUTER_AGE_LIMIT);
+        neighbors.on_link_status(own, router, router_nwk, 200, &listing, now, ACTIVITY);
+        neighbors.on_link_status(own, router, router_nwk, 200, frame, now, ACTIVITY);
 
         neighbors.link(router_nwk).unwrap().outgoing_cost
     }
@@ -1294,15 +1273,7 @@ mod test {
             |neighbors: &Neighbors| neighbors.link(router_nwk).unwrap().incoming_cost;
 
         // One sample is the link quality, and the router is listed at once
-        neighbors.on_link_status(
-            own,
-            router,
-            router_nwk,
-            200,
-            &link_status,
-            now,
-            ROUTER_AGE_LIMIT,
-        );
+        neighbors.on_link_status(own, router, router_nwk, 200, &link_status, now, ACTIVITY);
         assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(200));
         assert_eq!(neighbors.link_status_entries().len(), 1);
 
@@ -1333,16 +1304,8 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        neighbors.on_link_status(own, router, old, 200, &link_status, now, ROUTER_AGE_LIMIT);
-        neighbors.on_link_status(
-            own,
-            other,
-            contested,
-            200,
-            &link_status,
-            now,
-            ROUTER_AGE_LIMIT,
-        );
+        neighbors.on_link_status(own, router, old, 200, &link_status, now, ACTIVITY);
+        neighbors.on_link_status(own, other, contested, 200, &link_status, now, ACTIVITY);
 
         // The router's link status from an address the other neighbor holds, or from
         // our own address, is an address conflict: the router keeps its entry's address
@@ -1354,7 +1317,7 @@ mod test {
                 200,
                 &link_status,
                 now,
-                ROUTER_AGE_LIMIT,
+                ACTIVITY,
             );
             assert_eq!(outcome, LinkStatusOutcome::default());
             assert_eq!(neighbors.link(old).unwrap().eui64, router);
@@ -1372,13 +1335,13 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        neighbors.on_link_status(own, router, old, 10, &link_status, now, ROUTER_AGE_LIMIT);
+        neighbors.on_link_status(own, router, old, 10, &link_status, now, ACTIVITY);
 
         // More samples than the window buffered under the new address: the ring wraps
         for lqi in [10, 20, 200, 220] {
             neighbors.record_lqa(new, lqi);
         }
-        neighbors.on_link_status(own, router, new, 220, &link_status, now, ROUTER_AGE_LIMIT);
+        neighbors.on_link_status(own, router, new, 220, &link_status, now, ACTIVITY);
 
         // The window is [20, 200, 220] and its oldest (20) is replaced next, giving
         // [200, 220, 30]: a scrambled order would replace 220 and drop the median to 30
@@ -1387,6 +1350,46 @@ mod test {
             neighbors.link(new).unwrap().incoming_cost,
             lqi_to_link_cost(200)
         );
+    }
+
+    fn inbound_activity(neighbors: &Neighbors) -> u8 {
+        let entry = neighbors.entries().next().unwrap();
+        entry.router_inbound_activity.count()
+    }
+
+    #[test]
+    fn test_new_neighbor_is_not_charged_for_time_before_it_existed() {
+        // Created a minute in: the minute before must not decay its counters
+        let created = Instant::from_micros(0) + Duration::from_secs(60);
+        let mut neighbors = Neighbors::default();
+        neighbors.restore_child(
+            ChildDescriptor {
+                eui64: Eui64::from_hex("00:11:22:33:44:55:66:77"),
+                network_address: CHILD_NWK,
+                device_type: NwkDeviceType::Router,
+                rx_on_when_idle: true,
+                device_timeout: None,
+                relationship: Relationship::Child,
+            },
+            created,
+            ACTIVITY,
+        );
+
+        neighbors.decay_activity(created + Duration::from_secs(1), ACTIVITY.period);
+        assert_eq!(inbound_activity(&neighbors), ACTIVITY.initial_count - 1);
+    }
+
+    #[test]
+    fn test_use_is_not_charged_for_time_before_it() {
+        // By a minute in, the count the neighbor started with has decayed away
+        let used = Instant::from_micros(0) + Duration::from_secs(60);
+        let mut neighbors = neighbors_with(NwkDeviceType::Router);
+        neighbors.record_inbound_activity(CHILD_NWK, used, ACTIVITY.period);
+        neighbors.record_inbound_activity(CHILD_NWK, used, ACTIVITY.period);
+
+        // The two uses lose only the second that follows them
+        neighbors.decay_activity(used + Duration::from_secs(1), ACTIVITY.period);
+        assert_eq!(inbound_activity(&neighbors), 1);
     }
 
     #[test]
@@ -1402,7 +1405,7 @@ mod test {
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),
-            ROUTER_AGE_LIMIT,
+            ACTIVITY,
         );
 
         assert_eq!(
@@ -1441,7 +1444,7 @@ mod test {
                 relationship: Relationship::UnauthenticatedChild,
             },
             Instant::from_micros(0),
-            ROUTER_AGE_LIMIT,
+            ACTIVITY,
         );
 
         // Still a child for parent duties while unauthenticated
@@ -1469,7 +1472,7 @@ mod test {
                 relationship: Relationship::UnauthenticatedChild,
             },
             Instant::from_micros(0),
-            ROUTER_AGE_LIMIT,
+            ACTIVITY,
         );
         assert_eq!(
             relationship_of(&neighbors, eui64),

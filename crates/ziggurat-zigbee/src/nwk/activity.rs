@@ -40,6 +40,15 @@ impl Activity {
     }
 }
 
+/// What a table needs to keep activity counters.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivityParams {
+    /// The count a new counter starts at (`nwkRouterAgeLimit`)
+    pub initial_count: u8,
+    /// The time one count takes to decay (`nwkLinkStatusPeriod`)
+    pub period: Duration,
+}
+
 /// The decay steps owed for the time from `*decayed_at` to `now`, at one count per
 /// `period`. `*decayed_at` moves forward by the steps returned, so the rest of the time
 /// counts toward the next call.

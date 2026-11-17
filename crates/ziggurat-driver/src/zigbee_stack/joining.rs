@@ -117,7 +117,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 relationship: neighbors::Relationship::UnauthenticatedChild,
             },
             self.core_now(),
-            self.tunables.router_age_limit(),
+            self.activity_params(),
         );
 
         // A new child deadline may precede everything the maintenance task knows
@@ -1181,7 +1181,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 },
             },
             self.core_now(),
-            self.tunables.router_age_limit(),
+            self.activity_params(),
         );
 
         // A new child deadline may precede everything the maintenance task knows

@@ -24,6 +24,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
 use ziggurat_zigbee::debouncer::Debouncer;
 use ziggurat_zigbee::flat_map::FlatMap;
+use ziggurat_zigbee::nwk::activity::ActivityParams;
 use ziggurat_zigbee::nwk::frame::{NwkFrame, NwkSecurityHeaderKeyId};
 
 mod aps;
@@ -805,6 +806,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// now. Past deadlines resolve immediately.
     async fn sleep_until_core(&self, deadline: CoreInstant) {
         R::sleep(deadline.saturating_duration_since(self.core_now())).await;
+    }
+
+    /// What the tables need to keep their activity counters.
+    pub fn activity_params(&self) -> ActivityParams {
+        ActivityParams {
+            initial_count: self.tunables.router_age_limit(),
+            period: self.tunables.link_status_period(),
+        }
     }
 
     /// Sleep until a debouncer fires. `wake` signals that a request moved its next

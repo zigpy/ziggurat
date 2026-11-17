@@ -44,7 +44,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source,
             updated_path_cost,
             now,
-            self.tunables.router_age_limit(),
+            self.activity_params(),
         );
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
@@ -159,7 +159,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             route_request_cmd.many_to_one,
             self.core_now(),
             self.tunables.route_discovery_time(),
-            self.tunables.router_age_limit(),
+            self.activity_params(),
         );
 
         if !outcome.accepted {
@@ -237,7 +237,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if !many_to_one {
             self.core().nib.routing.note_relayed_discovery(
                 route_request_cmd.destination_address,
-                self.tunables.router_age_limit(),
+                self.core_now(),
+                self.activity_params(),
             );
         }
 

@@ -202,7 +202,7 @@ pub fn apply_children<P: RadioPhy, R: Runtime>(
                 relationship: Relationship::Child,
             },
             now,
-            stack.tunables.router_age_limit(),
+            stack.activity_params(),
         );
         core.nib.address_map.update_mapping(entry.ieee, entry.nwk);
     }
@@ -228,7 +228,8 @@ pub fn apply_route_table<P: RadioPhy, R: Runtime>(
             entry.destination,
             entry.next_hop,
             entry.path_cost,
-            stack.tunables.router_age_limit(),
+            stack.core_now(),
+            stack.activity_params(),
         );
     }
 }

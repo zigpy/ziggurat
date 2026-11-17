@@ -2,7 +2,7 @@ use crate::flat_map::FlatMap;
 use alloc::vec::Vec;
 
 use crate::Instant;
-use crate::nwk::activity::{Activity, take_decay_steps};
+use crate::nwk::activity::{Activity, ActivityParams, take_decay_steps};
 use crate::nwk::commands::NwkRouteRequestManyToOne;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::Nwk;
@@ -78,7 +78,7 @@ impl TableEntry {
         destination: Nwk,
         status: Status,
         next_hop_address: Nwk,
-        router_age_limit: u8,
+        activity: ActivityParams,
     ) -> Self {
         Self {
             destination,
@@ -90,7 +90,7 @@ impl TableEntry {
             next_hop_address,
             path_cost: u8::MAX,
             total_usage_count: 0,
-            recent_activity: Activity::new(router_age_limit),
+            recent_activity: Activity::new(activity.initial_count),
         }
     }
 
@@ -344,8 +344,10 @@ impl Routing {
         now: Instant,
         route_discovery_time: Duration,
         attempts: u8,
-        router_age_limit: u8,
+        activity: ActivityParams,
     ) -> Option<RouteRequestId> {
+        self.decay_activity(now, activity.period);
+
         if self.discoveries_left.contains_key(&destination) {
             return None;
         }
@@ -362,7 +364,7 @@ impl Routing {
             destination,
             now,
             route_discovery_time,
-            router_age_limit,
+            activity,
         ))
     }
 
@@ -374,9 +376,11 @@ impl Routing {
         own_address: Nwk,
         now: Instant,
         route_discovery_time: Duration,
-        router_age_limit: u8,
+        activity: ActivityParams,
         wanted: impl Fn(Nwk) -> bool,
     ) -> DiscoveryTick {
+        self.decay_activity(now, activity.period);
+
         let mut tick = DiscoveryTick::default();
 
         self.expire_discoveries(now);
@@ -403,7 +407,7 @@ impl Routing {
                     destination,
                     now,
                     route_discovery_time,
-                    router_age_limit,
+                    activity,
                 );
                 tick.restarted.push((destination, request_id));
                 true
@@ -427,7 +431,9 @@ impl Routing {
     }
 
     /// A frame was forwarded along the route: bump its usage counters.
-    pub fn record_usage(&mut self, destination: Nwk) {
+    pub fn record_usage(&mut self, destination: Nwk, now: Instant, period: Duration) {
+        self.decay_activity(now, period);
+
         if let Some(entry) = self.route_table.get_mut(&destination) {
             entry.recent_activity.record_use();
             entry.total_usage_count = entry.total_usage_count.saturating_add(1);
@@ -438,6 +444,10 @@ impl Routing {
     /// since the last call, at one count per `period` (`nwkLinkStatusPeriod`).
     pub fn decay_activity(&mut self, now: Instant, period: Duration) {
         let steps = take_decay_steps(&mut self.activity_decayed_at, now, period);
+
+        if steps == 0 {
+            return;
+        }
 
         // Spec Table 3-77: "decremented unconditionally", whatever the route's status
         for entry in self.route_table.values_mut() {
@@ -471,7 +481,9 @@ impl Routing {
     }
 
     /// The device at `nwk` left or joined again, clear associated state.
-    pub fn forget(&mut self, own_address: Nwk, nwk: Nwk, router_age_limit: u8) {
+    pub fn forget(&mut self, own_address: Nwk, nwk: Nwk, now: Instant, activity: ActivityParams) {
+        self.decay_activity(now, activity.period);
+
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
         self.discoveries_left.remove(&nwk);
@@ -494,12 +506,7 @@ impl Routing {
         {
             self.route_table.insert(
                 nwk,
-                TableEntry::new(
-                    nwk,
-                    Status::DiscoveryUnderway,
-                    UNKNOWN_NEXT_HOP,
-                    router_age_limit,
-                ),
+                TableEntry::new(nwk, Status::DiscoveryUnderway, UNKNOWN_NEXT_HOP, activity),
             );
         }
     }
@@ -511,9 +518,12 @@ impl Routing {
         destination: Nwk,
         next_hop: Nwk,
         path_cost: u8,
-        router_age_limit: u8,
+        now: Instant,
+        activity: ActivityParams,
     ) {
-        let mut entry = TableEntry::new(destination, Status::Active, next_hop, router_age_limit);
+        self.decay_activity(now, activity.period);
+
+        let mut entry = TableEntry::new(destination, Status::Active, next_hop, activity);
         entry.path_cost = path_cost;
         self.route_table.insert(destination, entry);
     }
@@ -605,7 +615,7 @@ impl Routing {
         destination: Nwk,
         now: Instant,
         route_discovery_time: Duration,
-        router_age_limit: u8,
+        activity: ActivityParams,
     ) -> RouteRequestId {
         // Expire stale discoveries before establishing the new one. A just-expired
         // discovery toward this same destination would otherwise tear down the
@@ -613,12 +623,7 @@ impl Routing {
         self.expire_discoveries(now);
 
         let route_table_entry = self.route_table.entry(destination).or_insert_with(|| {
-            TableEntry::new(
-                destination,
-                Status::Inactive,
-                UNKNOWN_NEXT_HOP,
-                router_age_limit,
-            )
+            TableEntry::new(destination, Status::Inactive, UNKNOWN_NEXT_HOP, activity)
         });
         route_table_entry.status = Status::DiscoveryUnderway;
 
@@ -695,8 +700,10 @@ impl Routing {
         many_to_one: NwkRouteRequestManyToOne,
         now: Instant,
         route_discovery_time: Duration,
-        router_age_limit: u8,
+        activity: ActivityParams,
     ) -> RouteRequestOutcome {
+        self.decay_activity(now, activity.period);
+
         self.expire_discoveries(now);
 
         let fresh = match self.discovery_table.get_mut(&(originator, request_id)) {
@@ -742,12 +749,7 @@ impl Routing {
         // Spec 3.6.4.5.1.2: the route back to the originator runs through the device we
         // accepted the request from, subject to the 3.6.4.5.3 suitability rule.
         let originator_entry = self.route_table.entry(originator).or_insert_with(|| {
-            TableEntry::new(
-                originator,
-                Status::Inactive,
-                UNKNOWN_NEXT_HOP,
-                router_age_limit,
-            )
+            TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP, activity)
         });
 
         let route_changed = originator_entry.consider_route(sender, updated_path_cost);
@@ -784,7 +786,14 @@ impl Routing {
 
     /// Before relaying a route request: mark the destination's entry as
     /// `DiscoveryUnderway`, so the reply we relay back finds it (spec 3.6.4.5.1.2).
-    pub fn note_relayed_discovery(&mut self, destination: Nwk, router_age_limit: u8) {
+    pub fn note_relayed_discovery(
+        &mut self,
+        destination: Nwk,
+        now: Instant,
+        activity: ActivityParams,
+    ) {
+        self.decay_activity(now, activity.period);
+
         self.route_table
             .entry(destination)
             .and_modify(|entry| {
@@ -797,7 +806,7 @@ impl Routing {
                     destination,
                     Status::DiscoveryUnderway,
                     UNKNOWN_NEXT_HOP,
-                    router_age_limit,
+                    activity,
                 )
             });
     }
@@ -815,8 +824,10 @@ impl Routing {
         sender: Nwk,
         updated_path_cost: u8,
         now: Instant,
-        router_age_limit: u8,
+        activity: ActivityParams,
     ) -> RouteReplyOutcome {
+        self.decay_activity(now, activity.period);
+
         // A reply to a discovery that has lapsed finds no entry and is dropped
         self.expire_discoveries(now);
 
@@ -908,12 +919,7 @@ impl Routing {
         // toward the originator of the route request, subject to the 3.6.4.5.3
         // suitability rule so a worse path never replaces a good ACTIVE route.
         let reverse_entry = self.route_table.entry(originator).or_insert_with(|| {
-            TableEntry::new(
-                originator,
-                Status::Inactive,
-                UNKNOWN_NEXT_HOP,
-                router_age_limit,
-            )
+            TableEntry::new(originator, Status::Inactive, UNKNOWN_NEXT_HOP, activity)
         });
 
         let update = reverse_entry

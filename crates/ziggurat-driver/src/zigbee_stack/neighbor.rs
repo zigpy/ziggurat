@@ -122,7 +122,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             lqi,
             &link_status_cmd,
             self.core_now(),
-            self.tunables.router_age_limit(),
+            self.activity_params(),
         );
 
         // The neighbor no longer answers at its old address, so routes through it
@@ -163,20 +163,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.maybe_age_neighbors();
 
-        let mut link_statuses = {
-            let mut core = self.core();
-            let now = self.core_now();
-            let period = self.tunables.link_status_period();
-
-            // Both decay by the time passed, so an extra link status is harmless
-            core.nib.routing.decay_activity(now, period);
-            core.nib.neighbors.decay_activity(now, period);
-
-            if empty {
-                Vec::new()
-            } else {
-                core.nib.neighbors.link_status_entries()
-            }
+        let mut link_statuses = if empty {
+            Vec::new()
+        } else {
+            self.core().nib.neighbors.link_status_entries()
         };
 
         // Link statuses are sorted in ascending order
