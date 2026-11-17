@@ -2,6 +2,7 @@ use crate::flat_map::FlatMap;
 use alloc::vec::Vec;
 
 use crate::Instant;
+use crate::nwk::activity::{Activity, take_decay_steps};
 use crate::nwk::commands::NwkRouteRequestManyToOne;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::Nwk;
@@ -69,7 +70,7 @@ pub struct TableEntry {
     /// used to forward a state packet towards its destination; and decremented
     /// unconditionally once every `nwkLinkStatusPeriod`. A value of 0 indicates no
     /// packets have recently been forwarded along this route.
-    pub recent_activity: u8,
+    pub recent_activity: Activity,
 }
 
 impl TableEntry {
@@ -89,7 +90,7 @@ impl TableEntry {
             next_hop_address,
             path_cost: u8::MAX,
             total_usage_count: 0,
-            recent_activity: router_age_limit,
+            recent_activity: Activity::new(router_age_limit),
         }
     }
 
@@ -253,6 +254,9 @@ pub struct Routing {
     /// originating in a particular router; the latter is used to identify stale routing
     /// information."
     request_sequence_number: RouteRequestId,
+
+    /// Up to when `recent_activity` has been decayed
+    activity_decayed_at: Instant,
 }
 
 impl Routing {
@@ -425,17 +429,19 @@ impl Routing {
     /// A frame was forwarded along the route: bump its usage counters.
     pub fn record_usage(&mut self, destination: Nwk) {
         if let Some(entry) = self.route_table.get_mut(&destination) {
-            entry.recent_activity = entry.recent_activity.saturating_add(1);
+            entry.recent_activity.record_use();
             entry.total_usage_count = entry.total_usage_count.saturating_add(1);
         }
     }
 
-    /// Called once per `nwkLinkStatusPeriod`: decrement the `recent_activity` field of
-    /// every active routing table entry.
-    pub fn decay_activity(&mut self) {
+    /// Decay the `recent_activity` of every active routing table entry by the time
+    /// passed since the last call, at one count per `period` (`nwkLinkStatusPeriod`).
+    pub fn decay_activity(&mut self, now: Instant, period: Duration) {
+        let steps = take_decay_steps(&mut self.activity_decayed_at, now, period);
+
         for entry in self.route_table.values_mut() {
             if entry.status == Status::Active {
-                entry.recent_activity = entry.recent_activity.saturating_sub(1);
+                entry.recent_activity.decay(steps);
             }
         }
     }

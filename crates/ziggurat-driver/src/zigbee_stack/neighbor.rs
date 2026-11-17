@@ -115,15 +115,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return Err(EnqueueError::NotStarted);
         }
 
-        // Decrement the `recent_activity` field of every active routing table entry
-        self.core().nib.routing.decay_activity();
-
         self.maybe_age_neighbors();
 
-        // Decrement the inbound and outbound activity fields for neighbors
         let mut link_statuses = {
             let mut core = self.core();
-            core.nib.neighbors.decay_activity();
+            let now = self.core_now();
+            let period = self.tunables.link_status_period();
+
+            // Both decay by the time passed, so an extra link status is harmless
+            core.nib.routing.decay_activity(now, period);
+            core.nib.neighbors.decay_activity(now, period);
 
             if empty {
                 Vec::new()

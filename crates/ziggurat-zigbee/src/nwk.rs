@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod address_conflicts;
 pub mod addresses;
 pub mod broadcast_budget;

@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use core::cmp;
 
 use crate::Instant;
+use crate::nwk::activity::{Activity, take_decay_steps};
 use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
 use crate::nwk::frame::NwkHeader;
 use crate::ring_buffer::RingBuffer;
@@ -126,8 +127,8 @@ pub struct TableEntry {
 
     pub router_connectivity: u8,
     pub router_neighbor_set_diversity: u8,
-    pub router_outbound_activity: u8,
-    pub router_inbound_activity: u8,
+    pub router_outbound_activity: Activity,
+    pub router_inbound_activity: Activity,
     pub security_timer: u8,
 }
 
@@ -197,6 +198,8 @@ pub struct Neighbors {
     /// LQI samples for senders that have no neighbor entry yet, capped at
     /// [`PENDING_LQA_CAP`] entries.
     pending_lqas: FlatMap<Nwk, LqaSamples>,
+    /// Up to when the activity counters have been decayed
+    activity_decayed_at: Instant,
 }
 
 impl Neighbors {
@@ -561,8 +564,8 @@ impl Neighbors {
             attached_at,
             router_connectivity: 0,
             router_neighbor_set_diversity: 0,
-            router_outbound_activity: router_age_limit,
-            router_inbound_activity: router_age_limit,
+            router_outbound_activity: Activity::new(router_age_limit),
+            router_inbound_activity: Activity::new(router_age_limit),
             security_timer: 0,
         });
 
@@ -658,19 +661,21 @@ impl Neighbors {
         stale_neighbors
     }
 
-    /// Called once per `nwkLinkStatusPeriod`: decrement the inbound and outbound
-    /// activity counters for every neighbor.
-    pub fn decay_activity(&mut self) {
+    /// Decay the inbound and outbound activity of every neighbor by the time passed
+    /// since the last call, at one count per `period` (`nwkLinkStatusPeriod`).
+    pub fn decay_activity(&mut self, now: Instant, period: Duration) {
+        let steps = take_decay_steps(&mut self.activity_decayed_at, now, period);
+
         for entry in self.table.values_mut() {
-            entry.router_outbound_activity = entry.router_outbound_activity.saturating_sub(1);
-            entry.router_inbound_activity = entry.router_inbound_activity.saturating_sub(1);
+            entry.router_outbound_activity.decay(steps);
+            entry.router_inbound_activity.decay(steps);
         }
     }
 
     /// A unicast was forwarded through this neighbor.
     pub fn record_outbound_activity(&mut self, eui64: Eui64) {
         if let Some(entry) = self.table.get_mut(&eui64) {
-            entry.router_outbound_activity = entry.router_outbound_activity.saturating_add(1);
+            entry.router_outbound_activity.record_use();
         }
     }
 
@@ -681,7 +686,7 @@ impl Neighbors {
             .values_mut()
             .find(|entry| entry.network_address == nwk)
         {
-            entry.router_inbound_activity = entry.router_inbound_activity.saturating_add(1);
+            entry.router_inbound_activity.record_use();
         }
     }
 
@@ -802,8 +807,8 @@ impl Neighbors {
                 attached_at: None,
                 router_connectivity: 0,
                 router_neighbor_set_diversity: 0,
-                router_outbound_activity: router_age_limit,
-                router_inbound_activity: router_age_limit,
+                router_outbound_activity: Activity::new(router_age_limit),
+                router_inbound_activity: Activity::new(router_age_limit),
                 security_timer: 0,
             };
 
