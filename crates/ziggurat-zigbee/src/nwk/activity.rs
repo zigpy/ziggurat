@@ -44,11 +44,15 @@ impl Activity {
 /// `period`. `*decayed_at` moves forward by the steps returned, so the rest of the time
 /// counts toward the next call.
 pub fn take_decay_steps(decayed_at: &mut Instant, now: Instant, period: Duration) -> u16 {
-    let step = period / u32::from(STEPS_PER_COUNT);
-    let elapsed = now.saturating_duration_since(*decayed_at).as_micros() / step.as_micros();
-    let steps = u16::try_from(elapsed).unwrap_or(u16::MAX);
+    let steps_per_count = u64::from(STEPS_PER_COUNT);
+    let period = u64::try_from(period.as_micros()).unwrap();
+    let elapsed = now.as_micros().saturating_sub(decayed_at.as_micros());
+    let steps = u16::try_from(elapsed * steps_per_count / period).unwrap_or(u16::MAX);
 
-    *decayed_at = *decayed_at + step * u32::from(steps);
+    // Rounded up, so a step shorter than a microsecond still moves `*decayed_at`
+    let taken = (u64::from(steps) * period).div_ceil(steps_per_count);
+
+    *decayed_at = Instant::from_micros(decayed_at.as_micros() + taken);
     steps
 }
 
@@ -86,6 +90,17 @@ mod test {
         // One step is 16 s / 256 = 62.5 ms
         assert_eq!(take_decay_steps(&mut decayed_at, at(60), PERIOD), 0);
         assert_eq!(take_decay_steps(&mut decayed_at, at(125), PERIOD), 2);
+    }
+
+    #[test]
+    fn test_period_shorter_than_256_microseconds_decays() {
+        let period = Duration::from_micros(100);
+        let mut decayed_at = at(0);
+        let now = Instant::from_micros(50);
+
+        // Half a period is half a count, and the same instant again owes nothing
+        assert_eq!(take_decay_steps(&mut decayed_at, now, period), 128);
+        assert_eq!(take_decay_steps(&mut decayed_at, now, period), 0);
     }
 
     #[test]
