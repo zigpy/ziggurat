@@ -47,13 +47,15 @@ pub fn take_decay_steps(decayed_at: &mut Instant, now: Instant, period: Duration
     let steps_per_count = u64::from(STEPS_PER_COUNT);
     let period = u64::try_from(period.as_micros()).unwrap();
     let elapsed = now.as_micros().saturating_sub(decayed_at.as_micros());
-    let steps = u16::try_from(elapsed * steps_per_count / period).unwrap_or(u16::MAX);
+    let steps = elapsed * steps_per_count / period;
 
     // Rounded up, so a step shorter than a microsecond still moves `*decayed_at`
-    let taken = (u64::from(steps) * period).div_ceil(steps_per_count);
+    let taken = (steps * period).div_ceil(steps_per_count);
 
+    // All of the steps are taken, even when they are more than a counter can hold:
+    // none is left over to decay a use recorded after this call
     *decayed_at = Instant::from_micros(decayed_at.as_micros() + taken);
-    steps
+    u16::try_from(steps).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]
@@ -101,6 +103,16 @@ mod test {
         // Half a period is half a count, and the same instant again owes nothing
         assert_eq!(take_decay_steps(&mut decayed_at, now, period), 128);
         assert_eq!(take_decay_steps(&mut decayed_at, now, period), 0);
+    }
+
+    #[test]
+    fn test_long_gap_is_taken_in_one_call() {
+        let mut decayed_at = at(0);
+
+        // Two hours hold more steps than a counter does
+        let now = at(2 * 60 * 60 * 1000);
+        assert_eq!(take_decay_steps(&mut decayed_at, now, PERIOD), u16::MAX);
+        assert_eq!(take_decay_steps(&mut decayed_at, now, PERIOD), 0);
     }
 
     #[test]
