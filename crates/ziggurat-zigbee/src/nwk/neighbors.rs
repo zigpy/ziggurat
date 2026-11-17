@@ -816,12 +816,24 @@ impl Neighbors {
         if link_status_cmd.is_first_frame {
             neighbor_entry.router_connectivity = 0;
             neighbor_entry.router_neighbor_set_diversity = 0;
+        }
 
-            // A list that leaves us out means the sender does not hear us. An empty
-            // list is no measurement: the sender just started and knows no neighbor
-            // yet, so the cost it gave us before stands until it ages out.
-            if !link_status_cmd.link_statuses.is_empty() {
-                neighbor_entry.outgoing_cost = 0;
+        // The list is sorted by address. A frame says nothing about us if our address
+        // is outside its range, or if its list is empty.
+        if let (Some(first), Some(last)) = (
+            link_status_cmd.link_statuses.first(),
+            link_status_cmd.link_statuses.last(),
+        ) {
+            let own = own_address.as_u16();
+            let covers_us = (link_status_cmd.is_first_frame || first.address.as_u16() <= own)
+                && (link_status_cmd.is_last_frame || own <= last.address.as_u16());
+
+            if covers_us {
+                neighbor_entry.outgoing_cost = link_status_cmd
+                    .link_statuses
+                    .iter()
+                    .find(|link_status| link_status.address == own_address)
+                    .map_or(0, |link_status| link_status.incoming_cost);
             }
         }
 
@@ -839,10 +851,6 @@ impl Neighbors {
                         .router_neighbor_set_diversity
                         .saturating_add(connectivity);
                 }
-            }
-
-            if link_status.address == own_address {
-                neighbor_entry.outgoing_cost = link_status.incoming_cost;
             }
         }
 
@@ -1040,6 +1048,76 @@ mod test {
             }
         );
         assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 0);
+    }
+
+    fn link_status_frame(
+        is_first_frame: bool,
+        is_last_frame: bool,
+        addresses: &[u16],
+    ) -> NwkLinkStatusCommand {
+        NwkLinkStatusCommand {
+            is_first_frame,
+            is_last_frame,
+            link_statuses: addresses
+                .iter()
+                .map(|&address| NwkLinkStatus {
+                    address: Nwk(address),
+                    incoming_cost: 3,
+                    outgoing_cost: 3,
+                })
+                .collect(),
+        }
+    }
+
+    /// Our outgoing cost to a router that listed us at cost 1, after it sends `frame`.
+    fn outgoing_cost_after(own: Nwk, frame: &NwkLinkStatusCommand) -> u8 {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let router_nwk = Nwk(0x1111);
+        let now = Instant::from_micros(0);
+        let mut neighbors = Neighbors::default();
+
+        let listing = link_status_listing(own);
+        neighbors.on_link_status(own, router, router_nwk, 200, &listing, now);
+        neighbors.on_link_status(own, router, router_nwk, 200, frame, now);
+
+        neighbors.link(router_nwk).unwrap().outgoing_cost
+    }
+
+    #[test]
+    fn test_link_status_frame_not_covering_us_keeps_outgoing_cost() {
+        let own = Nwk(0x3000);
+
+        // We sort after the last entry and more frames follow
+        let first_of_many = link_status_frame(true, false, &[0x1000, 0x2000]);
+        assert_eq!(outgoing_cost_after(own, &first_of_many), 1);
+
+        // We sort before the first entry and frames came before
+        let last_of_many = link_status_frame(false, true, &[0x4000, 0x5000]);
+        assert_eq!(outgoing_cost_after(own, &last_of_many), 1);
+
+        let middle_of_many = link_status_frame(false, false, &[0x4000, 0x5000]);
+        assert_eq!(outgoing_cost_after(own, &middle_of_many), 1);
+    }
+
+    #[test]
+    fn test_link_status_frame_covering_us_sets_outgoing_cost() {
+        let own = Nwk(0x3000);
+
+        // Between the first and the last entry
+        let middle_of_many = link_status_frame(false, false, &[0x2000, 0x4000]);
+        assert_eq!(outgoing_cost_after(own, &middle_of_many), 0);
+
+        // Below the first entry of the first frame
+        let first_of_many = link_status_frame(true, false, &[0x4000, 0x5000]);
+        assert_eq!(outgoing_cost_after(own, &first_of_many), 0);
+
+        // Above the last entry of the last frame
+        let last_of_many = link_status_frame(false, true, &[0x1000, 0x2000]);
+        assert_eq!(outgoing_cost_after(own, &last_of_many), 0);
+
+        // Listed as the entry two frames share
+        let listed = link_status_frame(false, false, &[0x3000, 0x4000]);
+        assert_eq!(outgoing_cost_after(own, &listed), 3);
     }
 
     #[test]
