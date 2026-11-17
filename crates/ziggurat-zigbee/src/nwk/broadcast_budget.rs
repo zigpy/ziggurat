@@ -13,6 +13,9 @@ pub enum TrafficClass {
     /// A transit frame relayed for another device: dropping one degrades the mesh but
     /// the originator retries end-to-end.
     Forwarding,
+    /// Optional stack work, such as route refresh: refused first under pressure, and it
+    /// never draws the tokens kept for host traffic. The caller tries again later.
+    Background,
     /// Stack machinery the mesh cannot function without: joins, APS acks, NWK
     /// commands, indirect deliveries. Always admitted.
     Critical,
@@ -24,7 +27,8 @@ pub enum BroadcastAdmission {
     /// Send now.
     Admit,
     /// Refused: a token for this class frees no sooner than `retry_in`. Only
-    /// [`TrafficClass::Forwarding`] and [`TrafficClass::Host`] are ever refused;
+    /// [`TrafficClass::Background`], [`TrafficClass::Forwarding`] and
+    /// [`TrafficClass::Host`] are ever refused;
     /// [`TrafficClass::Critical`] always admits.
     Defer { retry_in: Duration },
 }
@@ -34,7 +38,7 @@ pub enum BroadcastAdmission {
 pub struct BroadcastBudget {
     /// Available tokens. Critical broadcasts bypass the bucket and draw nothing; host
     /// and forwarding traffic only draws above its floor, so the count never dips below
-    /// zero.
+    /// zero. Background traffic stops higher still, above the host reserve.
     tokens: u32,
     /// When the last whole token was accrued. Advanced in whole-token steps so the
     /// sub-token remainder of elapsed time is never discarded.
@@ -51,11 +55,21 @@ impl BroadcastBudget {
     }
 
     /// The token floor a class may not dip into.
-    fn floor(class: TrafficClass, critical_reserve: u8, forwarding_reserve: u8) -> u32 {
+    fn floor(
+        class: TrafficClass,
+        critical_reserve: u8,
+        forwarding_reserve: u8,
+        host_reserve: u8,
+    ) -> u32 {
         match class {
             TrafficClass::Critical => 0,
             TrafficClass::Forwarding => u32::from(critical_reserve),
             TrafficClass::Host => u32::from(critical_reserve) + u32::from(forwarding_reserve),
+            TrafficClass::Background => {
+                u32::from(critical_reserve)
+                    + u32::from(forwarding_reserve)
+                    + u32::from(host_reserve)
+            }
         }
     }
 
@@ -107,6 +121,7 @@ impl BroadcastBudget {
         refill_interval: Duration,
         critical_reserve: u8,
         forwarding_reserve: u8,
+        host_reserve: u8,
     ) -> BroadcastAdmission {
         let capacity = u32::from(capacity);
         self.refill(now, capacity, refill_interval);
@@ -117,7 +132,7 @@ impl BroadcastBudget {
             // refills.
             BroadcastAdmission::Admit
         } else {
-            let floor = Self::floor(class, critical_reserve, forwarding_reserve);
+            let floor = Self::floor(class, critical_reserve, forwarding_reserve, host_reserve);
             if self.tokens > floor {
                 self.tokens -= 1;
                 BroadcastAdmission::Admit
@@ -128,5 +143,97 @@ impl BroadcastBudget {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CAPACITY: u8 = 10;
+    const REFILL: Duration = Duration::from_secs(1);
+    const CRITICAL_RESERVE: u8 = 1;
+    const FORWARDING_RESERVE: u8 = 1;
+    const HOST_RESERVE: u8 = 3;
+    /// Background broadcasts may not draw the last five tokens.
+    const BACKGROUND_FLOOR: u8 = CRITICAL_RESERVE + FORWARDING_RESERVE + HOST_RESERVE;
+
+    const START: Instant = Instant::from_micros(0);
+
+    fn take(budget: &mut BroadcastBudget, class: TrafficClass) -> BroadcastAdmission {
+        budget.take(
+            class,
+            START,
+            CAPACITY,
+            REFILL,
+            CRITICAL_RESERVE,
+            FORWARDING_RESERVE,
+            HOST_RESERVE,
+        )
+    }
+
+    /// A budget, never refilled during the test, holding `tokens`.
+    fn budget_with(tokens: u8) -> BroadcastBudget {
+        let mut budget = BroadcastBudget::new(CAPACITY);
+        for _ in tokens..CAPACITY {
+            assert_eq!(
+                take(&mut budget, TrafficClass::Host),
+                BroadcastAdmission::Admit
+            );
+        }
+        budget
+    }
+
+    #[test]
+    fn test_background_above_its_floor_is_admitted() {
+        let mut budget = budget_with(BACKGROUND_FLOOR + 1);
+
+        assert_eq!(
+            take(&mut budget, TrafficClass::Background),
+            BroadcastAdmission::Admit
+        );
+    }
+
+    #[test]
+    fn test_admitted_background_draws_a_token() {
+        let mut budget = budget_with(BACKGROUND_FLOOR + 1);
+        take(&mut budget, TrafficClass::Background);
+
+        assert_eq!(
+            take(&mut budget, TrafficClass::Background),
+            BroadcastAdmission::Defer { retry_in: REFILL }
+        );
+    }
+
+    #[test]
+    fn test_background_at_its_floor_is_deferred() {
+        let mut budget = budget_with(BACKGROUND_FLOOR);
+
+        assert!(matches!(
+            take(&mut budget, TrafficClass::Background),
+            BroadcastAdmission::Defer { .. }
+        ));
+    }
+
+    #[test]
+    fn test_host_is_admitted_where_background_is_deferred() {
+        let mut budget = budget_with(BACKGROUND_FLOOR);
+
+        assert_eq!(
+            take(&mut budget, TrafficClass::Host),
+            BroadcastAdmission::Admit
+        );
+    }
+
+    #[test]
+    fn test_deferred_background_waits_for_the_tokens_it_lacks() {
+        let mut budget = budget_with(BACKGROUND_FLOOR - 2);
+
+        assert_eq!(
+            take(&mut budget, TrafficClass::Background),
+            BroadcastAdmission::Defer {
+                retry_in: REFILL * 3
+            }
+        );
     }
 }

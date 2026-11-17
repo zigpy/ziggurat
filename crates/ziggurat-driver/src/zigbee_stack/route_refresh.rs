@@ -4,6 +4,7 @@
 use crate::runtime::Runtime;
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
+use ziggurat_zigbee::nwk::broadcast_budget::{BroadcastAdmission, TrafficClass};
 use ziggurat_zigbee::nwk::route_refresh::{RefreshReason, RouteRefreshPolicy};
 use ziggurat_zigbee::nwk::routing::RouteUpdate;
 
@@ -37,8 +38,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Once the neighbors have settled after the start, look again, in the background,
     /// at the routes found before, then at whatever the triggers queue. One refresh
-    /// discovery goes out per `route_refresh_spacing` at most, and none while a frame
-    /// waits for a discovery: frames come first. A refresh keeps the route in use until
+    /// discovery goes out per `route_refresh_spacing` at most, none while a frame waits
+    /// for a discovery, and none while the broadcast budget is low: a refresh is
+    /// `TrafficClass::Background`, the first class refused. Frames come first. A refresh keeps the route in use until
     /// a strictly cheaper reply arrives (`Routing::begin_refresh`).
     ///
     /// The `route_refresh` tunable is read on every pass: off, the task issues nothing
@@ -109,28 +111,47 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if !frames_wait
             && let Some((destination, reason)) = core.nib.route_refresh.next_due(now, policy)
         {
-            match core.nib.routing.begin_refresh(
-                own_address,
-                destination,
+            let admission = self.broadcast_budget.lock().take(
+                TrafficClass::Background,
                 now,
-                route_discovery_time,
-                self.activity_params(),
-            ) {
-                Some(request_id) => {
-                    tracing::info!("Route refresh: refreshing {destination:?} ({reason:?})");
-                    self.broadcast_discovery_request(core, destination, request_id);
-                    core.nib.route_refresh.issued(
-                        destination,
-                        reason,
-                        now,
-                        now + route_discovery_time,
-                    );
-                    issued = true;
-                }
-                None => {
-                    tracing::debug!(
-                        "Route refresh: {destination:?} is already under discovery, skipping"
-                    );
+                self.tunables.broadcast_budget_tokens(),
+                self.tunables.broadcast_token_refill(),
+                self.tunables.broadcast_critical_reserve(),
+                self.tunables.broadcast_forwarding_reserve(),
+                self.tunables.broadcast_host_reserve(),
+            );
+
+            if let BroadcastAdmission::Defer { retry_in } = admission {
+                tracing::debug!(
+                    "Route refresh: broadcast budget low, {destination:?} waits {retry_in:?}"
+                );
+                core.nib
+                    .route_refresh
+                    .defer(destination, reason, now + retry_in);
+            } else {
+                match core.nib.routing.begin_refresh(
+                    own_address,
+                    destination,
+                    now,
+                    route_discovery_time,
+                    self.activity_params(),
+                ) {
+                    Some(request_id) => {
+                        tracing::info!("Route refresh: refreshing {destination:?} ({reason:?})");
+                        self.broadcast_discovery_request(core, destination, request_id);
+                        core.nib.route_refresh.issued(
+                            destination,
+                            reason,
+                            now,
+                            now + route_discovery_time,
+                        );
+                        issued = true;
+                    }
+                    None => {
+                        tracing::debug!(
+                            "Route refresh: {destination:?} is already under discovery, skipping"
+                        );
+                    }
                 }
             }
         }

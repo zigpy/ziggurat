@@ -486,3 +486,70 @@ fn test_next_wake_in_back_off_is_when_the_back_off_ends() {
 
     assert_eq!(refresh.next_wake(at(10), POLICY), Some(at(70)));
 }
+
+// defer
+
+/// Take the next due refresh and put it back until `until`, as the driver does when
+/// the broadcast budget refuses it.
+fn defer(refresh: &mut RouteRefresh, now: Instant, until: Instant) -> Option<Nwk> {
+    let (destination, reason) = refresh.next_due(now, POLICY)?;
+    refresh.defer(destination, reason, until);
+    Some(destination)
+}
+
+#[test]
+fn test_deferred_destination_is_not_due_before_the_deferral_ends() {
+    let mut refresh = RouteRefresh::default();
+    refresh.enqueue(DEVICE, RefreshReason::Settled);
+    defer(&mut refresh, START, at(5));
+
+    assert_eq!(refresh.next_due(at(4), POLICY), None);
+}
+
+#[test]
+fn test_deferred_destination_is_due_first_when_the_deferral_ends() {
+    let mut refresh = RouteRefresh::default();
+    refresh.enqueue(DEVICE, RefreshReason::Settled);
+    refresh.enqueue(OTHER_DEVICE, RefreshReason::Settled);
+    defer(&mut refresh, START, at(5));
+    defer(&mut refresh, START, at(5));
+
+    assert_eq!(
+        refresh.next_due(at(5), POLICY).map(|due| due.0),
+        Some(DEVICE)
+    );
+}
+
+#[test]
+fn test_deferred_destination_keeps_its_reason() {
+    let mut refresh = RouteRefresh::default();
+    refresh.enqueue(DEVICE, RefreshReason::HopRecovered);
+    defer(&mut refresh, START, at(5));
+
+    assert_eq!(
+        refresh.next_due(at(5), POLICY),
+        Some((DEVICE, RefreshReason::HopRecovered))
+    );
+}
+
+#[test]
+fn test_deferral_does_not_start_the_spacing() {
+    let mut refresh = RouteRefresh::default();
+    refresh.enqueue(DEVICE, RefreshReason::Settled);
+    refresh.enqueue(OTHER_DEVICE, RefreshReason::Settled);
+    defer(&mut refresh, START, at(30));
+
+    assert_eq!(
+        refresh.next_due(START, POLICY).map(|due| due.0),
+        Some(OTHER_DEVICE)
+    );
+}
+
+#[test]
+fn test_next_wake_with_a_deferral_is_when_it_ends() {
+    let mut refresh = RouteRefresh::default();
+    refresh.enqueue(DEVICE, RefreshReason::Settled);
+    defer(&mut refresh, START, at(5));
+
+    assert_eq!(refresh.next_wake(START, POLICY), Some(at(5)));
+}

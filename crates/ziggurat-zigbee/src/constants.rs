@@ -430,6 +430,11 @@ tunables! {
     /// so a host flood cannot stop us relaying the mesh's own broadcasts.
     broadcast_forwarding_reserve: u8 = 2,
 
+    /// Broadcast tokens reserved for host broadcasts above the forwarding floor, which
+    /// background broadcasts (route refresh) never draw: a refresh only goes out while
+    /// more than critical + forwarding + host reserve tokens are left.
+    broadcast_host_reserve: u8 = 20,
+
     /// An intentional spec deviation: while permitting joins, spray a beacon every 5 ms
     /// for this long after each beacon request, to out-compete neighbouring networks
     /// that permanently permit joins. Zero disables it (a single beacon per request,

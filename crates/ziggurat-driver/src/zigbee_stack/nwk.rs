@@ -714,6 +714,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.tunables.broadcast_token_refill(),
             self.tunables.broadcast_critical_reserve(),
             self.tunables.broadcast_forwarding_reserve(),
+            self.tunables.broadcast_host_reserve(),
         );
 
         if let BroadcastAdmission::Defer { retry_in } = admission {

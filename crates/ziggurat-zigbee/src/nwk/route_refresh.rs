@@ -207,6 +207,27 @@ impl RouteRefresh {
         Some((queued.destination, queued.reason))
     }
 
+    /// The refresh of `destination` that `next_due` returned could not go out yet (the
+    /// broadcast budget refused it). It goes back with its reason, not due before
+    /// `until`, ahead of the queued destinations that are not waiting.
+    /// Nothing went out, so the spacing does not start and its back-off is unchanged.
+    pub fn defer(&mut self, destination: Nwk, reason: RefreshReason, until: Instant) {
+        let index = self
+            .queue
+            .iter()
+            .position(|queued| queued.not_before.is_none())
+            .unwrap_or(self.queue.len());
+
+        self.queue.insert(
+            index,
+            Queued {
+                destination,
+                reason,
+                not_before: Some(until),
+            },
+        );
+    }
+
     /// A refresh of `destination` went out: it is in flight until `deadline`, and the
     /// next one waits for the spacing.
     pub fn issued(
