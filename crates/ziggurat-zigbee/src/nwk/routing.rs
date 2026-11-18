@@ -243,6 +243,14 @@ pub struct Routing {
     /// only in the two spec tables above.
     discoveries_left: FlatMap<Nwk, u8>,
 
+    /// Destinations a delivery of ours failed toward. A host route hint for them no
+    /// longer stands in for discovery: hints are never written into the tables, so
+    /// nothing else learns from a failed one, and every hinted frame would retry it.
+    /// A fresh route to the destination (a route record, a route request it
+    /// originated, or our discovery answered) trusts its hints again, as does
+    /// forgetting the device.
+    hints_distrusted: FlatMap<Nwk, ()>,
+
     /// Implied from the spec: "notice that this 8-bit identifier is distinct from the
     /// 16-bit Routing Sequence Number. The former is used to discern route requests
     /// originating in a particular router; the latter is used to identify stale routing
@@ -452,6 +460,7 @@ impl Routing {
         self.route_table.remove(&nwk);
         self.route_record_table.remove(&nwk);
         self.discoveries_left.remove(&nwk);
+        self.trust_host_hints(nwk);
 
         // Only our own discoveries toward it are dropped. Discoveries we relay stay
         // until they expire: they are the only duplicate check for late copies of
@@ -499,6 +508,13 @@ impl Routing {
             relay_changed |= self.replace_route_record(last, Vec::new());
         }
 
+        // The record is a fresh path to the source and each relay: the host learns it
+        // too, so its hints for them can be trusted again
+        self.trust_host_hints(source);
+        for &relay in &relays {
+            self.trust_host_hints(relay);
+        }
+
         let source_changed = self.replace_route_record(source, relays);
 
         RouteRecordChange {
@@ -519,12 +535,37 @@ impl Routing {
         self.route_record_table.remove(&destination).is_some()
     }
 
+    /// A delivery of ours toward `destination` failed: host route hints for it are
+    /// ignored from now on, so a frame without a route of ours discovers one.
+    pub fn distrust_host_hints(&mut self, destination: Nwk) {
+        if self.hints_distrusted.insert(destination, ()).is_none() {
+            tracing::debug!(
+                "Delivery toward {destination:?} failed, ignoring host route hints for it until a fresh route is known"
+            );
+        }
+    }
+
+    /// A fresh route to `destination` is known, or the device is forgotten: its host
+    /// route hints may stand in for discovery again.
+    fn trust_host_hints(&mut self, destination: Nwk) {
+        if self.hints_distrusted.remove(&destination).is_some() {
+            tracing::debug!("Trusting host route hints toward {destination:?} again");
+        }
+    }
+
+    /// Whether a host route hint may stand in for discovery toward `destination`.
+    pub fn host_hints_trusted(&self, destination: Nwk) -> bool {
+        !self.hints_distrusted.contains_key(&destination)
+    }
+
     /// Spec 3.6.4.8.1: a router could not deliver a frame of ours toward `destination`.
     /// The route record goes with the routing entry: it wins over the routing table, so
-    /// a stale one would keep the broken path in use. Returns whether a route record
+    /// a stale one would keep the broken path in use. A host hint may have been the
+    /// broken path, so hints for it are distrusted too. Returns whether a route record
     /// was removed.
     pub fn forget_route_to(&mut self, destination: Nwk) -> bool {
         self.remove_route(destination);
+        self.distrust_host_hints(destination);
         self.remove_route_record(destination)
     }
 
@@ -723,6 +764,10 @@ impl Routing {
             path_cost: updated_path_cost,
         });
 
+        // The request is a fresh path from its originator, like a route record: its
+        // host hints can be trusted again
+        self.trust_host_hints(originator);
+
         RouteRequestOutcome {
             accepted: true,
             fresh,
@@ -815,6 +860,8 @@ impl Routing {
             routing_entry.next_hop_address = sender;
             routing_entry.path_cost = updated_path_cost;
             discovery_entry.residual_cost = Some(updated_path_cost);
+            // Our discovery found a fresh route: hints for the responder are trusted again
+            self.trust_host_hints(responder);
 
             let update = (previous_next_hop != Some(sender)).then_some(RouteUpdate {
                 destination: responder,

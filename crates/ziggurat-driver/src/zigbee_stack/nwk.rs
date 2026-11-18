@@ -614,6 +614,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let destination = failed.destination;
         self.invalidate_routes_via(next_hop);
+        self.core().nib.routing.distrust_host_hints(destination);
 
         if self.core().nib.routing.remove_route_record(destination) {
             tracing::info!("Removed source route to {destination:?} after delivery failure");
