@@ -148,6 +148,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.request_link_status_for_new_router();
         }
 
+        // The link works again: the routes that failed through it may be cheaper
+        // through it than on their detour
+        if let Some(neighbor_nwk) = outcome.restored_link {
+            self.note_hop_recovered(neighbor_nwk);
+        }
+
         self.link_status_received.notify_one();
     }
 
@@ -232,6 +238,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub async fn periodic_link_status_broadcast_task(&self) {
         // The network start has just sent one
         self.restart_link_status_period();
+
+        // Early link statuses wait for the first periodic one, which lists every
+        // router heard for a whole period
+        if self.tunables.hold_early_link_status_after_start() {
+            let first_period_end = self.core_now() + self.tunables.link_status_period();
+            self.core().nib.link_status_debouncer.hold(first_period_end);
+        }
 
         loop {
             self.wait_for_debouncer(|nib| &nib.link_status_debouncer, &self.link_status_wake)

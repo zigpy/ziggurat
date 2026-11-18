@@ -34,6 +34,7 @@ mod mac;
 mod neighbor;
 mod nwk;
 mod route;
+mod route_refresh;
 mod send_handle;
 mod sends;
 mod tasklets;
@@ -57,6 +58,7 @@ pub use ziggurat_zigbee::nwk::broadcast_budget::{
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
 pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
 pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
+pub use ziggurat_zigbee::nwk::route_refresh::RouteRefresh;
 pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
@@ -358,6 +360,8 @@ pub struct Nib {
     pub mtorr_debouncer: Debouncer,
     /// NWK routing state and decision logic (route/discovery/record tables)
     pub routing: Routing,
+    /// The routes to look at again in the background, and when
+    pub route_refresh: RouteRefresh,
     /// Broadcast deduplication and passive acknowledgment accounting
     pub broadcasts: Broadcasts,
     /// The network key, its outgoing frame counter, and per-relayer replay protection
@@ -517,6 +521,7 @@ impl State {
                     link_status_debouncer: Debouncer::default(),
                     mtorr_debouncer: Debouncer::default(),
                     routing: Routing::default(),
+                    route_refresh: RouteRefresh::default(),
                     broadcasts: Broadcasts::default(),
                     nwk_security: NwkSecurity::new(
                         config.network_key.clone(),
@@ -728,6 +733,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// earlier
     pub(crate) mtorr_wake: Notify,
 
+    /// Wakes the route refresh task when a trigger queued a destination
+    pub(crate) route_refresh_kick: Notify,
+
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
     pub(crate) link_status_received: Notify,
@@ -880,6 +888,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
             mtorr_wake: Notify::new(),
+            route_refresh_kick: Notify::new(),
             link_status_received: Notify::new(),
             link_status_wake: Notify::new(),
             address_conflict_wake: Notify::new(),
@@ -1140,6 +1149,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 arc_self.periodic_many_to_one_route_request_task().await;
             });
         }
+
+        // Look again, in the background, at routes that may have become cheaper
+        self.spawn_tracked(|arc_self| async move {
+            arc_self.route_refresh_task().await;
+        });
 
         // Reprogram the radio whenever it resets out from under us
         self.spawn_tracked(|arc_self| async move {

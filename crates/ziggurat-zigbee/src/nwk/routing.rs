@@ -456,8 +456,11 @@ impl Routing {
     }
 
     /// Mark every active route through the given next hop as inactive, forcing a fresh
-    /// discovery on next use.
-    pub fn invalidate_via(&mut self, next_hop: Nwk) {
+    /// discovery on next use. Returns the destinations whose routes it invalidated, so
+    /// route refresh can try them again once the hop recovers.
+    pub fn invalidate_via(&mut self, next_hop: Nwk) -> Vec<Nwk> {
+        let mut invalidated = Vec::new();
+
         for entry in self.route_table.values_mut() {
             if entry.status == Status::Active && entry.next_hop_address == next_hop {
                 tracing::info!(
@@ -465,8 +468,101 @@ impl Routing {
                     entry.destination
                 );
                 entry.status = Status::Inactive;
+                invalidated.push(entry.destination);
             }
         }
+
+        invalidated
+    }
+
+    /// The destinations with an active route.
+    pub fn active_destinations(&self) -> Vec<Nwk> {
+        self.route_table
+            .values()
+            .filter(|entry| entry.status == Status::Active)
+            .map(|entry| entry.destination)
+            .collect()
+    }
+
+    /// The destinations whose active route a refresh could improve, for the settle
+    /// trigger. A route at path cost 1 cannot get strictly cheaper. A concentrator
+    /// sends by a usable route record rather than by the routing table, so a refresh
+    /// of its table route would change nothing it uses.
+    pub fn refreshable_destinations(
+        &self,
+        is_concentrator: bool,
+        max_source_route: u8,
+    ) -> Vec<Nwk> {
+        self.route_table
+            .values()
+            .filter(|entry| entry.status == Status::Active && entry.path_cost > 1)
+            .filter(|entry| {
+                !is_concentrator
+                    || !self
+                        .route_record_table
+                        .get(&entry.destination)
+                        .is_some_and(|relays| relays.len() < max_source_route as usize)
+            })
+            .map(|entry| entry.destination)
+            .collect()
+    }
+
+    /// Whether a frame of ours waits for a route discovery. Route refresh yields to
+    /// these: its discoveries hold no frame.
+    pub const fn frames_await_discovery(&self) -> bool {
+        !self.discoveries_left.is_empty()
+    }
+
+    /// Start a route refresh: a discovery toward `destination` that no frame waits on,
+    /// so it never registers in `discoveries_left`. Returns the identifier to put in
+    /// the route request, or `None` when a discovery toward it is already underway.
+    ///
+    /// An active route stays `Active` and in use. Its discovery entry starts with the
+    /// route's path cost as the residual cost and `accept_route_reply` is unchanged:
+    /// seeding the residual cost is what lets only a strictly cheaper reply replace
+    /// the route. Without an active route this is an ordinary discovery.
+    pub fn begin_refresh(
+        &mut self,
+        own_address: Nwk,
+        destination: Nwk,
+        now: Instant,
+        route_discovery_time: Duration,
+        activity: ActivityParams,
+    ) -> Option<RouteRequestId> {
+        self.expire_discoveries(now);
+
+        let path_cost = match self.route_table.get(&destination) {
+            Some(entry) if entry.status == Status::DiscoveryUnderway => return None,
+            Some(entry) if entry.status == Status::Active => entry.path_cost,
+            _ => {
+                return Some(self.begin_discovery(
+                    own_address,
+                    destination,
+                    now,
+                    route_discovery_time,
+                    activity,
+                ));
+            }
+        };
+
+        self.request_sequence_number = self.request_sequence_number.wrapping_add(1);
+        let request_id = self.request_sequence_number;
+
+        self.discovery_table.insert(
+            (own_address, request_id),
+            DiscoveryEntry {
+                route_request_id: request_id,
+                source_address: own_address,
+                sender_address: UNKNOWN_NEXT_HOP,
+                forward_cost: 0,
+                residual_cost: Some(path_cost),
+                expiration_time: now + route_discovery_time,
+                destination_address: destination,
+                handled: true,
+            },
+        );
+
+        Some(request_id)
     }
 
     /// Remove the route to a destination, returning whether an entry was removed. An

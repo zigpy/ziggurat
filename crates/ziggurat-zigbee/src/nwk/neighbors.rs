@@ -193,6 +193,10 @@ pub struct LinkStatusOutcome {
     /// The sender's address, if its outgoing cost collapsed to zero: the link is
     /// considered broken and routes through it must be invalidated (spec 3.6.4.4.2).
     pub lost_link: Option<Nwk>,
+    /// The sender's address, if its outgoing cost rose from zero: the link works again
+    /// (or for the first time), and routes that failed through it may be worth looking
+    /// at again.
+    pub restored_link: Option<Nwk>,
     /// The sender's previous network address, if the link status came from a new one.
     pub replaced_address: Option<Nwk>,
     /// Our link status lists the sender from now on and did not before, so the sender
@@ -914,9 +918,11 @@ impl Neighbors {
         tracing::trace!("Updated neighbor table entry: {neighbor_entry:?}");
 
         let lost_link = previous_outgoing_cost > 0 && neighbor_entry.outgoing_cost == 0;
+        let restored_link = previous_outgoing_cost == 0 && neighbor_entry.outgoing_cost > 0;
 
         LinkStatusOutcome {
             lost_link: lost_link.then_some(neighbor_entry.network_address),
+            restored_link: restored_link.then_some(neighbor_entry.network_address),
             replaced_address,
             link_status_due: !was_in_link_status && neighbor_entry.is_in_link_status(),
             link_status_answer_due: link_status_cmd.link_statuses.is_empty(),
@@ -1017,7 +1023,9 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        neighbors.on_link_status(own, router, old, 200, &link_status, now, ACTIVITY);
+        // A new router's first link status listing us is a link that works
+        let outcome = neighbors.on_link_status(own, router, old, 200, &link_status, now, ACTIVITY);
+        assert_eq!(outcome.restored_link, Some(old));
         neighbors.record_lqa(old, 200);
         neighbors.record_lqa(old, 200);
         assert_eq!(neighbors.link(old).unwrap().eui64, router);
@@ -1032,6 +1040,7 @@ mod test {
             outcome,
             LinkStatusOutcome {
                 lost_link: None,
+                restored_link: None,
                 replaced_address: Some(old),
                 link_status_due: false,
                 link_status_answer_due: false,
@@ -1102,6 +1111,7 @@ mod test {
             outcome,
             LinkStatusOutcome {
                 lost_link: None,
+                restored_link: None,
                 replaced_address: None,
                 link_status_due: true,
                 link_status_answer_due: true,
@@ -1114,6 +1124,7 @@ mod test {
             outcome,
             LinkStatusOutcome {
                 lost_link: None,
+                restored_link: None,
                 replaced_address: None,
                 link_status_due: false,
                 link_status_answer_due: true,
@@ -1183,6 +1194,7 @@ mod test {
             outcome,
             LinkStatusOutcome {
                 lost_link: Some(router_nwk),
+                restored_link: None,
                 replaced_address: None,
                 link_status_due: false,
                 link_status_answer_due: false,
@@ -1390,6 +1402,81 @@ mod test {
         // The two uses lose only the second that follows them
         neighbors.decay_activity(used + Duration::from_secs(1), ACTIVITY.period);
         assert_eq!(inbound_activity(&neighbors), 1);
+    }
+
+    const OWN: Nwk = Nwk(0x0000);
+    const ROUTER_NWK: Nwk = Nwk(0x4965);
+
+    fn link_status_from_router(
+        neighbors: &mut Neighbors,
+        listing: Nwk,
+        at: Instant,
+    ) -> LinkStatusOutcome {
+        let cmd = NwkLinkStatusCommand {
+            is_first_frame: true,
+            is_last_frame: true,
+            link_statuses: vec![NwkLinkStatus {
+                address: listing,
+                incoming_cost: 1,
+                outgoing_cost: 1,
+            }],
+        };
+        neighbors.on_link_status(
+            OWN,
+            Eui64::from_hex("20:6e:f1:ff:fe:0a:d8:8c"),
+            ROUTER_NWK,
+            255,
+            &cmd,
+            at,
+            ACTIVITY,
+        )
+    }
+
+    /// The router's link status, listing us (cost 1) or not (cost 0 toward us).
+    fn link_status_toward_us(neighbors: &mut Neighbors, listed: bool) -> LinkStatusOutcome {
+        let listing = if listed { OWN } else { Nwk(0x1111) };
+        link_status_from_router(neighbors, listing, Instant::from_micros(0))
+    }
+
+    #[test]
+    fn test_link_status_restoring_the_cost_toward_us_reports_a_restored_link() {
+        let mut neighbors = Neighbors::default();
+        link_status_toward_us(&mut neighbors, true);
+        link_status_toward_us(&mut neighbors, false);
+
+        let outcome = link_status_toward_us(&mut neighbors, true);
+
+        assert_eq!(outcome.restored_link, Some(ROUTER_NWK));
+    }
+
+    #[test]
+    fn test_link_status_keeping_the_cost_toward_us_reports_no_restored_link() {
+        let mut neighbors = Neighbors::default();
+        link_status_toward_us(&mut neighbors, true);
+
+        let outcome = link_status_toward_us(&mut neighbors, true);
+
+        assert_eq!(outcome.restored_link, None);
+    }
+
+    #[test]
+    fn test_link_status_dropping_the_cost_toward_us_reports_no_restored_link() {
+        let mut neighbors = Neighbors::default();
+        link_status_toward_us(&mut neighbors, true);
+
+        let outcome = link_status_toward_us(&mut neighbors, false);
+
+        assert_eq!(outcome.restored_link, None);
+    }
+
+    #[test]
+    fn test_link_status_dropping_the_cost_toward_us_reports_a_lost_link() {
+        let mut neighbors = Neighbors::default();
+        link_status_toward_us(&mut neighbors, true);
+
+        let outcome = link_status_toward_us(&mut neighbors, false);
+
+        assert_eq!(outcome.lost_link, Some(ROUTER_NWK));
     }
 
     #[test]

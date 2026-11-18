@@ -980,3 +980,198 @@ fn test_equal_cost_copy_is_fresh_after_an_unhandled_cheaper_copy() {
     routing.note_route_request_handled(DEVICE, 1);
     assert!(!receive_copy(&mut routing, 2).fresh);
 }
+
+// Route refresh: a discovery toward a destination whose route stays in use until a
+// strictly cheaper reply arrives.
+
+fn refresh(routing: &mut Routing, now: Instant) -> Option<RouteRequestId> {
+    routing.begin_refresh(OWN, DEVICE, now, ROUTE_DISCOVERY_TIME, ACTIVITY)
+}
+
+fn refresh_reply(routing: &mut Routing, request_id: RouteRequestId, cost: u8) -> RouteReplyOutcome {
+    routing.accept_route_reply(OWN, OWN, request_id, DEVICE, ROUTER, cost, START, ACTIVITY)
+}
+
+#[test]
+fn test_refresh_of_an_active_route_returns_a_request_id() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 12, START, ACTIVITY);
+
+    assert!(refresh(&mut routing, START).is_some());
+}
+
+#[test]
+fn test_refresh_keeps_the_route_active_through_the_same_next_hop() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 12, START, ACTIVITY);
+
+    let _ = refresh(&mut routing, START);
+
+    assert_eq!(routing.route_status(DEVICE), Some(Status::Active));
+    assert_eq!(routing.next_hop(DEVICE), Some(NEIGHBOR));
+}
+
+#[test]
+fn test_refresh_reply_with_a_strictly_cheaper_path_moves_the_route() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 12, START, ACTIVITY);
+    let request_id = refresh(&mut routing, START).unwrap();
+
+    let _ = refresh_reply(&mut routing, request_id, 3);
+
+    assert_eq!(routing.next_hop(DEVICE), Some(ROUTER));
+}
+
+#[test]
+fn test_refresh_reply_with_an_equal_or_costlier_path_keeps_the_route() {
+    for cost in [12, 13] {
+        let mut routing = Routing::default();
+        routing.restore_route(DEVICE, NEIGHBOR, 12, START, ACTIVITY);
+        let request_id = refresh(&mut routing, START).unwrap();
+
+        let reply = refresh_reply(&mut routing, request_id, cost);
+
+        assert_eq!(reply.disposition, RouteReplyDisposition::Drop);
+        assert_eq!(routing.next_hop(DEVICE), Some(NEIGHBOR));
+    }
+}
+
+#[test]
+fn test_refresh_without_a_route_starts_a_discovery() {
+    let mut routing = Routing::default();
+
+    assert!(refresh(&mut routing, START).is_some());
+    assert_eq!(
+        routing.route_status(DEVICE),
+        Some(Status::DiscoveryUnderway)
+    );
+}
+
+#[test]
+fn test_refresh_of_an_inactive_route_starts_a_discovery() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 12, START, ACTIVITY);
+    let _ = routing.invalidate_via(NEIGHBOR);
+
+    assert!(refresh(&mut routing, START).is_some());
+    assert_eq!(
+        routing.route_status(DEVICE),
+        Some(Status::DiscoveryUnderway)
+    );
+}
+
+#[test]
+fn test_refresh_without_a_route_holds_no_frame() {
+    let mut routing = Routing::default();
+
+    let _ = refresh(&mut routing, START);
+
+    assert!(!routing.frames_await_discovery());
+}
+
+#[test]
+fn test_refresh_skips_a_destination_under_discovery() {
+    let mut routing = Routing::default();
+    assert!(want(&mut routing, START, 1));
+
+    assert_eq!(refresh(&mut routing, START), None);
+}
+
+#[test]
+fn test_active_destinations_lists_only_active_routes() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+    routing.restore_route(OTHER_DEVICE, ROUTER, 3, START, ACTIVITY);
+    let _ = routing.invalidate_via(ROUTER);
+    let _ = routing.begin_discovery(OWN, NEIGHBOR, START, ROUTE_DISCOVERY_TIME, ACTIVITY);
+
+    assert_eq!(routing.active_destinations(), vec![DEVICE]);
+}
+
+#[test]
+fn test_invalidate_via_returns_the_destinations_through_the_hop() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+    routing.restore_route(OTHER_DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+    routing.restore_route(ROUTER, ROUTER, 1, START, ACTIVITY);
+
+    let mut invalidated = routing.invalidate_via(NEIGHBOR);
+    invalidated.sort_by_key(|nwk| nwk.0);
+
+    assert_eq!(invalidated, vec![DEVICE, OTHER_DEVICE]);
+}
+
+#[test]
+fn test_invalidate_via_leaves_the_routes_through_the_hop_inactive() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+    routing.restore_route(OTHER_DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+
+    let _ = routing.invalidate_via(NEIGHBOR);
+
+    assert_eq!(routing.route_status(DEVICE), Some(Status::Inactive));
+    assert_eq!(routing.route_status(OTHER_DEVICE), Some(Status::Inactive));
+}
+
+#[test]
+fn test_frames_await_discovery_while_a_frame_wants_a_route() {
+    let mut routing = Routing::default();
+    let _ = want(&mut routing, START, 1);
+
+    assert!(routing.frames_await_discovery());
+}
+
+#[test]
+fn test_frames_await_no_discovery_when_none_waits() {
+    let routing = Routing::default();
+
+    assert!(!routing.frames_await_discovery());
+}
+
+#[test]
+fn test_refreshable_destinations_skip_a_route_at_the_lowest_cost() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, DEVICE, 1, START, ACTIVITY);
+    routing.restore_route(OTHER_DEVICE, NEIGHBOR, 2, START, ACTIVITY);
+
+    assert_eq!(
+        routing.refreshable_destinations(true, MAX_SOURCE_ROUTE),
+        vec![OTHER_DEVICE]
+    );
+}
+
+#[test]
+fn test_refreshable_destinations_of_a_concentrator_skip_a_source_routed_destination() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 5, START, ACTIVITY);
+    routing.store_route_record(DEVICE, vec![ROUTER]);
+
+    assert_eq!(
+        routing.refreshable_destinations(true, MAX_SOURCE_ROUTE),
+        Vec::new()
+    );
+}
+
+#[test]
+fn test_refreshable_destinations_of_a_router_keep_a_destination_with_a_route_record() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 5, START, ACTIVITY);
+    routing.store_route_record(DEVICE, vec![ROUTER]);
+
+    assert_eq!(
+        routing.refreshable_destinations(false, MAX_SOURCE_ROUTE),
+        vec![DEVICE]
+    );
+}
+
+#[test]
+fn test_refreshable_destinations_skip_inactive_routes() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 5, START, ACTIVITY);
+    let _ = routing.invalidate_via(NEIGHBOR);
+
+    assert_eq!(
+        routing.refreshable_destinations(false, MAX_SOURCE_ROUTE),
+        Vec::new()
+    );
+}

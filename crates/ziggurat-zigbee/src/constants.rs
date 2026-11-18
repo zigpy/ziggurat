@@ -345,6 +345,27 @@ tunables! {
     /// together.
     pending_route_discovery_attempts: u8 = 1,
 
+    /// Route refresh: look again for cheaper routes in the background, without
+    /// dropping the route in use, after the neighbors settle following a start, for
+    /// destinations only a host route hint reached, and for routes that failed through
+    /// a hop that works again.
+    route_refresh: bool = true,
+
+    /// The least time between two route refreshes. It bounds the broadcasts route
+    /// refresh adds to the network.
+    route_refresh_spacing: Duration = Duration::from_secs(2),
+
+    /// How long a destination that did not answer a route refresh waits before the
+    /// next one. Each later miss doubles it, up to `route_refresh_backoff_max`.
+    route_refresh_backoff: Duration = Duration::from_secs(60),
+
+    /// The longest wait between route refreshes of a destination that does not answer.
+    route_refresh_backoff_max: Duration = Duration::from_secs(30 * 60),
+
+    /// How long after its route failed through a hop a destination is refreshed when
+    /// that hop works again.
+    displaced_route_retention: Duration = Duration::from_secs(10 * 60),
+
     /// The default timeout for any end device child that does not negotiate a
     /// different value via the End Device Timeout Request command (spec 3.6.10.2).
     end_device_timeout_default: EndDeviceTimeout = EndDeviceTimeout::Minutes256,
@@ -409,6 +430,11 @@ tunables! {
     /// so a host flood cannot stop us relaying the mesh's own broadcasts.
     broadcast_forwarding_reserve: u8 = 2,
 
+    /// Broadcast tokens reserved for host broadcasts above the forwarding floor, which
+    /// background broadcasts (route refresh) never draw: a refresh only goes out while
+    /// more than critical + forwarding + host reserve tokens are left.
+    broadcast_host_reserve: u8 = 20,
+
     /// An intentional spec deviation: while permitting joins, spray a beacon every 5 ms
     /// for this long after each beacon request, to out-compete neighbouring networks
     /// that permanently permit joins. Zero disables it (a single beacon per request,
@@ -421,6 +447,14 @@ tunables! {
     /// router is unknown, which means a burst of link statuses. When false, such a
     /// router waits for the periodic link status.
     hack_early_link_status_for_unknown_routers: bool = true,
+
+    /// Hold every early link status until one link status period after the start.
+    /// The stack starts with no sibling routers, so an early link status lists only
+    /// the routers heard so far. A router that has not spoken yet takes that list as
+    /// "I do not hear you" and zeroes its cost toward us, which makes it drop our
+    /// route requests and replies until our next link status. When false, early link
+    /// statuses go out as soon as they are asked for.
+    hold_early_link_status_after_start: bool = true,
 }
 
 #[cfg(test)]

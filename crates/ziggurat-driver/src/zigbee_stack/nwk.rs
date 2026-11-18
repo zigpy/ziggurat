@@ -59,6 +59,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.core_now(),
             self.activity_params(),
         );
+        core.nib.route_refresh.forget(nwk);
         core.sends.fail_unrouted(nwk);
         self.commit_sends(core);
     }
@@ -405,6 +406,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let mut core = self.core();
         nwk_frame.nwk_header.sequence_number = core.nib.next_sequence_number();
 
+        let hint_stands_in = self.hint_stands_in_for_a_route(&core.nib, destination, &mode);
         let resolved = next_hop::resolve(
             &core.nib.routing,
             &core.nib.neighbors,
@@ -416,6 +418,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let handle = match resolved {
             NextHop::Resolved(next_hop) => {
+                if hint_stands_in {
+                    self.queue_hinted_refresh(&mut core.nib, destination);
+                }
+
                 let poll_address = Self::poll_address(&core.nib, next_hop);
                 self.enqueue_unicast_in(
                     &mut core,
@@ -708,6 +714,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.tunables.broadcast_token_refill(),
             self.tunables.broadcast_critical_reserve(),
             self.tunables.broadcast_forwarding_reserve(),
+            self.tunables.broadcast_host_reserve(),
         );
 
         if let BroadcastAdmission::Defer { retry_in } = admission {
