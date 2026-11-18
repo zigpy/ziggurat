@@ -202,6 +202,7 @@ pub fn apply_children<P: RadioPhy, R: Runtime>(
                 relationship: Relationship::Child,
             },
             now,
+            stack.activity_params(),
         );
         core.nib.address_map.update_mapping(entry.ieee, entry.nwk);
     }
@@ -223,9 +224,13 @@ pub fn apply_route_table<P: RadioPhy, R: Runtime>(
 ) {
     let mut core = stack.state.core.lock();
     for entry in payload.entries {
-        core.nib
-            .routing
-            .restore_route(entry.destination, entry.next_hop, entry.path_cost);
+        core.nib.routing.restore_route(
+            entry.destination,
+            entry.next_hop,
+            entry.path_cost,
+            stack.core_now(),
+            stack.activity_params(),
+        );
     }
 }
 

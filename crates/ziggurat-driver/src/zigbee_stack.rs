@@ -22,7 +22,9 @@ use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 use core::time::Duration;
+use ziggurat_zigbee::debouncer::Debouncer;
 use ziggurat_zigbee::flat_map::FlatMap;
+use ziggurat_zigbee::nwk::activity::ActivityParams;
 use ziggurat_zigbee::nwk::frame::{NwkFrame, NwkSecurityHeaderKeyId};
 
 mod aps;
@@ -350,6 +352,10 @@ pub struct Nib {
 
     /// The neighbor table: link quality accounting, link status digestion, aging
     pub neighbors: Neighbors,
+    /// When the next link status broadcast is due
+    pub link_status_debouncer: Debouncer,
+    /// When the next many-to-one route request is due
+    pub mtorr_debouncer: Debouncer,
     /// NWK routing state and decision logic (route/discovery/record tables)
     pub routing: Routing,
     /// Broadcast deduplication and passive acknowledgment accounting
@@ -508,6 +514,8 @@ impl State {
                     update_id: config.update_id,
                     tx_total: 0,
                     neighbors: Neighbors::default(),
+                    link_status_debouncer: Debouncer::default(),
+                    mtorr_debouncer: Debouncer::default(),
                     routing: Routing::default(),
                     broadcasts: Broadcasts::default(),
                     nwk_security: NwkSecurity::new(
@@ -716,13 +724,15 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// network-wide broadcast storm (spec 2.4.3.1.12.2)
     pub(crate) parent_annce_received: Mutex<Option<CoreInstant>>,
 
-    /// Wakes the MTORR scheduler before its max interval when accumulated route
-    /// errors or delivery failures cross their thresholds
-    pub(crate) mtorr_kick: Notify,
+    /// Wakes the many-to-one route request task when its next advertisement moved
+    /// earlier
+    pub(crate) mtorr_wake: Notify,
 
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
     pub(crate) link_status_received: Notify,
+    /// Wakes the link status task when the next link status broadcast moved earlier
+    pub(crate) link_status_wake: Notify,
     pub(crate) address_conflict_wake: Notify,
     /// Wakes the beacon-spam reactor when a beacon request opens its spray window.
     pub(crate) beacon_spam_wake: Notify,
@@ -798,6 +808,34 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         R::sleep(deadline.saturating_duration_since(self.core_now())).await;
     }
 
+    /// What the tables need to keep their activity counters.
+    pub fn activity_params(&self) -> ActivityParams {
+        ActivityParams {
+            initial_count: self.tunables.router_age_limit(),
+            period: self.tunables.link_status_period(),
+        }
+    }
+
+    /// Sleep until a debouncer fires. `wake` signals that a request moved its next
+    /// firing earlier: the sleep then starts again, until the new time.
+    async fn wait_for_debouncer(
+        &self,
+        debouncer: impl Fn(&Nib) -> &Debouncer + Send,
+        wake: &Notify,
+    ) {
+        loop {
+            let next = debouncer(&self.core().nib).next();
+            let due = core::pin::pin!(self.sleep_until_core(next));
+            let moved = core::pin::pin!(wake.notified());
+
+            if let futures::future::Either::Left(((), _)) =
+                futures::future::select(due, moved).await
+            {
+                return;
+            }
+        }
+    }
+
     /// Run `future`, failing with [`Elapsed`] if a [`CoreInstant`] deadline passes first.
     async fn timeout_at_core<F>(
         &self,
@@ -841,8 +879,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             src_match_sync: Notify::new(),
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
-            mtorr_kick: Notify::new(),
+            mtorr_wake: Notify::new(),
             link_status_received: Notify::new(),
+            link_status_wake: Notify::new(),
             address_conflict_wake: Notify::new(),
             beacon_spam_wake: Notify::new(),
             maintenance_wake: Notify::new(),

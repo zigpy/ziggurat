@@ -44,6 +44,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source,
             updated_path_cost,
             now,
+            self.activity_params(),
         );
 
         let (next_hop_nwk, path_cost) = match outcome.disposition {
@@ -158,6 +159,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             route_request_cmd.many_to_one,
             self.core_now(),
             self.tunables.route_discovery_time(),
+            self.activity_params(),
         );
 
         if !outcome.accepted {
@@ -233,10 +235,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // many-to-one requests are addressed to a broadcast address, so there is no
         // destination to track for them.
         if !many_to_one {
-            self.core()
-                .nib
-                .routing
-                .note_relayed_discovery(route_request_cmd.destination_address);
+            self.core().nib.routing.note_relayed_discovery(
+                route_request_cmd.destination_address,
+                self.core_now(),
+                self.activity_params(),
+            );
         }
 
         let rebroadcast_radius = nwk_frame.nwk_header.radius.saturating_sub(1);
@@ -344,25 +347,28 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         loop {
-            let min_deadline = self.core_now() + self.tunables.mtorr_min_interval();
-            let max_deadline = self.core_now() + self.tunables.mtorr_max_interval();
+            let now = self.core_now();
+            let max_interval = self.tunables.mtorr_max_interval();
+            self.core().nib.mtorr_debouncer.fired(now, max_interval);
 
             let _ = self.send_many_to_one_route_request().delivered().await;
 
             self.core().nib.routing.reset_mtorr_triggers();
 
-            // Advertise every max interval, sooner when accumulated route errors or
-            // delivery failures signal that routes toward us have gone bad, but never
-            // within the min interval
-            let max_sleep = core::pin::pin!(self.sleep_until_core(max_deadline));
-            let kicked = core::pin::pin!(self.mtorr_kick.notified());
+            // Advertise every max interval, or sooner when one was requested
+            self.wait_for_debouncer(|nib| &nib.mtorr_debouncer, &self.mtorr_wake)
+                .await;
+        }
+    }
 
-            if let futures::future::Either::Right(((), _)) =
-                futures::future::select(max_sleep, kicked).await
-            {
-                // Kicked early: still honor the minimum spacing before re-advertising.
-                self.sleep_until_core(min_deadline).await;
-            }
+    /// Advertise the many-to-one route again soon, but never within the min interval
+    /// of the last advertisement.
+    fn request_many_to_one_route_request(&self) {
+        let now = self.core_now();
+        let min_interval = self.tunables.mtorr_min_interval();
+
+        if self.core().nib.mtorr_debouncer.request(now, min_interval) {
+            self.mtorr_wake.notify_one();
         }
     }
 
@@ -380,7 +386,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .note_route_error(self.tunables.mtorr_route_error_threshold());
 
         if kick {
-            self.mtorr_kick.notify_one();
+            self.request_many_to_one_route_request();
         }
     }
 
@@ -398,7 +404,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .note_delivery_failure(self.tunables.mtorr_delivery_failure_threshold());
 
         if kick {
-            self.mtorr_kick.notify_one();
+            self.request_many_to_one_route_request();
         }
     }
 

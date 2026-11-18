@@ -53,7 +53,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     pub(super) fn forget_nwk_state_in(&self, mut core: CoreGuard<'_>, nwk: Nwk) {
-        core.nib.routing.forget(self.state.network_address, nwk);
+        core.nib.routing.forget(
+            self.state.network_address,
+            nwk,
+            self.core_now(),
+            self.activity_params(),
+        );
         core.sends.fail_unrouted(nwk);
         self.commit_sends(core);
     }
@@ -442,6 +447,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     now,
                     self.tunables.route_discovery_time(),
                     self.tunables.pending_route_discovery_attempts(),
+                    self.activity_params(),
                 );
                 if let Some(route_request_identifier) = route_request_identifier {
                     self.broadcast_discovery_request(
@@ -569,13 +575,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let relaying_ieee = core.nib.address_map.eui64_for(next_hop_address);
 
             if let Some(relaying_ieee) = relaying_ieee {
-                core.nib.neighbors.record_outbound_activity(relaying_ieee);
+                core.nib.neighbors.record_outbound_activity(
+                    relaying_ieee,
+                    self.core_now(),
+                    self.tunables.link_status_period(),
+                );
             }
 
             // And the routing table counters
-            core.nib
-                .routing
-                .record_usage(nwk_frame.nwk_header.destination);
+            core.nib.routing.record_usage(
+                nwk_frame.nwk_header.destination,
+                self.core_now(),
+                self.tunables.link_status_period(),
+            );
         }
 
         self.increment_tx_total();
@@ -836,10 +848,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
 
         // Receiving a unicast from a neighbor counts as inbound activity
-        self.core()
-            .nib
-            .neighbors
-            .record_inbound_activity(sender_nwk);
+        self.core().nib.neighbors.record_inbound_activity(
+            sender_nwk,
+            self.core_now(),
+            self.tunables.link_status_period(),
+        );
 
         // Spec 3.6.2.2: the radius is decremented on receipt and a frame that reaches
         // zero is never retransmitted

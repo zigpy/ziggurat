@@ -372,6 +372,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.state.network_address,
             now,
             self.tunables.route_discovery_time(),
+            self.activity_params(),
             |destination| core.sends.has_unrouted(destination),
         );
 

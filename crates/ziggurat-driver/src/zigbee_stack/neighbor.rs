@@ -1,8 +1,10 @@
 use crate::runtime::Runtime;
 use alloc::vec::Vec;
+use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
+use ziggurat_zigbee::nwk::NwkDeviceType;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -17,7 +19,43 @@ const MAX_LINK_STATUSES: usize = 7;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
-        self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
+        let link_status_due = self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
+
+        if link_status_due {
+            self.request_link_status_for_new_router();
+        }
+    }
+
+    /// Send the next link status soon: a router it will newly list waits for it to
+    /// learn its cost.
+    fn request_link_status_for_new_router(&self) {
+        // Coordinator only. Routers must not run this as it is: every router that
+        // hears a new neighbor would send within the same half second, each with its
+        // whole list, and most of those frames would collide.
+        if self.state.role == NwkDeviceType::Coordinator {
+            self.request_early_link_status();
+        }
+    }
+
+    /// Send the next link status after the delay of a gratuitous one (spec 3.6.4.4.2).
+    fn request_early_link_status(&self) {
+        let min_jitter = self.tunables.min_router_bootstrap_jitter();
+        let max_jitter = self.tunables.max_router_bootstrap_jitter();
+        let jitter = min_jitter
+            + max_jitter
+                .saturating_sub(min_jitter)
+                .mul_f32(crate::rng::random_f32::<R>());
+
+        let at = self.core_now() + jitter;
+
+        if self
+            .core()
+            .nib
+            .link_status_debouncer
+            .request(at, Duration::ZERO)
+        {
+            self.link_status_wake.notify_one();
+        }
     }
 
     pub(super) fn end_device_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
@@ -84,6 +122,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             lqi,
             &link_status_cmd,
             self.core_now(),
+            self.activity_params(),
         );
 
         // The neighbor no longer answers at its old address, so routes through it
@@ -101,6 +140,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.invalidate_routes_via(neighbor_nwk);
         }
 
+        if outcome.link_status_answer_due {
+            self.request_early_link_status();
+        } else if outcome.link_status_due
+            && self.tunables.hack_early_link_status_for_unknown_routers()
+        {
+            self.request_link_status_for_new_router();
+        }
+
         self.link_status_received.notify_one();
     }
 
@@ -114,21 +161,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return Err(EnqueueError::NotStarted);
         }
 
-        // Decrement the `recent_activity` field of every active routing table entry
-        self.core().nib.routing.decay_activity();
-
         self.maybe_age_neighbors();
 
-        // Decrement the inbound and outbound activity fields for neighbors
-        let mut link_statuses = {
-            let mut core = self.core();
-            core.nib.neighbors.decay_activity();
-
-            if empty {
-                Vec::new()
-            } else {
-                core.nib.neighbors.link_status_entries()
-            }
+        let mut link_statuses = if empty {
+            Vec::new()
+        } else {
+            self.core().nib.neighbors.link_status_entries()
         };
 
         // Link statuses are sorted in ascending order
@@ -184,19 +222,28 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
+    fn restart_link_status_period(&self) {
+        let now = self.core_now();
+        let period = self.tunables.link_status_period();
+
+        self.core().nib.link_status_debouncer.fired(now, period);
+    }
+
     pub async fn periodic_link_status_broadcast_task(&self) {
-        let mut next = self.core_now() + self.tunables.link_status_period();
+        // The network start has just sent one
+        self.restart_link_status_period();
 
         loop {
-            self.sleep_until_core(next).await;
+            self.wait_for_debouncer(|nib| &nib.link_status_debouncer, &self.link_status_wake)
+                .await;
+
+            self.restart_link_status_period();
 
             // The link status broadcast has a radius of 1 so delivery does not wait for
             // a relay quorum.
             if let Ok(link_status) = self.send_link_status_broadcast(false) {
                 let _ = link_status.delivered().await;
             }
-
-            next = next + self.tunables.link_status_period();
         }
     }
 }
