@@ -447,6 +447,14 @@ tunables! {
     /// router is unknown, which means a burst of link statuses. When false, such a
     /// router waits for the periodic link status.
     hack_early_link_status_for_unknown_routers: bool = true,
+
+    /// Hold every early link status until one link status period after the start.
+    /// The stack starts with no sibling routers, so an early link status lists only
+    /// the routers heard so far. A router that has not spoken yet takes that list as
+    /// "I do not hear you" and zeroes its cost toward us, which makes it drop our
+    /// route requests and replies until our next link status. When false, early link
+    /// statuses go out as soon as they are asked for.
+    hold_early_link_status_after_start: bool = true,
 }
 
 #[cfg(test)]

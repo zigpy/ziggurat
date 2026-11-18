@@ -9,6 +9,7 @@ use crate::Instant;
 pub struct Debouncer {
     next: Instant,
     last_fired: Instant,
+    held_until: Instant,
 }
 
 impl Debouncer {
@@ -20,7 +21,7 @@ impl Debouncer {
     /// Returns whether the next firing moved earlier: it stays where it is if it is
     /// already due sooner.
     pub fn request(&mut self, at: Instant, min_interval: Duration) -> bool {
-        let at = at.max(self.last_fired + min_interval);
+        let at = at.max(self.last_fired + min_interval).max(self.held_until);
         let earlier = at < self.next;
 
         if earlier {
@@ -28,6 +29,11 @@ impl Debouncer {
         }
 
         earlier
+    }
+
+    /// Requests move the next firing no earlier than `until`.
+    pub fn hold(&mut self, until: Instant) {
+        self.held_until = until;
     }
 
     /// It fires at `now`: the next firing is due an `interval` later.
@@ -94,5 +100,33 @@ mod test {
         debouncer.fired(at(10_000), INTERVAL);
         assert!(debouncer.request(at(21_000), min_interval));
         assert_eq!(debouncer.next(), at(21_000));
+    }
+
+    #[test]
+    fn test_held_request_waits_for_the_hold_to_end() {
+        let mut debouncer = started();
+        debouncer.hold(at(15_000));
+
+        assert!(!debouncer.request(at(1_400), Duration::ZERO));
+        assert_eq!(debouncer.next(), at(15_000));
+    }
+
+    #[test]
+    fn test_hold_shorter_than_the_interval_moves_a_request_to_its_end() {
+        let mut debouncer = started();
+        debouncer.hold(at(5_000));
+
+        assert!(debouncer.request(at(1_400), Duration::ZERO));
+        assert_eq!(debouncer.next(), at(5_000));
+    }
+
+    #[test]
+    fn test_request_after_the_hold_is_taken_as_it_is() {
+        let mut debouncer = started();
+        debouncer.hold(at(15_000));
+        debouncer.fired(at(15_000), INTERVAL);
+
+        assert!(debouncer.request(at(16_000), Duration::ZERO));
+        assert_eq!(debouncer.next(), at(16_000));
     }
 }
