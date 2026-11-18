@@ -1,5 +1,8 @@
 mod reconnect;
 
+#[cfg(test)]
+mod configure_tests;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -692,11 +695,14 @@ impl ZigguratServer {
     /// reconfiguring replaces it wholesale.
     async fn handle_configure(
         &self,
-        payload: proto::ConfigurePayload,
+        mut payload: proto::ConfigurePayload,
     ) -> Result<proto::Response, proto::Error> {
         // A replaced stack must be fully stopped before its successor registers its
-        // own receivers with the shared radio transport.
-        self.teardown_stack().await;
+        // own receivers with the shared radio transport and takes over its frame
+        // counters.
+        if let Some(replaced) = self.teardown_stack().await {
+            proto::carry_frame_counters(&replaced, &mut payload.state);
+        }
 
         tracing::info!("Initializing Zigbee stack with new settings...");
         let phy = self.phy().await.map_err(radio_error)?;
@@ -759,10 +765,11 @@ impl ZigguratServer {
         Ok(proto::Response::Empty)
     }
 
-    /// Stop and drop the running stack and its notification forwarder, if any.
-    async fn teardown_stack(&self) {
+    /// Stop and drop the running stack and its notification forwarder, if any. Returns
+    /// the stopped stack.
+    async fn teardown_stack(&self) -> Option<Arc<Stack>> {
         let old_stack = self.stack.lock().unwrap().take();
-        if let Some(old_stack) = old_stack {
+        if let Some(old_stack) = &old_stack {
             tracing::info!("Stopping the running Zigbee stack");
             old_stack.shutdown().await;
         }
@@ -773,6 +780,8 @@ impl ZigguratServer {
         }
 
         self.started.store(false, Ordering::SeqCst);
+
+        old_stack
     }
 
     /// Stream a table scan's events, then respond with the count.
