@@ -1,0 +1,23 @@
+[package]
+name = "ziggurat-sim-medium"
+version.workspace = true
+description = "Simulated 802.15.4 medium that relays frames between simulated radios"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+ziggurat-ieee-802154.workspace = true
+ziggurat-sim-proto = { path = "../ziggurat-sim-proto" }
+
+clap = { version = "4.6", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util"] }
+
+[[bin]]
+name = "ziggurat-sim-medium"
+path = "src/main.rs"
+doc = false

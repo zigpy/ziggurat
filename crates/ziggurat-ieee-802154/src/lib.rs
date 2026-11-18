@@ -22,6 +22,22 @@ pub type Psdu = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
 /// The payload of one 802.15.4 frame.
 pub type Msdu = heapless::Vec<u8, MAX_MAC_PAYLOAD_SIZE>;
 
+/// The 802.15.4 FCS (CRC-16/KERMIT) of a frame's bytes, FCS excluded.
+#[allow(clippy::identity_op)]
+pub fn compute_fcs(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0x0000;
+
+    for c in data.iter() {
+        let q = (((crc & 0x0F) as u8) ^ (c >> 0)) & 0x0F;
+        crc = (crc >> 4) ^ ((q as u16) * 0x1081);
+
+        let r = (((crc & 0x0F) as u8) ^ (c >> 4)) & 0x0F;
+        crc = (crc >> 4) ^ ((r as u16) * 0x1081);
+    }
+
+    crc
+}
+
 /// The frame does not fit in the room its layer has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("frame is too long")]
@@ -449,7 +465,7 @@ impl<'a> Ieee802154Frame<&'a [u8]> {
         let (data, fcs) = data.split_at(data.len() - FCS_LENGTH);
         let fcs = u16::from_le_bytes([fcs[0], fcs[1]]);
 
-        if Self::compute_fcs(data) != fcs {
+        if compute_fcs(data) != fcs {
             return Err(ParseError::InvalidFcs);
         }
 
@@ -458,7 +474,7 @@ impl<'a> Ieee802154Frame<&'a [u8]> {
 
     /// Parse a frame the radio has already checked, with its FCS removed.
     pub fn from_bytes_without_fcs(data: &'a [u8]) -> Result<Self, ParseError> {
-        Self::parse(data, Self::compute_fcs(data))
+        Self::parse(data, compute_fcs(data))
     }
 
     fn parse(data: &'a [u8], fcs: u16) -> Result<Self, ParseError> {
@@ -669,7 +685,7 @@ impl<P: FramePayload> Ieee802154Frame<P> {
 
     pub fn to_bytes(&self) -> Psdu {
         let mut psdu = self.to_bytes_without_fcs();
-        let fcs = Self::compute_fcs(&psdu).to_le_bytes();
+        let fcs = compute_fcs(&psdu).to_le_bytes();
         psdu.extend_from_slice(&fcs)
             .expect("room for the FCS was left");
         psdu
@@ -700,21 +716,6 @@ impl<P: FramePayload> Ieee802154Frame<P> {
             Self::Ack(frame) => frame.fcs,
             Self::Command(frame) => frame.fcs,
         }
-    }
-
-    #[allow(clippy::identity_op)]
-    pub fn compute_fcs(data: &[u8]) -> u16 {
-        let mut crc: u16 = 0x0000;
-
-        for c in data.iter() {
-            let q = (((crc & 0x0F) as u8) ^ (c >> 0)) & 0x0F;
-            crc = (crc >> 4) ^ ((q as u16) * 0x1081);
-
-            let r = (((crc & 0x0F) as u8) ^ (c >> 4)) & 0x0F;
-            crc = (crc >> 4) ^ ((r as u16) * 0x1081);
-        }
-
-        crc
     }
 }
 
