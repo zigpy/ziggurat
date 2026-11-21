@@ -1,0 +1,4 @@
+-- read-unknown: send seq=1 ep=10 cluster=0006 zcl=0022000000
+MULTICAST from [fd9e:4994:3fb:0:aeeb:e6ff:fe0b:ffa4]:23106 flags=unsolicited seq=0 ep=0 cluster=0x0005 profile=0x0000 zcl=03 65 49
+-- listening 3s
+UNICAST   from [fd9e:4994:3fb:0:1234:5678:9abc:def0]:23106 flags=nack seq=1 ep=10 cluster=0x0006 profile=0x0104 status=unknown-device zcl=-

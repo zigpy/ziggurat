@@ -1,0 +1,14 @@
+-- zdo-bind: send seq=1 ep=0 cluster=0021 zcl=30a0e00afefff16e200a060003a4ff0bfeffe6ebac01
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=1 ep=0 cluster=0x0021 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=1 ep=0 cluster=0x8021 profile=0x0000 zcl=30 00
+-- configure-reporting: send seq=2 ep=10 cluster=0006 zcl=002506000000100000100e
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=2 ep=10 cluster=0x0006 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=2 ep=10 cluster=0x0006 profile=0x0104 zcl=08 25 07 00
+-- on: send seq=3 ep=10 cluster=0006 zcl=011101
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=3 ep=10 cluster=0x0006 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=3 ep=10 cluster=0x0006 profile=0x0104 zcl=18 11 0b 01 00
+-- listening 3s
+-- off: send seq=5 ep=10 cluster=0006 zcl=011300
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=5 ep=10 cluster=0x0006 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=5 ep=10 cluster=0x0006 profile=0x0104 zcl=18 13 0b 00 00
+-- listening 3s

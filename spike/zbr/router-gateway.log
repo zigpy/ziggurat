@@ -1,0 +1,34 @@
+2026-11-21T16:48:28.561770+01:00  INFO ziggurat::zbr_router: ZBR router: fetching network settings from ws://127.0.0.1:19998
+2026-11-21T16:48:28.608419+01:00  INFO ziggurat::zbr_router: ZBR router: joining PAN PanId(0x2275) (ext Eui64(bf:21:54:02:88:05:4e:3d)) on channel 15 as router Nwk(0x4965) / Eui64(20:6e:f1:ff:fe:0a:d8:8c)
+2026-11-21T16:48:28.609723+01:00 ERROR ziggurat_spinel: RCP announced a reset: ResetPowerOn
+2026-11-21T16:48:28.631801+01:00  INFO ziggurat::zbr_router: ZBR router: Device_annce for Nwk(0x4965): Ok(())
+2026-11-21T16:48:28.631826+01:00  INFO ziggurat::zbr_router: ZBR router: up
+2026-11-21T16:48:28.631829+01:00  INFO ziggurat::zbr: ZBR: EPID Eui64(bf:21:54:02:88:05:4e:3d) -> prefix fd9e:4994:3fb::/64, multicast ff35:40:fd9e:4994:3fb::1, UDP port 23106, policy Full
+2026-11-21T16:48:28.631947+01:00  INFO ziggurat::zbr: ZBR: route the prefix locally: ip -6 route add local fd9e:4994:3fb::/64 dev lo
+2026-11-21T16:48:29.473500+01:00  INFO ziggurat::zbr_router: ZBR router: ZDP 0x0002 from Nwk(0x0000) answered: Ok(())
+2026-11-21T16:48:29.473435+01:00 DEBUG ziggurat::zbr: ZBR: unsolicited fd9e:4994:3fb:0:aeeb:e6ff:fe0b:ffa4 cluster 0x0002 -> ff35:40:fd9e:4994:3fb::1
+2026-11-21T16:48:29.495492+01:00 DEBUG ziggurat::zbr: ZBR: unsolicited fd9e:4994:3fb:0:aeeb:e6ff:fe0b:ffa4 cluster 0x0005 -> ff35:40:fd9e:4994:3fb::1
+2026-11-21T16:48:29.495549+01:00  INFO ziggurat::zbr_router: ZBR router: ZDP 0x0005 from Nwk(0x0000) answered: Ok(())
+2026-11-21T16:51:26.709091+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 10 cluster 0x0006 profile 0x0104 tsn 17->128
+2026-11-21T16:51:26.769784+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> [::1]:40349
+2026-11-21T16:51:29.709366+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 10 cluster 0x0006 profile 0x0104 tsn 34->129
+2026-11-21T16:51:29.769946+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> [::1]:40349
+2026-11-21T16:51:32.712623+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 10 cluster 0x0006 profile 0x0104 tsn 19->130
+2026-11-21T16:51:32.769689+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> [::1]:40349
+2026-11-21T16:51:35.715664+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 0 cluster 0x0022 profile 0x0000 tsn 49->131
+2026-11-21T16:51:35.779343+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x8022 -> [::1]:40349
+2026-11-21T16:51:38.716362+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 0 cluster 0x0021 profile 0x0000 tsn 50->132
+2026-11-21T16:51:38.779378+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x8021 -> [::1]:40349
+2026-11-21T16:51:41.716979+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 10 cluster 0x0006 profile 0x0104 tsn 37->133
+2026-11-21T16:51:41.779558+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> [::1]:40349
+2026-11-21T16:51:41.789758+01:00 DEBUG ziggurat::zbr: ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+2026-11-21T16:51:44.719993+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 10 cluster 0x0006 profile 0x0104 tsn 17->134
+2026-11-21T16:51:44.749554+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> [::1]:40349
+2026-11-21T16:51:44.829712+01:00 DEBUG ziggurat::zbr: ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+2026-11-21T16:51:50.726321+01:00  INFO ziggurat::zbr: ZBR: [::1]:40349 -> Eui64(20:6e:f1:ff:fe:0a:e0:a0) (Nwk(0x1f77)) ep 10 cluster 0x0006 profile 0x0104 tsn 19->135
+2026-11-21T16:51:50.779416+01:00  INFO ziggurat::zbr: ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> [::1]:40349
+2026-11-21T16:51:50.811329+01:00 DEBUG ziggurat::zbr: ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+2026-11-21T16:52:09.090838+01:00  INFO ziggurat::zbr: ZBR: NWK_addr_req for Eui64(10:34:56:78:9a:bc:de:f0): Ok(())
+2026-11-21T16:52:09.109633+01:00 DEBUG ziggurat::zbr: ZBR: unsolicited fd9e:4994:3fb:0:aeeb:e6ff:fe0b:ffa4 cluster 0x0005 -> ff35:40:fd9e:4994:3fb::1
+2026-11-21T16:52:09.109691+01:00  INFO ziggurat::zbr_router: ZBR router: ZDP 0x0005 from Nwk(0x0000) answered: Ok(())
+2026-11-21T16:52:12.128131+01:00  INFO ziggurat::zbr: ZBR: Eui64(10:34:56:78:9a:bc:de:f0) not found
