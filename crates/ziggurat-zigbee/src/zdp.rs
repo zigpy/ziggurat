@@ -7,6 +7,8 @@ use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{FrameWriter, TooLong};
 
+pub mod descriptors;
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DeserializeError {
     #[error("Could not deserialize payload to {ty}")]

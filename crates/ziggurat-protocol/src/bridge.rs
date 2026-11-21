@@ -16,10 +16,10 @@ use ziggurat_driver::zigbee_stack::{
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::discovery::ManufacturerCode;
 use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
 use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
 use ziggurat_zigbee::nwk::routing;
+use ziggurat_zigbee::zdp::descriptors::ManufacturerCode;
 use ziggurat_zigbee::zdp::SimpleDescriptor;
 
 use crate::send_tracker::{ConfirmKind, SendTracker};

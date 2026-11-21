@@ -1,11 +1,10 @@
-//! ZDP device and service discovery (spec 2.4.3.1): the descriptors of the local node
-//! that requests from other devices read.
+//! The local node's descriptors (spec 2.3.2), read by ZDP requests from other devices.
 
 use alloc::vec::Vec;
 
 use ziggurat_ieee_802154::types::Eui64;
 
-use crate::zdp::SimpleDescriptor;
+use super::SimpleDescriptor;
 
 /// The manufacturer code reported when no table entry matches: the Open Home
 /// Foundation's.

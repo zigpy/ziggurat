@@ -10,7 +10,7 @@ use ziggurat_phy::{
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::aps::frame::{ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
-use ziggurat_zigbee::discovery::Descriptors;
+use ziggurat_zigbee::zdp::descriptors::Descriptors;
 
 use thiserror::Error;
 
