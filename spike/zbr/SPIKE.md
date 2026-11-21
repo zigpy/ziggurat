@@ -98,3 +98,38 @@ Ziggurat or zigpy (`soak-router-1h-*`).
 | Multicast report | 89 ms | 141 ms | 149 ms | 156 ms |
 | Read ack | 40 ms | 53 ms | 64 ms | 79 ms |
 | Read response | 60 ms | 73 ms | 83 ms | 100 ms |
+
+# Sleepy end device (router placement)
+
+Device: ESP32-C6 `c6-devkits/c6-f9c4` (taken from the ZLOE bench at the user's request) with
+zbpeer rebuilt as a sleepy end device (`sleepy-zbpeer.patch` against spinel2quic `zbpeer`):
+receiver off when idle, keepalive / data poll every 15 s (observed ~16 s), channel 15 only,
+4 MB flash. It joined with the light (0x1f77) as parent, NWK 0x7bf9, capability 0x84.
+
+`sleepy_probe.py`: a Read Attributes (ack requested) every 2 s for 60 s, 30 requests.
+
+| Run | Gateway | Responses | Notes |
+|---|---|---|---|
+| 1 | `sleepy_destination` always false | 15/30 | 4 of the 19 nacks were false: `aps-ack-timeout` at 5 s, response at 5.5–7 s |
+| 2 | flag set for devices whose Device_annce says rx off when idle | 16/30 | every ack matches a response; nack at 12.7 s means really lost |
+| 3 | run 2 + one re-send after an APS ack timeout | 22/30 | nack at 25.4 s; latency up to 15 s |
+
+## Learned
+
+- The pattern is the parent's 7.68 s indirect queue against the device's poll interval: a frame
+  sent within 7.68 s before a poll is delivered at that poll, anything earlier expires in the
+  parent. With a 16 s poll, half of the requests sent at random times are lost.
+- The gateway has to know which devices sleep: otherwise the APS ack timeout is too short and
+  it nacks requests that do get answered. The Device_annce capability byte is one source (seen
+  only on join/rejoin, lost on gateway restart); the node descriptor or the controller's
+  database are others.
+- One retry at the ack timeout helps but cannot cover the poll cycle: the retry's window starts
+  12.7 s after the first, leaving ~5 s of every 16 s uncovered. Retrying at the persistence
+  expiry (7.68 s) instead would cover it, at the cost of duplicate frames when the first ack is
+  just late.
+- In the router placement the gateway is not the parent, so it cannot see polls: no "deliver on
+  next poll" mailbox. That needs the gateway to be the parent (coordinator placement, or
+  devices joined through the gateway router), or the device to cooperate (Poll Control
+  cluster check-ins + fast poll), or a client-visible "queued / expected delay" answer as the
+  design note's nack-waiting flag intended.
+- Reports from the sleepy device are unaffected: it transmits when it wakes.

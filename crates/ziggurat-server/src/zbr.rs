@@ -19,7 +19,7 @@
 //! The host must route the prefix locally (Linux "AnyIP"):
 //! `ip -6 route add local <prefix>::/64 dev lo`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{IoSlice, IoSliceMut};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
@@ -223,6 +223,8 @@ struct Gateway {
     config: Config,
     pending: Mutex<HashMap<PendingKey, Pending>>,
     next_tsn: Mutex<u8>,
+    /// SPIKE: devices whose Device_annce said receiver off when idle
+    sleepy: Mutex<HashSet<Eui64>>,
 }
 
 pub async fn run(
@@ -286,6 +288,7 @@ async fn run_inner(
         config,
         pending: Mutex::new(HashMap::new()),
         next_tsn: Mutex::new(0x80),
+        sleepy: Mutex::new(HashSet::new()),
     });
 
     let mut buf = vec![0u8; 2048];
@@ -438,7 +441,7 @@ impl Gateway {
                 has_eui64: true,
                 aps_ack: ack_requested,
                 aps_encryption: false,
-                sleepy_destination: false,
+                sleepy_destination: self.sleepy.lock().unwrap().contains(&eui64),
                 force_aps_seq: false,
             },
             destination: nwk,
@@ -464,6 +467,9 @@ impl Gateway {
             header.endpoint,
             header.cluster
         );
+        // SPIKE: a sleepy device's parent holds the frame for 7.68 s only; with a longer
+        // poll interval the frame can expire before the device polls, so try once more
+        let retry = payload.flags.sleepy_destination.then(|| payload.clone());
         let ((handle, _), _) = match proto::send_unicast(&self.stack, payload) {
             Ok(sent) => sent,
             Err(e) => {
@@ -477,11 +483,17 @@ impl Gateway {
         }
         let gateway = self.clone();
         tokio::spawn(async move {
-            let status = match handle.delivered().await {
-                Ok(()) => None,
-                Err(ziggurat_driver::zigbee_stack::DeliveryError::ApsAckTimeout) => {
-                    Some(Status::ApsAckTimeout)
+            use ziggurat_driver::zigbee_stack::DeliveryError;
+            let mut result = handle.delivered().await;
+            if let (Err(DeliveryError::ApsAckTimeout), Some(payload)) = (&result, retry) {
+                tracing::info!("ZBR: sleepy {eui64:?} missed it, sending again");
+                if let Ok(((handle, _), _)) = proto::send_unicast(&gateway.stack, payload) {
+                    result = handle.delivered().await;
                 }
+            }
+            let status = match result {
+                Ok(()) => None,
+                Err(DeliveryError::ApsAckTimeout) => Some(Status::ApsAckTimeout),
                 Err(e) => {
                     tracing::info!("ZBR: delivery to {eui64:?} failed: {e}");
                     Some(Status::DeliveryFailed)
@@ -539,6 +551,16 @@ impl Gateway {
             };
             if let Some((tsn, ieee, nwk)) = learned {
                 let eui64 = Eui64(ieee.try_into().unwrap());
+                // Device_annce capability: bit 3 = receiver on when idle
+                if let (0x0013, Some(&capability)) = (cluster_id, data.get(11)) {
+                    let mut sleepy = self.sleepy.lock().unwrap();
+                    if capability & 0x08 == 0 {
+                        tracing::info!("ZBR: {eui64:?} is sleepy (capability {capability:#04x})");
+                        sleepy.insert(eui64);
+                    } else {
+                        sleepy.remove(&eui64);
+                    }
+                }
                 let nwk = Nwk(u16::from_le_bytes(nwk));
                 tracing::info!("ZBR: learned {eui64:?} = {nwk:?}");
                 self.stack
