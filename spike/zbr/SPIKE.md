@@ -83,3 +83,18 @@ All success criteria met (`run-router-placement.log`, `router-gateway.log`):
 - ZDP requests addressed to the router itself (the controller's interview of it) also reach
   the multicast group: the gateway should not forward frames for its own node.
 - No TSN clash with zigpy: the router has its own NWK address, so replies come back to it.
+
+# Soak (router placement, 1 h)
+
+`soak-run.sh` / `soak.py`: every 5 s toggle the light (ack requested), read On/Off back and
+wait for the multicast report. 720 cycles, all passed: no missing ack, reply or report, no nack,
+no wrong value read back. Ziggurat RSS flat at ~14 MB for both processes; no new warnings in
+Ziggurat or zigpy (`soak-router-1h-*`).
+
+| Leg | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| Command ack | 34 ms | 42 ms | 44 ms | 76 ms |
+| Command response | 51 ms | 63 ms | 72 ms | 83 ms |
+| Multicast report | 89 ms | 141 ms | 149 ms | 156 ms |
+| Read ack | 40 ms | 53 ms | 64 ms | 79 ms |
+| Read response | 60 ms | 73 ms | 83 ms | 100 ms |
