@@ -80,6 +80,8 @@ pub enum RequestCommand {
     SetProvisionalKey = 0x37,
     SetTunable = 0x38,
     SendGpdf = 0x39,
+    AddEndpoint = 0x3A,
+    SetManufacturerCodes = 0x3B,
     SetConcentrator = 0x3C,
     // Radio scans and packet capture.
     EnergyScan = 0x40,
@@ -637,6 +639,47 @@ pub struct SetTunablePayload {
     pub value: u64,
 }
 
+/// Registers a local endpoint, which the stack describes in its answers to ZDP
+/// discovery requests. It replaces an earlier registration of the same endpoint. Valid
+/// endpoints are 1 to 254.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct AddEndpointPayload {
+    pub endpoint: u8,
+    pub profile_id: u16,
+    pub device_id: u16,
+    pub device_version: u4,
+    pub reserved: u4,
+    pub input_count: u8,
+    #[abstract_bits(length_from = input_count)]
+    pub input_clusters: Vec<u16>,
+    pub output_count: u8,
+    #[abstract_bits(length_from = output_count)]
+    pub output_clusters: Vec<u16>,
+}
+
+/// The manufacturer code reported in our node descriptor to devices whose EUI64 starts
+/// with `prefix` (most significant byte first, at most 8 bytes). An empty prefix
+/// matches every device.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct ManufacturerCodeEntry {
+    pub prefix_len: u8,
+    #[abstract_bits(length_from = prefix_len)]
+    pub prefix: Vec<u8>,
+    pub code: u16,
+}
+
+/// Replaces the whole manufacturer code table. For each device, the entry with the
+/// longest matching prefix wins.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct SetManufacturerCodesPayload {
+    pub count: u8,
+    #[abstract_bits(length_from = count)]
+    pub entries: Vec<ManufacturerCodeEntry>,
+}
+
 /// Become a concentrator, advertising many-to-one routes to the node and
 /// source-routing through the route records they bring back, or stop being one. It
 /// takes effect at once.
@@ -899,6 +942,8 @@ pub enum Request {
     SetTunable(SetTunablePayload),
     CancelRequest(CancelRequestPayload),
     SendGpdf(SendGpdfPayload),
+    AddEndpoint(AddEndpointPayload),
+    SetManufacturerCodes(SetManufacturerCodesPayload),
     SetConcentrator(ConcentratorPayload),
 }
 
@@ -935,6 +980,8 @@ impl Request {
             RequestCommand::SetTunable => Self::SetTunable(require(payload)?),
             RequestCommand::CancelRequest => Self::CancelRequest(require(payload)?),
             RequestCommand::SendGpdf => Self::SendGpdf(require(payload)?),
+            RequestCommand::AddEndpoint => Self::AddEndpoint(require(payload)?),
+            RequestCommand::SetManufacturerCodes => Self::SetManufacturerCodes(require(payload)?),
             RequestCommand::SetConcentrator => Self::SetConcentrator(require(payload)?),
         })
     }
