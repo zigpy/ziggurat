@@ -1,4 +1,4 @@
-# SPIKE (throwaway): Zigbee Border Router, coordinator placement (spike A)
+# SPIKE (throwaway): Zigbee Border Router, coordinator (A) and router (B) placements
 
 Design note: `docs/superpowers/specs/2026-11-21-zigbee-border-router-design.md`.
 Code: `crates/ziggurat-server/src/zbr.rs`, enabled with `--zbr-port <port>`
@@ -43,3 +43,43 @@ All success criteria met (logs in this directory):
 - A device's address is only known once Ziggurat's address map has it (zigpy loads it on
   start, joins add to it).
 - The light sends two reports per change (its own report plus the configured one).
+
+# Spike B: router placement
+
+Code: `crates/ziggurat-server/src/zbr_router.rs`, enabled with `--zbr-router-of <ws url>` next to
+the `--zbr-*` flags. Run: `PLACEMENT=router POLICY=full ./ctl.sh start` (the coordinator then runs
+without the gateway).
+
+## Setup (2026-11-21)
+
+- Second radio: ESP32-C6 `c6-devkits/c6-d88c` (stock OT RCP), taken from the ZLOE bench's
+  `zloe-sat2` (container stopped) at the user's request.
+- The router fetches the network settings (key, PAN, channel) from the spike A coordinator's
+  Ziggurat WebSocket and configures itself with `NodeRole::Router` (the ZLOE satellite spike's
+  method, no over-the-air join), NWK 0x4965 derived from its EUI-64 `20:6e:f1:ff:fe:0a:d8:8c`.
+  It sends Device_annce and answers Node_Desc / Active_EP itself; zigpy saw it join and
+  interviewed it without warnings.
+
+## Results
+
+All success criteria met (`run-router-placement.log`, `router-gateway.log`):
+
+- On / Read Attributes / Off through the router's gateway: ack, then the reply by unicast from
+  the device's address, client TSN restored. Same wire behaviour as spike A.
+- ZDO Unbind (light -> coordinator) and Bind (light -> router) from IP, then Configure Reporting:
+  each toggle produces one report on the multicast group, now delivered to the router.
+- Unknown EUI-64: the gateway broadcasts NWK_addr_req, waits 3 s, nacks `unknown-device`
+  (`run-router-unknown-device.log`).
+
+## Learned
+
+- The router needed no stack changes either: `NodeRole::Router` in Configure is enough.
+- The router already knew the light's NWK address from overheard traffic; NWK_addr_req
+  discovery (and learning from NWK_addr_rsp / Device_annce) is the fallback for the rest.
+- Reports reach the router only via a binding to it, so the gateway (or whoever sets it up)
+  has to rebind devices away from, or in addition to, the network's controller. Rebinding
+  takes reports away from the controller (ZHA would lose state updates); adding a second
+  binding doubles the radio traffic.
+- ZDP requests addressed to the router itself (the controller's interview of it) also reach
+  the multicast group: the gateway should not forward frames for its own node.
+- No TSN clash with zigpy: the router has its own NWK address, so replies come back to it.

@@ -1,5 +1,6 @@
 mod reconnect;
 mod zbr;
+mod zbr_router;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1140,6 +1141,11 @@ struct Args {
     /// SPIKE: interface the border router's multicast copies leave by
     #[arg(long)]
     zbr_multicast_interface: Option<String>,
+
+    /// SPIKE: run as a router of this coordinator's network (its Ziggurat WebSocket
+    /// URL), configured from its settings instead of joining over the air
+    #[arg(long)]
+    zbr_router_of: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1182,6 +1188,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 multicast_interface: args.zbr_multicast_interface,
             }),
         ));
+
+        if let Some(coordinator) = args.zbr_router_of {
+            let server = server.clone();
+            tokio::spawn(async move {
+                if let Err(e) = zbr_router::bootstrap(&server, &coordinator).await {
+                    tracing::error!("ZBR router bootstrap failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+        }
 
         match args.api {
             ApiMode::Ws => server.run(&args.listen).await?,

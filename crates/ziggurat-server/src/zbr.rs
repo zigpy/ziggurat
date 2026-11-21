@@ -51,6 +51,8 @@ const PROFILE_ZDO: u16 = 0x0000;
 const PROFILE_HA: u16 = 0x0104;
 /// The coordinator endpoint IP-originated frames come from (zigpy's own HA endpoint).
 const GATEWAY_SRC_EP: u8 = 1;
+/// ZDP TSN of the gateway's own NWK_addr_req (outside the rewrite range 0x80..)
+const DISCOVERY_TSN: u8 = 0x7f;
 /// A reply that has not arrived by then is no longer matched to its client.
 const PENDING_TTL: Duration = Duration::from_secs(30);
 
@@ -340,12 +342,72 @@ impl Gateway {
             return nack(Status::PolicyDenied);
         }
         let nwk = self.stack.state.core.lock().nib.address_map.nwk_for(eui64);
-        let Some(nwk) = nwk else {
-            return nack(Status::UnknownDevice);
+        let frame = frame.to_vec();
+        match nwk {
+            Some(nwk) => self.forward(header, profile, frame, eui64, nwk, client, local),
+            // SPIKE: a router knows few addresses: ask the network, then forward
+            None => {
+                let gateway = self.clone();
+                tokio::spawn(async move {
+                    match gateway.discover(eui64).await {
+                        Some(nwk) => {
+                            gateway.forward(header, profile, frame, eui64, nwk, client, local);
+                        }
+                        None => gateway.reply_status(
+                            local,
+                            client,
+                            header,
+                            Some(Status::UnknownDevice),
+                        ),
+                    }
+                });
+            }
+        }
+    }
+
+    /// Broadcast a ZDP NWK_addr_req for `eui64` and wait for the mapping to appear.
+    async fn discover(&self, eui64: Eui64) -> Option<Nwk> {
+        let mut request = vec![DISCOVERY_TSN];
+        request.extend_from_slice(&eui64.0);
+        request.extend_from_slice(&[0x00, 0x00]);
+        let sent = self.stack.send_aps_broadcast(
+            Nwk(0xFFFD),
+            PROFILE_ZDO,
+            0x0000,
+            0,
+            0,
+            30,
+            request,
+            ziggurat_driver::zigbee_stack::TxPriority::UserNormal,
+        );
+        tracing::info!("ZBR: NWK_addr_req for {eui64:?}: {:?}", sent.map(|_| ()));
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Some(nwk) = self.stack.state.core.lock().nib.address_map.nwk_for(eui64) {
+                return Some(nwk);
+            }
+        }
+        tracing::info!("ZBR: {eui64:?} not found");
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward(
+        self: &Arc<Self>,
+        header: Header,
+        profile: u16,
+        frame: Vec<u8>,
+        eui64: Eui64,
+        nwk: Nwk,
+        client: SocketAddrV6,
+        local: Ipv6Addr,
+    ) {
+        let nack = |status: Status| {
+            self.reply_status(local, client, header, Some(status));
         };
 
         // Own the TSN space for IP-originated frames: rewrite, remember the client's
-        let mut asdu = frame.to_vec();
+        let mut asdu = frame;
         let offset = tsn_offset(profile, &asdu).unwrap();
         let client_tsn = asdu[offset];
         let gateway_tsn = {
@@ -463,6 +525,33 @@ impl Gateway {
         };
         if group.is_some() {
             return;
+        }
+        // SPIKE: learn addresses from ZDP address responses and announcements
+        if profile_id == PROFILE_ZDO {
+            let learned = match (cluster_id, &data[..]) {
+                (0x8000, [tsn, 0x00, rest @ ..]) if rest.len() >= 10 => {
+                    Some((*tsn, &rest[..8], [rest[8], rest[9]]))
+                }
+                (0x0013, [tsn, lo, hi, rest @ ..]) if rest.len() >= 8 => {
+                    Some((*tsn, &rest[..8], [*lo, *hi]))
+                }
+                _ => None,
+            };
+            if let Some((tsn, ieee, nwk)) = learned {
+                let eui64 = Eui64(ieee.try_into().unwrap());
+                let nwk = Nwk(u16::from_le_bytes(nwk));
+                tracing::info!("ZBR: learned {eui64:?} = {nwk:?}");
+                self.stack
+                    .state
+                    .core
+                    .lock()
+                    .nib
+                    .address_map
+                    .update_mapping(eui64, nwk);
+                if cluster_id == 0x8000 && tsn == DISCOVERY_TSN {
+                    return;
+                }
+            }
         }
         let eui64 = self
             .stack

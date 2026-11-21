@@ -6,11 +6,14 @@ stop)
   G=$(ps -eo pgid,cmd | awk '$2=="/bin/sh" && $3=="./inns.sh" {print $1; exit}'); [ -n "$G" ] && kill -- -$G; sleep 2 ;;
 start)
   stty -F /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61094735-if00 -hupcl
+  stty -F /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B5E006437-if00 -hupcl
+  rm -f $S/router.log
   rm -f $S/zigpy.log
-  cd $S && POLICY=${POLICY:-commands} PERMIT=${PERMIT:-0} setsid unshare -rn ./inns.sh > $S/inns.out 2>&1 &
+  cd $S && PLACEMENT=${PLACEMENT:-coordinator} POLICY=${POLICY:-commands} PERMIT=${PERMIT:-0} setsid unshare -rn ./inns.sh > $S/inns.out 2>&1 &
   timeout 60 sh -c "until grep -qE 'KNOWN 20|PERMIT|Traceback' $S/zigpy.log 2>/dev/null; do sleep 2; done"
   sleep 2; grep -E "NETWORK|KNOWN|PERMIT|Error" $S/zigpy.log
-  sed 's/\x1b\[[0-9;]*m//g' $S/ziggurat.log | grep -E "ZBR: EPID" | tail -1 ;;
+  [ "$PLACEMENT" = router ] && timeout 40 sh -c "until grep -qE 'ZBR: EPID|failed' $S/router.log 2>/dev/null; do sleep 2; done"
+  sed 's/\x1b\[[0-9;]*m//g' $S/ziggurat.log $S/router.log 2>/dev/null | grep -E "ZBR: EPID|ZBR router|failed" | tail -5 ;;
 nsenter)
   shift; exec nsenter -t $(ps -eo pid,cmd | awk '$2 ~ /zbr-spike\/target\/debug\/ziggurat$/ {print $1; exit}') -U -n --preserve-credentials "$@" ;;
 esac
