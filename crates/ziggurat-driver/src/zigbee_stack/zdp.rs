@@ -4,10 +4,8 @@ use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{TooLong, write_frame};
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType};
-use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, NwkRouteDiscovery,
-};
+use ziggurat_zigbee::aps::frame::{ApsDataFrame, Asdu};
+use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
 use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
@@ -15,10 +13,9 @@ use ziggurat_zigbee::zdp::{
     ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus, mgmt_table_page,
 };
 
-use super::TrafficClass;
 use super::{
-    Broadcast, Confirm, EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective,
-    SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeStack, neighbors, routing,
+    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendHandle, TxPriority,
+    ZigbeeStack, neighbors, routing,
 };
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
@@ -149,7 +146,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             neighbor_table_list: descriptors,
         };
 
-        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, None) {
             tracing::warn!("Failed to send a neighbor table response to {source:?}: {err}");
         }
     }
@@ -210,7 +207,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             routing_table_list: descriptors,
         };
 
-        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, None) {
             tracing::warn!("Failed to send a routing table response to {source:?}: {err}");
         }
     }
@@ -294,70 +291,62 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             children: claimed,
         };
 
-        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, None) {
             tracing::warn!("Failed to send a parent announcement response to {source:?}: {err}");
         }
     }
 
-    /// Build and enqueue a ZDP command.
-    fn send_zdp_command<T: ZdpCommand + Sync>(
+    /// Unicast a ZDP command between endpoints 0. `aps_security` secures it with the
+    /// link key shared with that device. Unacknowledged: a lost response is covered by
+    /// the requester's own retries.
+    fn send_zdp_unicast<T: ZdpCommand>(
         &self,
         destination: Nwk,
-        delivery_mode: ApsDeliveryMode,
+        tsn: u8,
+        command: &T,
+        aps_security: Option<Eui64>,
+    ) -> Result<SendHandle, EnqueueError> {
+        let asdu: Asdu = write_frame(|writer| command.serialize(tsn, writer))
+            .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
+
+        self.send_aps_unicast(
+            destination,
+            ZDP_PROFILE_ID,
+            T::CLUSTER_ID as u16,
+            0,
+            0,
+            ApsAck::None,
+            None,
+            0,
+            asdu.to_vec(),
+            aps_security,
+            false,
+            TxPriority::UserNormal,
+            RouteDirective::StackDecides,
+        )
+        .map(|(handle, _)| handle)
+    }
+
+    /// Broadcast a ZDP command between endpoints 0.
+    fn send_zdp_broadcast<T: ZdpCommand>(
+        &self,
+        destination: Nwk,
         tsn: u8,
         command: &T,
     ) -> Result<SendHandle, EnqueueError> {
-        let asdu = write_frame(|writer| command.serialize(tsn, writer))
+        let asdu: Asdu = write_frame(|writer| command.serialize(tsn, writer))
             .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
 
-        let aps_frame = ApsDataFrame {
-            frame_control: ApsFrameControl {
-                frame_type: ApsFrameType::Data,
-                delivery_mode,
-                reserved1: 0b0,
-                security: false,
-                ack_request: false,
-                extended_header: false,
-            },
-            group_id: None,
-            destination_endpoint: Some(0),
-            cluster_id: T::CLUSTER_ID as u16,
-            profile_id: ZDP_PROFILE_ID,
-            source_endpoint: 0,
-            counter: self.next_aps_counter(),
-            asdu,
-        };
-
-        tracing::trace!("Prepared unicast ZDP APS frame: {aps_frame:?}");
-        let nwk_frame = self
-            .nwk_data_frame(
-                destination,
-                write_frame(|writer| aps_frame.serialize(writer))
-                    .map_err(|TooLong| EnqueueError::PayloadTooLong)?,
-            )
-            .with_discover_route(NwkRouteDiscovery::Enable)
-            .with_radius(2 * MAX_DEPTH);
-
-        // ZDP responses are answerable to the remote requester's retries: best-effort
-        let policy = TxPolicy {
-            priority: TxPriority::UserNormal,
-            class: TrafficClass::Host,
-        };
-
-        match delivery_mode {
-            ApsDeliveryMode::Broadcast => self.send_broadcast(Broadcast {
-                frame: nwk_frame,
-                security: NwkSecurityMode::NetworkKey,
-                policy,
-            }),
-            ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => self.send_unicast(Unicast {
-                frame: nwk_frame,
-                security: NwkSecurityMode::NetworkKey,
-                mode: SendMode::Route(RouteDirective::StackDecides),
-                policy,
-                confirm: Confirm::OnHandoff,
-            }),
-        }
+        self.send_aps_broadcast(
+            destination,
+            ZDP_PROFILE_ID,
+            T::CLUSTER_ID as u16,
+            0,
+            0,
+            0,
+            asdu.to_vec(),
+            TxPriority::UserNormal,
+        )
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming
@@ -444,12 +433,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let tsn = self.next_aps_counter();
             let started = self.core_now();
 
-            match self.send_zdp_command(
-                BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                ApsDeliveryMode::Broadcast,
-                tsn,
-                &announcement,
-            ) {
+            match self.send_zdp_broadcast(BROADCAST_ALL_ROUTERS_AND_COORDINATOR, tsn, &announcement)
+            {
                 Ok(send) => {
                     let _ = send.handed_off().await;
                 }
