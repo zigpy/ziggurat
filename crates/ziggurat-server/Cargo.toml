@@ -24,6 +24,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "io-std"] }
 tokio-serial = "5.5"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# SPIKE: Zigbee Border Router
+nix = { version = "0.31", features = ["socket", "uio", "net"] }
+socket2 = "0.6"
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }

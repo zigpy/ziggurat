@@ -1,4 +1,5 @@
 mod reconnect;
+mod zbr;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -89,12 +90,14 @@ pub struct ZigguratServer {
     started: AtomicBool,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
     notification_forwarder: Mutex<Option<JoinHandle<()>>>,
+    zbr: Option<zbr::Config>,
+    zbr_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ZigguratServer {
     /// The RCP transport is not opened and the Zigbee stack is not created until a
     /// client sends a command that needs them.
-    pub fn new(serial: SerialConfig) -> Self {
+    pub fn new(serial: SerialConfig, zbr: Option<zbr::Config>) -> Self {
         let (notification_tx, _) = broadcast::channel(NOTIFICATION_HUB_DEPTH);
 
         Self {
@@ -104,6 +107,8 @@ impl ZigguratServer {
             started: AtomicBool::new(false),
             notification_tx,
             notification_forwarder: Mutex::new(None),
+            zbr,
+            zbr_task: Mutex::new(None),
         }
     }
 
@@ -753,6 +758,17 @@ impl ZigguratServer {
         });
         *self.notification_forwarder.lock().unwrap() = Some(forwarder);
 
+        if let Some(config) = self.zbr.clone() {
+            let task = tokio::spawn(zbr::run(
+                stack.clone(),
+                self.notification_tx.subscribe(),
+                config,
+            ));
+            if let Some(old) = self.zbr_task.lock().unwrap().replace(task) {
+                old.abort();
+            }
+        }
+
         self.started.store(true, Ordering::SeqCst);
         tracing::info!("Zigbee stack initialized and running.");
 
@@ -761,6 +777,9 @@ impl ZigguratServer {
 
     /// Stop and drop the running stack and its notification forwarder, if any.
     async fn teardown_stack(&self) {
+        if let Some(task) = self.zbr_task.lock().unwrap().take() {
+            task.abort();
+        }
         let old_stack = self.stack.lock().unwrap().take();
         if let Some(old_stack) = old_stack {
             tracing::info!("Stopping the running Zigbee stack");
@@ -1109,6 +1128,18 @@ struct Args {
     /// Log level (RUST_LOG still overrides, with per-module filters)
     #[arg(long, default_value_t = LevelFilter::DEBUG)]
     log_level: LevelFilter,
+
+    /// SPIKE: serve the Zigbee Border Router (raw ZCL over UDP/IPv6) on this port
+    #[arg(long)]
+    zbr_port: Option<u16>,
+
+    /// SPIKE: what IP clients may send through the border router
+    #[arg(long, value_enum, default_value_t = zbr::Policy::ReadOnly)]
+    zbr_policy: zbr::Policy,
+
+    /// SPIKE: interface the border router's multicast copies leave by
+    #[arg(long)]
+    zbr_multicast_interface: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1137,13 +1168,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .init();
         }
 
-        let server = Arc::new(ZigguratServer::new(SerialConfig {
-            device: args.device,
-            baudrate: args.baudrate,
-            flow_control: args.flow_control,
-            reconnect_timeout: Duration::from_secs(args.reconnect_timeout),
-            reconnect_on_unresponsive: args.reconnect_on_unresponsive,
-        }));
+        let server = Arc::new(ZigguratServer::new(
+            SerialConfig {
+                device: args.device,
+                baudrate: args.baudrate,
+                flow_control: args.flow_control,
+                reconnect_timeout: Duration::from_secs(args.reconnect_timeout),
+                reconnect_on_unresponsive: args.reconnect_on_unresponsive,
+            },
+            args.zbr_port.map(|port| zbr::Config {
+                port,
+                policy: args.zbr_policy,
+                multicast_interface: args.zbr_multicast_interface,
+            }),
+        ));
 
         match args.api {
             ApiMode::Ws => server.run(&args.listen).await?,
