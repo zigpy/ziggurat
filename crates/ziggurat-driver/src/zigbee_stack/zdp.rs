@@ -5,7 +5,7 @@ use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{TooLong, write_frame};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, Asdu};
-use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, is_broadcast};
 
 use ziggurat_zigbee::zdp::{
     DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
@@ -14,7 +14,7 @@ use ziggurat_zigbee::zdp::{
 };
 
 use super::{
-    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendHandle, TxPriority,
+    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendHandle, TxPriority, ZigbeeCore,
     ZigbeeStack, neighbors, routing,
 };
 
@@ -30,11 +30,20 @@ const MGMT_RTG_DESCRIPTORS_PER_FRAME: usize = 10;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Dispatch the ZDP commands the stack itself consumes: the neighbor table they
-    /// maintain lives here. The client still observes the frames.
-    pub(super) fn handle_zdp_frame(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
+    /// maintain and the descriptors they read live here. The client still observes the
+    /// frames. `aps_security` is the requester's EUI64 if the request was APS-secured.
+    pub(super) fn handle_zdp_frame(
+        &self,
+        nwk_frame: &NwkFrame,
+        aps_frame: &ApsDataFrame,
+        aps_security: Option<Eui64>,
+    ) {
         if aps_frame.profile_id != ZDP_PROFILE_ID || aps_frame.destination_endpoint != Some(0) {
             return;
         }
+
+        let source = nwk_frame.nwk_header.source;
+        let broadcast = is_broadcast(nwk_frame.nwk_header.destination);
 
         match ZdpClusterId::try_from(aps_frame.cluster_id) {
             Ok(ZdpClusterId::DeviceAnnce) => self.handle_device_annce(nwk_frame, aps_frame),
@@ -42,16 +51,54 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Ok(ZdpClusterId::ParentAnnceRsp) => self.handle_parent_annce_rsp(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtLqiReq) => self.handle_mgmt_lqi_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtRtgReq) => self.handle_mgmt_rtg_req(nwk_frame, aps_frame),
-            // The client answers descriptor and address requests
-            Ok(
-                ZdpClusterId::NwkAddrReq
-                | ZdpClusterId::IeeeAddrReq
-                | ZdpClusterId::NodeDescReq
-                | ZdpClusterId::PowerDescReq
-                | ZdpClusterId::SimpleDescReq
-                | ZdpClusterId::ActiveEpReq
-                | ZdpClusterId::MatchDescReq,
-            ) => {}
+            Ok(ZdpClusterId::NwkAddrReq) => {
+                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .nwk_addr_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::IeeeAddrReq) => {
+                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .ieee_addr_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::NodeDescReq) => {
+                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                    let requester = aps_security
+                        .or(nwk_frame.nwk_header.source_ieee)
+                        .or_else(|| core.nib.address_map.eui64_for(source));
+                    core.descriptors.node_desc_rsp(
+                        request,
+                        &core.nib.neighbors,
+                        broadcast,
+                        requester,
+                    )
+                });
+            }
+            Ok(ZdpClusterId::PowerDescReq) => {
+                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .power_desc_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::SimpleDescReq) => {
+                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .simple_desc_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::ActiveEpReq) => {
+                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors.active_ep_rsp(request, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::MatchDescReq) => {
+                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .match_desc_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
             // Responses from other devices are the client's business
             Ok(
                 ZdpClusterId::NwkAddrRsp
@@ -297,6 +344,32 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         if let Err(err) = self.send_zdp_unicast(source, tsn, &response, None) {
             tracing::warn!("Failed to send a parent announcement response to {source:?}: {err}");
+        }
+    }
+
+    /// Answer a device and service discovery request. The answer is unicast to the
+    /// requester, with the APS security the request arrived with.
+    fn answer_discovery_request<Req: ZdpCommand, Rsp: ZdpCommand>(
+        &self,
+        aps_frame: &ApsDataFrame,
+        source: Nwk,
+        aps_security: Option<Eui64>,
+        answer: impl FnOnce(&ZigbeeCore, &Req) -> Option<Rsp>,
+    ) {
+        let (tsn, request) = match Req::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!("Malformed {:?} from {source:?}: {err}", Req::CLUSTER_ID);
+                return;
+            }
+        };
+
+        let Some(response) = answer(&self.core(), &request) else {
+            return;
+        };
+
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, aps_security) {
+            tracing::warn!("Failed to send {:?} to {source:?}: {err}", Rsp::CLUSTER_ID);
         }
     }
 

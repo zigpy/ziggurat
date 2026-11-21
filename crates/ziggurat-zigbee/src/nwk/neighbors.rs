@@ -313,6 +313,26 @@ impl Neighbors {
         })
     }
 
+    /// The network address of the end device child with the given EUI64, if one exists.
+    pub fn end_device_child_nwk(&self, eui64: Eui64) -> Option<Nwk> {
+        self.table
+            .get(&eui64)
+            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
+            .map(|entry| entry.network_address)
+    }
+
+    /// The network addresses of every end device child, in ascending order.
+    pub fn end_device_child_addresses(&self) -> Vec<Nwk> {
+        let mut addresses: Vec<Nwk> = self
+            .table
+            .values()
+            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
+            .map(|entry| entry.network_address)
+            .collect();
+        addresses.sort_by_key(Nwk::as_u16);
+        addresses
+    }
+
     /// Spec 3.3.1.1.8: after validating the source (3.6.2.2), a router parent SHALL
     /// clear the End Device Initiator bit when relaying a frame sent by one of its end
     /// device children. Otherwise the next router searches its own neighbor table for

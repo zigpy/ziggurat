@@ -192,10 +192,10 @@ pub struct NwkRejoinCapabilityInformation {
     pub receiver_on_when_idle: bool,
     /// This field will always have a value of 0 in implementations of this
     /// specification.
-    reserved1: u1,
+    pub reserved1: u1,
     /// This field will always have a value of 0 in implementations of this
     /// specification.
-    reserved2: u1,
+    pub reserved2: u1,
     /// This field SHALL have a value of 0. Note that this overrides the default meaning
     /// specified in \[B1\] (802.15.4-2020, IEEE Standard for Local and metropolitan area
     /// networks--Part 15.4: Low-Rate Wireless Personal Area Networks (LR-WPANs))
