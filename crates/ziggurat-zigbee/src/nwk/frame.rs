@@ -38,6 +38,11 @@ pub const BROADCAST_RX_ON_WHEN_IDLE: Nwk = Nwk(0xFFFD);
 pub const BROADCAST_ALL_ROUTERS_AND_COORDINATOR: Nwk = Nwk(0xFFFC);
 pub const BROADCAST_LOW_POWER_ROUTERS: Nwk = Nwk(0xFFFB);
 
+/// Spec Table 3-80: addresses 0xFFF8 to 0xFFFF are broadcast addresses.
+pub const fn is_broadcast(address: Nwk) -> bool {
+    address.as_u16() >= 0xFFF8
+}
+
 #[abstract_bits(bits = 2)]
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]

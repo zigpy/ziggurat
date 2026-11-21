@@ -562,7 +562,11 @@ impl State {
                 },
                 sends: SendTable::default(),
                 address_conflicts: AddressConflicts::default(),
-                descriptors: Descriptors::default(),
+                descriptors: Descriptors::new(
+                    config.network_address,
+                    config.ieee_address,
+                    config.role,
+                ),
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
@@ -1081,10 +1085,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         continue;
                     }
 
-                    // The ZDP commands that maintain stack state (the neighbor and
-                    // address tables live here, not in the client) are consumed by
-                    // the stack; the client still observes the frames
-                    self.handle_zdp_frame(&nwk_frame, &aps_frame);
+                    // The stack consumes the ZDP commands that read or change its own
+                    // state: the neighbor and address tables, and the descriptors.
+                    // The client still observes the frames
+                    self.handle_zdp_frame(&nwk_frame, &aps_frame, aps_source_eui64);
 
                     let notification = ZigbeeNotification::ReceivedApsCommand {
                         source: nwk_frame.nwk_header.source,
