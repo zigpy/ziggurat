@@ -7,6 +7,7 @@ pub mod beacon;
 pub mod constants;
 pub mod crypto;
 pub mod debouncer;
+pub mod discovery;
 pub mod flat_map;
 pub mod gp;
 pub mod nwk;

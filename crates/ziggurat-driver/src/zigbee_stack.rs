@@ -10,6 +10,7 @@ use ziggurat_phy::{
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::aps::frame::{ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
+use ziggurat_zigbee::discovery::Descriptors;
 
 use thiserror::Error;
 
@@ -422,6 +423,9 @@ pub struct ZigbeeCore {
     /// lock because resolving one reads the address map and the routing table.
     pub address_conflicts: AddressConflicts,
 
+    /// The local endpoints and manufacturer codes, read by ZDP discovery requests.
+    pub descriptors: Descriptors,
+
     /// Deadline until which the coordinator advertises `association_permit` in its
     /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
     /// renewals extend the window. `None` or past means direct joins are denied.
@@ -558,6 +562,7 @@ impl State {
                 },
                 sends: SendTable::default(),
                 address_conflicts: AddressConflicts::default(),
+                descriptors: Descriptors::default(),
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
