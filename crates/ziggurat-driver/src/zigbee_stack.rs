@@ -10,6 +10,7 @@ use ziggurat_phy::{
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::aps::frame::{ApsFrame, parse_aps_frame};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
+use ziggurat_zigbee::zcl::endpoints::Endpoints;
 use ziggurat_zigbee::zdp::descriptors::Descriptors;
 
 use thiserror::Error;
@@ -38,6 +39,7 @@ mod route;
 mod send_handle;
 mod sends;
 mod tasklets;
+mod zcl;
 mod zdp;
 
 use send_handle::SendWatches;
@@ -426,6 +428,9 @@ pub struct ZigbeeCore {
     /// The local endpoints and manufacturer codes, read by ZDP discovery requests.
     pub descriptors: Descriptors,
 
+    /// The application endpoints the stack serves itself, rather than the client.
+    pub endpoints: Endpoints,
+
     /// Deadline until which the coordinator advertises `association_permit` in its
     /// beacon and accepts direct MAC associations. A deadline rather than a flag lets
     /// renewals extend the window. `None` or past means direct joins are denied.
@@ -567,6 +572,7 @@ impl State {
                     config.ieee_address,
                     config.role,
                 ),
+                endpoints: Endpoints::default(),
                 permitting_joins_until: None,
                 trust_center_joins_until: None,
                 beacon_spam_until: None,
@@ -1089,6 +1095,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     // state: the neighbor and address tables, and the descriptors.
                     // The client still observes the frames
                     self.handle_zdp_frame(&nwk_frame, &aps_frame, aps_source_eui64);
+                    self.handle_zcl_frame(&nwk_frame, &aps_frame, aps_source_eui64);
 
                     let notification = ZigbeeNotification::ReceivedApsCommand {
                         source: nwk_frame.nwk_header.source,
