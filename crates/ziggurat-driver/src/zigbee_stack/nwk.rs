@@ -512,22 +512,28 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// encrypt it with, or `None` for a frame sent unsecured.
     fn secure_nwk_frame(&self, nwk_frame: &mut NwkFrame, security: NwkSecurityMode) -> Option<Key> {
         if security == NwkSecurityMode::NetworkKey {
-            nwk_frame.aux_header = Some(NwkAuxHeader {
-                security_control: NwkSecurityHeaderControlField {
-                    security_level: NwkSecurityLevel::NoSecurity,
-                    key_id: NwkSecurityHeaderKeyId::NetworkKey,
-                    extended_nonce: true,
-                    require_verified_frame_counter: false,
-                },
-                // The encryption frame counter always increments
-                frame_counter: self.next_nwk_frame_counter(),
-                extended_source: Some(self.state.ieee_address),
-                key_sequence_number: self.core().nib.nwk_security.active_key_seq_number(),
-            });
+            // The encryption frame counter always increments
+            nwk_frame.aux_header = Some(self.outgoing_aux_header(self.next_nwk_frame_counter()));
 
             Some(self.core().nib.nwk_security.network_key())
         } else {
             None
+        }
+    }
+
+    /// The auxiliary header our frames are secured with. Its length does not depend on
+    /// the frame counter, so a size check can pass any.
+    pub(super) fn outgoing_aux_header(&self, frame_counter: u32) -> NwkAuxHeader {
+        NwkAuxHeader {
+            security_control: NwkSecurityHeaderControlField {
+                security_level: NwkSecurityLevel::NoSecurity,
+                key_id: NwkSecurityHeaderKeyId::NetworkKey,
+                extended_nonce: true,
+                require_verified_frame_counter: false,
+            },
+            frame_counter,
+            extended_source: Some(self.state.ieee_address),
+            key_sequence_number: self.core().nib.nwk_security.active_key_seq_number(),
         }
     }
 
