@@ -613,6 +613,13 @@ impl NwkFrame {
         write_frame(|writer| self.serialize(writer, Some(key)))
             .expect("the NWK frame fits in an MSDU")
     }
+
+    /// Whether the frame, secured, fits an 802.15.4 frame with short addresses. The
+    /// key does not change the length.
+    pub fn fits_secured(&self) -> bool {
+        write_frame::<MAX_PHY_PACKET_SIZE>(|writer| self.serialize(writer, Some(&Key([0; 16]))))
+            .is_ok_and(|bytes| MAC_FRAME_OVERHEAD + bytes.len() <= MAX_PHY_PACKET_SIZE)
+    }
 }
 
 /// A NWK frame ready to go into an 802.15.4 data frame, encrypted under `key` as it is

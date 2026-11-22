@@ -912,13 +912,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if let NwkPayload::Command(command) = &mut nwk_frame.payload {
             match command {
                 NwkCommand::RouteRecord(route_record) => {
-                    // Spec 3.6.4.5.5: with no room left for our address the route record
-                    // is discarded rather than overflowing the frame.
-                    if route_record.relays.len() >= usize::from(self.tunables.max_source_route()) {
-                        tracing::warn!("Dropping transiting route record: relay list is full");
+                    route_record.relays.push(self.state.network_address);
+
+                    // Spec 3.6.4.5.5: with no room left in the frame for our address, the
+                    // route record is discarded. How long a source route the concentrator
+                    // will use is its own limit, not ours
+                    if !nwk_frame.fits_secured() {
+                        tracing::warn!("Dropping transiting route record: the frame is full");
                         return;
                     }
-                    route_record.relays.push(self.state.network_address);
                 }
                 // A relay SHALL append its address to a transiting route record; one we
                 // could not parse cannot have it appended, so it is discarded rather than
