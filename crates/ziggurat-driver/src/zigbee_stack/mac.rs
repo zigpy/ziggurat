@@ -390,9 +390,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         // Spec 4.3.1.2 step 8: the first NWK-secured frame from an unauthenticated
-        // child authenticates it
-        if self.core().nib.neighbors.note_nwk_secured_frame(src_eui64) {
+        // child authenticates it, which completes its join
+        let promoted = self.core().nib.neighbors.note_nwk_secured_frame(src_eui64);
+        if let Some(child_nwk) = promoted {
             tracing::debug!("Child {src_eui64:?} sent a NWK-secured frame, now authenticated");
+            self.announce_join(child_nwk, src_eui64);
         }
 
         if is_transit {

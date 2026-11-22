@@ -699,16 +699,17 @@ impl Neighbors {
     }
 
     /// Spec 4.3.1.2 step 8: a frame from `eui64` passed NWK security processing, so
-    /// an unauthenticated child entry for it becomes a child. Returns whether the entry
-    /// was promoted.
-    pub fn note_nwk_secured_frame(&mut self, eui64: Eui64) -> bool {
+    /// an unauthenticated child entry for it becomes a child. Returns the network
+    /// address of a promoted child: its join is complete.
+    #[must_use = "a promoted child has joined, and its join must be announced"]
+    pub fn note_nwk_secured_frame(&mut self, eui64: Eui64) -> Option<Nwk> {
         match self.table.get_mut(&eui64) {
             Some(entry) if entry.relationship == Relationship::UnauthenticatedChild => {
                 entry.relationship = Relationship::Child;
                 entry.security_timeout_at = None;
-                true
+                Some(entry.network_address)
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -1566,11 +1567,11 @@ mod test {
             Relationship::UnauthenticatedChild
         );
 
-        assert!(neighbors.note_nwk_secured_frame(eui64));
+        assert!(neighbors.note_nwk_secured_frame(eui64).is_some());
         assert_eq!(relationship_of(&neighbors, eui64), Relationship::Child);
 
         // Already authenticated: nothing left to promote
-        assert!(!neighbors.note_nwk_secured_frame(eui64));
+        assert!(neighbors.note_nwk_secured_frame(eui64).is_none());
         assert_eq!(relationship_of(&neighbors, eui64), Relationship::Child);
 
         // Associating again makes it unauthenticated until its next secured frame
@@ -1591,7 +1592,7 @@ mod test {
             relationship_of(&neighbors, eui64),
             Relationship::UnauthenticatedChild
         );
-        assert!(neighbors.note_nwk_secured_frame(eui64));
+        assert!(neighbors.note_nwk_secured_frame(eui64).is_some());
         assert_eq!(relationship_of(&neighbors, eui64), Relationship::Child);
     }
 
@@ -1601,8 +1602,12 @@ mod test {
         let mut neighbors = neighbors_with(NwkDeviceType::Router);
 
         // Unknown senders gain no entry, and authenticated children stay children
-        assert!(!neighbors.note_nwk_secured_frame(Eui64::from_hex("88:99:aa:bb:cc:dd:ee:ff")));
-        assert!(!neighbors.note_nwk_secured_frame(child));
+        assert!(
+            neighbors
+                .note_nwk_secured_frame(Eui64::from_hex("88:99:aa:bb:cc:dd:ee:ff"))
+                .is_none()
+        );
+        assert!(neighbors.note_nwk_secured_frame(child).is_none());
         assert_eq!(neighbors.entries().count(), 1);
         assert_eq!(relationship_of(&neighbors, child), Relationship::Child);
     }

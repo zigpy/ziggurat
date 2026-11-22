@@ -205,7 +205,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Delete the children that did not send a NWK-secured frame in time.
+    /// Delete the children that did not send a NWK-secured frame in time. No departure
+    /// is announced: a join is announced only once the child authenticates.
     fn evict_unauthenticated_children(&self) {
         let evicted = self
             .core()

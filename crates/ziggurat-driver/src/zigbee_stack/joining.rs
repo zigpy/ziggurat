@@ -138,8 +138,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// The join follow-up flow (spec 4.6.3.2), one tasklet per joiner: the joiner polls
     /// the association response out of the indirect queue, confirming its short
-    /// address; the network key follows; the join is announced once the key transport
-    /// lands.
+    /// address; the network key follows. The join is announced once the joiner
+    /// authenticates with its first NWK-secured frame.
     async fn run_join(&self, eui64: Eui64, short_address: Nwk) {
         let Some(response) = self.queue_association_response(
             eui64,
@@ -156,13 +156,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        self.deliver_key_and_announce(short_address, eui64, JoinKind::New)
+        self.deliver_network_key(short_address, eui64, JoinKind::New)
             .await;
     }
 
-    /// Deliver the network key and, once the transport lands, announce the join. The
-    /// shared tail of the association and unsecured-rejoin flows.
-    async fn deliver_key_and_announce(&self, nwk: Nwk, eui64: Eui64, join_kind: JoinKind) {
+    /// Deliver the network key: the shared tail of the association and unsecured-rejoin
+    /// flows. The join is announced later, when the device authenticates.
+    async fn deliver_network_key(&self, nwk: Nwk, eui64: Eui64, join_kind: JoinKind) {
         let Some(key_transport) = self.send_network_key(nwk, eui64, join_kind) else {
             return;
         };
@@ -172,14 +172,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 "Network key transport to {eui64:?} was not delivered ({err}); \
                  the device will retry"
             );
-            return;
         }
-
-        self.announce_join(nwk, eui64);
     }
 
-    /// Emit the `DeviceJoined` notification for a device whose key material is in place.
-    fn announce_join(&self, nwk: Nwk, eui64: Eui64) {
+    /// Emit the `DeviceJoined` notification for a child that has authenticated: it
+    /// rejoined with NWK security, or sent its first NWK-secured frame.
+    pub(super) fn announce_join(&self, nwk: Nwk, eui64: Eui64) {
         let (device_type, rx_on_when_idle) = self.device_join_capability(eui64);
 
         self.push_notification(ZigbeeNotification::DeviceJoined {
@@ -1194,7 +1192,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A trust center rejoin means the device no longer has the network key
         if !secured {
-            // The join is announced only once the key transport lands
+            // The join is announced once the device authenticates with the new key
             let stack = self
                 .self_weak
                 .upgrade()
@@ -1202,7 +1200,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             self.tasklets.push(async move {
                 stack
-                    .deliver_key_and_announce(assigned_nwk, source_ieee, JoinKind::Rejoin)
+                    .deliver_network_key(assigned_nwk, source_ieee, JoinKind::Rejoin)
                     .await;
             });
         } else {
