@@ -296,6 +296,11 @@ tunables! {
     /// often not heard, so waiting for it only causes needless retransmissions.
     broadcast_relayer_max_link_cost: u8 = 3,
 
+    /// A stored source route is used only while our outgoing cost to its first hop, as
+    /// that neighbor's link status reports it, is at most this value. The route was
+    /// learned from frames sent toward us, which says nothing about the link outward.
+    source_route_max_first_hop_cost: u8 = 3,
+
     /// The minimum time between two consecutive many-to-one route requests, even when
     /// error thresholds are crossed.
     mtorr_min_interval: Duration = Duration::from_secs(10),

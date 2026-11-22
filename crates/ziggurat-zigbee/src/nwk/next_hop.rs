@@ -73,6 +73,8 @@ pub struct Policy {
     pub force_route_discovery: bool,
     /// The longest source route we embed.
     pub max_source_route: u8,
+    /// The highest outgoing cost to a source route's first hop we send over.
+    pub source_route_max_first_hop_cost: u8,
     /// How long after a router child associates or rejoins we send to it directly
     /// when no route is known.
     pub new_router_child_window: Duration,
@@ -111,7 +113,15 @@ pub fn resolve(
 
     // A stored source route (concentrator behavior) wins over the routing table.
     if policy.is_concentrator && !policy.force_route_discovery {
-        match routing.route_to(destination, policy.max_source_route) {
+        // Our outgoing cost is the one the neighbor measured and reported; 0 means it
+        // has not reported one yet
+        let first_hop_usable = |hop| {
+            neighbors.link(hop).is_some_and(|link| {
+                (1..=policy.source_route_max_first_hop_cost).contains(&link.outgoing_cost)
+            })
+        };
+
+        match routing.route_to(destination, policy.max_source_route, first_hop_usable) {
             Some(Route::NextHop(next_hop)) => return NextHop::Resolved(next_hop),
             Some(Route::SourceRouted(relays)) => return apply_source_route(frame, relays),
             None => {}

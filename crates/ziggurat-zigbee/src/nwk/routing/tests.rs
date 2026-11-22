@@ -102,12 +102,16 @@ fn test_forget_drops_the_route_and_the_route_record() {
     let mut routing = Routing::default();
     routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
     routing.store_route_record(DEVICE, vec![ROUTER]);
-    assert!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE).is_some());
+    assert!(
+        routing
+            .route_to(DEVICE, MAX_SOURCE_ROUTE, |_| true)
+            .is_some()
+    );
 
     routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     assert_eq!(routing.next_hop(DEVICE), None);
-    assert_eq!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE), None);
+    assert_eq!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE, |_| true), None);
 }
 
 #[test]
@@ -300,7 +304,7 @@ fn test_unchanged_route_record_reports_a_relay_route_it_restores() {
         }
     );
     assert_eq!(
-        routing.route_to(ROUTER, MAX_SOURCE_ROUTE),
+        routing.route_to(ROUTER, MAX_SOURCE_ROUTE, |_| true),
         Some(Route::SourceRouted(vec![NEIGHBOR]))
     );
 }
@@ -315,7 +319,7 @@ fn test_forget_route_to_drops_the_route_record_and_the_routing_entry() {
         routing.store_route_record(DEVICE, relays);
 
         assert!(routing.forget_route_to(DEVICE));
-        assert_eq!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE), None);
+        assert_eq!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE, |_| true), None);
     }
 }
 
@@ -336,7 +340,7 @@ fn test_forget_route_to_leaves_other_destinations_alone() {
     routing.forget_route_to(DEVICE);
 
     assert_eq!(
-        routing.route_to(ROUTER, MAX_SOURCE_ROUTE),
+        routing.route_to(ROUTER, MAX_SOURCE_ROUTE, |_| true),
         Some(Route::NextHop(ROUTER))
     );
 }
@@ -979,4 +983,29 @@ fn test_equal_cost_copy_is_fresh_after_an_unhandled_cheaper_copy() {
     assert!(receive_copy(&mut routing, 2).fresh);
     routing.note_route_request_handled(DEVICE, 1);
     assert!(!receive_copy(&mut routing, 2).fresh);
+}
+
+// A source route only proves its links toward us. With a poor outbound link to its
+// first hop, the routing table's route is used instead.
+#[test]
+fn test_route_to_skips_a_source_route_with_an_unusable_first_hop() {
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+    routing.store_route_record(DEVICE, vec![OTHER_DEVICE, ROUTER]);
+
+    assert_eq!(
+        routing.route_to(DEVICE, MAX_SOURCE_ROUTE, |hop| hop == ROUTER),
+        Some(Route::SourceRouted(vec![OTHER_DEVICE, ROUTER]))
+    );
+    assert_eq!(
+        routing.route_to(DEVICE, MAX_SOURCE_ROUTE, |hop| hop != ROUTER),
+        Some(Route::NextHop(NEIGHBOR))
+    );
+
+    // With no relays the destination itself is the first hop
+    routing.store_route_record(DEVICE, vec![]);
+    assert_eq!(
+        routing.route_to(DEVICE, MAX_SOURCE_ROUTE, |hop| hop != DEVICE),
+        Some(Route::NextHop(NEIGHBOR))
+    );
 }
