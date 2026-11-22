@@ -45,8 +45,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Ok(ZdpClusterId::ParentAnnceRsp) => self.handle_parent_annce_rsp(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtLqiReq) => self.handle_mgmt_lqi_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtRtgReq) => self.handle_mgmt_rtg_req(nwk_frame, aps_frame),
-            // Management responses from other devices are the client's business
-            Ok(ZdpClusterId::MgmtLqiRsp | ZdpClusterId::MgmtRtgRsp) | Err(_) => {}
+            // The client answers descriptor and address requests
+            Ok(
+                ZdpClusterId::NwkAddrReq
+                | ZdpClusterId::IeeeAddrReq
+                | ZdpClusterId::NodeDescReq
+                | ZdpClusterId::PowerDescReq
+                | ZdpClusterId::SimpleDescReq
+                | ZdpClusterId::ActiveEpReq
+                | ZdpClusterId::MatchDescReq,
+            ) => {}
+            // Responses from other devices are the client's business
+            Ok(
+                ZdpClusterId::NwkAddrRsp
+                | ZdpClusterId::IeeeAddrRsp
+                | ZdpClusterId::NodeDescRsp
+                | ZdpClusterId::PowerDescRsp
+                | ZdpClusterId::SimpleDescRsp
+                | ZdpClusterId::ActiveEpRsp
+                | ZdpClusterId::MatchDescRsp
+                | ZdpClusterId::MgmtLqiRsp
+                | ZdpClusterId::MgmtRtgRsp,
+            )
+            | Err(_) => {}
         }
     }
 
