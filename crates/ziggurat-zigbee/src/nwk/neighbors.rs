@@ -623,6 +623,17 @@ impl Neighbors {
 
     /// Whether any router neighbor has established a bidirectional link with us,
     /// i.e. a received link status lists us with a nonzero cost.
+    /// The routers and coordinator we have a working link to, in both directions.
+    pub fn live_router_links(&self) -> Vec<Nwk> {
+        self.table
+            .values()
+            .filter(|entry| {
+                entry.device_type != NwkDeviceType::EndDevice && entry.outgoing_cost > 0
+            })
+            .map(|entry| entry.network_address)
+            .collect()
+    }
+
     pub fn any_live_router_link(&self) -> bool {
         self.table
             .values()

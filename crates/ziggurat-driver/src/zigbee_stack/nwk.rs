@@ -1048,9 +1048,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Zigbee spec 3.6.4.8.1: when relaying fails, the routes through the dead link are
-    /// invalidated and the failure is reported back to the frame's originator.
+    /// invalidated and the failure is reported: to the concentrator for a route it
+    /// advertised, otherwise back to the frame's originator.
     fn handle_relay_failure(&self, failed: FailedNwkUnicast, next_hop: Nwk) {
+        // A failure on a route a concentrator advertised is reported to the
+        // concentrator, not to the frame's source
+        let many_to_one = !failed.source_routed
+            && self
+                .core()
+                .nib
+                .routing
+                .is_many_to_one_route(failed.destination);
+
         self.invalidate_routes_via(next_hop);
+
+        if many_to_one {
+            self.report_many_to_one_route_failure(&failed, next_hop);
+            return;
+        }
 
         let source = failed.source;
 
@@ -1087,6 +1102,56 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if let Err(err) = self.send_unicast(send) {
             tracing::warn!("Failed to send network status report: {err}");
         }
+    }
+
+    /// Spec 3.6.4.8.1: tell a concentrator that the route it advertised broke at us, so
+    /// it advertises again. Every router within its radius has a route to it, so the
+    /// report goes to a random other router neighbor rather than the dead next hop.
+    // The guard is moved into `commit_sends`; the lint misreads the early return
+    #[allow(clippy::significant_drop_tightening)]
+    fn report_many_to_one_route_failure(&self, failed: &FailedNwkUnicast, dead_next_hop: Nwk) {
+        let concentrator = failed.destination;
+        let mut core = self.core();
+
+        let relays: Vec<Nwk> = core
+            .nib
+            .neighbors
+            .live_router_links()
+            .into_iter()
+            .filter(|&relay| relay != dead_next_hop)
+            .collect();
+
+        if relays.is_empty() {
+            tracing::debug!("No router neighbor to report a broken route to {concentrator:?}");
+            return;
+        }
+
+        let relay = relays[usize::from(crate::rng::random_u16::<R>()) % relays.len()];
+
+        tracing::info!(
+            "Reporting a broken many-to-one route to {concentrator:?} through {relay:?}"
+        );
+
+        let frame = self
+            .nwk_command_frame(
+                concentrator,
+                NwkCommand::NetworkStatus(NwkNetworkStatusCommand {
+                    status_code: NwkNetworkStatus::ManyToOneRouteFailure,
+                    network_address: failed.source,
+                }),
+            )
+            .with_sequence_number(core.nib.next_sequence_number());
+
+        let poll_address = Self::poll_address(&core.nib, relay);
+        self.enqueue_unicast_in(
+            &mut core,
+            Frame::nwk(frame, NwkSecurityMode::NetworkKey),
+            TxPolicy::STACK_CRITICAL,
+            Confirm::OnHandoff,
+            relay,
+            poll_address,
+        );
+        self.commit_sends(core);
     }
 
     /// Zigbee spec 3.6.6: re-broadcast a newly seen broadcast frame, preserving the

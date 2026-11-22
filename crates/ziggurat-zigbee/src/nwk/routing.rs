@@ -457,6 +457,14 @@ impl Routing {
 
     /// Mark every active route through the given next hop as inactive, forcing a fresh
     /// discovery on next use.
+    /// Whether the active route to `destination` was learned from its many-to-one
+    /// route request.
+    pub fn is_many_to_one_route(&self, destination: Nwk) -> bool {
+        self.route_table
+            .get(&destination)
+            .is_some_and(|entry| entry.status == Status::Active && entry.many_to_one)
+    }
+
     pub fn invalidate_via(&mut self, next_hop: Nwk) {
         for entry in self.route_table.values_mut() {
             if entry.status == Status::Active && entry.next_hop_address == next_hop {
