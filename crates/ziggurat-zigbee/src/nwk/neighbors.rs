@@ -318,20 +318,29 @@ impl Neighbors {
         })
     }
 
-    /// The network address of the end device child with the given EUI64, if one exists.
+    /// The network address of the authenticated end device child with the given EUI64,
+    /// for answering ZDO requests on its behalf. Spec 4.6.3.2.1: a parent does not
+    /// answer for an unauthenticated child.
     pub fn end_device_child_nwk(&self, eui64: Eui64) -> Option<Nwk> {
         self.table
             .get(&eui64)
-            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
+            .filter(|entry| {
+                entry.relationship == Relationship::Child
+                    && entry.device_type == NwkDeviceType::EndDevice
+            })
             .map(|entry| entry.network_address)
     }
 
-    /// The network addresses of every end device child, in ascending order.
+    /// The network addresses of every authenticated end device child, in ascending
+    /// order, for ZDO address responses (spec 4.6.3.2.1).
     pub fn end_device_child_addresses(&self) -> Vec<Nwk> {
         let mut addresses: Vec<Nwk> = self
             .table
             .values()
-            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
+            .filter(|entry| {
+                entry.relationship == Relationship::Child
+                    && entry.device_type == NwkDeviceType::EndDevice
+            })
             .map(|entry| entry.network_address)
             .collect();
         addresses.sort_by_key(Nwk::as_u16);
@@ -364,14 +373,24 @@ impl Neighbors {
         })
     }
 
-    /// The (EUI64, network address) of every rx-off-when-idle end-device child. A
+    /// The (EUI64, network address) of every rx-off-when-idle authenticated child. A
     /// 0xFFFF broadcast has to be delivered to each as a MAC unicast, since a sleeping
-    /// radio never hears the broadcast itself (spec 3.6.6).
+    /// radio never hears the broadcast itself (spec 3.6.6). Nothing is forwarded to an
+    /// unauthenticated child (spec 4.6.3.2.1).
     pub fn sleepy_children(&self) -> impl Iterator<Item = (Eui64, Nwk)> {
         self.table
             .values()
-            .filter(|entry| !entry.rx_on_when_idle && entry.is_child())
+            .filter(|entry| !entry.rx_on_when_idle && entry.relationship == Relationship::Child)
             .map(|entry| (entry.extended_address, entry.network_address))
+    }
+
+    /// Whether the device with this network address is a child that has not yet sent a
+    /// NWK-secured frame. Spec 4.6.3.2.1: a parent does not forward frames to it, or
+    /// answer ZDO or NWK requests on its behalf.
+    pub fn is_unauthenticated_child(&self, nwk: Nwk) -> bool {
+        self.table.values().any(|entry| {
+            entry.network_address == nwk && entry.relationship == Relationship::UnauthenticatedChild
+        })
     }
 
     pub fn contains(&self, eui64: Eui64) -> bool {

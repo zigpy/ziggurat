@@ -912,6 +912,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let destination = nwk_frame.nwk_header.destination;
 
+        // Spec 4.6.3.2.1: nothing is forwarded to an unauthenticated child
+        if self
+            .core()
+            .nib
+            .neighbors
+            .is_unauthenticated_child(destination)
+        {
+            tracing::debug!("Not relaying frame to unauthenticated child {destination:?}");
+            return;
+        }
+
         // Spec 3.6.4.5.5: each relay appends its network address to a transiting route
         // record command before forwarding it. Other command types (and frames we could
         // not decode) are relayed verbatim.

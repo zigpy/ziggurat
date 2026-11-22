@@ -184,8 +184,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Some(self.state.ieee_address)
         } else {
             // Spec 3.6.4.5.1.2: parents answer route requests for their end device
-            // children, which do not participate in route discovery
-            self.end_device_child_eui64(route_request_cmd.destination_address)
+            // children, which do not participate in route discovery. Spec 4.6.3.2.1:
+            // never for an unauthenticated child
+            let destination = route_request_cmd.destination_address;
+            self.end_device_child_eui64(destination).filter(|_| {
+                !self
+                    .core()
+                    .nib
+                    .neighbors
+                    .is_unauthenticated_child(destination)
+            })
         };
 
         let originator = nwk_frame.nwk_header.source;

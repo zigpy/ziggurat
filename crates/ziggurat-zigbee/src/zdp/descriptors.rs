@@ -218,7 +218,11 @@ impl Descriptors {
 
         let (ieee, is_local) = if nwk == self.nwk {
             (self.ieee, true)
-        } else if let Some(ieee) = neighbors.end_device_child_eui64(nwk) {
+        } else if let Some(ieee) = neighbors
+            .end_device_child_eui64(nwk)
+            .filter(|_| !neighbors.is_unauthenticated_child(nwk))
+        {
+            // Spec 4.6.3.2.1: never answered for an unauthenticated child
             (ieee, false)
         } else if broadcast {
             return None;
@@ -419,7 +423,10 @@ impl Descriptors {
     fn other_device_status(&self, nwk: Nwk, neighbors: &Neighbors) -> ZdpStatus {
         if self.role == NwkDeviceType::EndDevice {
             ZdpStatus::InvRequestType
-        } else if neighbors.end_device_child_eui64(nwk).is_some() {
+        } else if neighbors.end_device_child_eui64(nwk).is_some()
+            && !neighbors.is_unauthenticated_child(nwk)
+        {
+            // Spec 4.6.3.2.1: never answered for an unauthenticated child
             ZdpStatus::NoDescriptor
         } else {
             ZdpStatus::DeviceNotFound
