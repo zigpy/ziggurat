@@ -426,39 +426,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     poll_address,
                 )
             }
-            NextHop::NeedDiscovery => {
-                tracing::debug!("Holding frame until a route to {destination:?} is known");
-                let id = core.sends.enqueue_unrouted_unicast(
-                    UnroutedUnicast {
-                        frame: Frame::nwk(nwk_frame, security),
-                        priority: policy.priority,
-                        confirm,
-                        destination,
-                    },
-                    now,
-                    &self.tunables,
-                );
-
-                // The routing table starts a discovery unless the send can wait on
-                // one: a discovery of ours still underway, or one the timer pass starts
-                let route_request_identifier = core.nib.routing.want_route(
-                    self.state.network_address,
-                    destination,
-                    now,
-                    self.tunables.route_discovery_time(),
-                    self.tunables.pending_route_discovery_attempts(),
-                    self.activity_params(),
-                );
-                if let Some(route_request_identifier) = route_request_identifier {
-                    self.broadcast_discovery_request(
-                        &mut core,
-                        destination,
-                        route_request_identifier,
-                    );
-                }
-
-                SendHandle::new(id, &self.send_watches)
-            }
+            NextHop::NeedDiscovery => self.hold_for_route(
+                &mut core,
+                Frame::nwk(nwk_frame, security),
+                policy.priority,
+                confirm,
+                now,
+            ),
             NextHop::Discard => {
                 tracing::debug!(
                     "Dropping frame to {destination:?}: no route and discovery suppressed"
@@ -469,6 +443,49 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.commit_sends(core);
         Ok(handle)
+    }
+
+    /// Hold a unicast until a route to its destination is known. The routing table
+    /// starts a discovery unless the frame can wait on one: a discovery of ours still
+    /// underway, or one the timer pass starts.
+    fn hold_for_route(
+        &self,
+        core: &mut ZigbeeCore,
+        frame: Frame,
+        priority: TxPriority,
+        confirm: Confirm,
+        now: CoreInstant,
+    ) -> SendHandle {
+        let Frame::Nwk { nwk_frame, .. } = &frame else {
+            unreachable!("only NWK unicasts are routed")
+        };
+        let destination = nwk_frame.nwk_header.destination;
+
+        tracing::debug!("Holding frame until a route to {destination:?} is known");
+        let id = core.sends.enqueue_unrouted_unicast(
+            UnroutedUnicast {
+                frame,
+                priority,
+                confirm,
+                destination,
+            },
+            now,
+            &self.tunables,
+        );
+
+        let route_request_identifier = core.nib.routing.want_route(
+            self.state.network_address,
+            destination,
+            now,
+            self.tunables.route_discovery_time(),
+            self.tunables.pending_route_discovery_attempts(),
+            self.activity_params(),
+        );
+        if let Some(route_request_identifier) = route_request_identifier {
+            self.broadcast_discovery_request(core, destination, route_request_identifier);
+        }
+
+        SendHandle::new(id, &self.send_watches)
     }
 
     pub(super) fn next_nwk_sequence_number(&self) -> u8 {
@@ -825,6 +842,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.
+    // The guard is moved into `commit_sends`; the lint misreads the early return
+    #[allow(clippy::significant_drop_tightening)]
     pub(super) fn relay_unicast_nwk_frame(
         &self,
         mut nwk_frame: NwkFrame,
@@ -938,6 +957,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             match next_hop {
                 Some(next_hop) => next_hop,
+                // Spec 3.6.4.5.1: a relay discovers a route only for a frame from its own
+                // end device child that allows discovery. End devices do not discover
+                // routes themselves, so their parent does it for them
+                None if nwk_frame.nwk_header.frame_control.discover_route
+                    == NwkRouteDiscovery::Enable
+                    && self
+                        .end_device_child_eui64(nwk_frame.nwk_header.source)
+                        .is_some() =>
+                {
+                    let now = self.core_now();
+                    let mut core = self.core();
+                    self.hold_for_route(
+                        &mut core,
+                        Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
+                        TxPriority::UserNormal,
+                        Confirm::OnHandoff,
+                        now,
+                    );
+                    self.commit_sends(core);
+                    return;
+                }
+                // Any other frame is dropped: a relay never discovers on behalf of a
+                // router, which recovers through its own discovery or APS retries
                 None => {
                     tracing::debug!("No active route to relay frame to {destination:?}, dropping");
                     return;

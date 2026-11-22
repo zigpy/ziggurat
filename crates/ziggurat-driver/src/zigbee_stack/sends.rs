@@ -229,6 +229,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // A forced discovery holds the frame only while it is underway. Once it is
         // answered or has lapsed, the frame takes any route like every other frame
         let mut policy = self.next_hop_policy(nib);
+        // Spec 3.6.4.3: only a frame we originate takes a stored source route, not one
+        // we relay for an end device child
+        policy.is_concentrator &= nwk_frame.nwk_header.source == self.state.network_address;
         policy.force_route_discovery &= nib.routing.own_discovery_underway(
             self.state.network_address,
             nwk_frame.nwk_header.destination,
