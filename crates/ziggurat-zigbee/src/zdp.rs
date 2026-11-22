@@ -10,6 +10,7 @@ use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{FrameWriter, TooLong};
 
 pub mod descriptors;
+pub mod nwk_update;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DeserializeError {
@@ -43,6 +44,7 @@ pub enum ZdpClusterId {
     MgmtLqiReq = 0x0031,
     MgmtRtgReq = 0x0032,
     MgmtBindReq = 0x0033,
+    MgmtNwkUpdateReq = 0x0038,
     NwkAddrRsp = 0x8000,
     IeeeAddrRsp = 0x8001,
     NodeDescRsp = 0x8002,
@@ -54,6 +56,7 @@ pub enum ZdpClusterId {
     MgmtLqiRsp = 0x8031,
     MgmtRtgRsp = 0x8032,
     MgmtBindRsp = 0x8033,
+    MgmtNwkUpdateNotify = 0x8038,
 }
 
 /// Zigbee spec Table 2-129 (partial): ZDP response status values.
@@ -607,6 +610,44 @@ pub struct MgmtBindRsp {
 
 impl ZdpCommand for MgmtBindRsp {
     const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtBindRsp;
+}
+
+/// Zigbee spec 2.4.3.3.9: ask for an energy scan, a channel change, or a new channel
+/// mask and network manager, depending on the scan duration. The fields after it are
+/// present only for the request they belong to.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtNwkUpdateReq {
+    pub scan_channels: u32,
+    pub scan_duration: u8,
+    #[abstract_bits(presence_from = matches!(scan_duration, 0x00..=0x05))]
+    pub scan_count: Option<u8>,
+    #[abstract_bits(presence_from = matches!(scan_duration, 0xFE | 0xFF))]
+    pub nwk_update_id: Option<u8>,
+    #[abstract_bits(presence_from = matches!(scan_duration, 0xFF))]
+    pub nwk_manager_addr: Option<Nwk>,
+}
+
+impl ZdpCommand for MgmtNwkUpdateReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtNwkUpdateReq;
+}
+
+/// Zigbee spec 2.4.4.3.9: the result of an energy scan, or the status of a failed
+/// Mgmt_NWK_Update_req.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtNwkUpdateNotify {
+    pub status: ZdpStatus,
+    pub scanned_channels: u32,
+    pub total_transmissions: u16,
+    pub transmission_failures: u16,
+    scanned_channels_list_count: u8,
+    #[abstract_bits(length_from = scanned_channels_list_count)]
+    pub energy_values: Vec<u8>,
+}
+
+impl ZdpCommand for MgmtNwkUpdateNotify {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtNwkUpdateNotify;
 }
 
 /// Spec 2.4.4.3.2 / 2.4.4.3.3: one page of a Mgmt_Lqi_rsp or Mgmt_Rtg_rsp table.

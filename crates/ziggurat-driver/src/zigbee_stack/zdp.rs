@@ -3,21 +3,22 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_ieee_802154::{TooLong, write_frame};
+use ziggurat_ieee_802154::{TooLong, energy_detect_value, write_frame};
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, Asdu};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, is_broadcast};
 
+use ziggurat_zigbee::zdp::nwk_update::{self, NwkUpdate};
 use ziggurat_zigbee::zdp::{
-    DeviceAnnce, MgmtBindReq, MgmtBindRsp, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp,
-    NeighborDescriptor, ParentAnnce, ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID,
+    DeviceAnnce, MgmtBindReq, MgmtBindRsp, MgmtLqiReq, MgmtLqiRsp, MgmtNwkUpdateReq, MgmtRtgReq,
+    MgmtRtgRsp, NeighborDescriptor, ParentAnnce, ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID,
     ZdpAffinity, ZdpClusterId, ZdpCommand, ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus,
     ZdpRxOnWhenIdle, ZdpStatus, mgmt_table_page,
 };
 
 use super::{
-    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendHandle, TxPriority, ZigbeeCore,
-    ZigbeeStack, neighbors, routing,
+    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendHandle, TxPriority,
+    ZigbeeCore, ZigbeeStack, neighbors, routing,
 };
 
 /// A ZDP response's cluster is its request's with the high bit set (spec 2.4.4.1).
@@ -117,6 +118,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 });
             }
             Ok(ZdpClusterId::MgmtBindReq) => {}
+            Ok(ZdpClusterId::MgmtNwkUpdateReq) if self.state.role == NwkDeviceType::Router => {
+                self.handle_mgmt_nwk_update_req(nwk_frame, aps_frame, aps_security);
+            }
+            // The coordinator's channel is the client's to manage
+            Ok(ZdpClusterId::MgmtNwkUpdateReq) => {}
             // Responses from other devices are the client's business
             Ok(
                 ZdpClusterId::NwkAddrRsp
@@ -128,12 +134,130 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 | ZdpClusterId::MatchDescRsp
                 | ZdpClusterId::MgmtLqiRsp
                 | ZdpClusterId::MgmtRtgRsp
-                | ZdpClusterId::MgmtBindRsp,
+                | ZdpClusterId::MgmtBindRsp
+                | ZdpClusterId::MgmtNwkUpdateNotify,
             ) => {}
             Err(_) if aps_frame.cluster_id & ZDP_RESPONSE_BIT == 0 => {
                 self.reject_unsupported_zdp_request(nwk_frame, aps_frame, aps_security);
             }
             Err(_) => {}
+        }
+    }
+
+    /// Spec 2.4.3.3.9.2: change channel, store a new manager, or scan for energy, as
+    /// the network manager asks.
+    fn handle_mgmt_nwk_update_req(
+        &self,
+        nwk_frame: &NwkFrame,
+        aps_frame: &ApsDataFrame,
+        aps_security: Option<Eui64>,
+    ) {
+        let source = nwk_frame.nwk_header.source;
+
+        let (tsn, request) = match MgmtNwkUpdateReq::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!("Malformed network update request from {source:?}: {err}");
+                return;
+            }
+        };
+
+        let unicast = !is_broadcast(nwk_frame.nwk_header.destination)
+            && aps_frame.frame_control.delivery_mode == ApsDeliveryMode::Unicast;
+
+        let Some(update) = NwkUpdate::from_request(&request, unicast) else {
+            return;
+        };
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        match update {
+            NwkUpdate::ChangeChannel { channel, update_id } => {
+                self.tasklets.push(async move {
+                    arc_self.change_channel_on_request(channel, update_id).await;
+                });
+            }
+            NwkUpdate::UpdateManager {
+                channel_mask,
+                manager,
+            } => {
+                let mut core = self.core();
+                core.aib.channel_mask = channel_mask;
+                core.nib.manager_address = manager;
+            }
+            NwkUpdate::EnergyScan {
+                channels,
+                duration,
+                count,
+            } => {
+                self.tasklets.push(async move {
+                    arc_self
+                        .report_energy_scans(source, tsn, channels, duration, count, aps_security)
+                        .await;
+                });
+            }
+            NwkUpdate::Reject(status) => {
+                if let Err(err) =
+                    self.send_zdp_unicast(source, tsn, &nwk_update::rejection(status), aps_security)
+                {
+                    tracing::warn!("Failed to refuse a network update from {source:?}: {err}");
+                }
+            }
+        }
+    }
+
+    /// Frequency agility annex: switch channel once the request had time to reach
+    /// every router, adopt its update id, and restart the transmission counts. The
+    /// update id goes first so no beacon on the new channel advertises the old one.
+    async fn change_channel_on_request(&self, channel: u8, update_id: u8) {
+        R::sleep(self.tunables.broadcast_delivery_time()).await;
+
+        tracing::info!("Changing to channel {channel} as the network manager asked");
+        self.set_nwk_update_id(update_id);
+
+        if let Err(err) = self.set_channel(channel).await {
+            tracing::warn!("Failed to change to channel {channel}: {err}");
+            return;
+        }
+
+        let mut core = self.core();
+        core.nib.tx_total = 0;
+        core.nib.neighbors.reset_transmit_failures();
+    }
+
+    /// Spec 2.4.3.3.9.2 step 5: scan the channels `count` times, reporting each pass
+    /// to the requester.
+    async fn report_energy_scans(
+        &self,
+        requester: Nwk,
+        tsn: u8,
+        channels: Vec<u8>,
+        duration: Duration,
+        count: u8,
+        aps_security: Option<Eui64>,
+    ) {
+        for _ in 0..count {
+            let mut energy_values = Vec::with_capacity(channels.len());
+
+            for &channel in &channels {
+                match self.energy_detect(channel, duration).await {
+                    Ok(rssi) => energy_values.push(energy_detect_value(rssi)),
+                    Err(err) => {
+                        tracing::warn!("Energy scan of channel {channel} failed: {err}");
+                        return;
+                    }
+                }
+            }
+
+            let total_transmissions = self.core().nib.tx_total;
+            let report = nwk_update::scan_report(&channels, energy_values, total_transmissions);
+
+            if let Err(err) = self.send_zdp_unicast(requester, tsn, &report, aps_security) {
+                tracing::warn!("Failed to report an energy scan to {requester:?}: {err}");
+            }
         }
     }
 
