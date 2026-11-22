@@ -283,7 +283,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core.nib
             .routing
             .note_route_request_handled(originator, request_id);
-        self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        let relay =
+            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        core.sends
+            .route_request_relayed(originator, request_id, relay);
         self.commit_sends(core);
     }
 

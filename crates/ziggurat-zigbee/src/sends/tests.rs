@@ -148,6 +148,28 @@ impl Fixture {
         (request, self.settled())
     }
 
+    /// Relay a copy of another router's route request, as the driver does: three copies,
+    /// the first due now. Returns the relay and what registering it settles.
+    fn relay_route_request(&mut self) -> (SendId, Vec<Verdict>) {
+        let relay = self.sends.enqueue_broadcast(
+            Broadcast {
+                frame: "relayed route request",
+                priority: TxPriority::UserNormal,
+                schedule: Schedule::FixedInterval {
+                    interval: Duration::from_millis(254),
+                    copies_remaining: 3,
+                    next_attempt: self.now,
+                },
+            },
+            self.now,
+            &self.tunables,
+        );
+        assert!(self.settled().is_empty());
+
+        self.sends.route_request_relayed(NEXT_HOP, 1, relay);
+        (relay, self.settled())
+    }
+
     /// Run a timer pass in which the routing table offers this next hop toward
     /// `DESTINATION`. Returns what the pass settles.
     fn pass(&mut self, next_hop: Option<Nwk>) -> Vec<Verdict> {
@@ -350,6 +372,25 @@ fn test_new_route_request_stops_the_one_it_replaces() {
     assert_eq!(settled, [cancelled(first_request)]);
 
     // Only the new request has a copy to send
+    assert!(fixture.pass(None).is_empty());
+    assert!(fixture.transmit_next().is_empty());
+    assert!(fixture.dequeue().is_none());
+}
+
+// A relay of a cheaper copy of a route request stops the relay of the costlier copy,
+// including the copies it has yet to send
+#[test]
+fn test_relayed_route_request_stops_the_costlier_relay() {
+    let mut fixture = Fixture::new();
+    let (first_relay, settled) = fixture.relay_route_request();
+    assert!(settled.is_empty());
+    assert!(fixture.pass(None).is_empty());
+    assert!(fixture.transmit_next().is_empty());
+
+    let (_, settled) = fixture.relay_route_request();
+    assert_eq!(settled, [cancelled(first_relay)]);
+
+    // Only the new relay has a copy to send
     assert!(fixture.pass(None).is_empty());
     assert!(fixture.transmit_next().is_empty());
     assert!(fixture.dequeue().is_none());

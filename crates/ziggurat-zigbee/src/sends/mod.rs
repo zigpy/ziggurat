@@ -47,6 +47,7 @@ use crate::aps::frame::ApsAckFrame;
 use crate::constants::Tunables;
 use crate::flat_map::{FlatMap, FlatSet};
 use crate::gp::GpdfTarget;
+use crate::nwk::routing::RouteRequestId;
 
 pub use broadcasts::{Broadcast, Schedule};
 pub use gpdfs::{Gpdf, GpdfTrigger};
@@ -258,6 +259,10 @@ pub struct Sends<F: SendFrame, E> {
     /// still has copies to send. Kept to stop those copies when the discovery is
     /// replaced or abandoned.
     route_requests: FlatMap<Nwk, SendId>,
+    /// The broadcast relaying another router's route request, by originator and
+    /// request identifier, while it still has copies to send. Kept to stop those copies
+    /// when a cheaper copy of the request is relayed.
+    relayed_route_requests: FlatMap<(Nwk, RouteRequestId), SendId>,
     outbox: Outbox<F, E>,
 }
 
@@ -270,6 +275,7 @@ impl<F: SendFrame, E> Default for Sends<F, E> {
             broadcasts: Broadcasts::default(),
             gpdfs: Gpdfs::default(),
             route_requests: FlatMap::new(),
+            relayed_route_requests: FlatMap::new(),
             outbox: VecDeque::new(),
         }
     }
@@ -463,6 +469,23 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         }
     }
 
+    /// The driver relayed `relay`, a copy of `originator`'s route request `request_id`.
+    /// Copies still to come of the copy it relayed before are not sent: a cheaper path
+    /// replaced theirs (spec 3.6.4.5.1.4 allows discarding them).
+    pub fn route_request_relayed(
+        &mut self,
+        originator: Nwk,
+        request_id: RouteRequestId,
+        relay: SendId,
+    ) {
+        if let Some(previous) = self
+            .relayed_route_requests
+            .insert((originator, request_id), relay)
+        {
+            self.broadcasts.stop(previous, &mut self.outbox);
+        }
+    }
+
     /// Fail every unrouted send to `destination`: no route to it will be found. Copies
     /// of its route request still to come are not sent.
     pub fn fail_unrouted(&mut self, destination: Nwk) {
@@ -522,6 +545,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         self.broadcasts.abandon(&mut self.outbox);
         self.gpdfs.abandon(&mut self.outbox);
         self.route_requests.clear();
+        self.relayed_route_requests.clear();
     }
 
     /// Cancel a send. Returns whether it was cancelled: not if it is unknown, already
@@ -573,6 +597,8 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         // A route request with no copy left to send needs no stopping
         self.route_requests
             .retain(|_, request| self.broadcasts.contains(*request));
+        self.relayed_route_requests
+            .retain(|_, relay| self.broadcasts.contains(*relay));
     }
 
     /// When the timer must next run, or `None` when nothing is waiting on time.
