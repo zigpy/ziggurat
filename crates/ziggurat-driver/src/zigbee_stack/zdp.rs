@@ -1,22 +1,27 @@
 use crate::runtime::Runtime;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{TooLong, write_frame};
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::aps::frame::{ApsDataFrame, Asdu};
+use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, Asdu};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, is_broadcast};
 
 use ziggurat_zigbee::zdp::{
-    DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
-    ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
-    ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus, mgmt_table_page,
+    DeviceAnnce, MgmtBindReq, MgmtBindRsp, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp,
+    NeighborDescriptor, ParentAnnce, ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID,
+    ZdpAffinity, ZdpClusterId, ZdpCommand, ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus,
+    ZdpRxOnWhenIdle, ZdpStatus, mgmt_table_page,
 };
 
 use super::{
     ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendHandle, TxPriority, ZigbeeCore,
     ZigbeeStack, neighbors, routing,
 };
+
+/// A ZDP response's cluster is its request's with the high bit set (spec 2.4.4.1).
+const ZDP_RESPONSE_BIT: u16 = 0x8000;
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
@@ -52,19 +57,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Ok(ZdpClusterId::MgmtLqiReq) => self.handle_mgmt_lqi_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtRtgReq) => self.handle_mgmt_rtg_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::NwkAddrReq) => {
-                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
                     core.descriptors
                         .nwk_addr_rsp(request, &core.nib.neighbors, broadcast)
                 });
             }
             Ok(ZdpClusterId::IeeeAddrReq) => {
-                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
                     core.descriptors
                         .ieee_addr_rsp(request, &core.nib.neighbors, broadcast)
                 });
             }
             Ok(ZdpClusterId::NodeDescReq) => {
-                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
                     let requester = aps_security
                         .or(nwk_frame.nwk_header.source_ieee)
                         .or_else(|| core.nib.address_map.eui64_for(source));
@@ -77,28 +82,41 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 });
             }
             Ok(ZdpClusterId::PowerDescReq) => {
-                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
                     core.descriptors
                         .power_desc_rsp(request, &core.nib.neighbors, broadcast)
                 });
             }
             Ok(ZdpClusterId::SimpleDescReq) => {
-                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
                     core.descriptors
                         .simple_desc_rsp(request, &core.nib.neighbors, broadcast)
                 });
             }
             Ok(ZdpClusterId::ActiveEpReq) => {
-                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
                     core.descriptors.active_ep_rsp(request, broadcast)
                 });
             }
             Ok(ZdpClusterId::MatchDescReq) => {
-                self.answer_discovery_request(aps_frame, source, aps_security, |core, request| {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
                     core.descriptors
                         .match_desc_rsp(request, &core.nib.neighbors, broadcast)
                 });
             }
+            // Spec 2.4.4.3.4: a router keeps no binding table, and reports it empty.
+            // The coordinator's bindings are the client's business
+            Ok(ZdpClusterId::MgmtBindReq) if self.state.role == NwkDeviceType::Router => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |_, _: &MgmtBindReq| {
+                    (!broadcast).then_some(MgmtBindRsp {
+                        status: ZdpStatus::Success,
+                        binding_table_entries: 0,
+                        start_index: 0,
+                        binding_table_list_count: 0,
+                    })
+                });
+            }
+            Ok(ZdpClusterId::MgmtBindReq) => {}
             // Responses from other devices are the client's business
             Ok(
                 ZdpClusterId::NwkAddrRsp
@@ -109,9 +127,54 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 | ZdpClusterId::ActiveEpRsp
                 | ZdpClusterId::MatchDescRsp
                 | ZdpClusterId::MgmtLqiRsp
-                | ZdpClusterId::MgmtRtgRsp,
-            )
-            | Err(_) => {}
+                | ZdpClusterId::MgmtRtgRsp
+                | ZdpClusterId::MgmtBindRsp,
+            ) => {}
+            Err(_) if aps_frame.cluster_id & ZDP_RESPONSE_BIT == 0 => {
+                self.reject_unsupported_zdp_request(nwk_frame, aps_frame, aps_security);
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Spec 2.4.4.1: a router answers a unicast request it does not support with only
+    /// the response cluster and NOT_SUPPORTED, and drops a broadcast one. On the
+    /// coordinator the client may support the request.
+    fn reject_unsupported_zdp_request(
+        &self,
+        nwk_frame: &NwkFrame,
+        aps_frame: &ApsDataFrame,
+        aps_security: Option<Eui64>,
+    ) {
+        if self.state.role != NwkDeviceType::Router
+            || is_broadcast(nwk_frame.nwk_header.destination)
+            || aps_frame.frame_control.delivery_mode != ApsDeliveryMode::Unicast
+        {
+            return;
+        }
+
+        let Some(&tsn) = aps_frame.asdu.first() else {
+            return;
+        };
+
+        let source = nwk_frame.nwk_header.source;
+
+        if let Err(err) = self.send_aps_unicast(
+            source,
+            ZDP_PROFILE_ID,
+            aps_frame.cluster_id | ZDP_RESPONSE_BIT,
+            0,
+            0,
+            ApsAck::None,
+            None,
+            0,
+            vec![tsn, ZdpStatus::NotSupported as u8],
+            aps_security,
+            false,
+            TxPriority::UserNormal,
+            RouteDirective::StackDecides,
+        ) {
+            tracing::warn!("Failed to reject a ZDP request from {source:?}: {err}");
         }
     }
 
@@ -345,7 +408,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Answer a device and service discovery request. The answer is unicast to the
     /// requester, with the APS security the request arrived with.
-    fn answer_discovery_request<Req: ZdpCommand, Rsp: ZdpCommand>(
+    fn answer_zdp_request<Req: ZdpCommand, Rsp: ZdpCommand>(
         &self,
         aps_frame: &ApsDataFrame,
         source: Nwk,
