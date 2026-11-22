@@ -13,6 +13,7 @@ pub mod nwk;
 pub mod ring_buffer;
 pub mod sends;
 pub mod time;
+pub mod zcl;
 pub mod zdp;
 
 pub use time::Instant;
