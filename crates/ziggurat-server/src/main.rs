@@ -641,6 +641,10 @@ impl ZigguratServer {
                 proto::set_tunable(&*self.configured()?, &payload)?;
                 Ok(proto::Response::Empty)
             }
+            R::SetConcentrator(payload) => {
+                self.configured()?.set_concentrator(payload.enabled);
+                Ok(proto::Response::Empty)
+            }
             R::CancelRequest(payload) => {
                 let stack = self.running()?;
                 let mut tracker = sends.tracker.lock().unwrap();

@@ -171,6 +171,10 @@ async fn dispatch<P: RadioPhy>(
             proto::set_tunable(&**configured(app)?, &payload)?;
             Ok(Response::Empty)
         }
+        Request::SetConcentrator(payload) => {
+            configured(app)?.set_concentrator(payload.enabled);
+            Ok(Response::Empty)
+        }
         Request::CancelRequest(payload) => {
             let stack = running(app)?.clone();
             let result = crate::with_send_tracker(&app.sends, |tracker| {
