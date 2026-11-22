@@ -42,6 +42,7 @@ pub enum ZdpClusterId {
     ParentAnnce = 0x001F,
     MgmtLqiReq = 0x0031,
     MgmtRtgReq = 0x0032,
+    MgmtBindReq = 0x0033,
     NwkAddrRsp = 0x8000,
     IeeeAddrRsp = 0x8001,
     NodeDescRsp = 0x8002,
@@ -52,6 +53,7 @@ pub enum ZdpClusterId {
     ParentAnnceRsp = 0x801F,
     MgmtLqiRsp = 0x8031,
     MgmtRtgRsp = 0x8032,
+    MgmtBindRsp = 0x8033,
 }
 
 /// Zigbee spec Table 2-129 (partial): ZDP response status values.
@@ -579,6 +581,32 @@ pub struct MgmtRtgRsp {
 
 impl ZdpCommand for MgmtRtgRsp {
     const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtRtgRsp;
+}
+
+/// Zigbee spec 2.4.3.3.4: request a slice of the remote device's binding table.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtBindReq {
+    pub start_index: u8,
+}
+
+impl ZdpCommand for MgmtBindReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtBindReq;
+}
+
+/// Zigbee spec 2.4.4.3.4: a slice of our binding table. We keep no binding table, so
+/// the binding descriptor list is always empty and left out.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtBindRsp {
+    pub status: ZdpStatus,
+    pub binding_table_entries: u8,
+    pub start_index: u8,
+    pub binding_table_list_count: u8,
+}
+
+impl ZdpCommand for MgmtBindRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtBindRsp;
 }
 
 /// Spec 2.4.4.3.2 / 2.4.4.3.3: one page of a Mgmt_Lqi_rsp or Mgmt_Rtg_rsp table.
