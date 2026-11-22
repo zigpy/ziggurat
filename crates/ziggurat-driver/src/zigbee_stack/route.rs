@@ -326,38 +326,51 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
+    /// Advertise many-to-one routes while we are a concentrator, idling otherwise.
     pub async fn periodic_many_to_one_route_request_task(&self) {
-        // Receivers drop route requests from senders with a zero outgoing cost, so
-        // the first advertisement waits until link status exchanges establish a
-        // neighbor link, bounded by a fixed ceiling in case the network is silent
-        let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period();
-
         loop {
-            if self.core().nib.neighbors.any_live_router_link() {
-                break;
+            while !self.is_concentrator() {
+                self.concentrator_changed.notified().await;
             }
 
-            if self
-                .timeout_at_core(startup_deadline, self.link_status_received.notified())
-                .await
-                .is_err()
-            {
-                break;
+            // Receivers drop route requests from senders with a zero outgoing cost, so
+            // the first advertisement waits until link status exchanges establish a
+            // neighbor link, bounded by a fixed ceiling in case the network is silent
+            let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period();
+
+            while !self.core().nib.neighbors.any_live_router_link()
+                && self
+                    .timeout_at_core(startup_deadline, self.link_status_received.notified())
+                    .await
+                    .is_ok()
+            {}
+
+            while self.is_concentrator() {
+                let now = self.core_now();
+                let max_interval = self.tunables.mtorr_max_interval();
+                self.core().nib.mtorr_debouncer.fired(now, max_interval);
+
+                let _ = self.send_many_to_one_route_request().delivered().await;
+
+                self.core().nib.routing.reset_mtorr_triggers();
+
+                // Advertise every max interval, or sooner when one was requested. Being
+                // turned off ends the wait
+                loop {
+                    let due = core::pin::pin!(
+                        self.wait_for_debouncer(|nib| &nib.mtorr_debouncer, &self.mtorr_wake)
+                    );
+                    let changed = core::pin::pin!(self.concentrator_changed.notified());
+
+                    if matches!(
+                        futures::future::select(due, changed).await,
+                        futures::future::Either::Left(_)
+                    ) || !self.is_concentrator()
+                    {
+                        break;
+                    }
+                }
             }
-        }
-
-        loop {
-            let now = self.core_now();
-            let max_interval = self.tunables.mtorr_max_interval();
-            self.core().nib.mtorr_debouncer.fired(now, max_interval);
-
-            let _ = self.send_many_to_one_route_request().delivered().await;
-
-            self.core().nib.routing.reset_mtorr_triggers();
-
-            // Advertise every max interval, or sooner when one was requested
-            self.wait_for_debouncer(|nib| &nib.mtorr_debouncer, &self.mtorr_wake)
-                .await;
         }
     }
 
@@ -375,15 +388,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Count a received route-failure network status toward an early many-to-one
     /// route request.
     pub(super) fn note_route_error(&self) {
-        if !self.state.is_concentrator {
-            return;
-        }
-
-        let kick = self
-            .core()
-            .nib
-            .routing
-            .note_route_error(self.tunables.mtorr_route_error_threshold());
+        let kick = {
+            let mut core = self.core();
+            core.nib.is_concentrator
+                && core
+                    .nib
+                    .routing
+                    .note_route_error(self.tunables.mtorr_route_error_threshold())
+        };
 
         if kick {
             self.request_many_to_one_route_request();
@@ -393,19 +405,31 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Count a locally failed unicast delivery toward an early many-to-one route
     /// request.
     pub(super) fn note_delivery_failure(&self) {
-        if !self.state.is_concentrator {
-            return;
-        }
-
-        let kick = self
-            .core()
-            .nib
-            .routing
-            .note_delivery_failure(self.tunables.mtorr_delivery_failure_threshold());
+        let kick = {
+            let mut core = self.core();
+            core.nib.is_concentrator
+                && core
+                    .nib
+                    .routing
+                    .note_delivery_failure(self.tunables.mtorr_delivery_failure_threshold())
+        };
 
         if kick {
             self.request_many_to_one_route_request();
         }
+    }
+
+    /// Become a concentrator, or stop being one. It takes effect at once: the first
+    /// advertisement goes out right away, and frames stop being source-routed when it
+    /// is turned off. Route records keep being stored either way, since devices send
+    /// them for as long as their many-to-one routes last.
+    pub fn set_concentrator(&self, enabled: bool) {
+        self.core().nib.is_concentrator = enabled;
+        self.concentrator_changed.notify_one();
+    }
+
+    fn is_concentrator(&self) -> bool {
+        self.core().nib.is_concentrator
     }
 
     pub(super) fn invalidate_routes_via(&self, next_hop: Nwk) {

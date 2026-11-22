@@ -197,9 +197,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// The stack settings next-hop resolution reads.
-    pub(super) fn next_hop_policy(&self) -> next_hop::Policy {
+    pub(super) fn next_hop_policy(&self, nib: &Nib) -> next_hop::Policy {
         next_hop::Policy {
-            is_concentrator: self.state.is_concentrator,
+            is_concentrator: nib.is_concentrator,
             force_route_discovery: self.state.hack_force_route_discovery,
             max_source_route: self.tunables.max_source_route(),
             new_router_child_window: 2 * self.tunables.link_status_period(),
@@ -228,7 +228,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // A forced discovery holds the frame only while it is underway. Once it is
         // answered or has lapsed, the frame takes any route like every other frame
-        let mut policy = self.next_hop_policy();
+        let mut policy = self.next_hop_policy(nib);
         policy.force_route_discovery &= nib.routing.own_discovery_underway(
             self.state.network_address,
             nwk_frame.nwk_header.destination,

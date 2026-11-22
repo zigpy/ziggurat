@@ -55,7 +55,7 @@ pub fn network_config(payload: &ConfigurePayload) -> NetworkConfig {
             },
         }),
         tx_power: state.tx_power,
-        source_routing: payload.source_routing,
+        concentrator: payload.source_routing,
         depth: payload.depth,
     }
 }

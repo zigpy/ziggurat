@@ -265,7 +265,8 @@ pub struct NetworkConfig {
     pub tclk_seed: Option<TclkSeed>,
     /// The radio transmit power in dBm
     pub tx_power: i8,
-    pub source_routing: bool,
+    /// Whether we start out as a concentrator (see [`ZigbeeStack::set_concentrator`]).
+    pub concentrator: bool,
     /// A router's tree depth: one more than its parent's when it joined. The
     /// coordinator's is always 0, whatever this says.
     pub depth: u8,
@@ -367,6 +368,10 @@ pub struct Nib {
     pub nwk_security: NwkSecurity,
     /// The EUI64-to-network-address map, one owner per network address
     pub address_map: AddressMap,
+    /// `nwkIsConcentrator`: we advertise many-to-one routes to ourselves and
+    /// source-route through the route records they bring back. Whoever controls the
+    /// node decides, at any time.
+    pub is_concentrator: bool,
 }
 
 impl Nib {
@@ -487,7 +492,6 @@ pub struct State {
     pub network_address: Nwk,
     pub extended_pan_id: Eui64,
 
-    pub is_concentrator: bool,
     pub security_level: u8,
 
     /// A flag that determines if a timestamp indication is provided on incoming and
@@ -536,6 +540,7 @@ impl State {
                         FRAME_COUNTER_NOTIFY_INTERVAL,
                     ),
                     address_map: AddressMap::new(config.network_address, config.ieee_address),
+                    is_concentrator: config.concentrator,
                 },
                 aib: Aib {
                     aps_counter,
@@ -586,7 +591,6 @@ impl State {
             nwk_manager_addr: Nwk(0x0000),
             network_address: config.network_address,
             extended_pan_id: config.extended_pan_id,
-            is_concentrator: config.source_routing,
             security_level: 5,
             time_stamp: false,
             leave_request_allowed: false,
@@ -742,6 +746,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// Wakes the many-to-one route request task when its next advertisement moved
     /// earlier
     pub(crate) mtorr_wake: Notify,
+    /// Wakes the many-to-one advertiser when the client turns concentrator behavior on
+    /// or off
+    pub(crate) concentrator_changed: Notify,
 
     /// Signaled whenever a link status command is digested; the MTORR startup wait
     /// uses it to advertise as soon as a neighbor link is established
@@ -895,6 +902,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             src_match_written: Mutex::new(SrcMatchTable::default()),
             parent_annce_received: Mutex::new(None),
             mtorr_wake: Notify::new(),
+            concentrator_changed: Notify::new(),
             link_status_received: Notify::new(),
             link_status_wake: Notify::new(),
             address_conflict_wake: Notify::new(),
@@ -1149,12 +1157,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         });
 
         // Advertise many-to-one routes to ourselves so that devices can route inbound
-        // traffic without per-device route discoveries
-        if self.state.is_concentrator {
-            self.spawn_tracked(|arc_self| async move {
-                arc_self.periodic_many_to_one_route_request_task().await;
-            });
-        }
+        // traffic without per-device route discoveries, while we are a concentrator
+        self.spawn_tracked(|arc_self| async move {
+            arc_self.periodic_many_to_one_route_request_task().await;
+        });
 
         // Reprogram the radio whenever it resets out from under us
         self.spawn_tracked(|arc_self| async move {

@@ -410,7 +410,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             &core.nib.neighbors,
             &mut nwk_frame,
             &mode,
-            self.next_hop_policy(),
+            self.next_hop_policy(&core.nib),
             now,
         );
 
