@@ -48,7 +48,7 @@ pub async fn bootstrap(server: &std::sync::Arc<ZigguratServer>, coordinator: &st
         .await
         .map_err(|_| "start_network failed")?;
 
-    spawn_zdp_responder(server, nwk);
+    spawn_zdp_responder(server, nwk, ieee);
     announce(server, nwk, ieee);
     tracing::info!("ZBR router: up");
     Ok(())
@@ -104,7 +104,7 @@ fn clock_counter() -> u32 {
 
 /// Answer Node_Desc_req and Active_EP_req (no endpoints) for our own address, so the
 /// network's controller can interview this router after its Device_annce.
-fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>, own: Nwk) {
+fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>, own: Nwk, own_ieee: Eui64) {
     use ziggurat_driver::zigbee_stack::{ApsAck, RouteDirective, TxPriority, ZigbeeNotification};
 
     let mut notifications = server.notification_tx.subscribe();
@@ -130,13 +130,27 @@ fn spawn_zdp_responder(server: &std::sync::Arc<ZigguratServer>, own: Nwk) {
             let [seq, lo, hi, ..] = data[..] else {
                 continue;
             };
-            if Nwk(u16::from_le_bytes([lo, hi])) != own {
-                continue;
-            }
             let Some(stack) = server.current_stack() else {
                 continue;
             };
+            // NWK_addr_req / IEEE_addr_req for us (a device resolving a binding to us):
+            // the single-device response, [seq, status, IEEE, NWK]
+            let addr_rsp = |cluster| {
+                let mut rsp = vec![seq, 0x00];
+                rsp.extend_from_slice(&own_ieee.0);
+                rsp.extend_from_slice(&own.0.to_le_bytes());
+                (cluster, rsp)
+            };
+            let addressed = match cluster_id {
+                0x0000 => data.get(1..9) == Some(&own_ieee.0[..]),
+                _ => Nwk(u16::from_le_bytes([lo, hi])) == own,
+            };
+            if !addressed {
+                continue;
+            }
             let (rsp_cluster, rsp) = match cluster_id {
+                0x0000 => addr_rsp(0x8000),
+                0x0001 => addr_rsp(0x8001),
                 // Router, 2.4 GHz, caps 0x8E, buffer 82, transfer 128, stack rev 22
                 0x0002 => {
                     let server_mask: u16 = 22 << 9;

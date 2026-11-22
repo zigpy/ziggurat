@@ -8,7 +8,7 @@ import json, os, select, socket, struct, sys, time
 PORT = 23106
 DEV, GROUP, DURATION, INTERVAL, OUT = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
 EP, CLUSTER, HA = 10, 0x0006, 0x0104
-TIMEOUT = 3.0
+TIMEOUT = float(os.environ.get("SOAK_TIMEOUT", "3"))
 
 uc = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
 uc.connect((DEV, PORT))

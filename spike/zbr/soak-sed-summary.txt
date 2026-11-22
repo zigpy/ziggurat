@@ -1,0 +1,10 @@
+cycles 80, ok 44
+cmd_ack   n= 46 p50=5.20s p90=13.91s max=14.98s
+cmd_rsp   n= 46 p50=5.23s p90=13.94s max=15.00s
+report    n= 44 p50=5.27s p90=13.97s max=15.08s
+read_ack  n= 79 p50=0.28s p90=13.91s max=14.97s
+read_rsp  n= 79 p50=0.30s p90=13.93s max=14.98s
+cmd_nack Counter({7: 34})
+read_nack Counter({7: 1})
+wrong read value 17
+failed cycles [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 79, 80]

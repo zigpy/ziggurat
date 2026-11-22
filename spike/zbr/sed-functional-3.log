@@ -1,0 +1,12 @@
+[   0.00] -- on attempt 1: seq=1 zcl=010101
+[   7.54]    ack 7.51s, response 7.54s zcl=18 01 0b 01 00
+[   7.54] -- listening 20s
+[   7.61] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=0 cluster=0x0000 zcl=01 8c d8 0a fe ff f1 6e 20 00 00
+[   7.80] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=10 cluster=0x0006 zcl=08 01 0a 00 00 10 01
+[  27.56] -- off attempt 1: seq=2 zcl=010200
+[  52.94]    nack aps-ack-timeout after 25.38s
+[  52.94] -- off attempt 2: seq=3 zcl=010300
+[  68.01]    ack 15.03s, response 15.07s zcl=18 03 0b 00 00
+[  68.01] -- listening 20s
+[  68.03] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=10 cluster=0x0006 zcl=08 03 0a 00 00 10 00
+[  88.02] done, 0 step(s) failed

@@ -132,4 +132,42 @@ receiver off when idle, keepalive / data poll every 15 s (observed ~16 s), chann
   devices joined through the gateway router), or the device to cooperate (Poll Control
   cluster check-ins + fast poll), or a client-visible "queued / expected delay" answer as the
   design note's nack-waiting flag intended.
-- Reports from the sleepy device are unaffected: it transmits when it wakes.
+- Reports from the sleepy device are unaffected by the poll: it transmits when it wakes. They
+  did need the router to answer NWK_addr_req for itself (below).
+
+## Functional run (`sed_steps.py`, client retries a nack up to 4 times)
+
+- ZDO Bind (On/Off, to the router's EUI-64 ep 1) from IP: ok after 12.8 s; Configure
+  Reporting: 0.25 s (the device fast-polls for a while after any exchange, so follow-ups answer
+  in ~0.2 s). `sed-functional.log`; its On/Off frames were wrongly built (global, not cluster
+  commands), fixed in the later runs.
+- On / Read / Off / Read: every step done, some only on the client's 2nd or 3rd attempt (nack
+  `aps-ack-timeout` at 25.4 s = first send + gateway re-send both expired). Latency 0.2–15 s.
+  `sed-functional-2.log`.
+- Reports did not arrive at first: to use the binding the device broadcasts NWK_addr_req for
+  the router's EUI-64, and nobody answered (the router is not in the coordinator's address map
+  the way a joined router would be). The router's ZDP responder now answers NWK_addr_req /
+  IEEE_addr_req for itself; after that every executed toggle produced a multicast report within
+  ~0.2 s of the response. `sed-functional-3.log`, `router-sed.log`.
+
+## Soak (1 h, `soak.py` with 45 s interval, 30 s timeout)
+
+`soak-sed.jsonl`, `soak-sed-summary.txt`, `soak-sed-rss.log`. Each cycle: toggle (ack, Default
+Response, report), then read back. No client retries.
+
+| | n | p50 | p90 | max |
+|---|---|---|---|---|
+| toggle ack | 46/80 | 5.2 s | 13.9 s | 15.0 s |
+| report | 44/80 | 5.3 s | 14.0 s | 15.1 s |
+| read response | 79/80 | 0.3 s | 13.9 s | 15.0 s |
+
+- 44/80 cycles fully ok. 34 toggles nacked `aps-ack-timeout`; in each the device state stayed
+  unchanged (read back the old value), so these were real losses, not false nacks. 2 executed
+  toggles produced no report. RSS steady at 13–14 MB.
+- The failures come in runs (cycles 1–13, 36–55, 79): the 45 s interval is close to 3 poll
+  periods, so the send phase drifts slowly through the poll cycle. Losses happen when the first
+  send and the re-send 12.7 s later both expire before a poll, i.e. a poll lands in the 7.7–12.7
+  s gap after the send. The read sent right after such a nack lands just before the next poll,
+  which is why reads succeed (p50 0.3 s) in exactly the cycles where toggles fail.
+- Confirms the earlier learning: re-sending at the persistence expiry (every 7.68 s for one poll
+  period) would close the gap; a single re-send at the ack timeout cannot.

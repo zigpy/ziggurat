@@ -1,0 +1,15 @@
+[   0.00] -- zdo-bind-router attempt 1: seq=1 zcl=01c4f90afefff16e200a0600038cd80afefff16e2001
+[  12.78]    ack 12.76s, response 12.78s zcl=01 00
+[  12.78] -- configure-reporting attempt 1: seq=2 zcl=000206000000100000100e
+[  13.02] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=0 cluster=0x0000 zcl=01 8c d8 0a fe ff f1 6e 20 00 00
+[  13.04]    ack 0.23s, response 0.25s zcl=08 02 07 00
+[  13.04] -- on attempt 1: seq=3 zcl=000301
+[  13.22]    ack 0.15s, response 0.18s zcl=18 03 0b 01 00
+[  13.22] -- read attempt 1: seq=4 zcl=0004000000
+[  13.44]    ack 0.20s, response 0.22s zcl=08 04 01 00 00 00 10 00
+[  13.44] -- off attempt 1: seq=5 zcl=000500
+[  13.65]    ack 0.20s, response 0.22s zcl=08 05 01
+[  13.65] -- read attempt 1: seq=6 zcl=0006000000
+[  13.84]    ack 0.16s, response 0.18s zcl=08 06 01 00 00 00 10 00
+[  13.84] -- listening 20s
+[  33.85] done, 0 step(s) failed
