@@ -187,6 +187,14 @@ pub struct NeighborLink {
     pub incoming_cost: u8,
 }
 
+impl NeighborLink {
+    /// The cost of the link for routing: the worse of the two directions, so an
+    /// asymmetric link is not preferred
+    pub fn cost(&self) -> u8 {
+        cmp::max(self.outgoing_cost, self.incoming_cost)
+    }
+}
+
 /// What a received link status changed in the sender's entry, for route maintenance.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LinkStatusOutcome {

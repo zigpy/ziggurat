@@ -301,6 +301,13 @@ tunables! {
     /// learned from frames sent toward us, which says nothing about the link outward.
     source_route_max_first_hop_cost: u8 = 3,
 
+    /// A neighbor is sent to directly, with no route, only while its link cost is at
+    /// most this value (spec 3.6.3.3). The link cost is the worse of the two directions.
+    /// Every link costs at least 1, so a relayed path costs at least 2. A direct link
+    /// of cost 1 or 2 is as cheap as any route a discovery could find. Above 2, a
+    /// relayed path may be cheaper, so a discovery decides.
+    direct_max_link_cost: u8 = 2,
+
     /// The minimum time between two consecutive many-to-one route requests, even when
     /// error thresholds are crossed.
     mtorr_min_interval: Duration = Duration::from_secs(10),

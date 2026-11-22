@@ -7,6 +7,7 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::nwk::NwkDeviceType;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use ziggurat_zigbee::nwk::next_hop;
 
 use super::TrafficClass;
 
@@ -60,6 +61,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     pub(super) fn end_device_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
         self.core().nib.neighbors.end_device_child_eui64(nwk)
+    }
+
+    /// Whether a unicast goes straight to its destination, with no route: an end device
+    /// child, a router child that has sent no link status yet, or a neighbor with a good
+    /// link.
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) fn sends_directly_to(&self, destination: Nwk) -> bool {
+        let now = self.core_now();
+        let core = self.core();
+        let neighbors = &core.nib.neighbors;
+        let policy = self.next_hop_policy(&core.nib);
+
+        neighbors.end_device_child_eui64(destination).is_some()
+            || next_hop::is_direct_neighbor(neighbors, destination, policy.direct_max_link_cost)
+            || neighbors.is_recently_attached_router_child(
+                destination,
+                now,
+                policy.new_router_child_window,
+            )
     }
 
     pub(super) fn sleepy_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {

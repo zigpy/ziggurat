@@ -139,12 +139,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let sender_ieee = sender_link.eui64;
 
-        // The maximum of the incoming and outgoing costs is used for computations to
-        // deprioritize asymmetric routes
-        let contributing_path_cost = cmp::max(sender_link.outgoing_cost, sender_link.incoming_cost);
         let updated_path_cost = route_request_cmd
             .path_cost
-            .saturating_add(contributing_path_cost);
+            .saturating_add(sender_link.cost());
 
         // Deduplicate route requests and track the best path back to the originator.
         // Only the first copy, one advertising a strictly better forward cost, or an
@@ -211,7 +208,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         route_request_identifier: route_request_cmd.route_request_identifier,
                         originator_nwk: nwk_frame.nwk_header.source,
                         responder_nwk: route_request_cmd.destination_address,
-                        path_cost: contributing_path_cost,
+                        path_cost: sender_link.cost(),
                         originator_eui64: nwk_frame.nwk_header.source_ieee,
                         responder_eui64: Some(responder_eui64),
                     }),

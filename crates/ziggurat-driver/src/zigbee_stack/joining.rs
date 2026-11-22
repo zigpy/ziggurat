@@ -401,10 +401,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    pub(super) fn is_neighbor(&self, nwk: Nwk) -> bool {
-        self.core().nib.neighbors.has_network_address(nwk)
-    }
-
     /// Register an install-code-derived link key for a device expected to join:
     /// an `apsDeviceKeyPairSet` entry with `PROVISIONAL_KEY` attributes that
     /// replaces the well-known key for that device's network key delivery.
@@ -628,8 +624,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Send a serialized APS frame to an on-network device, with NWK security. Direct
-    /// children do not participate in route discovery, so they are addressed directly.
+    /// Send a serialized APS frame to an on-network device, with NWK security.
     fn send_secured_aps_payload(
         &self,
         destination: Nwk,
@@ -644,7 +639,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.send_unicast(Unicast {
             frame: nwk_frame,
             security: NwkSecurityMode::NetworkKey,
-            mode: if self.is_neighbor(destination) {
+            mode: if self.sends_directly_to(destination) {
                 SendMode::Direct
             } else {
                 SendMode::Route(RouteDirective::StackDecides)

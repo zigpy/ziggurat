@@ -966,9 +966,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 .note_source_routed_frame(nwk_frame.nwk_header.source);
 
             next_hop
-        } else if self.is_neighbor(destination) {
-            // Children and direct neighbors are addressed directly, everything else
-            // goes through the routing table
+        } else if self.sends_directly_to(destination) {
             destination
         } else {
             let next_hop = self.core().nib.routing.next_hop(destination);

@@ -204,6 +204,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             max_source_route: self.tunables.max_source_route(),
             source_route_max_first_hop_cost: self.tunables.source_route_max_first_hop_cost(),
             new_router_child_window: 2 * self.tunables.link_status_period(),
+            direct_max_link_cost: self.tunables.direct_max_link_cost(),
         }
     }
 

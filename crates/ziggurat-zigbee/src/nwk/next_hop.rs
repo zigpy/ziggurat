@@ -78,6 +78,19 @@ pub struct Policy {
     /// How long after a router child associates or rejoins we send to it directly
     /// when no route is known.
     pub new_router_child_window: Duration,
+    /// The highest link cost to a neighbor we send to directly, with no route.
+    pub direct_max_link_cost: u8,
+}
+
+/// Whether `destination` is a neighbor we can send to directly, with no route (spec
+/// 3.6.3.3).
+///
+/// A neighbor that has not listed us in a link status has no outgoing cost and is
+/// excluded.
+pub fn is_direct_neighbor(neighbors: &Neighbors, destination: Nwk, max_link_cost: u8) -> bool {
+    neighbors.link(destination).is_some_and(|link| {
+        link.outgoing_cost > 0 && link.incoming_cost > 0 && link.cost() <= max_link_cost
+    })
 }
 
 /// Resolve the MAC next hop for a unicast.
@@ -108,6 +121,13 @@ pub fn resolve(
     // End device children never route-discover; their parent delivers directly. This
     // also keeps a stale route record from outliving a device rejoining as our child.
     if neighbors.end_device_child_eui64(destination).is_some() {
+        return NextHop::Resolved(destination);
+    }
+
+    // A neighbor with a good link is reached directly. No route is cheaper
+    if !policy.force_route_discovery
+        && is_direct_neighbor(neighbors, destination, policy.direct_max_link_cost)
+    {
         return NextHop::Resolved(destination);
     }
 
