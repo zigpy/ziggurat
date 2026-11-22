@@ -266,6 +266,9 @@ pub struct NetworkConfig {
     /// The radio transmit power in dBm
     pub tx_power: i8,
     pub source_routing: bool,
+    /// A router's tree depth: one more than its parent's when it joined. The
+    /// coordinator's is always 0, whatever this says.
+    pub depth: u8,
 }
 
 /// The frame a send holds, as enqueued.
@@ -477,6 +480,8 @@ pub struct State {
     pub role: NwkDeviceType,
     pub capability_information: NwkCapabilityInformation,
     pub nwk_manager_addr: Nwk,
+    /// Our tree depth, advertised in beacons. The coordinator is the root, at 0.
+    pub depth: u8,
 
     pub ieee_address: Eui64,
     pub network_address: Nwk,
@@ -507,6 +512,12 @@ pub struct State {
 
 impl State {
     pub fn new(config: &NetworkConfig, aps_counter: u8) -> Self {
+        assert!(
+            config.depth <= MAX_DEPTH,
+            "depth {} is deeper than nwkcMaxDepth",
+            config.depth
+        );
+
         Self {
             core: Mutex::new(ZigbeeCore {
                 nib: Nib {
@@ -553,6 +564,10 @@ impl State {
             hack_force_route_discovery: false,
 
             role: config.role,
+            depth: match config.role {
+                NwkDeviceType::Coordinator => 0,
+                NwkDeviceType::Router | NwkDeviceType::EndDevice => config.depth,
+            },
             capability_information: NwkCapabilityInformation {
                 alternate_pan_coordinator: false,
                 device_type: match config.role {
