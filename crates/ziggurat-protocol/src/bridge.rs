@@ -249,6 +249,7 @@ pub fn apply_source_routes<P: RadioPhy, R: Runtime>(
     }
 }
 
+#[allow(clippy::significant_drop_tightening)]
 pub fn add_endpoint<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     payload: AddEndpointPayload,
@@ -258,19 +259,25 @@ pub fn add_endpoint<P: RadioPhy, R: Runtime>(
         return Err(Status::InvalidRequest.into());
     }
 
-    stack
-        .state
-        .core
-        .lock()
-        .descriptors
-        .add_endpoint(SimpleDescriptor {
-            endpoint: payload.endpoint,
-            profile_id: payload.profile_id,
-            device_id: payload.device_id,
-            device_version: payload.device_version,
-            input_clusters: payload.input_clusters,
-            output_clusters: payload.output_clusters,
-        });
+    let mut core = stack.state.core.lock();
+
+    // The stack serves this endpoint itself, and describes it from what it serves
+    if core.endpoints.contains(payload.endpoint) {
+        tracing::warn!(
+            "Rejecting endpoint {}: the stack serves it",
+            payload.endpoint
+        );
+        return Err(Status::InvalidRequest.into());
+    }
+
+    core.descriptors.add_endpoint(SimpleDescriptor {
+        endpoint: payload.endpoint,
+        profile_id: payload.profile_id,
+        device_id: payload.device_id,
+        device_version: payload.device_version,
+        input_clusters: payload.input_clusters,
+        output_clusters: payload.output_clusters,
+    });
     Ok(())
 }
 
