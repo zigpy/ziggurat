@@ -111,6 +111,11 @@ impl AddressMap {
         self.map.insert(eui64, nwk);
     }
 
+    /// Forget a device's mapping, e.g. for a joiner that never authenticated.
+    pub fn forget(&mut self, eui64: Eui64) {
+        self.map.remove(&eui64);
+    }
+
     /// Forget every mapping to a network address, e.g. one made ambiguous by an
     /// address conflict.
     pub fn forget_address(&mut self, nwk: Nwk) {

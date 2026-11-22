@@ -224,6 +224,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             // network key
             self.drop_indirect_transactions(Some(eui64), nwk);
             self.core().nib.routing.remove_route(nwk);
+
+            // Otherwise every failed join, forged ones included, would hold an address
+            // map entry forever.
+            // TODO: this also forgets the mapping of a known device whose unsecured
+            // rejoin failed. Its address is then free, and a new joiner can draw it
+            // while the device still uses it (1 in 65527 per join until the device
+            // rejoins).
+            self.core().nib.address_map.forget(eui64);
         }
     }
 }
