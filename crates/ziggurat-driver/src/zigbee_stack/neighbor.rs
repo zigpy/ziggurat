@@ -244,7 +244,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     fn restart_link_status_period(&self) {
         let now = self.core_now();
-        let period = self.tunables.link_status_period();
+        let jitter = self
+            .tunables
+            .link_status_jitter()
+            .mul_f32(crate::rng::random_f32::<R>());
+        let period = self.tunables.link_status_period().saturating_sub(jitter);
 
         self.core().nib.link_status_debouncer.fired(now, period);
     }

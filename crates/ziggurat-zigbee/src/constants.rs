@@ -327,6 +327,12 @@ tunables! {
     /// The time between link status command frames.
     link_status_period: Duration = Duration::from_secs(15),
 
+    /// Each link status period is shortened by a random amount up to this value (spec
+    /// 3.6.4.4.1). Routers that start together would otherwise send in step forever,
+    /// and a link status is sent once, without retries, so the same frames would
+    /// collide every period.
+    link_status_jitter: Duration = Duration::from_secs(1),
+
     /// `nwkcMinRouterBootstrapJitter`: the shortest delay before a gratuitous link
     /// status.
     min_router_bootstrap_jitter: Duration = Duration::from_millis(500),
