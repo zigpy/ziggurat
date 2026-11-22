@@ -46,6 +46,31 @@ pub enum ZdpStatus {
     NotSupported = 0x84,
 }
 
+/// Zigbee spec 2.3.2.5: the simple descriptor of one endpoint.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SimpleDescriptor {
+    pub endpoint: u8,
+    pub profile_id: u16,
+    pub device_id: u16,
+    pub device_version: u4,
+    reserved: u4,
+    input_cluster_count: u8,
+    #[abstract_bits(length_from = input_cluster_count)]
+    pub input_clusters: Vec<u16>,
+    output_cluster_count: u8,
+    #[abstract_bits(length_from = output_cluster_count)]
+    pub output_clusters: Vec<u16>,
+}
+
+impl SimpleDescriptor {
+    /// The serialized length in bytes: the fixed fields, two count bytes, and two
+    /// bytes per cluster.
+    pub const fn length(&self) -> u8 {
+        (8 + 2 * (self.input_clusters.len() + self.output_clusters.len())) as u8
+    }
+}
+
 pub trait ZdpCommand: AbstractBits + Sized {
     const CLUSTER_ID: ZdpClusterId;
 
