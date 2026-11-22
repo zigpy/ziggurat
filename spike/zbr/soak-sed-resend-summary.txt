@@ -1,0 +1,9 @@
+cycles 80, ok 80
+cmd_ack   n= 80 p50=7.77s p90=13.76s max=15.06s
+cmd_rsp   n= 80 p50=7.78s p90=13.79s max=15.08s
+report    n= 80 p50=7.81s p90=13.88s max=15.17s
+read_ack  n= 80 p50=0.27s p90=0.33s max=16.86s
+read_rsp  n= 80 p50=0.29s p90=0.36s max=16.88s
+cmd_nack Counter()
+read_nack Counter()
+wrong read value 0

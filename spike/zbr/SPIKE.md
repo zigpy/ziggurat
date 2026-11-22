@@ -171,3 +171,23 @@ Response, report), then read back. No client retries.
   which is why reads succeed (p50 0.3 s) in exactly the cycles where toggles fail.
 - Confirms the earlier learning: re-sending at the persistence expiry (every 7.68 s for one poll
   period) would close the gap; a single re-send at the ack timeout cannot.
+
+## Re-send every 7.68 s (soak, same setup)
+
+The gateway now re-sends a frame for a sleepy device at 7.68 s and 15.36 s after the first send
+(the parent's persistence time), each copy with the first copy's APS counter so the device's
+duplicate rejection drops extras, until one copy is acked. The three copies cover a poll period up
+to ~23 s. `soak-sed-resend.jsonl`, `soak-sed-resend-summary.txt`, `router-sed-resend.log`,
+`sed-resend-functional.log`.
+
+| | n | p50 | p90 | max |
+|---|---|---|---|---|
+| toggle ack | 80/80 | 7.8 s | 13.8 s | 15.1 s |
+| report | 80/80 | 7.8 s | 13.9 s | 15.2 s |
+| read response | 80/80 | 0.3 s | 0.4 s | 16.9 s |
+
+- 80/80 cycles fully ok, no nacks, no wrong read-back, no duplicate execution. ~42 cycles needed
+  the first re-send, ~1 the second. RSS steady at 14 MB.
+- The p50 rises from 5.2 s to 7.8 s only because commands that used to be lost now land at the
+  next poll. Without the gateway being the parent, this is the best the router placement does:
+  latency up to one poll period, but no losses.

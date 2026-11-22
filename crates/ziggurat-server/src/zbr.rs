@@ -52,6 +52,9 @@ const PROFILE_HA: u16 = 0x0104;
 /// The coordinator endpoint IP-originated frames come from (zigpy's own HA endpoint).
 const GATEWAY_SRC_EP: u8 = 1;
 /// ZDP TSN of the gateway's own NWK_addr_req (outside the rewrite range 0x80..)
+/// SPIKE: the parent's indirect-queue persistence (macTransactionPersistenceTime)
+const SLEEPY_RESEND: Duration = Duration::from_millis(7680);
+const SLEEPY_RESENDS: u32 = 2;
 const DISCOVERY_TSN: u8 = 0x7f;
 /// A reply that has not arrived by then is no longer matched to its client.
 const PENDING_TTL: Duration = Duration::from_secs(30);
@@ -468,9 +471,11 @@ impl Gateway {
             header.cluster
         );
         // SPIKE: a sleepy device's parent holds the frame for 7.68 s only; with a longer
-        // poll interval the frame can expire before the device polls, so try once more
-        let retry = payload.flags.sleepy_destination.then(|| payload.clone());
-        let ((handle, _), _) = match proto::send_unicast(&self.stack, payload) {
+        // poll interval the frame can expire before the device polls. Re-send it every
+        // 7.68 s, with the same APS counter so the device drops duplicates, until one copy
+        // is acked or SLEEPY_RESENDS more have gone out (covers a poll period up to ~23 s)
+        let resend = payload.flags.sleepy_destination.then(|| payload.clone());
+        let ((handle, _), sent) = match proto::send_unicast(&self.stack, payload) {
             Ok(sent) => sent,
             Err(e) => {
                 let _ = e;
@@ -483,12 +488,34 @@ impl Gateway {
         }
         let gateway = self.clone();
         tokio::spawn(async move {
+            use futures_util::stream::{FuturesUnordered, StreamExt};
             use ziggurat_driver::zigbee_stack::DeliveryError;
-            let mut result = handle.delivered().await;
-            if let (Err(DeliveryError::ApsAckTimeout), Some(payload)) = (&result, retry) {
-                tracing::info!("ZBR: sleepy {eui64:?} missed it, sending again");
-                if let Ok(((handle, _), _)) = proto::send_unicast(&gateway.stack, payload) {
-                    result = handle.delivered().await;
+            let mut copies = FuturesUnordered::new();
+            copies.push(wait_delivered(handle));
+            let mut resend = resend.map(|mut payload| {
+                payload.flags.force_aps_seq = true;
+                payload.aps_seq = sent.aps_seq;
+                (payload, 0)
+            });
+            let mut result = Err(DeliveryError::ApsAckTimeout);
+            let mut next_resend = tokio::time::Instant::now() + SLEEPY_RESEND;
+            while !copies.is_empty() || resend.is_some() {
+                tokio::select! {
+                    Some(done) = copies.next(), if !copies.is_empty() => match done {
+                        Ok(()) => { result = Ok(()); break; }
+                        Err(e) => result = Err(e),
+                    },
+                    () = tokio::time::sleep_until(next_resend), if resend.is_some() => {
+                        let (payload, n) = resend.take().unwrap();
+                        tracing::info!("ZBR: sleepy {eui64:?}, re-send {} (aps seq {})", n + 1, payload.aps_seq);
+                        if let Ok(((handle, _), _)) = proto::send_unicast(&gateway.stack, payload.clone()) {
+                            copies.push(wait_delivered(handle));
+                        }
+                        if n + 1 < SLEEPY_RESENDS {
+                            resend = Some((payload, n + 1));
+                            next_resend += SLEEPY_RESEND;
+                        }
+                    }
                 }
             }
             let status = match result {
@@ -709,4 +736,11 @@ mod tests {
         assert!(!allowed(Policy::Commands, PROFILE_ZDO, &[0x01]));
         assert!(allowed(Policy::Full, PROFILE_ZDO, &[0x01]));
     }
+}
+
+/// SPIKE: one named future type for every copy of a sleepy re-send.
+async fn wait_delivered(
+    handle: ziggurat_driver::zigbee_stack::SendHandle,
+) -> Result<(), ziggurat_driver::zigbee_stack::DeliveryError> {
+    handle.delivered().await
 }
