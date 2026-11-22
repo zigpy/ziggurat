@@ -315,6 +315,14 @@ tunables! {
     /// The time between link status command frames.
     link_status_period: Duration = Duration::from_secs(15),
 
+    /// `nwkcMinRouterBootstrapJitter`: the shortest delay before a gratuitous link
+    /// status.
+    min_router_bootstrap_jitter: Duration = Duration::from_millis(500),
+
+    /// `nwkcMaxRouterBootstrapJitter`: the longest delay before a gratuitous link
+    /// status.
+    max_router_bootstrap_jitter: Duration = Duration::from_secs(1),
+
     /// The number of missed link status command frames before resetting the link costs
     /// to zero.
     router_age_limit: u8 = 3,
@@ -406,6 +414,13 @@ tunables! {
     /// that permanently permit joins. Zero disables it (a single beacon per request,
     /// the spec behaviour).
     hack_beacon_spam_duration: Duration = Duration::from_millis(100),
+
+    /// Uncooperative on a large network: as the coordinator, send an extra link status
+    /// within a second of the first link status from a router we did not know, so it
+    /// learns its cost without waiting for the next period. After a restart every
+    /// router is unknown, which means a burst of link statuses. When false, such a
+    /// router waits for the periodic link status.
+    hack_early_link_status_for_unknown_routers: bool = true,
 }
 
 #[cfg(test)]

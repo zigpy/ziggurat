@@ -6,7 +6,7 @@ use core::time::Duration;
 /// The sans-io core never reads a clock; the driver passes `now` in and converts its own
 /// platform clock (tokio, embassy, a sim) to and from this type at the boundary. Replacing
 /// `std::time::Instant` is what lets this crate build for `no_std` targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Instant {
     micros: u64,
 }

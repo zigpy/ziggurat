@@ -18,6 +18,11 @@ const NEIGHBOR: Nwk = Nwk(0x4444);
 const START: Instant = Instant::from_micros(0);
 const ROUTE_DISCOVERY_TIME: Duration = Duration::from_secs(10);
 const MAX_SOURCE_ROUTE: u8 = 11;
+const ROUTER_AGE_LIMIT: u8 = 3;
+const ACTIVITY: ActivityParams = ActivityParams {
+    initial_count: ROUTER_AGE_LIMIT,
+    period: Duration::from_secs(15),
+};
 
 /// A route request relayed to us by `NEIGHBOR`.
 #[derive(Clone, Copy)]
@@ -39,6 +44,7 @@ fn receive(routing: &mut Routing, request: RouteRequest, now: Instant) -> bool {
             NwkRouteRequestManyToOne::NotManyToOne,
             now,
             ROUTE_DISCOVERY_TIME,
+            ACTIVITY,
         )
         .accepted
 }
@@ -48,7 +54,7 @@ fn receive(routing: &mut Routing, request: RouteRequest, now: Instant) -> bool {
 #[test]
 fn test_forget_drops_our_discovery_toward_the_device() {
     let mut routing = Routing::default();
-    routing.begin_discovery(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME);
+    routing.begin_discovery(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, ACTIVITY);
     assert_eq!(
         routing.own_discovery_lapse(OWN, DEVICE, START),
         Some(START + ROUTE_DISCOVERY_TIME)
@@ -58,20 +64,47 @@ fn test_forget_drops_our_discovery_toward_the_device() {
         Some(Status::DiscoveryUnderway)
     );
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     assert_eq!(routing.own_discovery_lapse(OWN, DEVICE, START), None);
     assert_eq!(routing.route_status(DEVICE), None);
 }
 
 #[test]
+fn test_recent_activity_decays_on_an_inactive_route() {
+    let period = Duration::from_secs(15);
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+    routing.invalidate_via(NEIGHBOR);
+    assert_eq!(routing.route_status(DEVICE), Some(Status::Inactive));
+
+    routing.decay_activity(START + period, period);
+
+    let entry = routing.entries().next().unwrap();
+    assert_eq!(entry.recent_activity, Activity::new(ROUTER_AGE_LIMIT - 1));
+}
+
+#[test]
+fn test_new_route_is_not_charged_for_time_before_it_existed() {
+    // Created a minute in: the minute before must not decay its counter
+    let created = START + Duration::from_secs(60);
+    let mut routing = Routing::default();
+    routing.restore_route(DEVICE, NEIGHBOR, 3, created, ACTIVITY);
+
+    routing.decay_activity(created + Duration::from_secs(1), ACTIVITY.period);
+
+    let entry = routing.entries().next().unwrap();
+    assert_eq!(entry.recent_activity.count(), ROUTER_AGE_LIMIT - 1);
+}
+
+#[test]
 fn test_forget_drops_the_route_and_the_route_record() {
     let mut routing = Routing::default();
-    routing.restore_route(DEVICE, NEIGHBOR, 3);
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
     routing.store_route_record(DEVICE, vec![ROUTER]);
     assert!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE).is_some());
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     assert_eq!(routing.next_hop(DEVICE), None);
     assert_eq!(routing.route_to(DEVICE, MAX_SOURCE_ROUTE), None);
@@ -80,10 +113,10 @@ fn test_forget_drops_the_route_and_the_route_record() {
 #[test]
 fn test_forget_leaves_other_destinations_alone() {
     let mut routing = Routing::default();
-    routing.restore_route(OTHER_DEVICE, NEIGHBOR, 3);
-    routing.begin_discovery(OWN, ROUTER, START, ROUTE_DISCOVERY_TIME);
+    routing.restore_route(OTHER_DEVICE, NEIGHBOR, 3, START, ACTIVITY);
+    routing.begin_discovery(OWN, ROUTER, START, ROUTE_DISCOVERY_TIME, ACTIVITY);
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     assert_eq!(routing.next_hop(OTHER_DEVICE), Some(NEIGHBOR));
     assert_eq!(
@@ -105,7 +138,7 @@ fn test_forget_keeps_the_duplicate_check_for_a_request_the_device_originated() {
     };
     assert!(receive(&mut routing, request, START));
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     let late_copy = RouteRequest {
         path_cost: 7,
@@ -124,7 +157,7 @@ fn test_forget_keeps_the_duplicate_check_for_a_request_toward_the_device() {
     };
     assert!(receive(&mut routing, request, START));
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     let late_copy = RouteRequest {
         path_cost: 7,
@@ -145,15 +178,15 @@ fn test_forget_keeps_a_relayed_discovery_toward_the_device_answerable() {
         path_cost: 5,
     };
     assert!(receive(&mut routing, request, START));
-    routing.note_relayed_discovery(DEVICE);
+    routing.note_relayed_discovery(DEVICE, START, ACTIVITY);
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
     assert_eq!(
         routing.route_status(DEVICE),
         Some(Status::DiscoveryUnderway)
     );
 
-    let reply = routing.accept_route_reply(OWN, ROUTER, 1, DEVICE, DEVICE, 1, START);
+    let reply = routing.accept_route_reply(OWN, ROUTER, 1, DEVICE, DEVICE, 1, START, ACTIVITY);
     assert_eq!(
         reply.disposition,
         RouteReplyDisposition::Relay {
@@ -174,10 +207,10 @@ fn test_forget_placeholder_for_a_relayed_discovery_expires_with_it() {
         path_cost: 5,
     };
     assert!(receive(&mut routing, request, START));
-    routing.restore_route(DEVICE, OTHER_DEVICE, 3);
-    routing.note_relayed_discovery(DEVICE);
+    routing.restore_route(DEVICE, OTHER_DEVICE, 3, START, ACTIVITY);
+    routing.note_relayed_discovery(DEVICE, START, ACTIVITY);
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
     assert_eq!(routing.next_hop(DEVICE), None);
     assert_eq!(
         routing.route_status(DEVICE),
@@ -208,13 +241,13 @@ fn test_relayed_discovery_still_expires_after_its_originator_is_forgotten() {
         path_cost: 5,
     };
     assert!(receive(&mut routing, request, START));
-    routing.note_relayed_discovery(OTHER_DEVICE);
+    routing.note_relayed_discovery(OTHER_DEVICE, START, ACTIVITY);
     assert_eq!(
         routing.route_status(OTHER_DEVICE),
         Some(Status::DiscoveryUnderway)
     );
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     // Any later request runs the expiry
     let unrelated = RouteRequest {
@@ -278,7 +311,7 @@ fn test_unchanged_route_record_reports_a_relay_route_it_restores() {
 fn test_forget_route_to_drops_the_route_record_and_the_routing_entry() {
     for relays in [vec![], vec![ROUTER]] {
         let mut routing = Routing::default();
-        routing.restore_route(DEVICE, NEIGHBOR, 3);
+        routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
         routing.store_route_record(DEVICE, relays);
 
         assert!(routing.forget_route_to(DEVICE));
@@ -289,7 +322,7 @@ fn test_forget_route_to_drops_the_route_record_and_the_routing_entry() {
 #[test]
 fn test_forget_route_to_reports_only_a_removed_route_record() {
     let mut routing = Routing::default();
-    routing.restore_route(DEVICE, NEIGHBOR, 3);
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
 
     assert!(!routing.forget_route_to(DEVICE));
     assert_eq!(routing.next_hop(DEVICE), None);
@@ -311,13 +344,13 @@ fn test_forget_route_to_leaves_other_destinations_alone() {
 /// A frame of ours wants a route to `DEVICE`. Returns whether that starts a discovery.
 fn want(routing: &mut Routing, now: Instant, attempts: u8) -> bool {
     routing
-        .want_route(OWN, DEVICE, now, ROUTE_DISCOVERY_TIME, attempts)
+        .want_route(OWN, DEVICE, now, ROUTE_DISCOVERY_TIME, attempts, ACTIVITY)
         .is_some()
 }
 
 /// Run a timer pass, with a frame still waiting for the route or not.
 fn tick(routing: &mut Routing, now: Instant, wanted: bool) -> DiscoveryTick {
-    routing.tick_discoveries(OWN, now, ROUTE_DISCOVERY_TIME, |_| wanted)
+    routing.tick_discoveries(OWN, now, ROUTE_DISCOVERY_TIME, ACTIVITY, |_| wanted)
 }
 
 #[test]
@@ -423,7 +456,7 @@ fn test_relayed_discovery_toward_the_destination_is_not_ours() {
         path_cost: 3,
     };
     assert!(receive(&mut routing, request, START));
-    routing.note_relayed_discovery(DEVICE);
+    routing.note_relayed_discovery(DEVICE, START, ACTIVITY);
 
     assert!(want(&mut routing, START, 1));
 }
@@ -454,11 +487,11 @@ fn test_relayed_discovery_does_not_keep_ours_alive() {
 #[test]
 fn test_removing_the_route_keeps_a_discovery_underway() {
     let mut routing = Routing::default();
-    routing.restore_route(DEVICE, NEIGHBOR, 3);
+    routing.restore_route(DEVICE, NEIGHBOR, 3, START, ACTIVITY);
     assert!(routing.remove_route(DEVICE));
 
     let request_id = routing
-        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1, ACTIVITY)
         .unwrap();
     assert!(!routing.remove_route(DEVICE));
     assert!(!routing.forget_route_to(DEVICE));
@@ -470,13 +503,13 @@ fn test_removing_the_route_keeps_a_discovery_underway() {
 
 /// `DEVICE` answers our route request through `NEIGHBOR`.
 fn reply(routing: &mut Routing, request_id: RouteRequestId, now: Instant) -> RouteReplyOutcome {
-    routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3, now)
+    routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, 3, now, ACTIVITY)
 }
 
 /// Start a discovery toward `DEVICE` and have the device answer it.
 fn answered_discovery(routing: &mut Routing, attempts: u8) {
     let request_id = routing
-        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, attempts)
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, attempts, ACTIVITY)
         .unwrap();
 
     let reply = reply(routing, request_id, START);
@@ -513,7 +546,7 @@ fn test_relayed_discovery_does_not_revive_our_answered_one() {
         path_cost: 3,
     };
     assert!(receive(&mut routing, request, START));
-    routing.note_relayed_discovery(DEVICE);
+    routing.note_relayed_discovery(DEVICE, START, ACTIVITY);
     assert_eq!(
         routing.route_status(DEVICE),
         Some(Status::DiscoveryUnderway)
@@ -527,15 +560,24 @@ fn test_relayed_discovery_does_not_revive_our_answered_one() {
 fn test_reply_with_the_highest_path_cost_answers_the_discovery() {
     let mut routing = Routing::default();
     let request_id = routing
-        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1, ACTIVITY)
         .unwrap();
 
-    let reply = routing.accept_route_reply(OWN, OWN, request_id, DEVICE, NEIGHBOR, u8::MAX, START);
+    let reply = routing.accept_route_reply(
+        OWN,
+        OWN,
+        request_id,
+        DEVICE,
+        NEIGHBOR,
+        u8::MAX,
+        START,
+        ACTIVITY,
+    );
     assert_eq!(reply.disposition, RouteReplyDisposition::Established);
     assert_eq!(tick(&mut routing, START, false), DiscoveryTick::default());
 
     routing.invalidate_via(NEIGHBOR);
-    routing.note_relayed_discovery(DEVICE);
+    routing.note_relayed_discovery(DEVICE, START, ACTIVITY);
 
     assert!(want(&mut routing, START, 1));
 }
@@ -563,7 +605,7 @@ fn test_forget_ends_our_discovery_toward_the_device() {
     let mut routing = Routing::default();
     assert!(want(&mut routing, START, 1));
 
-    routing.forget(OWN, DEVICE);
+    routing.forget(OWN, DEVICE, START, ACTIVITY);
 
     assert_eq!(routing.next_discovery_lapse(OWN, START), None);
     assert!(want(&mut routing, START, 1));
@@ -575,7 +617,7 @@ fn test_forget_ends_our_discovery_toward_the_device() {
 fn test_reply_to_a_lapsed_discovery_is_dropped() {
     let mut routing = Routing::default();
     let request_id = routing
-        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1)
+        .want_route(OWN, DEVICE, START, ROUTE_DISCOVERY_TIME, 1, ACTIVITY)
         .unwrap();
 
     let late = reply(&mut routing, request_id, START + ROUTE_DISCOVERY_TIME);
@@ -670,7 +712,8 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
             // The driver only holds a frame when it has no route
             Step::Hold if routing.next_hop(DEVICE).is_some() => {}
             Step::Hold => {
-                let started = routing.want_route(OWN, DEVICE, now, ROUTE_DISCOVERY_TIME, attempts);
+                let started =
+                    routing.want_route(OWN, DEVICE, now, ROUTE_DISCOVERY_TIME, attempts, ACTIVITY);
 
                 // Only the first frame to wait can start a discovery, and a discovery
                 // of ours that is still underway serves it
@@ -780,7 +823,7 @@ fn check_own_discovery(steps: &[Step], attempts: u8) {
                     path_cost: 3,
                 };
                 assert!(receive(&mut routing, request, now), "{steps:?}");
-                routing.note_relayed_discovery(DEVICE);
+                routing.note_relayed_discovery(DEVICE, START, ACTIVITY);
 
                 model.expire();
                 model.relayed_live = true;
@@ -851,6 +894,7 @@ fn receive_copy(routing: &mut Routing, path_cost: u8) -> RouteRequestOutcome {
         NwkRouteRequestManyToOne::NotManyToOne,
         START,
         ROUTE_DISCOVERY_TIME,
+        ACTIVITY,
     )
 }
 
