@@ -129,7 +129,12 @@ pub struct TableEntry {
     pub router_neighbor_set_diversity: u8,
     pub router_outbound_activity: Activity,
     pub router_inbound_activity: Activity,
-    pub security_timer: u8,
+
+    /// An unauthenticated child is deleted once this deadline passes without a
+    /// NWK-secured frame from it (spec 3.6.1.6.1.3, 4.6.3.3.3). `None` for any other
+    /// entry.
+    // Spec-expected field: `pub security_timer: u8`, kept as a deadline
+    pub security_timeout_at: Option<Instant>,
 }
 
 impl TableEntry {
@@ -567,13 +572,49 @@ impl Neighbors {
         evicted
     }
 
+    /// Delete unauthenticated children whose security timer has run out without a
+    /// NWK-secured frame (spec 3.6.1.6.1.3, 4.6.3.3.3), router or end device alike.
+    /// Returns them for cleanup. Spec 3.6.1.11.2: no leave is sent to such a child.
+    #[must_use = "deleted children must be cleaned up; dropping them leaves stale entries"]
+    pub fn evict_unauthenticated_children(&mut self, now: Instant) -> Vec<(Eui64, Nwk)> {
+        let evicted: Vec<(Eui64, Nwk)> = self
+            .table
+            .values()
+            .filter(|entry| {
+                entry.relationship == Relationship::UnauthenticatedChild
+                    && entry
+                        .security_timeout_at
+                        .is_some_and(|timeout_at| timeout_at <= now)
+            })
+            .map(|entry| (entry.extended_address, entry.network_address))
+            .collect();
+
+        for (eui64, _) in &evicted {
+            self.table.remove(eui64);
+        }
+
+        evicted
+    }
+
     /// Get-or-create the entry for a joining or rejoining child, keeping any existing
     /// state (e.g. LQI samples, keepalive confirmation) so the table stays stable
     /// across attachment retries. The fields a device may change between attachments
     /// are refreshed even on existing entries: a device may re-attach with different
     /// capabilities (e.g. re-flashed from router to end device).
-    pub fn upsert_child(&mut self, child: ChildDescriptor, now: Instant, activity: ActivityParams) {
-        self.upsert(child, now, Some(now), activity);
+    ///
+    /// An unauthenticated child is deleted unless it sends a NWK-secured frame within
+    /// `security_timeout` (spec 3.6.1.6.1.3, `apsSecurityTimeOutPeriod`).
+    pub fn upsert_child(
+        &mut self,
+        child: ChildDescriptor,
+        now: Instant,
+        security_timeout: Duration,
+        activity: ActivityParams,
+    ) {
+        let security_timeout_at = (child.relationship == Relationship::UnauthenticatedChild)
+            .then_some(now + security_timeout);
+
+        self.upsert(child, now, Some(now), security_timeout_at, activity);
     }
 
     /// Seed a child entry restored by the client on startup. Unlike a device that
@@ -584,7 +625,7 @@ impl Neighbors {
         now: Instant,
         activity: ActivityParams,
     ) {
-        self.upsert(child, now, None, activity);
+        self.upsert(child, now, None, None, activity);
     }
 
     fn upsert(
@@ -592,6 +633,7 @@ impl Neighbors {
         child: ChildDescriptor,
         now: Instant,
         attached_at: Option<Instant>,
+        security_timeout_at: Option<Instant>,
         activity: ActivityParams,
     ) {
         self.decay_activity(now, activity.period);
@@ -620,7 +662,7 @@ impl Neighbors {
             router_neighbor_set_diversity: 0,
             router_outbound_activity: Activity::new(activity.initial_count),
             router_inbound_activity: Activity::new(activity.initial_count),
-            security_timer: 0,
+            security_timeout_at: None,
         });
 
         entry.attached_at = attached_at;
@@ -630,6 +672,7 @@ impl Neighbors {
         entry.device_timeout = child.device_timeout;
         entry.timeout_at = child.device_timeout.map(|timeout| now + timeout);
         entry.relationship = child.relationship;
+        entry.security_timeout_at = security_timeout_at;
     }
 
     pub fn remove(&mut self, eui64: Eui64) {
@@ -643,6 +686,7 @@ impl Neighbors {
         match self.table.get_mut(&eui64) {
             Some(entry) if entry.relationship == Relationship::UnauthenticatedChild => {
                 entry.relationship = Relationship::Child;
+                entry.security_timeout_at = None;
                 true
             }
             _ => false,
@@ -668,13 +712,20 @@ impl Neighbors {
             .any(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
     }
 
-    /// The earliest end device child keepalive deadline, for scheduling the eviction
-    /// sweep.
+    /// The earliest child deadline, an end device keepalive or the security timer of
+    /// an unauthenticated child, for scheduling the eviction sweep.
     pub fn next_child_timeout(&self) -> Option<Instant> {
         self.table
             .values()
-            .filter(|entry| entry.is_child() && entry.device_type == NwkDeviceType::EndDevice)
-            .filter_map(|entry| entry.timeout_at)
+            .filter(|entry| entry.is_child())
+            .flat_map(|entry| {
+                let keepalive_at = (entry.device_type == NwkDeviceType::EndDevice)
+                    .then_some(entry.timeout_at)
+                    .flatten();
+
+                [keepalive_at, entry.security_timeout_at]
+            })
+            .flatten()
             .min()
     }
 
@@ -886,7 +937,7 @@ impl Neighbors {
                 router_neighbor_set_diversity: 0,
                 router_outbound_activity: Activity::new(activity.initial_count),
                 router_inbound_activity: Activity::new(activity.initial_count),
-                security_timer: 0,
+                security_timeout_at: None,
             };
 
             // Seed with the samples buffered before the entry existed plus the current
@@ -987,6 +1038,7 @@ mod test {
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),
+            Duration::from_secs(30),
             ACTIVITY,
         );
         neighbors
@@ -1444,6 +1496,7 @@ mod test {
                 relationship: Relationship::Child,
             },
             Instant::from_micros(0),
+            Duration::from_secs(30),
             ACTIVITY,
         );
 
@@ -1483,6 +1536,7 @@ mod test {
                 relationship: Relationship::UnauthenticatedChild,
             },
             Instant::from_micros(0),
+            Duration::from_secs(30),
             ACTIVITY,
         );
 
@@ -1511,6 +1565,7 @@ mod test {
                 relationship: Relationship::UnauthenticatedChild,
             },
             Instant::from_micros(0),
+            Duration::from_secs(30),
             ACTIVITY,
         );
         assert_eq!(

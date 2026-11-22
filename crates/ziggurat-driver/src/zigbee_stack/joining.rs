@@ -117,6 +117,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 relationship: neighbors::Relationship::UnauthenticatedChild,
             },
             self.core_now(),
+            self.tunables.aps_security_timeout(),
             self.activity_params(),
         );
 
@@ -1176,6 +1177,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 },
             },
             self.core_now(),
+            self.tunables.aps_security_timeout(),
             self.activity_params(),
         );
 

@@ -160,13 +160,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(())
     }
 
-    /// Evicts children whose keepalive deadline has lapsed (spec 3.6.10.1). Sleeps
-    /// until the earliest deadline, woken early when a new or renegotiated child entry
-    /// could move it closer; keepalive refreshes only push deadlines out and need no
-    /// wake.
+    /// Evicts children whose keepalive deadline has lapsed (spec 3.6.10.1), and
+    /// unauthenticated children whose security timer has run out (spec 3.6.1.6.1.3).
+    /// Sleeps until the earliest deadline, woken early when a new or renegotiated child
+    /// entry could move it closer; keepalive refreshes only push deadlines out and need
+    /// no wake.
     pub(super) async fn child_timeout_task(&self) {
         loop {
             self.evict_timed_out_children();
+            self.evict_unauthenticated_children();
 
             let next_timeout = self.core().nib.neighbors.next_child_timeout();
             match next_timeout {
@@ -200,6 +202,27 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 ieee: Some(eui64),
                 reason: DeviceLeaveReason::KeepaliveTimeout,
             });
+        }
+    }
+
+    /// Delete the children that did not send a NWK-secured frame in time.
+    fn evict_unauthenticated_children(&self) {
+        let evicted = self
+            .core()
+            .nib
+            .neighbors
+            .evict_unauthenticated_children(self.core_now());
+
+        for (eui64, nwk) in evicted {
+            tracing::warn!(
+                "Child {eui64:?} ({nwk:?}) sent no NWK-secured frame before its security \
+                 timer ran out, deleting"
+            );
+
+            // Fails a join still waiting to deliver the association response or the
+            // network key
+            self.drop_indirect_transactions(Some(eui64), nwk);
+            self.core().nib.routing.remove_route(nwk);
         }
     }
 }

@@ -370,6 +370,13 @@ tunables! {
     /// together.
     pending_route_discovery_attempts: u8 = 1,
 
+    /// `apsSecurityTimeOutPeriod`: how long a child that associated or rejoined without
+    /// NWK security has to send its first NWK-secured frame before it is deleted (spec
+    /// 3.6.1.6.1.3). The spec leaves the value to the stack. It must cover two indirect
+    /// holds, the association or rejoin response and then the network key, plus the
+    /// child's first secured frame.
+    aps_security_timeout: Duration = Duration::from_secs(30),
+
     /// The default timeout for any end device child that does not negotiate a
     /// different value via the End Device Timeout Request command (spec 3.6.10.2).
     end_device_timeout_default: EndDeviceTimeout = EndDeviceTimeout::Minutes256,
