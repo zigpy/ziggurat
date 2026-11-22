@@ -73,6 +73,11 @@ impl<'a> FrameWriter<'a> {
         self.len() == 0
     }
 
+    /// How many more bytes this writer accepts.
+    pub fn remaining(&self) -> usize {
+        self.end - self.buffer.len()
+    }
+
     pub fn extend(&mut self, bytes: &[u8]) -> Result<(), TooLong> {
         if self.buffer.len() + bytes.len() > self.end {
             return Err(TooLong);
