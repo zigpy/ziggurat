@@ -265,16 +265,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_radius(rebroadcast_radius)
             .with_sequence_number(nwk_frame.nwk_header.sequence_number);
 
-        // Spec 3.6.4.5.1.4: relayed route requests are jittered and retried. The jitter
-        // bounds are loaded once and subtracted saturating: a runtime tunable change can
-        // transiently leave min above max.
-        let min_jitter = self.tunables.min_rreq_jitter();
-        let max_jitter = self.tunables.max_rreq_jitter();
-        let jitter = (min_jitter
-            + max_jitter
-                .saturating_sub(min_jitter)
-                .mul_f32(crate::rng::random_f32::<R>()))
-            * 2;
+        // Spec 3.6.4.5.1.4: relayed route requests are delayed and retried. The delay
+        // grows with the cost of the link this copy came over, so along a path it adds
+        // up to the path cost: the cheapest copy tends to arrive first, and fewer
+        // routers relay again for a cheaper copy. The random part keeps neighbors that
+        // heard the same copy from relaying at the same moment
+        let jitter = self.tunables.rreq_delay_per_link_cost() * u32::from(sender_link.cost())
+            + self
+                .tunables
+                .rreq_jitter()
+                .mul_f32(crate::rng::random_f32::<R>());
 
         let attempts = self.tunables.rreq_retries().saturating_add(1);
         let mut core = self.core();

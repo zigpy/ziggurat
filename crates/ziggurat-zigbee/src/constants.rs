@@ -350,8 +350,15 @@ tunables! {
     initial_rreq_retries: u8 = 3,
     rreq_retries: u8 = 2,
     rreq_retry_interval: Duration = Duration::from_millis(254),
-    min_rreq_jitter: Duration = Duration::from_millis(2),
-    max_rreq_jitter: Duration = Duration::from_millis(128),
+
+    /// A relayed route request waits this long per unit of cost of the link it came
+    /// over, plus up to `rreq_jitter` at random. Over a path the waits add up to the
+    /// path cost times this value, so copies tend to arrive cheapest first. The spec
+    /// allows a cost-dependent delay (3.6.4.5.1.4). With link costs up to 7, the
+    /// defaults stay within the spec's 2 x [2, 128] ms window.
+    rreq_delay_per_link_cost: Duration = Duration::from_millis(32),
+    rreq_jitter: Duration = Duration::from_millis(32),
+
     unicast_retries: u8 = 3,
     unicast_retry_delay: Duration = Duration::from_millis(50),
     broadcast_delivery_time: Duration = Duration::from_millis(9000),
