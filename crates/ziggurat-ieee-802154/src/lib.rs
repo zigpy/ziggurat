@@ -19,6 +19,18 @@ pub const MAX_MAC_PAYLOAD_SIZE: usize = 118;
 /// A whole 802.15.4 frame. Frames are built in one of these and handed to the radio.
 pub type Psdu = heapless::Vec<u8, MAX_PHY_PACKET_SIZE>;
 
+/// 12.3.4: the receiver sensitivity the O-QPSK PHY must reach.
+const O_QPSK_RECEIVER_SENSITIVITY_DBM: i16 = -85;
+
+/// 10.2.6: the energy detection value of a received power. Zero is less than 10 dB
+/// above the PHY's specified receiver sensitivity, and the values rise linearly over
+/// the 40 dB above that.
+pub fn energy_detect_value(rssi_dbm: i8) -> u8 {
+    let floor = O_QPSK_RECEIVER_SENSITIVITY_DBM + 10;
+    let scaled = (i16::from(rssi_dbm) - floor) * 255 / 40;
+    scaled.clamp(0, 255) as u8
+}
+
 /// The payload of one 802.15.4 frame.
 pub type Msdu = heapless::Vec<u8, MAX_MAC_PAYLOAD_SIZE>;
 

@@ -84,6 +84,9 @@ const FRAME_COUNTER_NOTIFY_INTERVAL: u32 = 100;
 /// that wasn't reading has already missed it and re-syncs on reconnect.
 const NOTIFICATION_QUEUE_CAP: usize = 64;
 
+/// Channels 11 to 26 of channel page 0, the default `apsChannelMaskList`.
+const ALL_2400_MHZ_CHANNELS: u32 = 0x07FF_F800;
+
 /// A synchronous admission failure, returned by the `send_*` entry points.
 ///
 /// An `Err` means nothing was enqueued and no later confirmation follows; `retry_in`
@@ -371,6 +374,8 @@ pub struct Nib {
     pub nwk_security: NwkSecurity,
     /// The EUI64-to-network-address map, one owner per network address
     pub address_map: AddressMap,
+    /// `nwkManagerAddr`: the device that manages the network's channel
+    pub manager_address: Nwk,
     /// `nwkIsConcentrator`: we advertise many-to-one routes to ourselves and
     /// source-route through the route records they bring back. Whoever controls the
     /// node decides, at any time.
@@ -397,6 +402,9 @@ pub struct Aib {
     /// derivation, command encryption). Holds the non-spec TCLK seed used to derive
     /// keys when the network was taken over from a microcontroller stack.
     pub aps_security: ApsSecurity,
+    /// `apsChannelMaskList`: the channels the network may use, for a router that has
+    /// to find it again after missing a channel change
+    pub channel_mask: u32,
 }
 
 /// Host-side mirror of the MAC PIB attributes we drive on the RCP. The MAC sub-layer
@@ -493,7 +501,6 @@ pub struct State {
 
     pub role: NwkDeviceType,
     pub capability_information: NwkCapabilityInformation,
-    pub nwk_manager_addr: Nwk,
     /// Our tree depth, advertised in beacons. The coordinator is the root, at 0.
     pub depth: u8,
 
@@ -549,6 +556,7 @@ impl State {
                         FRAME_COUNTER_NOTIFY_INTERVAL,
                     ),
                     address_map: AddressMap::new(config.network_address, config.ieee_address),
+                    manager_address: Nwk(0x0000),
                     is_concentrator: config.concentrator,
                 },
                 aib: Aib {
@@ -559,6 +567,7 @@ impl State {
                         config.tclk_seed.clone(),
                         FRAME_COUNTER_NOTIFY_INTERVAL,
                     ),
+                    channel_mask: ALL_2400_MHZ_CHANNELS,
                 },
                 mac: MacState {
                     channel: config.channel,
@@ -603,7 +612,6 @@ impl State {
                 security_capability: NwkSecurityCapability::Capable,
                 allocate_address: true,
             },
-            nwk_manager_addr: Nwk(0x0000),
             network_address: config.network_address,
             extended_pan_id: config.extended_pan_id,
             security_level: 5,
