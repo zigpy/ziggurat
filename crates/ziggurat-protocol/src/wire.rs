@@ -80,6 +80,7 @@ pub enum RequestCommand {
     SetProvisionalKey = 0x37,
     SetTunable = 0x38,
     SendGpdf = 0x39,
+    SetConcentrator = 0x3C,
     // Radio scans and packet capture.
     EnergyScan = 0x40,
     NetworkScan = 0x41,
@@ -297,6 +298,8 @@ pub struct NetworkState {
 #[derive(Debug, Clone)]
 pub struct ConfigurePayload {
     pub role: NodeRole,
+    /// Deprecated: use `SetConcentrator`. Still honored as the starting concentrator
+    /// state, for clients that predate the command.
     pub source_routing: bool,
     /// A router's tree depth; the coordinator's is always 0. Older clients leave these
     /// bits reserved, as 0.
@@ -634,6 +637,16 @@ pub struct SetTunablePayload {
     pub value: u64,
 }
 
+/// Become a concentrator, advertising many-to-one routes to the node and
+/// source-routing through the route records they bring back, or stop being one. It
+/// takes effect at once.
+#[abstract_bits]
+#[derive(Debug, Clone)]
+pub struct ConcentratorPayload {
+    pub enabled: bool,
+    pub reserved: u7,
+}
+
 #[abstract_bits]
 #[derive(Debug, Clone)]
 pub struct ScanRequestPayload {
@@ -886,6 +899,7 @@ pub enum Request {
     SetTunable(SetTunablePayload),
     CancelRequest(CancelRequestPayload),
     SendGpdf(SendGpdfPayload),
+    SetConcentrator(ConcentratorPayload),
 }
 
 impl Request {
@@ -921,6 +935,7 @@ impl Request {
             RequestCommand::SetTunable => Self::SetTunable(require(payload)?),
             RequestCommand::CancelRequest => Self::CancelRequest(require(payload)?),
             RequestCommand::SendGpdf => Self::SendGpdf(require(payload)?),
+            RequestCommand::SetConcentrator => Self::SetConcentrator(require(payload)?),
         })
     }
 }
