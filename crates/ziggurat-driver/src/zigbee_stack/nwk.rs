@@ -4,6 +4,7 @@ use crate::ziggurat_ieee_802154::{
     Ieee802154Address, Ieee802154AddressingMode, Ieee802154DataFrame, Ieee802154Frame,
     Ieee802154FrameControl, Ieee802154FrameHeader, Ieee802154FrameType, Ieee802154FrameVersion,
 };
+use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
 use ziggurat_phy::RadioPhy;
@@ -416,6 +417,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let handle = match resolved {
             NextHop::Resolved(next_hop) => {
+                if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Data
+                    && nwk_frame.nwk_header.source == self.state.network_address
+                    && core.nib.routing.route_record_due(destination, false)
+                {
+                    self.enqueue_route_record(
+                        &mut core,
+                        self.state.network_address,
+                        self.state.ieee_address,
+                        destination,
+                        Vec::new(),
+                        next_hop,
+                        policy.priority,
+                    );
+                }
+
                 let poll_address = Self::poll_address(&core.nib, next_hop);
                 self.enqueue_unicast_in(
                     &mut core,
@@ -992,11 +1008,33 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             nwk_frame.nwk_header.source
         );
 
+        let source = nwk_frame.nwk_header.source;
+        let child_eui64 = self.end_device_child_eui64(source);
+        let mut core = self.core();
+
+        // Spec 3.6.4.5.5: a data frame from our end device child toward a concentrator
+        // is preceded by a route record for the child, starting with us
+        if let Some(child_eui64) = child_eui64
+            && nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Data
+            && core.nib.routing.route_record_due(destination, true)
+        {
+            self.enqueue_route_record(
+                &mut core,
+                source,
+                child_eui64,
+                destination,
+                Vec::from([self.state.network_address]),
+                next_hop_address,
+                TxPriority::UserNormal,
+            );
+        }
+
         // The originator's sequence number is preserved. Any failure handling (route
         // invalidation, the network status back to the originator) follows the send
         // table's verdict; nothing is awaited here.
-        let poll_address = Self::poll_address(&self.core().nib, next_hop_address);
-        self.enqueue_unicast(
+        let poll_address = Self::poll_address(&core.nib, next_hop_address);
+        self.enqueue_unicast_in(
+            &mut core,
             Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
             TxPolicy {
                 priority: TxPriority::UserNormal,
@@ -1006,6 +1044,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             next_hop_address,
             poll_address,
         );
+        self.commit_sends(core);
     }
 
     /// Zigbee spec 3.6.4.8.1: when relaying fails, the routes through the dead link are

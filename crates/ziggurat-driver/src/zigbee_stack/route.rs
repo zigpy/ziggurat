@@ -2,12 +2,13 @@ use crate::runtime::Runtime;
 use core::cmp;
 use core::time::Duration;
 
-use ziggurat_ieee_802154::types::Nwk;
+use alloc::vec::Vec;
+use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::RadioPhy;
 
 use ziggurat_zigbee::nwk::commands::{
-    NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand,
-    NwkRouteRequestCommand, NwkRouteRequestManyToOne,
+    NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
+    NwkRouteReplyCommand, NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
 
@@ -15,7 +16,7 @@ use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
+    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
     TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
@@ -430,6 +431,45 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     fn is_concentrator(&self) -> bool {
         self.core().nib.is_concentrator
+    }
+
+    /// Spec 3.6.4.5.5: tell a concentrator the path from `source`, ourselves or our end
+    /// device child, ahead of a data frame to it over the same next hop. `relays` is
+    /// the path so far: empty from us, our own address from a child.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn enqueue_route_record(
+        &self,
+        core: &mut ZigbeeCore,
+        source: Nwk,
+        source_eui64: Eui64,
+        concentrator: Nwk,
+        relays: Vec<Nwk>,
+        next_hop: Nwk,
+        priority: TxPriority,
+    ) {
+        tracing::debug!("Sending a route record for {source:?} to {concentrator:?}");
+
+        let frame = self
+            .nwk_command_frame(
+                concentrator,
+                NwkCommand::RouteRecord(NwkRouteRecordCommand { relays }),
+            )
+            .with_source(source)
+            .with_source_ieee(Some(source_eui64))
+            .with_sequence_number(core.nib.next_sequence_number());
+
+        let poll_address = Self::poll_address(&core.nib, next_hop);
+        self.enqueue_unicast_in(
+            core,
+            Frame::nwk(frame, NwkSecurityMode::NetworkKey),
+            TxPolicy {
+                priority,
+                class: TrafficClass::Critical,
+            },
+            Confirm::OnHandoff,
+            next_hop,
+            poll_address,
+        );
     }
 
     pub(super) fn invalidate_routes_via(&self, next_hop: Nwk) {

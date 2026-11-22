@@ -572,6 +572,33 @@ impl Routing {
         self.remove_route_record(destination)
     }
 
+    /// Spec 3.6.4.5.5: whether a route record has to precede a data frame toward
+    /// `destination` over its many-to-one route. A frame relayed for one of our end
+    /// device children always needs one. A frame we originate needs one while the
+    /// concentrator asks for it: a concentrator that keeps a route record table then
+    /// has our route until its next advertisement asks again, so the request is
+    /// cleared; one that keeps none needs a route record before every frame.
+    pub fn route_record_due(&mut self, destination: Nwk, for_end_device_child: bool) -> bool {
+        let Some(entry) = self.route_table.get_mut(&destination) else {
+            return false;
+        };
+
+        if entry.status != Status::Active || !entry.many_to_one {
+            return false;
+        }
+
+        if for_end_device_child {
+            return true;
+        }
+
+        let due = entry.route_record_required;
+        if !entry.no_route_cache {
+            entry.route_record_required = false;
+        }
+
+        due
+    }
+
     /// Spec 3.6.4.3.2: relaying a source-routed frame proves the concentrator that
     /// originated it holds a route record for the frame's source; no route record
     /// has to precede the next frame toward it (unless it keeps no route cache).
