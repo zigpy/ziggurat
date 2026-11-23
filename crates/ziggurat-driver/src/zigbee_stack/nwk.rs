@@ -404,44 +404,31 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let now = self.core_now();
 
         let mut core = self.core();
-        nwk_frame.nwk_header.sequence_number = core.nib.next_sequence_number();
+        let nib = &mut core.nib;
+        nwk_frame.nwk_header.sequence_number = nib.next_sequence_number();
 
+        let next_hop_policy = self.next_hop_policy(nib);
         let resolved = next_hop::resolve(
-            &core.nib.routing,
-            &core.nib.neighbors,
+            &mut nib.routing,
+            &nib.neighbors,
             &mut nwk_frame,
             &mode,
-            self.next_hop_policy(&core.nib),
+            next_hop_policy,
             now,
         );
 
         let handle = match resolved {
-            NextHop::Resolved(next_hop) => {
-                if nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Data
-                    && nwk_frame.nwk_header.source == self.state.network_address
-                    && core.nib.routing.route_record_due(destination, false)
-                {
-                    self.enqueue_route_record(
-                        &mut core,
-                        self.state.network_address,
-                        self.state.ieee_address,
-                        destination,
-                        Vec::new(),
-                        next_hop,
-                        policy.priority,
-                    );
-                }
-
-                let poll_address = Self::poll_address(&core.nib, next_hop);
-                self.enqueue_unicast_in(
-                    &mut core,
-                    Frame::nwk(nwk_frame, security),
-                    policy,
-                    confirm,
-                    next_hop,
-                    poll_address,
-                )
-            }
+            NextHop::Resolved {
+                next_hop,
+                route_record,
+            } => self.enqueue_resolved_in(
+                &mut core,
+                Frame::nwk(nwk_frame, security),
+                policy,
+                confirm,
+                next_hop,
+                route_record,
+            ),
             NextHop::NeedDiscovery => self.hold_for_route(
                 &mut core,
                 Frame::nwk(nwk_frame, security),
@@ -722,7 +709,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 ),
                 None => core
                     .sends
-                    .enqueue_unicast(unicast, self.core_now(), &self.tunables),
+                    .enqueue_unicast(unicast, None, self.core_now(), &self.tunables),
             };
         }
     }
@@ -941,115 +928,57 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         }
 
-        let next_hop_address = if let Some(source_route) = &mut nwk_frame.nwk_header.source_route {
-            // Spec 3.6.4.3.2: a source-routed frame names its own path; the relay
-            // list is followed instead of the routing table
-            let index = usize::from(source_route.relay_index);
-
-            let next_hop = if index == 0 {
-                // The final relay forwards directly to the NWK destination
-                destination
-            } else {
-                if source_route.relays.get(index) != Some(&self.state.network_address) {
-                    tracing::debug!("Dropping source routed frame not addressed through us");
-                    return;
-                }
-
-                source_route.relay_index -= 1;
-                source_route.relays[index - 1]
-            };
-
-            // Delivery to our own end device child skips the rest of the relay list
-            let next_hop = if self.end_device_child_eui64(destination).is_some() {
-                destination
-            } else {
-                next_hop
-            };
-
-            self.core()
-                .nib
-                .routing
-                .note_source_routed_frame(nwk_frame.nwk_header.source);
-
-            next_hop
-        } else if self.sends_directly_to(destination) {
-            destination
-        } else {
-            let next_hop = self.core().nib.routing.next_hop(destination);
-
-            match next_hop {
-                Some(next_hop) => next_hop,
-                // Spec 3.6.4.5.1: a relay discovers a route only for a frame from its own
-                // end device child that allows discovery. End devices do not discover
-                // routes themselves, so their parent does it for them
-                None if nwk_frame.nwk_header.frame_control.discover_route
-                    == NwkRouteDiscovery::Enable
-                    && self
-                        .end_device_child_eui64(nwk_frame.nwk_header.source)
-                        .is_some() =>
-                {
-                    let now = self.core_now();
-                    let mut core = self.core();
-                    self.hold_for_route(
-                        &mut core,
-                        Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
-                        TxPriority::UserNormal,
-                        Confirm::OnHandoff,
-                        now,
-                    );
-                    self.commit_sends(core);
-                    return;
-                }
-                // Any other frame is dropped: a relay never discovers on behalf of a
-                // router, which recovers through its own discovery or APS retries
-                None => {
-                    tracing::debug!("No active route to relay frame to {destination:?}, dropping");
-                    return;
-                }
-            }
-        };
-
-        tracing::debug!(
-            "Relaying frame from {:?} to {destination:?} via {next_hop_address:?}",
-            nwk_frame.nwk_header.source
+        let now = self.core_now();
+        let mut core = self.core();
+        let nib = &mut core.nib;
+        let policy = self.next_hop_policy(nib);
+        let resolved = next_hop::resolve(
+            &mut nib.routing,
+            &nib.neighbors,
+            &mut nwk_frame,
+            &SendMode::Relay,
+            policy,
+            now,
         );
 
-        let source = nwk_frame.nwk_header.source;
-        let child_eui64 = self.end_device_child_eui64(source);
-        let mut core = self.core();
+        let frame = Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey);
+        match resolved {
+            NextHop::Resolved {
+                next_hop,
+                route_record,
+            } => {
+                tracing::debug!("Relaying frame to {destination:?} via {next_hop:?}");
 
-        // Spec 3.6.4.5.5: a data frame from our end device child toward a concentrator
-        // is preceded by a route record for the child, starting with us
-        if let Some(child_eui64) = child_eui64
-            && nwk_frame.nwk_header.frame_control.frame_type == NwkFrameType::Data
-            && core.nib.routing.route_record_due(destination, true)
-        {
-            self.enqueue_route_record(
-                &mut core,
-                source,
-                child_eui64,
-                destination,
-                Vec::from([self.state.network_address]),
-                next_hop_address,
-                TxPriority::UserNormal,
-            );
+                // The originator's sequence number is preserved. Any failure handling
+                // (route invalidation, the network status back to the originator) follows
+                // the send table's verdict; nothing is awaited here.
+                self.enqueue_resolved_in(
+                    &mut core,
+                    frame,
+                    TxPolicy {
+                        priority: TxPriority::UserNormal,
+                        class: TrafficClass::Forwarding,
+                    },
+                    Confirm::OnHandoff,
+                    next_hop,
+                    route_record,
+                );
+            }
+            NextHop::NeedDiscovery => {
+                self.hold_for_route(
+                    &mut core,
+                    frame,
+                    TxPriority::UserNormal,
+                    Confirm::OnHandoff,
+                    now,
+                );
+            }
+            NextHop::Discard => {
+                tracing::debug!("Not relaying frame to {destination:?}, no route");
+                return;
+            }
         }
 
-        // The originator's sequence number is preserved. Any failure handling (route
-        // invalidation, the network status back to the originator) follows the send
-        // table's verdict; nothing is awaited here.
-        let poll_address = Self::poll_address(&core.nib, next_hop_address);
-        self.enqueue_unicast_in(
-            &mut core,
-            Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
-            TxPolicy {
-                priority: TxPriority::UserNormal,
-                class: TrafficClass::Forwarding,
-            },
-            Confirm::OnHandoff,
-            next_hop_address,
-            poll_address,
-        );
         self.commit_sends(core);
     }
 

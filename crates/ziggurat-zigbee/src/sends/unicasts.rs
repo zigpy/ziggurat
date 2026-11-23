@@ -29,6 +29,16 @@ pub struct Unicast<F> {
     pub poll_address: Option<Ieee802154Address>,
 }
 
+/// How a held unicast is sent once it has a route.
+#[derive(Debug)]
+pub struct Routed<F> {
+    pub next_hop: Nwk,
+    /// The address the device polls under, if the frame must wait for its poll.
+    pub poll_address: Option<Ieee802154Address>,
+    /// A frame sent first, to the same next hop.
+    pub preceded_by: Option<F>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     /// Ready for the sender.
@@ -60,6 +70,8 @@ struct Record<F> {
     deadline: Instant,
     /// The broadcast this frame copies to a sleepy child.
     copy_of: Option<SendId>,
+    /// The send that goes first: this frame is not sent while that one is in the table.
+    after: Option<SendId>,
 }
 
 impl<F> Record<F> {
@@ -120,7 +132,9 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
     /// A unicast fails if not handed off within the handoff timeout; a held frame if
     /// not polled for within the transaction persistence time. A send admitted earlier
     /// passes the deadline it was admitted with: it replaces the handoff timeout and
-    /// caps the persistence time.
+    /// caps the persistence time. A send `after` another is not sent while that one is
+    /// in the table.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
@@ -128,6 +142,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
         now: Instant,
         admitted_deadline: Option<Instant>,
         copy_of: Option<SendId>,
+        after: Option<SendId>,
         tunables: &Tunables,
     ) {
         let persistence_deadline = now + tunables.transaction_persistence_time();
@@ -150,6 +165,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
                 stage,
                 deadline,
                 copy_of,
+                after,
             },
         );
     }
@@ -159,7 +175,13 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
     pub(super) fn best_queued(&self, now: Instant) -> Option<(SendId, TxPriority)> {
         self.records
             .iter()
-            .filter(|(_, record)| record.stage == Stage::Queued && now < record.deadline)
+            .filter(|(_, record)| {
+                record.stage == Stage::Queued
+                    && now < record.deadline
+                    && record
+                        .after
+                        .is_none_or(|first| !self.records.contains_key(&first))
+            })
             .max_by_key(|(id, record)| (record.priority, Reverse(**id)))
             .map(|(id, record)| (*id, record.priority))
     }

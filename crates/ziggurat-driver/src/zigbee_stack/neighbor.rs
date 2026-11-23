@@ -67,16 +67,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn sends_directly_to(&self, destination: Nwk) -> bool {
         let now = self.core_now();
         let core = self.core();
-        let neighbors = &core.nib.neighbors;
         let policy = self.next_hop_policy(&core.nib);
 
-        neighbors.end_device_child_eui64(destination).is_some()
-            || next_hop::is_direct_neighbor(neighbors, destination, policy.direct_max_link_cost)
-            || neighbors.is_recently_attached_router_child(
-                destination,
-                now,
-                policy.new_router_child_window,
-            )
+        next_hop::reaches_directly(&core.nib.neighbors, destination, policy, now)
     }
 
     pub(super) fn sleepy_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {

@@ -36,6 +36,7 @@ mod unicasts;
 mod unrouted;
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::time::Duration;
 
@@ -51,7 +52,7 @@ use crate::nwk::routing::RouteRequestId;
 
 pub use broadcasts::{Broadcast, Schedule};
 pub use gpdfs::{Gpdf, GpdfTrigger};
-pub use unicasts::Unicast;
+pub use unicasts::{Routed, Unicast};
 pub use unrouted::UnroutedUnicast;
 
 use broadcasts::Broadcasts;
@@ -293,16 +294,49 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         self.outbox.pop_front()
     }
 
-    /// Enqueue a unicast with a known next hop.
+    /// Enqueue a unicast with a known next hop. `preceded_by` is sent first, to the same
+    /// next hop at the same priority, and the unicast waits until it is settled.
     pub fn enqueue_unicast(
         &mut self,
         unicast: Unicast<F>,
+        preceded_by: Option<F>,
+        now: Instant,
+        tunables: &Tunables,
+    ) -> SendId {
+        let first = preceded_by.map(|frame| self.enqueue_ahead(frame, &unicast, now, tunables));
+
+        let id = self.next_id();
+        self.unicasts
+            .enqueue(id, unicast, now, None, None, first, tunables);
+
+        id
+    }
+
+    /// Enqueue `frame` to go ahead of `unicast`: to the same next hop, at the same
+    /// priority.
+    fn enqueue_ahead(
+        &mut self,
+        frame: F,
+        unicast: &Unicast<F>,
         now: Instant,
         tunables: &Tunables,
     ) -> SendId {
         let id = self.next_id();
-        self.unicasts
-            .enqueue(id, unicast, now, None, None, tunables);
+        self.unicasts.enqueue(
+            id,
+            Unicast {
+                frame,
+                priority: unicast.priority,
+                confirm: Confirm::OnHandoff,
+                next_hop: unicast.next_hop,
+                poll_address: unicast.poll_address,
+            },
+            now,
+            None,
+            None,
+            None,
+            tunables,
+        );
         id
     }
 
@@ -316,7 +350,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
     ) -> SendId {
         let id = self.next_id();
         self.unicasts
-            .enqueue(id, unicast, now, None, Some(broadcast), tunables);
+            .enqueue(id, unicast, now, None, Some(broadcast), None, tunables);
         id
     }
 
@@ -496,29 +530,37 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         }
     }
 
-    /// Move every unrouted send that `next_hop` finds a next hop for.
+    /// Move every unrouted send that `route` finds a next hop for.
     fn route_unicasts(
         &mut self,
         now: Instant,
         tunables: &Tunables,
-        mut next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+        mut route: impl FnMut(&mut F) -> Option<Routed<F>>,
     ) {
         // A send without a next hop stays held
-        for (id, unrouted, (next_hop, poll_address)) in
-            self.unrouted_unicasts.take_routed(&mut next_hop)
-        {
+        let routed: Vec<_> = self.unrouted_unicasts.take_routed(&mut route).collect();
+
+        for (id, unrouted, routed) in routed {
+            let unicast = Unicast {
+                frame: unrouted.frame,
+                priority: unrouted.priority,
+                confirm: unrouted.confirm,
+                next_hop: routed.next_hop,
+                poll_address: routed.poll_address,
+            };
+
+            let first = routed
+                .preceded_by
+                .map(|frame| self.enqueue_ahead(frame, &unicast, now, tunables));
+
+            // The send keeps the deadline it was held with
             self.unicasts.enqueue(
                 id,
-                Unicast {
-                    frame: unrouted.frame,
-                    priority: unrouted.priority,
-                    confirm: unrouted.confirm,
-                    next_hop,
-                    poll_address,
-                },
+                unicast,
                 now,
                 Some(unrouted.deadline),
                 None,
+                first,
                 tunables,
             );
         }
@@ -582,13 +624,12 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         &mut self,
         now: Instant,
         tunables: &Tunables,
-        // A frame's next hop, and the address its device polls under if the frame must
-        // wait for its poll
-        next_hop: impl FnMut(&mut F) -> Option<(Nwk, Option<Ieee802154Address>)>,
+        // How a held frame is sent once it has a route, `None` while it has none
+        route: impl FnMut(&mut F) -> Option<Routed<F>>,
     ) {
         // Fail the sends past their deadline first, so routing never revives one
         self.unrouted_unicasts.tick(now, &mut self.outbox);
-        self.route_unicasts(now, tunables, next_hop);
+        self.route_unicasts(now, tunables, route);
 
         self.unicasts.tick(now, &mut self.outbox);
         self.broadcasts.tick(now, &mut self.outbox);

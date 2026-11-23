@@ -3,7 +3,7 @@ use core::cmp;
 use core::time::Duration;
 
 use alloc::vec::Vec;
-use ziggurat_ieee_802154::types::{Eui64, Nwk};
+use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
 
 use ziggurat_zigbee::nwk::commands::{
@@ -11,13 +11,14 @@ use ziggurat_zigbee::nwk::commands::{
     NwkRouteReplyCommand, NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use ziggurat_zigbee::nwk::next_hop::RouteRecord;
 
 use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
-    TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, Frame, Nib, NwkSecurityMode, SendHandle, SendMode,
+    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -433,20 +434,26 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.core().nib.is_concentrator
     }
 
-    /// Spec 3.6.4.5.5: tell a concentrator the path from `source`, ourselves or our end
-    /// device child, ahead of a data frame to it over the same next hop. `relays` is
-    /// the path so far: empty from us, our own address from a child.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn enqueue_route_record(
+    /// Spec 3.6.4.5.5: the route record that tells `concentrator` the path from us or
+    /// our end device child, sent ahead of a data frame to it.
+    pub(super) fn route_record_frame(
         &self,
-        core: &mut ZigbeeCore,
-        source: Nwk,
-        source_eui64: Eui64,
+        nib: &mut Nib,
+        record: RouteRecord,
         concentrator: Nwk,
-        relays: Vec<Nwk>,
-        next_hop: Nwk,
-        priority: TxPriority,
-    ) {
+    ) -> Frame {
+        let (source, source_eui64, relays) = match record {
+            RouteRecord::Ours => (
+                self.state.network_address,
+                self.state.ieee_address,
+                Vec::new(),
+            ),
+            // The path from our child starts with us
+            RouteRecord::Child { nwk, eui64 } => {
+                (nwk, eui64, Vec::from([self.state.network_address]))
+            }
+        };
+
         tracing::debug!("Sending a route record for {source:?} to {concentrator:?}");
 
         let frame = self
@@ -456,20 +463,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             )
             .with_source(source)
             .with_source_ieee(Some(source_eui64))
-            .with_sequence_number(core.nib.next_sequence_number());
+            .with_sequence_number(nib.next_sequence_number());
 
-        let poll_address = Self::poll_address(&core.nib, next_hop);
-        self.enqueue_unicast_in(
-            core,
-            Frame::nwk(frame, NwkSecurityMode::NetworkKey),
-            TxPolicy {
-                priority,
-                class: TrafficClass::Critical,
-            },
-            Confirm::OnHandoff,
-            next_hop,
-            poll_address,
-        );
+        Frame::nwk(frame, NwkSecurityMode::NetworkKey)
     }
 
     pub(super) fn invalidate_routes_via(&self, next_hop: Nwk) {
