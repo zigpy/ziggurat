@@ -27,8 +27,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// Send the next link status soon: a router it will newly list waits for it to
-    /// learn its cost.
+    /// learn its cost. Both callers go through here, so clearing
+    /// `hack_early_link_status_for_unknown_routers` turns every such request off.
     fn request_link_status_for_new_router(&self) {
+        if !self.tunables.hack_early_link_status_for_unknown_routers() {
+            return;
+        }
+
         // Coordinator only. Routers must not run this as it is: every router that
         // hears a new neighbor would send within the same half second, each with its
         // whole list, and most of those frames would collide.
@@ -142,9 +147,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         if outcome.link_status_answer_due {
             self.request_early_link_status();
-        } else if outcome.link_status_due
-            && self.tunables.hack_early_link_status_for_unknown_routers()
-        {
+        } else if outcome.link_status_due {
             self.request_link_status_for_new_router();
         }
 
