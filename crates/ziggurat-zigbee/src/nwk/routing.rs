@@ -85,6 +85,12 @@ pub struct TableEntry {
 }
 
 impl TableEntry {
+    /// Whether our data frames to this concentrator need a route record first. One that
+    /// keeps no route cache needs one before every frame.
+    pub fn route_record_required(&self) -> bool {
+        self.no_route_cache || self.route_record_state != RouteRecordState::Known
+    }
+
     const fn new(
         destination: Nwk,
         status: Status,
@@ -605,9 +611,7 @@ impl Routing {
             return false;
         }
 
-        for_end_device_child
-            || entry.no_route_cache
-            || entry.route_record_state != RouteRecordState::Known
+        for_end_device_child || entry.route_record_required()
     }
 
     /// `next_hop` acked our route record to `concentrator`. A concentrator that is our
