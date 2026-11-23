@@ -321,26 +321,51 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             && nwk_frame.nwk_header.destination.as_u16()
                 < BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16();
 
-        // The only unencrypted NWK frames we accept are trust center rejoin requests,
-        // and only over the radio
-        if !nwk_frame.nwk_header.frame_control.security {
-            if phy != PhyIndex::Radio {
-                tracing::debug!("Ignoring unsecured NWK frame from {phy:?}");
-                return None;
-            }
-
-            let payload = NwkPayload::from_bytes(
-                nwk_frame.nwk_header.frame_control.frame_type,
-                Nsdu::from_slice(nwk_frame.ciphertext).expect("the parser bounds the payload"),
-            );
-            self.handle_unsecured_nwk_frame(&NwkFrame {
-                nwk_header: nwk_frame.nwk_header,
-                aux_header: None,
-                payload,
-            });
+        // The only unencrypted NWK frames the radio delivers are trust center rejoin
+        // requests
+        if phy == PhyIndex::Radio && !nwk_frame.nwk_header.frame_control.security {
+            self.handle_unsecured_nwk_frame(&plaintext_nwk_frame(&nwk_frame));
             return None;
         }
 
+        // NWK frames are always relayed with 16-bit MAC addressing; anything else is
+        // malformed and dropped rather than panicking on remote input
+        let source_nwk = match data_frame.header.src_address {
+            Some(Ieee802154Address::Nwk(nwk)) => nwk,
+            _ => {
+                tracing::warn!(
+                    "Ignoring NWK frame without a 16-bit MAC source address: {:?}",
+                    data_frame.header.src_address
+                );
+                return None;
+            }
+        };
+
+        let decrypted_nwk_frame = match phy {
+            PhyIndex::Radio => self.decrypt_nwk_frame(&nwk_frame)?,
+            // A trusted link authenticated and decrypted the frame itself, and checked
+            // it for replay, so it carries no NWK security (spec 4.3.1.3)
+            PhyIndex::Secondary(_) => {
+                if nwk_frame.nwk_header.frame_control.security {
+                    tracing::debug!("Ignoring NWK-secured frame from trusted link {phy:?}");
+                    return None;
+                }
+
+                plaintext_nwk_frame(&nwk_frame)
+            }
+        };
+
+        if is_transit {
+            self.relay_unicast_nwk_frame(decrypted_nwk_frame, source_nwk, phy, lqi, rssi);
+            return None;
+        }
+
+        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, phy, lqi, rssi)
+            .then_some(decrypted_nwk_frame)
+    }
+
+    /// Spec 4.3.1.2: check and decrypt a NWK-secured frame received over the radio.
+    fn decrypt_nwk_frame(&self, nwk_frame: &EncryptedNwkFrame) -> Option<NwkFrame> {
         let aux_header = match nwk_frame.aux_header {
             None => {
                 tracing::debug!("Ignoring frame, auxiliary header is missing");
@@ -387,32 +412,13 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         tracing::trace!("Decrypted frame: {decrypted_nwk_frame:?}");
 
-        // NWK frames are always relayed with 16-bit MAC addressing; anything else is
-        // malformed and dropped rather than panicking on remote input
-        let source_nwk = match data_frame.header.src_address {
-            Some(Ieee802154Address::Nwk(nwk)) => nwk,
-            _ => {
-                tracing::warn!(
-                    "Ignoring NWK frame without a 16-bit MAC source address: {:?}",
-                    data_frame.header.src_address
-                );
-                return None;
-            }
-        };
-
         // Spec 4.3.1.2 step 8: the first NWK-secured frame from an unauthenticated
         // child authenticates it
         if self.core().nib.neighbors.note_nwk_secured_frame(src_eui64) {
             tracing::debug!("Child {src_eui64:?} sent a NWK-secured frame, now authenticated");
         }
 
-        if is_transit {
-            self.relay_unicast_nwk_frame(decrypted_nwk_frame, source_nwk, phy, lqi, rssi);
-            return None;
-        }
-
-        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, phy, lqi, rssi)
-            .then_some(decrypted_nwk_frame)
+        Some(decrypted_nwk_frame)
     }
 
     fn process_gpdf(
@@ -627,5 +633,19 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             (TxResult::ChannelAccessFailure, _) => Err(DeliveryError::CcaFailure),
             (other, _) => Err(DeliveryError::TransmitFailed(other)),
         }
+    }
+}
+
+/// A NWK frame that carries no NWK security, parsed as it is.
+fn plaintext_nwk_frame(nwk_frame: &EncryptedNwkFrame) -> NwkFrame {
+    let payload = NwkPayload::from_bytes(
+        nwk_frame.nwk_header.frame_control.frame_type,
+        Nsdu::from_slice(nwk_frame.ciphertext).expect("the parser bounds the payload"),
+    );
+
+    NwkFrame {
+        nwk_header: nwk_frame.nwk_header.clone(),
+        aux_header: None,
+        payload,
     }
 }

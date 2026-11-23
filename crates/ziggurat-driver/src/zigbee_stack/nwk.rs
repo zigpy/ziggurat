@@ -512,15 +512,27 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         self.core().nib.next_sequence_number()
     }
 
-    /// Give the frame the auxiliary header for this attempt and return the key to
-    /// encrypt it with, or `None` for a frame sent unsecured.
-    fn secure_nwk_frame(&self, nwk_frame: &mut NwkFrame, security: NwkSecurityMode) -> Option<Key> {
-        if security == NwkSecurityMode::NetworkKey {
+    /// Give the frame the auxiliary header for this attempt over `phy` and return the
+    /// key to encrypt it with, or `None` for a frame sent unsecured. A trusted link
+    /// protects what it carries itself, so a frame sent over one carries no NWK
+    /// security (spec 4.3.1.3). The frame keeps this state between attempts, which may
+    /// go over different PHYs.
+    fn secure_nwk_frame(
+        &self,
+        nwk_frame: &mut NwkFrame,
+        security: NwkSecurityMode,
+        phy: PhyIndex,
+    ) -> Option<Key> {
+        let secured = security == NwkSecurityMode::NetworkKey && phy == PhyIndex::Radio;
+        nwk_frame.nwk_header.frame_control.security = secured;
+
+        if secured {
             // The encryption frame counter always increments
             nwk_frame.aux_header = Some(self.outgoing_aux_header(self.next_nwk_frame_counter()));
 
             Some(self.core().nib.nwk_security.network_key())
         } else {
+            nwk_frame.aux_header = None;
             None
         }
     }
@@ -610,7 +622,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             .link(next_hop_address)
             .map_or(PhyIndex::Radio, |link| link.phy);
 
-        let key = self.secure_nwk_frame(nwk_frame, security);
+        let key = self.secure_nwk_frame(nwk_frame, security, phy);
         let mut ieee802154_frame = self.build_unicast_802154_data_frame(
             next_hop_address,
             OutgoingNwkFrame {
@@ -851,17 +863,52 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         self.enqueue_broadcast(frame, policy, Schedule::Once)
     }
 
-    /// Encrypt and broadcast a single copy of a frame on every PHY in `phys`, then
-    /// leave in `phys` only the PHYs that have yet to confirm it. A secondary PHY
-    /// confirms it with [`TxResult::Acked`]; the radio is confirmed by its passive-ack
-    /// quorum, which the send table tracks. The copy fails only if no PHY sent it.
+    /// Broadcast a single copy of a frame on every PHY in `phys`, then leave in `phys`
+    /// only the PHYs that have yet to confirm it. A secondary PHY confirms it with
+    /// [`TxResult::Acked`]; the radio is confirmed by its passive-ack quorum, which
+    /// the send table tracks. The copy fails only if no PHY sent it.
     pub(super) async fn transmit_broadcast(
         &self,
         nwk_frame: &mut NwkFrame,
         security: NwkSecurityMode,
         phys: &mut PhySet,
     ) -> Result<(), DeliveryError> {
-        let key = self.secure_nwk_frame(nwk_frame, security);
+        self.increment_tx_total();
+
+        let mut unconfirmed = PhySet::EMPTY;
+        let mut sent = false;
+        let mut first_error = None;
+
+        for phy in self.phys().filter(|&phy| phys.contains(phy)) {
+            match self.transmit_broadcast_on(nwk_frame, security, phy).await {
+                Ok(TxResult::Acked) if phy != PhyIndex::Radio => sent = true,
+                Ok(_) => {
+                    sent = true;
+                    unconfirmed.insert(phy);
+                }
+                Err(err) => {
+                    unconfirmed.insert(phy);
+                    first_error.get_or_insert(err);
+                }
+            }
+        }
+
+        *phys = unconfirmed;
+
+        match first_error {
+            Some(err) if !sent => Err(err),
+            _ => Ok(()),
+        }
+    }
+
+    /// Secure a frame for `phy` and broadcast one copy of it there.
+    async fn transmit_broadcast_on(
+        &self,
+        nwk_frame: &mut NwkFrame,
+        security: NwkSecurityMode,
+        phy: PhyIndex,
+    ) -> Result<TxResult, DeliveryError> {
+        let key = self.secure_nwk_frame(nwk_frame, security, phy);
 
         let (ieee802154_sequence_number, pan_id) = {
             let core = self.core();
@@ -898,32 +945,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             fcs: 0x0000, // It'll be replaced
         });
 
-        self.increment_tx_total();
-
-        let mut unconfirmed = PhySet::EMPTY;
-        let mut sent = false;
-        let mut first_error = None;
-
-        for phy in self.phys().filter(|&phy| phys.contains(phy)) {
-            match self.send_802154_frame(&mut ieee802154_frame, phy).await {
-                Ok(TxResult::Acked) if phy != PhyIndex::Radio => sent = true,
-                Ok(_) => {
-                    sent = true;
-                    unconfirmed.insert(phy);
-                }
-                Err(err) => {
-                    unconfirmed.insert(phy);
-                    first_error.get_or_insert(err);
-                }
-            }
-        }
-
-        *phys = unconfirmed;
-
-        match first_error {
-            Some(err) if !sent => Err(err),
-            _ => Ok(()),
-        }
+        self.send_802154_frame(&mut ieee802154_frame, phy).await
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.
