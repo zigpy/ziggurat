@@ -229,8 +229,8 @@ impl TableEntry {
         self.links().any(|(_, link)| link.outgoing_cost > 0)
     }
 
-    /// The cheapest link. A link with both costs known wins over one without, and
-    /// the radio wins a tie.
+    /// The cheapest link. A link with both costs known wins over one without, and a
+    /// secondary PHY wins a tie with the radio.
     pub fn best_link(&self) -> Option<NeighborLink> {
         self.links()
             .map(|(phy, link)| NeighborLink {
@@ -243,6 +243,13 @@ impl TableEntry {
                 (
                     link.outgoing_cost == 0 || link.incoming_cost == 0,
                     link.cost(),
+                    // Link cost only measures delivery, so a good radio link and a
+                    // backbone link both cost 1. The radio channel is airtime shared
+                    // with every device in range, while a secondary PHY is not, so a
+                    // tie goes to the secondary PHY: this keeps the channel free for
+                    // devices that only have the radio. Secondary PHYs tie-break by
+                    // index.
+                    link.phy == PhyIndex::Radio,
                     link.phy,
                 )
             })
