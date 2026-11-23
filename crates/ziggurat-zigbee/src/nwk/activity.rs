@@ -55,6 +55,14 @@ pub struct ActivityParams {
 pub fn take_decay_steps(decayed_at: &mut Instant, now: Instant, period: Duration) -> u16 {
     let steps_per_count = u64::from(STEPS_PER_COUNT);
     let period = u64::try_from(period.as_micros()).unwrap();
+
+    // The `link_status_period` tunable accepts zero: a count then lasts no time at all
+    if period == 0 {
+        let owed = now > *decayed_at;
+        *decayed_at = (*decayed_at).max(now);
+        return if owed { u16::MAX } else { 0 };
+    }
+
     let elapsed = now.as_micros().saturating_sub(decayed_at.as_micros());
     let steps = elapsed * steps_per_count / period;
 
@@ -112,6 +120,20 @@ mod test {
         // Half a period is half a count, and the same instant again owes nothing
         assert_eq!(take_decay_steps(&mut decayed_at, now, period), 128);
         assert_eq!(take_decay_steps(&mut decayed_at, now, period), 0);
+    }
+
+    #[test]
+    fn test_zero_period_decays_everything_without_panicking() {
+        let mut decayed_at = at(0);
+
+        assert_eq!(
+            take_decay_steps(&mut decayed_at, at(1), Duration::ZERO),
+            u16::MAX
+        );
+        assert_eq!(decayed_at, at(1));
+
+        // The same instant again owes nothing
+        assert_eq!(take_decay_steps(&mut decayed_at, at(1), Duration::ZERO), 0);
     }
 
     #[test]
