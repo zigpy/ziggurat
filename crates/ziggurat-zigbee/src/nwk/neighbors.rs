@@ -754,7 +754,9 @@ impl Neighbors {
     }
 
     /// Digest a received link status command, updating the sender's entry (creating a
-    /// sibling entry for previously unseen routers).
+    /// sibling entry for previously unseen routers). The frame's `lqi` is expected to
+    /// have gone through [`Self::record_lqa`] already, as the receive path does: it is
+    /// recorded here only for a new entry with no buffered samples.
     #[allow(clippy::too_many_arguments)]
     pub fn on_link_status(
         &mut self,
@@ -850,10 +852,15 @@ impl Neighbors {
                 security_timer: 0,
             };
 
-            // Seed with the samples buffered before the entry existed plus the current
-            // one (the receive path could not record them without an entry).
-            entry.lqas = buffered_lqas;
-            entry.lqas.push(lqi);
+            // Seed with the samples buffered before the entry existed. The receive path
+            // has already buffered this frame's LQI, so it is only added here when
+            // nothing was buffered: counting it twice would give one frame two of the
+            // window's samples.
+            if buffered_lqas.is_empty() {
+                entry.lqas.push(lqi);
+            } else {
+                entry.lqas = buffered_lqas;
+            }
 
             entry
         });
@@ -1284,6 +1291,33 @@ mod test {
         // Three samples: the median
         neighbors.record_lqa(router_nwk, 40);
         assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(40));
+    }
+
+    #[test]
+    fn test_first_link_status_counts_as_one_sample() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
+        let now = Instant::from_micros(0);
+        let mut neighbors = Neighbors::default();
+
+        // The receive path buffers the frame's LQI before the link status is digested
+        neighbors.record_lqa(router_nwk, 40);
+        neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            40,
+            &link_status_listing(own),
+            now,
+            ACTIVITY,
+        );
+
+        // The next frame makes two samples, whose average is the link quality
+        neighbors.record_lqa(router_nwk, 200);
+        assert_eq!(
+            neighbors.link(router_nwk).unwrap().incoming_cost,
+            lqi_to_link_cost(120)
+        );
     }
 
     #[test]
