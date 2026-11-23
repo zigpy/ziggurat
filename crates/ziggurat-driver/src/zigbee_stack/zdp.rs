@@ -108,8 +108,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     permit_joining: ZdpPermitJoining::Unknown,
                     // Spec Table 2-102: the neighbor's tree depth. We know only the
                     // coordinator's, the root's, and our children's, one below ours.
-                    // Other neighbors are reported as if they were our children
-                    depth: if entry.device_type == NwkDeviceType::Coordinator {
+                    // Other neighbors are reported as if they were our children. A
+                    // coordinator first heard in a link status is stored as a router,
+                    // but its address is always 0x0000
+                    depth: if entry.device_type == NwkDeviceType::Coordinator
+                        || entry.network_address == Nwk(0x0000)
+                    {
                         0
                     } else {
                         (self.state.depth + 1).min(MAX_DEPTH)
