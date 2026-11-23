@@ -29,16 +29,16 @@ pub struct Broadcasts {
 }
 
 impl Broadcasts {
-    /// Digest a received broadcast. Returns true for a known transaction, which also
-    /// records the sender's passive acknowledgment: the frame is a duplicate and must
-    /// be filtered. An unknown broadcast creates a transaction expecting passive acks
-    /// from the routers `audience` returns, and returns false: the frame is fresh and
-    /// must be processed.
+    /// Digest a received broadcast. Returns true for a known transaction: the frame is
+    /// a duplicate and must be filtered. An unknown broadcast creates a transaction
+    /// expecting passive acks from the routers `audience` returns, and returns false:
+    /// the frame is fresh and must be processed. `ack_from` is the sender when its copy
+    /// counts as a passive acknowledgment, which only a copy heard on the radio does.
     pub fn filter_received(
         &mut self,
         source: Nwk,
         sequence_number: u8,
-        sender: Nwk,
+        ack_from: Option<Nwk>,
         audience: impl FnOnce() -> Vec<Nwk>,
         now: Instant,
         delivery_time: Duration,
@@ -48,7 +48,9 @@ impl Broadcasts {
         if let Some(transaction) = self.table.get_mut(&(source, sequence_number)) {
             // Spec 3.6.6: a neighbor relaying a broadcast we know about is its
             // passive acknowledgment of that broadcast
-            transaction.heard_from.insert(sender);
+            if let Some(sender) = ack_from {
+                transaction.heard_from.insert(sender);
+            }
             return true;
         }
 
@@ -58,7 +60,7 @@ impl Broadcasts {
                 expiration_time: now + delivery_time,
                 expected_relayers: audience(),
                 // Whoever delivered the frame to us has already broadcast it
-                heard_from: FlatSet::from([sender]),
+                heard_from: ack_from.into_iter().collect(),
             },
         );
 
@@ -110,5 +112,28 @@ impl Broadcasts {
 
                 audience > 0 && heard >= audience.min(quorum)
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    const DELIVERY_TIME: Duration = Duration::from_secs(9);
+
+    #[test]
+    fn test_copy_off_the_radio_is_filtered_but_not_an_ack() {
+        let now = Instant::from_micros(0);
+        let (source, relayer) = (Nwk(0x1234), Nwk(0x5678));
+        let mut broadcasts = Broadcasts::default();
+
+        broadcasts.record_transmission(source, 1, vec![relayer], now, DELIVERY_TIME);
+
+        assert!(broadcasts.filter_received(source, 1, None, Vec::new, now, DELIVERY_TIME));
+        assert!(!broadcasts.passively_acked(source, 1, |_| true, 1));
+
+        assert!(broadcasts.filter_received(source, 1, Some(relayer), Vec::new, now, DELIVERY_TIME));
+        assert!(broadcasts.passively_acked(source, 1, |_| true, 1));
     }
 }

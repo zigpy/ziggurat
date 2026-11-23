@@ -792,8 +792,9 @@ impl Neighbors {
             .min()
     }
 
-    /// Router neighbors with a good live link, which are expected to relay our
-    /// broadcasts (passive acknowledgment, spec 3.6.6).
+    /// Router neighbors with a good live radio link, which are expected to relay our
+    /// broadcasts (passive acknowledgment, spec 3.6.6). Passive acks make up for
+    /// 802.15.4 broadcasts being unconfirmed; a secondary PHY confirms its own.
     pub fn expected_broadcast_relayers(&self, max_link_cost: u8) -> Vec<Nwk> {
         self.table
             .values()
@@ -811,7 +812,7 @@ impl Neighbors {
 
     fn relays_broadcasts(entry: &TableEntry, max_link_cost: u8) -> bool {
         entry.device_type == NwkDeviceType::Router
-            && entry.links().any(|(_, link)| {
+            && entry.link(PhyIndex::Radio).is_some_and(|link| {
                 (1..=max_link_cost).contains(&link.outgoing_cost)
                     && (1..=max_link_cost).contains(&link.incoming_cost())
             })
@@ -1908,5 +1909,40 @@ mod test {
         assert!(!neighbors.note_nwk_secured_frame(child));
         assert_eq!(neighbors.entries().count(), 1);
         assert_eq!(relationship_of(&neighbors, child), Relationship::Child);
+    }
+
+    #[test]
+    fn test_only_radio_neighbors_relay_broadcasts() {
+        let own = Nwk(0x0000);
+        let now = Instant::from_micros(0);
+        let link_status = link_status_listing(own);
+        let mut neighbors = Neighbors::default();
+
+        let backbone_router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        neighbors.on_link_status(
+            own,
+            backbone_router,
+            Nwk(0x1111),
+            PhyIndex::Secondary(0),
+            255,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
+
+        let radio_router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
+        neighbors.on_link_status(
+            own,
+            radio_router,
+            Nwk(0x2222),
+            PhyIndex::Radio,
+            255,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
+
+        assert_eq!(neighbors.expected_broadcast_relayers(3), vec![Nwk(0x2222)]);
+        assert!(!neighbors.is_expected_broadcast_relayer(Nwk(0x1111), 3));
     }
 }

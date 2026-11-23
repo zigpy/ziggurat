@@ -64,8 +64,9 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         self.commit_sends(core);
     }
 
-    /// Filter broadcast frames based on the NWK broadcast transaction table
-    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) -> bool {
+    /// Filter broadcast frames based on the NWK broadcast transaction table. Only a
+    /// copy heard on the radio is a passive acknowledgment.
+    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, phy: PhyIndex) -> bool {
         let now = self.core_now();
 
         // We cannot handle broadcasts until the network has been running for at least
@@ -84,7 +85,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         let duplicate = nib.broadcasts.filter_received(
             nwk_frame.nwk_header.source,
             nwk_frame.nwk_header.sequence_number,
-            sender_nwk,
+            (phy == PhyIndex::Radio).then_some(sender_nwk),
             || {
                 nib.neighbors
                     .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost())
@@ -233,7 +234,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             >= BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
             && !bypasses_transaction_table
         {
-            if self.filter_broadcast(nwk_frame, sender_nwk) {
+            if self.filter_broadcast(nwk_frame, sender_nwk, phy) {
                 tracing::trace!("Filtering broadcast, stopping further processing");
                 return false;
             }
