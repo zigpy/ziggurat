@@ -568,12 +568,13 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         }
     }
 
-    /// Assign the frame its MAC sequence number and hand it to one PHY.
+    /// Assign the frame its MAC sequence number and hand it to one PHY. A result that
+    /// is no failure for this frame comes back as `Ok`.
     pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
         frame: &mut Ieee802154Frame<Payload>,
         phy: PhyIndex,
-    ) -> Result<(), DeliveryError> {
+    ) -> Result<TxResult, DeliveryError> {
         self.assign_mac_sequence_number(frame);
 
         tracing::trace!("Sending 802.15.4 frame: {frame:?}");
@@ -584,7 +585,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         if self.state.hack_disable_tx {
             tracing::debug!("Not transmitting the frame, TX is disabled");
-            return Ok(());
+            return Ok(TxResult::Sent);
         }
 
         let result = match phy {
@@ -612,7 +613,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         match (result, frame.header().dest_address) {
             // A frame without an ACK request, such as a beacon or a radio broadcast,
             // cannot be confirmed: passive acks stand in for it on the radio
-            (TxResult::Acked | TxResult::Sent, _) => Ok(()),
+            (TxResult::Acked | TxResult::Sent, _) => Ok(result),
             // A secondary PHY already retried the peers that missed its broadcast, so
             // there is nothing left to retry here
             (
@@ -620,7 +621,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                 None | Some(Ieee802154Address::Nwk(Nwk(0xFFFF))),
             ) => {
                 tracing::debug!("Broadcast on {phy:?} was not confirmed by every peer: {result:?}");
-                Ok(())
+                Ok(result)
             }
             (TxResult::NoAck, Some(next_hop)) => Err(DeliveryError::NwkNoAck { next_hop }),
             (TxResult::ChannelAccessFailure, _) => Err(DeliveryError::CcaFailure),

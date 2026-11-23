@@ -291,9 +291,9 @@ pub enum Frame {
     Nwk {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        /// The PHY to send on. `None` picks one: the cheapest link to the next hop for
-        /// a unicast, every PHY for a broadcast.
-        phy: Option<PhyIndex>,
+        /// The PHYs a broadcast's next copy goes to: those that have yet to confirm it.
+        /// A unicast goes over the next hop's cheapest link instead.
+        phys: PhySet,
     },
     /// An already-finished 802.15.4 frame (a beacon, an association response),
     /// transmitted as-is but for its MAC sequence number.
@@ -301,6 +301,57 @@ pub enum Frame {
     /// A GPDF to a GPD, transmitted like `Raw` but timed from its trigger. Channel
     /// Configuration is sent on the GPD's next channel, not the operational one.
     Gpdf { frame: Ieee802154Frame, channel: u8 },
+}
+
+/// A set of PHYs: bit 0 is the radio, bit `n + 1` is secondary PHY `n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhySet(u32);
+
+impl PhySet {
+    /// The most secondary PHYs a set can hold.
+    pub const MAX_SECONDARY: usize = 31;
+
+    pub const EMPTY: Self = Self(0);
+
+    /// Every PHY the stack has.
+    pub const ALL: Self = Self(u32::MAX);
+
+    const fn bit(phy: PhyIndex) -> u32 {
+        match phy {
+            PhyIndex::Radio => 1,
+            PhyIndex::Secondary(index) => 1 << (index + 1),
+        }
+    }
+
+    pub const fn only(phy: PhyIndex) -> Self {
+        Self(Self::bit(phy))
+    }
+
+    /// Where a broadcast that came in on `arrival` is relayed. Split horizon: a
+    /// secondary PHY already delivered it to all its peers, so it is not sent back
+    /// there. The radio is not fully meshed, so relaying back onto it is the flood.
+    pub const fn relaying_from(arrival: PhyIndex) -> Self {
+        match arrival {
+            PhyIndex::Radio => Self::ALL,
+            PhyIndex::Secondary(_) => Self(Self::ALL.0 & !Self::bit(arrival)),
+        }
+    }
+
+    pub const fn contains(self, phy: PhyIndex) -> bool {
+        self.0 & Self::bit(phy) != 0
+    }
+
+    pub const fn insert(&mut self, phy: PhyIndex) {
+        self.0 |= Self::bit(phy);
+    }
+
+    pub const fn remove(&mut self, phy: PhyIndex) {
+        self.0 &= !Self::bit(phy);
+    }
+
+    pub const fn has_secondary(self) -> bool {
+        self.0 & !Self::bit(PhyIndex::Radio) != 0
+    }
 }
 
 /// What failure handling reads from a NWK frame whose unicast failed at its next hop.
@@ -323,6 +374,19 @@ impl SendFrame for Frame {
                 source_routed: nwk_frame.nwk_header.source_route.is_some(),
             }),
             Self::Raw(_) | Self::Gpdf { .. } => None,
+        }
+    }
+
+    fn awaits_confirmation(&self) -> bool {
+        match self {
+            Self::Nwk { phys, .. } => phys.has_secondary(),
+            Self::Raw(_) | Self::Gpdf { .. } => false,
+        }
+    }
+
+    fn passively_acked(&mut self) {
+        if let Self::Nwk { phys, .. } = self {
+            phys.remove(PhyIndex::Radio);
         }
     }
 }
@@ -910,6 +974,12 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         tunables: Tunables,
         spawner: R::Spawner,
     ) -> Arc<Self> {
+        assert!(
+            secondary_phys.len() <= PhySet::MAX_SECONDARY,
+            "at most {} secondary PHYs",
+            PhySet::MAX_SECONDARY
+        );
+
         let raw_frame_rx = radio.subscribe_rx();
         let secondary_rx = secondary_phys
             .iter()

@@ -9,10 +9,20 @@ use crate::gp::{GpdId, GpdfTarget};
 
 use super::*;
 
+/// A test frame that a secondary PHY has yet to confirm. The driver removes the PHY
+/// from its frame when a copy is confirmed; a test swaps the frame text instead.
+const AWAITING_SECONDARY: &str = "awaiting a secondary PHY";
+
 impl SendFrame for &'static str {
     type Failure = ();
 
     fn failure(&self) {}
+
+    fn awaits_confirmation(&self) -> bool {
+        *self == AWAITING_SECONDARY
+    }
+
+    fn passively_acked(&mut self) {}
 }
 
 type TestSends = Sends<&'static str, SendFailure>;
@@ -427,6 +437,41 @@ fn test_relayed_route_request_stops_the_costlier_relay() {
     assert!(fixture.pass(None).is_empty());
     assert!(fixture.transmit_next().is_empty());
     assert!(fixture.dequeue().is_none());
+}
+
+// A broadcast whose radio quorum is heard is not delivered while a secondary PHY has yet
+// to confirm it: the next copy goes out, and its confirmation settles the send.
+#[test]
+fn test_passive_ack_broadcast_waits_for_secondary_phy() {
+    let mut fixture = Fixture::new();
+    let key = (DESTINATION, 1);
+    let broadcast = fixture.sends.enqueue_broadcast(
+        Broadcast {
+            frame: AWAITING_SECONDARY,
+            priority: TxPriority::UserNormal,
+            schedule: Schedule::PassiveAck {
+                key,
+                copies_remaining: 3,
+                next_attempt: fixture.now,
+            },
+        },
+        fixture.now,
+        &fixture.tunables,
+    );
+
+    assert!(fixture.pass(None).is_empty());
+    let in_flight = fixture.dequeue().unwrap();
+    assert!(fixture.transmitted(in_flight).is_empty());
+
+    // The radio quorum alone does not deliver it
+    fixture.sends.deliver_broadcasts(|heard| heard == key);
+    assert!(fixture.settled().is_empty());
+
+    // The secondary PHY confirms the next copy
+    assert!(fixture.pass(None).is_empty());
+    let mut in_flight = fixture.dequeue().unwrap();
+    *in_flight.frame_mut() = "broadcast";
+    assert_eq!(fixture.transmitted(in_flight), [(broadcast, Ok(()))]);
 }
 
 // A schedule with no copies at all never reaches the air: it fails as a handoff timeout

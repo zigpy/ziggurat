@@ -17,8 +17,8 @@ use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
-    TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, PhyIndex, PhySet, SendHandle,
+    SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
@@ -109,6 +109,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         nwk_frame: &NwkFrame,
         route_request_cmd: NwkRouteRequestCommand,
         sender_nwk: Nwk,
+        arrival: PhyIndex,
     ) {
         tracing::debug!(
             "Route request command frame (sender {sender_nwk:?}): {route_request_cmd:?}"
@@ -284,8 +285,13 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         core.nib
             .routing
             .note_route_request_handled(originator, request_id);
-        let relay =
-            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        let relay = self.broadcast_route_request(
+            &mut core,
+            relayed_route_request_cmd,
+            PhySet::relaying_from(arrival),
+            attempts,
+            jitter,
+        );
         core.sends
             .route_request_relayed(originator, request_id, relay);
         self.commit_sends(core);
@@ -327,7 +333,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                     class: TrafficClass::Critical,
                 },
             },
-            None,
+            PhySet::ALL,
         )
     }
 
@@ -483,13 +489,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         };
 
         let result = self
-            .transmit_unicast(
-                &mut frame,
-                next_hop,
-                NwkSecurityMode::NetworkKey,
-                false,
-                None,
-            )
+            .transmit_unicast(&mut frame, next_hop, NwkSecurityMode::NetworkKey, false)
             .await;
 
         if result.is_err() {
@@ -598,6 +598,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         let request = self.broadcast_route_request(
             core,
             route_request_frame,
+            PhySet::ALL,
             self.tunables.initial_rreq_retries().saturating_add(1),
             Duration::ZERO,
         );

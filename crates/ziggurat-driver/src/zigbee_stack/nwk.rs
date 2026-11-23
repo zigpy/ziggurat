@@ -7,7 +7,7 @@ use crate::ziggurat_ieee_802154::{
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
-use ziggurat_phy::{Phy, RadioPhy};
+use ziggurat_phy::{Phy, RadioPhy, TxResult};
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
@@ -24,7 +24,7 @@ use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError,
-    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, PhyIndex,
+    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, PhyIndex, PhySet,
     RouteDirective, Schedule, SendHandle, SendId, SendMode, TxPolicy, TxPriority, Unicast,
     ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
@@ -111,12 +111,17 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         &self,
         core: &mut ZigbeeCore,
         nwk_frame: NwkFrame,
+        phys: PhySet,
         attempts: u8,
         initial_delay: Duration,
     ) -> SendId {
         self.enqueue_broadcast_in(
             core,
-            Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey),
+            Frame::Nwk {
+                nwk_frame,
+                security: NwkSecurityMode::NetworkKey,
+                phys,
+            },
             TxPolicy {
                 priority: TxPriority::UserNormal,
                 class: TrafficClass::Critical,
@@ -256,7 +261,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             }
 
             // A fresh broadcast is relayed onward to the rest of the mesh
-            self.maybe_relay_broadcast(nwk_frame);
+            self.maybe_relay_broadcast(nwk_frame, phy);
         }
 
         // Handle NWK commands
@@ -289,7 +294,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                     }
                 }
                 NwkCommand::RouteRequest(cmd) => {
-                    self.handle_route_request(nwk_frame, cmd.clone(), sender_nwk);
+                    self.handle_route_request(nwk_frame, cmd.clone(), sender_nwk, phy);
                 }
                 NwkCommand::RejoinRequest(cmd) => {
                     self.handle_rejoin_request(nwk_frame, cmd.clone(), true);
@@ -596,16 +601,14 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         next_hop_address: Nwk,
         security: NwkSecurityMode,
         frame_pending: bool,
-        phy: Option<PhyIndex>,
     ) -> Result<(), DeliveryError> {
         // A device we have no link to is tried over the radio
-        let phy = phy.unwrap_or_else(|| {
-            self.core()
-                .nib
-                .neighbors
-                .link(next_hop_address)
-                .map_or(PhyIndex::Radio, |link| link.phy)
-        });
+        let phy = self
+            .core()
+            .nib
+            .neighbors
+            .link(next_hop_address)
+            .map_or(PhyIndex::Radio, |link| link.phy);
 
         let key = self.secure_nwk_frame(nwk_frame, security);
         let mut ieee802154_frame = self.build_unicast_802154_data_frame(
@@ -640,7 +643,10 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         self.increment_tx_total();
 
-        let result = self.send_802154_frame(&mut ieee802154_frame, phy).await;
+        let result = self
+            .send_802154_frame(&mut ieee802154_frame, phy)
+            .await
+            .map(drop);
 
         if let Err(e) = &result {
             // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
@@ -827,13 +833,9 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         Ok(handle)
     }
 
-    /// Send a single-copy broadcast on `phy`, or every PHY: assign its sequence number
-    /// and queue one copy for the sender. The transmit result is the verdict.
-    pub(super) fn send_oneshot_broadcast(
-        &self,
-        send: Broadcast,
-        phy: Option<PhyIndex>,
-    ) -> SendHandle {
+    /// Send a single-copy broadcast on `phys`: assign its sequence number and queue one
+    /// copy for the sender. The transmit result is the verdict.
+    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast, phys: PhySet) -> SendHandle {
         let Broadcast {
             frame: mut nwk_frame,
             security,
@@ -844,17 +846,20 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         let frame = Frame::Nwk {
             nwk_frame,
             security,
-            phy,
+            phys,
         };
         self.enqueue_broadcast(frame, policy, Schedule::Once)
     }
 
-    /// Encrypt and broadcast a single copy of a frame on `phy`, or every PHY.
+    /// Encrypt and broadcast a single copy of a frame on every PHY in `phys`, then
+    /// leave in `phys` only the PHYs that have yet to confirm it. A secondary PHY
+    /// confirms it with [`TxResult::Acked`]; the radio is confirmed by its passive-ack
+    /// quorum, which the send table tracks. The copy fails only if no PHY sent it.
     pub(super) async fn transmit_broadcast(
         &self,
         nwk_frame: &mut NwkFrame,
         security: NwkSecurityMode,
-        phy: Option<PhyIndex>,
+        phys: &mut PhySet,
     ) -> Result<(), DeliveryError> {
         let key = self.secure_nwk_frame(nwk_frame, security);
 
@@ -895,20 +900,30 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         self.increment_tx_total();
 
-        if let Some(phy) = phy {
-            return self.send_802154_frame(&mut ieee802154_frame, phy).await;
+        let mut unconfirmed = PhySet::EMPTY;
+        let mut sent = false;
+        let mut first_error = None;
+
+        for phy in self.phys().filter(|&phy| phys.contains(phy)) {
+            match self.send_802154_frame(&mut ieee802154_frame, phy).await {
+                Ok(TxResult::Acked) if phy != PhyIndex::Radio => sent = true,
+                Ok(_) => {
+                    sent = true;
+                    unconfirmed.insert(phy);
+                }
+                Err(err) => {
+                    unconfirmed.insert(phy);
+                    first_error.get_or_insert(err);
+                }
+            }
         }
 
-        // The radio's outcome is the verdict; the secondary PHYs are sent to after it
-        let result = self
-            .send_802154_frame(&mut ieee802154_frame, PhyIndex::Radio)
-            .await;
+        *phys = unconfirmed;
 
-        for phy in self.phys().skip(1) {
-            self.send_802154_frame(&mut ieee802154_frame, phy).await?;
+        match first_error {
+            Some(err) if !sent => Err(err),
+            _ => Ok(()),
         }
-
-        result
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.
@@ -1155,7 +1170,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// retransmits until the passive-ack quorum is heard or attempts run out.
     // The guard is moved into `commit_sends`; the lint misses the move
     #[allow(clippy::significant_drop_tightening)]
-    fn maybe_relay_broadcast(&self, nwk_frame: &NwkFrame) {
+    fn maybe_relay_broadcast(&self, nwk_frame: &NwkFrame, arrival: PhyIndex) {
         // Broadcast NWK commands are not generically relayed: link status and leave
         // frames have a radius of 1, and route requests accumulate path cost in their
         // own relay logic
@@ -1205,7 +1220,11 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         // when we received the frame, so the timer's quorum check already covers
         // relayed broadcasts.
         self.enqueue_broadcast(
-            Frame::nwk(relayed_frame, NwkSecurityMode::NetworkKey),
+            Frame::Nwk {
+                nwk_frame: relayed_frame,
+                security: NwkSecurityMode::NetworkKey,
+                phys: PhySet::relaying_from(arrival),
+            },
             TxPolicy {
                 priority: TxPriority::UserNormal,
                 class: TrafficClass::Forwarding,

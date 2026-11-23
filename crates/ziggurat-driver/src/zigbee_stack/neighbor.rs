@@ -12,7 +12,7 @@ use ziggurat_zigbee::nwk::next_hop;
 use super::TrafficClass;
 
 use super::{
-    Broadcast, EnqueueError, NwkSecurityMode, PhyIndex, SendHandle, TxPolicy, TxPriority,
+    Broadcast, EnqueueError, NwkSecurityMode, PhyIndex, PhySet, SendHandle, TxPolicy, TxPriority,
     ZigbeeStack,
 };
 
@@ -260,7 +260,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                 },
             };
 
-            let sent = self.send_oneshot_broadcast(send, Some(phy));
+            let sent = self.send_oneshot_broadcast(send, PhySet::only(phy));
             if is_last {
                 return sent;
             }

@@ -24,7 +24,7 @@ use crate::runtime::Runtime;
 
 use super::{
     Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, GpdfTarget, Nib, NwkSecurityMode,
-    PhyIndex, RouteDirective, Schedule, SendHandle, SendId, SendMode, Transmit, TxPolicy,
+    PhyIndex, PhySet, RouteDirective, Schedule, SendHandle, SendId, SendMode, Transmit, TxPolicy,
     ZigbeeCore, ZigbeeStack,
 };
 
@@ -316,7 +316,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                 Frame::Nwk {
                     nwk_frame,
                     security,
-                    phy,
+                    ..
                 },
             ) => {
                 // Spec 3.6.4.5.5: the route record goes out before the data frame, not
@@ -325,23 +325,23 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                     self.transmit_route_record(nwk_frame, next_hop).await;
                 }
 
-                self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending, *phy)
+                self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending)
                     .await
             }
             (Transmit::Unicast { frame_pending, .. }, Frame::Raw(raw)) => {
                 raw.header_mut().frame_control.frame_pending = frame_pending;
-                self.send_802154_frame(raw, PhyIndex::Radio).await
+                self.send_802154_frame(raw, PhyIndex::Radio).await.map(drop)
             }
             (
                 Transmit::Broadcast,
                 Frame::Nwk {
                     nwk_frame,
                     security,
-                    phy,
+                    phys,
                 },
-            ) => self.transmit_broadcast(nwk_frame, *security, *phy).await,
+            ) => self.transmit_broadcast(nwk_frame, *security, phys).await,
             (Transmit::Broadcast, Frame::Raw(raw)) => {
-                self.send_802154_frame(raw, PhyIndex::Radio).await
+                self.send_802154_frame(raw, PhyIndex::Radio).await.map(drop)
             }
             (Transmit::Gpdf(trigger), Frame::Gpdf { frame, channel }) => {
                 self.transmit_gpdf(frame, *channel, trigger).await
@@ -432,7 +432,7 @@ impl Frame {
         Self::Nwk {
             nwk_frame,
             security,
-            phy: None,
+            phys: PhySet::ALL,
         }
     }
 }

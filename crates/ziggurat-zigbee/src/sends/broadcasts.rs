@@ -76,9 +76,10 @@ struct Record<F, E> {
     schedule: Schedule,
     copy: CopyState,
     handed_off: bool,
-    /// The quorum was heard before a copy was handed off: the neighbors relayed while
-    /// the copy was in the radio. The first handoff settles
-    /// the send; a broadcast is never delivered without reaching the air once.
+    /// The radio's passive-ack quorum was heard, but the send is not delivered yet:
+    /// either no copy was handed off (the neighbors relayed while the copy was in the
+    /// radio), or a secondary PHY has yet to confirm it. A broadcast is never delivered
+    /// without reaching the air once.
     quorum_heard: bool,
     /// The last copy's radio failure: the verdict if the copies run out before one is
     /// handed off. `None` then means no copy was ever sent, a handoff timeout.
@@ -224,7 +225,12 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
             Err(err) => record.last_error = Some(err),
         }
 
-        let delivered = record.quorum_heard && record.handed_off;
+        let frame = record.frame.as_mut().unwrap();
+        if record.quorum_heard {
+            frame.passively_acked();
+        }
+
+        let delivered = record.quorum_heard && record.handed_off && !frame.awaits_confirmation();
         if first_handoff {
             outbox.push_back(Action::HandedOff(id));
         }
@@ -255,8 +261,9 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
     }
 
     /// Deliver every broadcast whose passive-ack quorum `heard` says was heard: the send
-    /// is delivered once a copy was handed off. Until then (no copy handed off yet, or
-    /// one in the radio right now) the first successful report settles it instead.
+    /// is delivered once a copy was handed off and no secondary PHY awaits it. Until
+    /// then (no copy handed off yet, one in the radio right now, or a secondary PHY
+    /// unconfirmed) a later copy's report settles it instead.
     pub(super) fn deliver(
         &mut self,
         mut heard: impl FnMut((Nwk, u8)) -> bool,
@@ -270,11 +277,14 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
                 return false;
             }
 
+            record.quorum_heard = true;
             if record.copy == CopyState::Transmitting || !record.handed_off {
-                record.quorum_heard = true;
                 return false;
             }
-            true
+
+            let frame = record.frame.as_mut().unwrap();
+            frame.passively_acked();
+            !frame.awaits_confirmation()
         });
 
         for (id, record) in delivered {

@@ -206,6 +206,14 @@ pub trait SendFrame {
     type Failure: core::fmt::Debug;
 
     fn failure(&self) -> Self::Failure;
+
+    /// Whether a broadcast still waits for a PHY that confirms delivery itself, a
+    /// secondary PHY, to confirm it. Such a broadcast is not delivered yet.
+    fn awaits_confirmation(&self) -> bool;
+
+    /// The radio's passive-ack quorum was heard: later copies of the broadcast skip the
+    /// radio.
+    fn passively_acked(&mut self);
 }
 
 /// Something the driver must do because of a mutation, taken with
