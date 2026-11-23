@@ -754,7 +754,10 @@ impl Neighbors {
     }
 
     /// Digest a received link status command, updating the sender's entry (creating a
-    /// sibling entry for previously unseen routers).
+    /// sibling entry for previously unseen routers). The frame's `lqi` is expected to
+    /// have gone through [`Self::record_lqa`] already, as the receive path does: it is
+    /// recorded here only for a new entry whose sample `record_lqa` did not buffer
+    /// (nothing buffered for the address, or another neighbor holds it).
     #[allow(clippy::too_many_arguments)]
     pub fn on_link_status(
         &mut self,
@@ -784,6 +787,11 @@ impl Neighbors {
 
         // Fold any LQI samples buffered for this address before its entry existed.
         let mut buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();
+
+        // The receive path buffers the frame's LQI only while no neighbor holds the
+        // address. When one does, the sample went to that neighbor's entry, and what
+        // is buffered predates it.
+        let frame_lqi_buffered = !buffered_lqas.is_empty() && !self.has_network_address(source_nwk);
 
         // Spec 3.3.1.7: a frame carrying its source IEEE address, as every link status
         // does (3.4.8.2), SHOULD be checked against the neighbor table. A router that
@@ -850,10 +858,14 @@ impl Neighbors {
                 security_timer: 0,
             };
 
-            // Seed with the samples buffered before the entry existed plus the current
-            // one (the receive path could not record them without an entry).
+            // Seed with the samples buffered before the entry existed. This frame's LQI
+            // is added only when the receive path did not buffer it: counting it twice
+            // would give one frame two of the window's samples.
             entry.lqas = buffered_lqas;
-            entry.lqas.push(lqi);
+
+            if !frame_lqi_buffered {
+                entry.lqas.push(lqi);
+            }
 
             entry
         });
@@ -1284,6 +1296,75 @@ mod test {
         // Three samples: the median
         neighbors.record_lqa(router_nwk, 40);
         assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(40));
+    }
+
+    #[test]
+    fn test_first_link_status_counts_as_one_sample() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let (own, router_nwk) = (Nwk(0x0000), Nwk(0x1111));
+        let now = Instant::from_micros(0);
+        let mut neighbors = Neighbors::default();
+
+        // The receive path buffers the frame's LQI before the link status is digested
+        neighbors.record_lqa(router_nwk, 40);
+        neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            40,
+            &link_status_listing(own),
+            now,
+            ACTIVITY,
+        );
+
+        // The next frame makes two samples, whose average is the link quality
+        neighbors.record_lqa(router_nwk, 200);
+        assert_eq!(
+            neighbors.link(router_nwk).unwrap().incoming_cost,
+            lqi_to_link_cost(120)
+        );
+    }
+
+    #[test]
+    fn test_first_link_status_from_a_held_address_counts_its_sample() {
+        let router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        let other = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
+        let (own, contested) = (Nwk(0x0000), Nwk(0x2222));
+        let now = Instant::from_micros(0);
+        let mut neighbors = Neighbors::default();
+
+        // A sample buffered for the address before another device took it as our child
+        neighbors.record_lqa(contested, 40);
+        neighbors.upsert_child(
+            ChildDescriptor {
+                eui64: other,
+                network_address: contested,
+                device_type: NwkDeviceType::Router,
+                rx_on_when_idle: true,
+                device_timeout: None,
+                relationship: Relationship::Child,
+            },
+            now,
+            ACTIVITY,
+        );
+
+        // A new router's link status from that address: the receive path records the
+        // frame's LQI on the neighbor holding the address, not in the buffer
+        neighbors.record_lqa(contested, 200);
+        neighbors.on_link_status(
+            own,
+            router,
+            contested,
+            200,
+            &link_status_listing(own),
+            now,
+            ACTIVITY,
+        );
+
+        assert_eq!(
+            neighbors.table.get(&router).unwrap().incoming_link_cost(),
+            lqi_to_link_cost(120)
+        );
     }
 
     #[test]
