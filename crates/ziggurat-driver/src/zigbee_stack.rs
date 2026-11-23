@@ -60,11 +60,12 @@ pub use ziggurat_zigbee::nwk::broadcast_budget::{
     BroadcastAdmission, BroadcastBudget, TrafficClass,
 };
 pub use ziggurat_zigbee::nwk::broadcasts::Broadcasts;
-pub use ziggurat_zigbee::nwk::neighbors::{Neighbors, PhyIndex};
+pub use ziggurat_zigbee::nwk::neighbors::Neighbors;
 pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
 pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
+pub use ziggurat_zigbee::phy::{PhyIndex, PhySet};
 pub use ziggurat_zigbee::sends::{
     ApsAckData, Confirm, GpdfTrigger, Schedule, SendFailure, SendFrame, SendId, Sends,
     SrcMatchTable, Transmit, TxPriority,
@@ -286,14 +287,11 @@ pub struct NetworkConfig {
 /// is assigned just before it reaches the air: a frame can wait in the table for
 /// seconds, and assigning the counter at admission would let later sends reach the air
 /// with higher counters first, which the destination's replay window rejects.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Frame {
     Nwk {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
-        /// The PHYs a broadcast's next copy goes to: those that have yet to confirm it.
-        /// A unicast goes over the next hop's cheapest link instead.
-        phys: PhySet,
     },
     /// An already-finished 802.15.4 frame (a beacon, an association response),
     /// transmitted as-is but for its MAC sequence number.
@@ -301,57 +299,6 @@ pub enum Frame {
     /// A GPDF to a GPD, transmitted like `Raw` but timed from its trigger. Channel
     /// Configuration is sent on the GPD's next channel, not the operational one.
     Gpdf { frame: Ieee802154Frame, channel: u8 },
-}
-
-/// A set of PHYs: bit 0 is the radio, bit `n + 1` is secondary PHY `n`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PhySet(u32);
-
-impl PhySet {
-    /// The most secondary PHYs a set can hold.
-    pub const MAX_SECONDARY: usize = 31;
-
-    pub const EMPTY: Self = Self(0);
-
-    /// Every PHY the stack has.
-    pub const ALL: Self = Self(u32::MAX);
-
-    const fn bit(phy: PhyIndex) -> u32 {
-        match phy {
-            PhyIndex::Radio => 1,
-            PhyIndex::Secondary(index) => 1 << (index + 1),
-        }
-    }
-
-    pub const fn only(phy: PhyIndex) -> Self {
-        Self(Self::bit(phy))
-    }
-
-    /// Where a broadcast that came in on `arrival` is relayed. Split horizon: a
-    /// secondary PHY already delivered it to all its peers, so it is not sent back
-    /// there. The radio is not fully meshed, so relaying back onto it is the flood.
-    pub const fn relaying_from(arrival: PhyIndex) -> Self {
-        match arrival {
-            PhyIndex::Radio => Self::ALL,
-            PhyIndex::Secondary(_) => Self(Self::ALL.0 & !Self::bit(arrival)),
-        }
-    }
-
-    pub const fn contains(self, phy: PhyIndex) -> bool {
-        self.0 & Self::bit(phy) != 0
-    }
-
-    pub const fn insert(&mut self, phy: PhyIndex) {
-        self.0 |= Self::bit(phy);
-    }
-
-    pub const fn remove(&mut self, phy: PhyIndex) {
-        self.0 &= !Self::bit(phy);
-    }
-
-    pub const fn has_secondary(self) -> bool {
-        self.0 & !Self::bit(PhyIndex::Radio) != 0
-    }
 }
 
 /// What failure handling reads from a NWK frame whose unicast failed at its next hop.
@@ -374,19 +321,6 @@ impl SendFrame for Frame {
                 source_routed: nwk_frame.nwk_header.source_route.is_some(),
             }),
             Self::Raw(_) | Self::Gpdf { .. } => None,
-        }
-    }
-
-    fn awaits_confirmation(&self) -> bool {
-        match self {
-            Self::Nwk { phys, .. } => phys.has_secondary(),
-            Self::Raw(_) | Self::Gpdf { .. } => false,
-        }
-    }
-
-    fn passively_acked(&mut self) {
-        if let Self::Nwk { phys, .. } = self {
-            phys.remove(PhyIndex::Radio);
         }
     }
 }
@@ -867,8 +801,9 @@ pub struct ZigbeeStack<P: RadioPhy, S: Phy, R: Runtime> {
     /// so a host broadcast flood cannot starve stack-critical broadcasts.
     pub(crate) broadcast_budget: Mutex<BroadcastBudget>,
 
-    /// Wakes the sender task when a frame may have become ready to transmit.
-    pub(crate) send_wake: Notify,
+    /// Wakes each PHY's sender task when a frame may have become ready to transmit,
+    /// the radio's first.
+    pub(crate) send_wakes: Vec<Notify>,
     /// Wakes the send timer task when the send table's next deadline may have moved.
     pub(crate) send_timer_wake: Notify,
     /// The verdicts of the sends someone holds a handle to.
@@ -987,6 +922,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             .map(|phy| phy.subscribe_rx())
             .collect();
         let reset_rx = radio.subscribe_reset();
+        let send_wakes = (0..=secondary_phys.len()).map(|_| Notify::new()).collect();
 
         let initial_broadcast_tokens = tunables.broadcast_budget_tokens();
 
@@ -1020,7 +956,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             maintenance_wake: Notify::new(),
             tasklets: tasklets::Tasklets::default(),
             broadcast_budget: Mutex::new(BroadcastBudget::new(initial_broadcast_tokens)),
-            send_wake: Notify::new(),
+            send_wakes,
             send_watches: Arc::new(SendWatches::default()),
             send_timer_wake: Notify::new(),
             spawner,
@@ -1230,12 +1166,26 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         }
     }
 
-    /// The radio, then every secondary PHY.
-    pub(crate) fn phys(&self) -> impl Iterator<Item = PhyIndex> {
-        let secondary = (0..self.secondary_phys.len())
-            .map(|index| PhyIndex::Secondary(u8::try_from(index).expect("at most 255 PHYs")));
+    /// The radio and every secondary PHY.
+    pub(crate) const fn all_phys(&self) -> PhySet {
+        PhySet::radio_and_secondary(self.secondary_phys.len())
+    }
 
-        core::iter::once(PhyIndex::Radio).chain(secondary)
+    /// Where a broadcast that came in on `arrival` is relayed. Split horizon: a
+    /// secondary PHY already delivered it to all its peers, so it is not sent back
+    /// there. The radio is not fully meshed, so relaying back onto it is the flood.
+    pub(crate) const fn relay_phys(&self, arrival: PhyIndex) -> PhySet {
+        match arrival {
+            PhyIndex::Radio => self.all_phys(),
+            PhyIndex::Secondary(_) => self.all_phys().without(arrival),
+        }
+    }
+
+    /// Wake every PHY's sender: a frame may have become ready for any of them.
+    pub(crate) fn wake_senders(&self) {
+        for wake in &self.send_wakes {
+            wake.notify_one();
+        }
     }
 
     /// The next frame from any PHY. The radio is polled first.
@@ -1279,12 +1229,14 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         self.reset_radio().await?;
         self.apply_radio_configuration().await?;
 
-        // The single sender task drains the transmit queue; it must run before anything
-        // enqueues a frame (the initial link status broadcast below would otherwise
-        // block on a completion nobody resolves).
-        self.spawn_tracked(|arc_self| async move {
-            arc_self.sender_task().await;
-        });
+        // Each PHY's sender task drains its transmit queue; they must run before
+        // anything enqueues a frame (the initial link status broadcast below would
+        // otherwise block on a completion nobody resolves).
+        for phy in self.all_phys().iter() {
+            self.spawn_tracked(move |arc_self| async move {
+                arc_self.sender_task(phy).await;
+            });
+        }
 
         // Drives everything in the send table that waits on time: route discoveries,
         // unicast retries, broadcast retransmissions, and every send's deadline. Must

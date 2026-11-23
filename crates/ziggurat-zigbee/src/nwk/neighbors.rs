@@ -6,6 +6,7 @@ use crate::Instant;
 use crate::nwk::activity::{Activity, ActivityParams, take_decay_steps};
 use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
 use crate::nwk::frame::NwkHeader;
+use crate::phy::PhyIndex;
 use crate::ring_buffer::RingBuffer;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
@@ -51,14 +52,6 @@ impl LqaSamples {
             Some(((sorted[middle - 1] as u16 + sorted[middle] as u16) / 2) as u8)
         }
     }
-}
-
-/// The PHY a frame came in on or goes out on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PhyIndex {
-    Radio,
-    /// An index into the driver's secondary PHYs
-    Secondary(u8),
 }
 
 /// Compute the link cost (1-7) based on the LQI (0-255).

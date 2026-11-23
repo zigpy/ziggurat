@@ -15,9 +15,9 @@
 //! - [`Gpdfs`](gpdfs::Gpdfs): a Green Power frame held until its GPD listens, then sent
 //!   at a set time after the GPDF that said so.
 //!
-//! [`Sends`] fronts the four with one id space: the sender dequeues the highest
-//! priority ready frame across them, and a cancel or a transmit report is routed to the
-//! table holding the id.
+//! [`Sends`] fronts the four with one id space: each PHY's sender dequeues the highest
+//! priority frame ready for that PHY across them, and a cancel or a transmit report is
+//! routed to the table holding the id.
 //!
 //! The tables never read a clock and never notify anyone: `now` is passed in, and every
 //! mutation queues the [`Action`]s the driver must carry out, for the driver to take
@@ -48,6 +48,7 @@ use crate::constants::Tunables;
 use crate::flat_map::{FlatMap, FlatSet};
 use crate::gp::GpdfTarget;
 use crate::nwk::routing::RouteRequestId;
+use crate::phy::PhyIndex;
 
 pub use broadcasts::{Broadcast, Schedule};
 pub use gpdfs::{Gpdf, GpdfTrigger};
@@ -160,6 +161,16 @@ pub enum Confirm {
     ApsAck { ack: ApsAckData, wait: Duration },
 }
 
+/// What a transmitted copy is known to have reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Every receiver it was addressed to confirmed it. The radio never confirms a
+    /// broadcast: its passive-ack quorum does.
+    Confirmed,
+    /// It went out, but nothing confirmed it.
+    Unconfirmed,
+}
+
 /// How the sender transmits a dequeued frame.
 #[derive(Debug, Clone, Copy)]
 pub enum Transmit {
@@ -175,18 +186,19 @@ pub enum Transmit {
     Gpdf(GpdfTrigger),
 }
 
-/// A send on loan to the radio.
+/// A send on loan to a PHY.
 ///
-/// Its frame left the record with the sender, which transmits it and hands it back,
-/// with the result, through `transmitted`. Only `dequeue` issues one and only
-/// `transmitted` consumes one, so a frame handed to the radio always comes back,
-/// reported on.
-#[must_use = "a dequeued send stays in the radio until it is reported through `transmitted`"]
+/// Its frame left the record with the PHY's sender, which transmits it and hands it
+/// back, with the result, through `transmitted`. Only `dequeue` issues one and only
+/// `transmitted` consumes one, so a frame handed to a PHY always comes back, reported
+/// on.
+#[must_use = "a dequeued send stays in its PHY until it is reported through `transmitted`"]
 #[derive(Debug)]
 pub struct InFlight<F> {
     id: SendId,
     frame: F,
     transmit: Transmit,
+    phy: PhyIndex,
 }
 
 impl<F> InFlight<F> {
@@ -197,6 +209,10 @@ impl<F> InFlight<F> {
     pub const fn transmit(&self) -> Transmit {
         self.transmit
     }
+
+    pub const fn phy(&self) -> PhyIndex {
+        self.phy
+    }
 }
 
 /// A frame the send tables hold.
@@ -206,14 +222,6 @@ pub trait SendFrame {
     type Failure: core::fmt::Debug;
 
     fn failure(&self) -> Self::Failure;
-
-    /// Whether a broadcast still waits for a PHY that confirms delivery itself, a
-    /// secondary PHY, to confirm it. Such a broadcast is not delivered yet.
-    fn awaits_confirmation(&self) -> bool;
-
-    /// The radio's passive-ack quorum was heard: later copies of the broadcast skip the
-    /// radio.
-    fn passively_acked(&mut self);
 }
 
 /// Something the driver must do because of a mutation, taken with
@@ -349,7 +357,10 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
         broadcast: Broadcast<F>,
         now: Instant,
         tunables: &Tunables,
-    ) -> SendId {
+    ) -> SendId
+    where
+        F: Clone,
+    {
         let id = self.next_id();
         self.broadcasts.enqueue(id, broadcast, now, tunables);
         id
@@ -376,10 +387,19 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
             .triggered(target, trigger, now, accept, &mut self.outbox);
     }
 
-    /// Lend the highest-priority queued frame (oldest first within a priority) to the
-    /// sender, which must hand it back through `transmitted`. A frame past its deadline
-    /// is never lent: once in the radio its deadline no longer applies.
-    pub fn dequeue(&mut self, now: Instant) -> Option<InFlight<F>> {
+    /// Lend the highest-priority frame queued for `phy` (oldest first within a
+    /// priority) to its sender, which must hand it back through `transmitted`. A frame
+    /// past its deadline is never lent: once in a PHY its deadline no longer applies.
+    ///
+    /// `unicast_phy` picks the PHY for a unicast's next attempt, from its frame and
+    /// next hop. A frame held for a sleepy child's poll goes over the radio, as do
+    /// GPDFs.
+    pub fn dequeue(
+        &mut self,
+        now: Instant,
+        phy: PhyIndex,
+        unicast_phy: impl FnMut(&F, Nwk) -> PhyIndex,
+    ) -> Option<InFlight<F>> {
         #[derive(Clone, Copy)]
         enum Table {
             Unicasts,
@@ -389,15 +409,16 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
 
         let unicast = self
             .unicasts
-            .best_queued(now)
+            .best_queued(now, phy, unicast_phy)
             .map(|(id, priority)| (id, priority, Table::Unicasts));
         let broadcast = self
             .broadcasts
-            .best_queued(now)
+            .best_queued(now, phy)
             .map(|(id, priority)| (id, priority, Table::Broadcasts));
         let gpdf = self
             .gpdfs
             .best_queued(now)
+            .filter(|_| phy == PhyIndex::Radio)
             .map(|(id, priority)| (id, priority, Table::Gpdfs));
 
         // Higher priority first; between equal priorities the older send (lower id)
@@ -407,8 +428,8 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
             .max_by_key(|(id, priority, _)| (*priority, Reverse(*id)))?;
 
         Some(match table {
-            Table::Unicasts => self.unicasts.dequeue(id),
-            Table::Broadcasts => self.broadcasts.dequeue(id),
+            Table::Unicasts => self.unicasts.dequeue(id, phy),
+            Table::Broadcasts => self.broadcasts.dequeue(id, phy),
             Table::Gpdfs => self.gpdfs.dequeue(id),
         })
     }
@@ -420,7 +441,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
     pub fn transmitted(
         &mut self,
         in_flight: InFlight<F>,
-        result: Result<(), TransmitError<E>>,
+        result: Result<Delivery, TransmitError<E>>,
         now: Instant,
         retry_delay: Duration,
         passive_ack_interval: Duration,
@@ -429,17 +450,25 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
             id,
             frame,
             transmit,
+            phy,
         } = in_flight;
 
         // Each kind of transmit only ever comes from its own table
         match transmit {
             Transmit::Unicast { .. } => {
-                self.unicasts
-                    .transmitted(id, frame, result, now, retry_delay, &mut self.outbox);
+                self.unicasts.transmitted(
+                    id,
+                    frame,
+                    result.map(drop),
+                    now,
+                    retry_delay,
+                    &mut self.outbox,
+                );
             }
             Transmit::Broadcast => {
                 self.broadcasts.transmitted(
                     id,
+                    phy,
                     frame,
                     result,
                     now,
@@ -449,7 +478,7 @@ impl<F: SendFrame, E: From<SendFailure>> Sends<F, E> {
             }
             Transmit::Gpdf(_) => {
                 self.gpdfs
-                    .transmitted(id, frame, result, now, &mut self.outbox);
+                    .transmitted(id, frame, result.map(drop), now, &mut self.outbox);
             }
         }
     }

@@ -1,10 +1,17 @@
 //! Broadcasts: a frame sent once, or rebroadcast on a schedule (spec 3.6.6).
 //!
-//! The record's frame is the only copy: a retransmission queues the record itself, so
-//! settling the record drops every copy still to come, and at most one copy is ever
+//! A broadcast goes out on a set of PHYs, each through its own lane: a copy of the
+//! frame with its own schedule, so that a slow PHY never holds up the others. The
+//! radio's lane is done once its passive-ack quorum is heard, a secondary PHY's once
+//! the PHY confirms a copy, and any lane once its schedule runs out. The send is over
+//! when every lane is done.
+//!
+//! A lane's frame is its only copy: a retransmission queues the lane itself, so
+//! settling the record drops every copy still to come, and a lane has at most one copy
 //! outstanding. Every copy, the first included, is queued by the tick its schedule
 //! makes it due on; only a `Once` schedule queues its copy at admission.
 
+use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::marker::PhantomData;
 use core::time::Duration;
@@ -14,12 +21,14 @@ use ziggurat_ieee_802154::types::Nwk;
 use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
+use crate::phy::{PhyIndex, PhySet};
 
 use super::{
-    Action, InFlight, Outbox, SendFailure, SendFrame, SendId, Transmit, TransmitError, TxPriority,
+    Action, Delivery, InFlight, Outbox, SendFailure, SendFrame, SendId, Transmit, TransmitError,
+    TxPriority,
 };
 
-/// How a broadcast is retransmitted and when it is done.
+/// How a broadcast is retransmitted on each of its PHYs and when it is done.
 ///
 /// `next_attempt` is when the next copy is due. It is re-armed when a copy's transmit
 /// completes, so the interval between copies is measured on the air, not from when the
@@ -43,12 +52,64 @@ pub enum Schedule {
     },
 }
 
+impl Schedule {
+    const fn next_attempt(&self) -> Option<Instant> {
+        match self {
+            Self::Once => None,
+            Self::PassiveAck { next_attempt, .. } | Self::FixedInterval { next_attempt, .. } => {
+                Some(*next_attempt)
+            }
+        }
+    }
+
+    /// Send no copy after the one in flight.
+    const fn stop(&mut self) {
+        match self {
+            Self::Once => {}
+            Self::PassiveAck {
+                copies_remaining, ..
+            }
+            | Self::FixedInterval {
+                copies_remaining, ..
+            } => *copies_remaining = 0,
+        }
+    }
+
+    /// Consume the next copy if it is due. `None` means nothing is due.
+    fn due(&mut self, now: Instant) -> Option<Due> {
+        match self {
+            Self::Once => None,
+            Self::PassiveAck {
+                copies_remaining,
+                next_attempt,
+                ..
+            }
+            | Self::FixedInterval {
+                copies_remaining,
+                next_attempt,
+                ..
+            } => {
+                if *next_attempt > now {
+                    return None;
+                }
+                if *copies_remaining == 0 {
+                    return Some(Due::Over);
+                }
+                *copies_remaining -= 1;
+                Some(Due::Copy)
+            }
+        }
+    }
+}
+
 /// What a broadcast is enqueued with.
 #[derive(Debug)]
 pub struct Broadcast<F> {
     pub frame: F,
     pub priority: TxPriority,
     pub schedule: Schedule,
+    /// The PHYs the broadcast goes out on, each with the whole schedule
+    pub phys: PhySet,
 }
 
 /// What a tick finds a schedule's next copy to be.
@@ -63,48 +124,120 @@ enum Due {
 enum CopyState {
     Idle,
     Queued,
-    /// The sender holds an encrypted copy and is waiting on the radio. A record in this
+    /// The PHY's sender holds a secured copy and is waiting on the PHY. A lane in this
     /// state is never settled from outside: `transmitted` always finds it.
     Transmitting,
 }
 
+/// A broadcast's copies on one PHY.
 #[derive(Debug)]
-struct Record<F, E> {
-    /// `None` exactly while a copy is on loan to the radio (`CopyState::Transmitting`).
+struct Lane<F> {
+    phy: PhyIndex,
+    /// `None` exactly while a copy is on loan to the PHY (`CopyState::Transmitting`).
     frame: Option<F>,
-    priority: TxPriority,
     schedule: Schedule,
     copy: CopyState,
+    /// A copy went out on this PHY.
     handed_off: bool,
-    /// The radio's passive-ack quorum was heard, but the send is not delivered yet:
-    /// either no copy was handed off (the neighbors relayed while the copy was in the
-    /// radio), or a secondary PHY has yet to confirm it. A broadcast is never delivered
-    /// without reaching the air once.
+    /// The radio's passive-ack quorum was heard. It confirms the lane once a copy went
+    /// out: a broadcast is never delivered without reaching the air once.
     quorum_heard: bool,
-    /// The last copy's radio failure: the verdict if the copies run out before one is
+    /// The PHY has the broadcast: no copy follows.
+    confirmed: bool,
+    /// The schedule has no copy left.
+    exhausted: bool,
+}
+
+impl<F> Lane<F> {
+    /// Whether the lane sends no further copy.
+    const fn done(&self) -> bool {
+        self.confirmed || self.exhausted
+    }
+
+    /// Whether the lane is done and has no copy left to report.
+    fn over(&self) -> bool {
+        self.done() && self.copy != CopyState::Transmitting
+    }
+
+    fn next_wake(&self, deadline: Instant) -> Option<Instant> {
+        if self.done() {
+            return None;
+        }
+
+        match self.copy {
+            CopyState::Transmitting => None,
+            CopyState::Queued => Some(deadline),
+            CopyState::Idle => Some(
+                self.schedule
+                    .next_attempt()
+                    .unwrap_or(deadline)
+                    .min(deadline),
+            ),
+        }
+    }
+
+    /// No copy follows: a queued one is dropped, one in flight still reports.
+    fn finish(&mut self) {
+        self.exhausted = true;
+        if self.copy == CopyState::Queued {
+            self.copy = CopyState::Idle;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Record<F, E> {
+    lanes: Vec<Lane<F>>,
+    priority: TxPriority,
+    /// A copy went out on some PHY.
+    handed_off: bool,
+    /// The last copy's failure: the verdict if the copies run out before one is
     /// handed off. `None` then means no copy was ever sent, a handoff timeout.
     last_error: Option<E>,
+    /// A copy can never be transmitted: the verdict once no copy is in flight.
+    rejected: Option<E>,
     deadline: Instant,
 }
 
-impl<F, E> Record<F, E> {
-    const fn next_attempt(&self) -> Option<Instant> {
-        match self.schedule {
-            Schedule::Once => None,
-            Schedule::PassiveAck { next_attempt, .. }
-            | Schedule::FixedInterval { next_attempt, .. } => Some(next_attempt),
+impl<F, E: From<SendFailure>> Record<F, E> {
+    fn lane_mut(&mut self, phy: PhyIndex) -> &mut Lane<F> {
+        self.lanes
+            .iter_mut()
+            .find(|lane| lane.phy == phy)
+            .expect("a copy only comes from one of the broadcast's PHYs")
+    }
+
+    fn transmitting(&self) -> bool {
+        self.lanes
+            .iter()
+            .any(|lane| lane.copy == CopyState::Transmitting)
+    }
+
+    fn over(&self) -> bool {
+        self.lanes.iter().all(Lane::over)
+    }
+
+    /// The verdict of a record that is over.
+    fn verdict(&mut self) -> Result<(), E> {
+        if let Some(err) = self.rejected.take() {
+            Err(err)
+        } else if self.handed_off {
+            Ok(())
+        } else {
+            // A schedule that started with no copies has no failure to report: no copy
+            // ever reached a PHY
+            Err(self
+                .last_error
+                .take()
+                .unwrap_or_else(|| SendFailure::HandoffTimeout.into()))
         }
     }
 
     fn next_wake(&self) -> Option<Instant> {
-        match self.copy {
-            CopyState::Transmitting => None,
-            CopyState::Queued => Some(self.deadline),
-            CopyState::Idle => {
-                let next_attempt = self.next_attempt().unwrap_or(self.deadline);
-                Some(next_attempt.min(self.deadline))
-            }
-        }
+        self.lanes
+            .iter()
+            .filter_map(|lane| lane.next_wake(self.deadline))
+            .min()
     }
 }
 
@@ -131,53 +264,79 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
         broadcast: Broadcast<F>,
         now: Instant,
         tunables: &Tunables,
-    ) {
+    ) where
+        F: Clone,
+    {
+        let copy = match broadcast.schedule {
+            Schedule::Once => CopyState::Queued,
+            Schedule::PassiveAck { .. } | Schedule::FixedInterval { .. } => CopyState::Idle,
+        };
+
+        let lanes = broadcast
+            .phys
+            .iter()
+            .map(|phy| Lane {
+                phy,
+                frame: Some(broadcast.frame.clone()),
+                schedule: broadcast.schedule,
+                copy,
+                handed_off: false,
+                quorum_heard: false,
+                confirmed: false,
+                exhausted: false,
+            })
+            .collect();
+
         self.records.insert(
             id,
             Record {
-                frame: Some(broadcast.frame),
+                lanes,
                 priority: broadcast.priority,
-                schedule: broadcast.schedule,
-                copy: match broadcast.schedule {
-                    Schedule::Once => CopyState::Queued,
-                    Schedule::PassiveAck { .. } | Schedule::FixedInterval { .. } => CopyState::Idle,
-                },
                 handed_off: false,
-                quorum_heard: false,
                 last_error: None,
+                rejected: None,
                 deadline: now + tunables.handoff_timeout(),
             },
         );
     }
 
-    /// The highest-priority queued copy, oldest first within a priority. A send past its
-    /// deadline is left for `tick` to fail.
-    pub(super) fn best_queued(&self, now: Instant) -> Option<(SendId, TxPriority)> {
+    /// The highest-priority copy queued for `phy`, oldest first within a priority. A
+    /// send past its deadline is left for `tick` to fail.
+    pub(super) fn best_queued(&self, now: Instant, phy: PhyIndex) -> Option<(SendId, TxPriority)> {
         self.records
             .iter()
-            .filter(|(_, record)| record.copy == CopyState::Queued && now < record.deadline)
+            .filter(|(_, record)| {
+                now < record.deadline
+                    && record
+                        .lanes
+                        .iter()
+                        .any(|lane| lane.phy == phy && lane.copy == CopyState::Queued)
+            })
             .max_by_key(|(id, record)| (record.priority, Reverse(**id)))
             .map(|(id, record)| (*id, record.priority))
     }
 
-    pub(super) fn dequeue(&mut self, id: SendId) -> InFlight<F> {
-        let record = self.records.get_mut(&id).unwrap();
-        debug_assert_eq!(record.copy, CopyState::Queued);
-        record.copy = CopyState::Transmitting;
+    pub(super) fn dequeue(&mut self, id: SendId, phy: PhyIndex) -> InFlight<F> {
+        let lane = self.records.get_mut(&id).unwrap().lane_mut(phy);
+        debug_assert_eq!(lane.copy, CopyState::Queued);
+        lane.copy = CopyState::Transmitting;
 
         InFlight {
             id,
-            frame: record.frame.take().unwrap(),
+            frame: lane.frame.take().unwrap(),
             transmit: Transmit::Broadcast,
+            phy,
         }
     }
 
     /// `passive_ack_interval` spaces the next passive-ack copy from this one.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn transmitted(
         &mut self,
         id: SendId,
+        phy: PhyIndex,
         frame: F,
-        result: Result<(), TransmitError<E>>,
+        result: Result<Delivery, TransmitError<E>>,
         now: Instant,
         passive_ack_interval: Duration,
         outbox: &mut Outbox<F, E>,
@@ -186,25 +345,14 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
             .records
             .get_mut(&id)
             .expect("a transmitting send is never settled from outside");
-        debug_assert_eq!(record.copy, CopyState::Transmitting);
-        record.copy = CopyState::Idle;
-        record.frame = Some(frame);
 
-        let result = match result {
-            Ok(()) => Ok(()),
-            Err(TransmitError::Failed(err)) => Err(err),
-            // No later copy can succeed either
-            Err(TransmitError::Rejected(err)) => {
-                self.settle(id, Err(err), outbox);
-                return;
-            }
-        };
+        let lane = record.lane_mut(phy);
+        debug_assert_eq!(lane.copy, CopyState::Transmitting);
+        lane.copy = CopyState::Idle;
+        lane.frame = Some(frame);
 
-        match &mut record.schedule {
-            Schedule::Once => {
-                self.settle(id, result, outbox);
-                return;
-            }
+        match &mut lane.schedule {
+            Schedule::Once => lane.exhausted = true,
             Schedule::PassiveAck { next_attempt, .. } => {
                 *next_attempt = now + passive_ack_interval;
             }
@@ -217,42 +365,46 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
             }
         }
 
-        // A lost copy is not terminal: the schedule retransmits. The first copy on air
-        // is the handoff.
-        let first_handoff = result.is_ok() && !record.handed_off;
+        // A lost copy is not terminal: the schedule retransmits
         match result {
-            Ok(()) => record.handed_off = true,
-            Err(err) => record.last_error = Some(err),
+            Ok(delivery) => {
+                lane.handed_off = true;
+
+                // Only a secondary PHY confirms what it delivered; on the radio, the
+                // passive-ack quorum does
+                if (phy != PhyIndex::Radio && delivery == Delivery::Confirmed) || lane.quorum_heard
+                {
+                    lane.confirmed = true;
+                }
+
+                // The first copy on air is the handoff
+                if !record.handed_off {
+                    record.handed_off = true;
+                    outbox.push_back(Action::HandedOff(id));
+                }
+            }
+            Err(TransmitError::Failed(err)) => record.last_error = Some(err),
+            // No later copy can succeed either, on any PHY
+            Err(TransmitError::Rejected(err)) => {
+                record.rejected = Some(err);
+                record.lanes.iter_mut().for_each(Lane::finish);
+            }
         }
 
-        let frame = record.frame.as_mut().unwrap();
-        if record.quorum_heard {
-            frame.passively_acked();
-        }
-
-        let delivered = record.quorum_heard && record.handed_off && !frame.awaits_confirmation();
-        if first_handoff {
-            outbox.push_back(Action::HandedOff(id));
-        }
-        if delivered {
-            self.settle(id, Ok(()), outbox);
+        if record.over() {
+            self.settle(id, outbox);
         }
     }
 
-    /// Remove a record and report its verdict.
-    fn settle(&mut self, id: SendId, result: Result<(), E>, outbox: &mut Outbox<F, E>) {
-        let record = self.records.remove(&id).unwrap();
-        Self::settled(id, record, result, outbox);
+    /// Remove a record that is over and report its verdict.
+    fn settle(&mut self, id: SendId, outbox: &mut Outbox<F, E>) {
+        let mut record = self.records.remove(&id).unwrap();
+        let result = record.verdict();
+        Self::settled(id, result, outbox);
     }
 
     /// Report the verdict of a record removed from the table.
-    fn settled(id: SendId, record: Record<F, E>, result: Result<(), E>, outbox: &mut Outbox<F, E>) {
-        drop(
-            record
-                .frame
-                .expect("a transmitting send is never settled from outside"),
-        );
-
+    fn settled(id: SendId, result: Result<(), E>, outbox: &mut Outbox<F, E>) {
         outbox.push_back(Action::Settled {
             id,
             result,
@@ -260,40 +412,46 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
         });
     }
 
-    /// Deliver every broadcast whose passive-ack quorum `heard` says was heard: the send
-    /// is delivered once a copy was handed off and no secondary PHY awaits it. Until
-    /// then (no copy handed off yet, one in the radio right now, or a secondary PHY
-    /// unconfirmed) a later copy's report settles it instead.
+    /// Confirm the radio's copies of every broadcast whose passive-ack quorum `heard`
+    /// says was heard. The send is delivered once every PHY is done. A quorum heard
+    /// before the radio's first copy went out confirms the radio when it does.
     pub(super) fn deliver(
         &mut self,
         mut heard: impl FnMut((Nwk, u8)) -> bool,
         outbox: &mut Outbox<F, E>,
     ) {
-        let delivered = self.records.extract_if(|_, record| {
-            let Schedule::PassiveAck { key, .. } = record.schedule else {
-                return false;
+        for record in self.records.values_mut() {
+            let Some(lane) = record
+                .lanes
+                .iter_mut()
+                .find(|lane| lane.phy == PhyIndex::Radio)
+            else {
+                continue;
             };
-            if record.quorum_heard || !heard(key) {
-                return false;
+            let Schedule::PassiveAck { key, .. } = lane.schedule else {
+                continue;
+            };
+            if lane.quorum_heard || !heard(key) {
+                continue;
             }
 
-            record.quorum_heard = true;
-            if record.copy == CopyState::Transmitting || !record.handed_off {
-                return false;
+            lane.quorum_heard = true;
+            if lane.handed_off {
+                lane.confirmed = true;
+                if lane.copy == CopyState::Queued {
+                    lane.copy = CopyState::Idle;
+                }
             }
+        }
 
-            let frame = record.frame.as_mut().unwrap();
-            frame.passively_acked();
-            !frame.awaits_confirmation()
-        });
-
-        for (id, record) in delivered {
-            Self::settled(id, record, Ok(()), outbox);
+        let delivered = self.records.extract_if(|_, record| record.over());
+        for (id, mut record) in delivered {
+            Self::settled(id, record.verdict(), outbox);
         }
     }
 
-    /// Settle every record as cancelled: the stack is shutting down and no copy, in the
-    /// radio or not, is ever reported on again.
+    /// Settle every record as cancelled: the stack is shutting down and no copy, in a
+    /// PHY or not, is ever reported on again.
     pub(super) fn abandon(&mut self, outbox: &mut Outbox<F, E>) {
         while let Some((id, _)) = self.records.pop_first() {
             outbox.push_back(Action::Settled {
@@ -308,40 +466,40 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
         self.records.contains_key(&id)
     }
 
-    /// Whether the send was cancelled: not if a copy is in the radio right now, or the
+    /// Whether the send was cancelled: not if a copy is in a PHY right now, or the
     /// send is unknown.
     pub(super) fn cancel(&mut self, id: SendId, outbox: &mut Outbox<F, E>) -> bool {
         let Some(record) = self.records.get(&id) else {
             return false;
         };
-        if record.copy == CopyState::Transmitting {
+        if record.transmitting() {
             return false;
         }
-        self.settle(id, Err(SendFailure::Cancelled.into()), outbox);
+
+        self.records.remove(&id);
+        Self::settled(id, Err(SendFailure::Cancelled.into()), outbox);
         true
     }
 
-    /// Send no further copies of a broadcast nobody waits on any more. A copy in the
-    /// radio right now cannot be recalled: its schedule is emptied instead, so the
-    /// record settles when it next comes due (a `Once` schedule settles on the copy's
-    /// own report).
+    /// Send no further copies of a broadcast nobody waits on any more. A copy in a PHY
+    /// right now cannot be recalled: the schedules are emptied instead, so the record
+    /// settles when they next come due (a `Once` schedule settles on the copy's own
+    /// report).
     pub(super) fn stop(&mut self, id: SendId, outbox: &mut Outbox<F, E>) {
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
 
-        if record.copy == CopyState::Transmitting {
-            match &mut record.schedule {
-                Schedule::Once => {}
-                Schedule::PassiveAck {
-                    copies_remaining, ..
+        if record.transmitting() {
+            for lane in &mut record.lanes {
+                lane.schedule.stop();
+                if lane.copy == CopyState::Queued {
+                    lane.copy = CopyState::Idle;
                 }
-                | Schedule::FixedInterval {
-                    copies_remaining, ..
-                } => *copies_remaining = 0,
             }
         } else {
-            self.settle(id, Err(SendFailure::Cancelled.into()), outbox);
+            self.records.remove(&id);
+            Self::settled(id, Err(SendFailure::Cancelled.into()), outbox);
         }
     }
 
@@ -349,31 +507,23 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
     /// records past their deadline.
     pub(super) fn tick(&mut self, now: Instant, outbox: &mut Outbox<F, E>) {
         let over = self.records.extract_map(|_, record| {
-            if record.copy == CopyState::Transmitting {
-                return None;
-            }
+            for lane in &mut record.lanes {
+                if lane.done() || lane.copy != CopyState::Idle {
+                    continue;
+                }
 
-            if record.copy == CopyState::Idle
-                && let Some(due) = Self::schedule_due(&mut record.schedule, now)
-            {
-                match due {
-                    Due::Copy => record.copy = CopyState::Queued,
-                    Due::Over => {
-                        // A schedule that started with no copies has no radio
-                        // failure to report: no copy ever reached the radio
-                        return Some(if record.handed_off {
-                            Ok(())
-                        } else {
-                            Err(record
-                                .last_error
-                                .take()
-                                .unwrap_or_else(|| SendFailure::HandoffTimeout.into()))
-                        });
-                    }
+                match lane.schedule.due(now) {
+                    Some(Due::Copy) => lane.copy = CopyState::Queued,
+                    Some(Due::Over) => lane.exhausted = true,
+                    None => {}
                 }
             }
 
-            if record.deadline <= now {
+            if record.over() {
+                return Some(record.verdict());
+            }
+
+            if record.deadline <= now && !record.transmitting() {
                 return Some(if record.handed_off {
                     Ok(())
                 } else {
@@ -384,43 +534,8 @@ impl<F: SendFrame, E: From<SendFailure>> Broadcasts<F, E> {
             None
         });
 
-        for (id, record, result) in over {
-            Self::settled(id, record, result, outbox);
-        }
-    }
-
-    /// Consume a schedule's next copy if it is due. `None` means nothing is due.
-    fn schedule_due(schedule: &mut Schedule, now: Instant) -> Option<Due> {
-        match schedule {
-            Schedule::Once => None,
-            Schedule::PassiveAck {
-                copies_remaining,
-                next_attempt,
-                ..
-            } => {
-                if *next_attempt > now {
-                    return None;
-                }
-                if *copies_remaining == 0 {
-                    return Some(Due::Over);
-                }
-                *copies_remaining -= 1;
-                Some(Due::Copy)
-            }
-            Schedule::FixedInterval {
-                copies_remaining,
-                next_attempt,
-                ..
-            } => {
-                if *next_attempt > now {
-                    return None;
-                }
-                if *copies_remaining == 0 {
-                    return Some(Due::Over);
-                }
-                *copies_remaining -= 1;
-                Some(Due::Copy)
-            }
+        for (id, _, result) in over {
+            Self::settled(id, result, outbox);
         }
     }
 

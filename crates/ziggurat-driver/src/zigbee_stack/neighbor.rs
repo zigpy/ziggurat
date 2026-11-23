@@ -185,7 +185,8 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         self.maybe_age_neighbors();
 
         let handles: Vec<SendHandle> = self
-            .phys()
+            .all_phys()
+            .iter()
             .map(|phy| self.send_link_status_on(phy, empty))
             .collect();
 

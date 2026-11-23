@@ -9,6 +9,7 @@ use core::time::Duration;
 use crate::Instant;
 use crate::flat_map::FlatMap;
 use crate::gp::GpdfTarget;
+use crate::phy::PhyIndex;
 
 use super::{
     Action, InFlight, Outbox, SendFailure, SendFrame, SendId, Transmit, TransmitError, TxPriority,
@@ -151,6 +152,7 @@ impl<F: SendFrame, E: From<SendFailure>> Gpdfs<F, E> {
             id,
             frame: record.frame.take().unwrap(),
             transmit: Transmit::Gpdf(trigger),
+            phy: PhyIndex::Radio,
         }
     }
 

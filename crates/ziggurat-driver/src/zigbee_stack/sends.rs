@@ -1,5 +1,5 @@
-//! The async shell around the send table ([`Sends`]): enqueueing, the sender task that
-//! feeds the radio, the timer task that drives everything waiting on time, and the
+//! The async shell around the send table ([`Sends`]): enqueueing, the sender tasks
+//! that feed each PHY, the timer task that drives everything waiting on time, and the
 //! execution of the actions the table queues.
 //!
 //! The table lives in the core, so one lock covers a mutation and the core facts it
@@ -11,21 +11,21 @@ use core::time::Duration;
 
 use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::Nwk;
-use ziggurat_phy::{Phy, RadioPhy};
+use ziggurat_phy::{Phy, RadioPhy, TxResult};
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::gp::build_gpdf_to_gpd;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{
-    Action, Broadcast as BroadcastRecord, Gpdf as GpdfRecord, Routed, TransmitError,
-    Unicast as UnicastRecord,
+    Action, Broadcast as BroadcastRecord, Delivery, Gpdf as GpdfRecord, InFlight, Routed,
+    TransmitError, Unicast as UnicastRecord,
 };
 
 use crate::runtime::Runtime;
 
 use super::{
-    Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, GpdfTarget, Nib, NwkSecurityMode,
-    PhyIndex, PhySet, RouteDirective, Schedule, SendHandle, SendId, SendMode, Transmit, TxPolicy,
-    ZigbeeCore, ZigbeeStack,
+    Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, GpdfTarget, Neighbors, Nib,
+    NwkSecurityMode, PhyIndex, PhySet, RouteDirective, Schedule, SendHandle, SendId, SendMode,
+    Transmit, TxPolicy, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
@@ -78,9 +78,10 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         frame: Frame,
         policy: TxPolicy,
         schedule: Schedule,
+        phys: PhySet,
     ) -> SendHandle {
         let mut core = self.core();
-        let handle = self.enqueue_broadcast_in(&mut core, frame, policy, schedule);
+        let handle = self.enqueue_broadcast_in(&mut core, frame, policy, schedule, phys);
         self.commit_sends(core);
         handle
     }
@@ -92,12 +93,14 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         frame: Frame,
         policy: TxPolicy,
         schedule: Schedule,
+        phys: PhySet,
     ) -> SendHandle {
         let id = core.sends.enqueue_broadcast(
             BroadcastRecord {
                 frame,
                 priority: policy.priority,
                 schedule,
+                phys,
             },
             self.core_now(),
             &self.tunables,
@@ -179,7 +182,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             self.send_watches.settled(id, result);
         }
 
-        self.send_wake.notify_one();
+        self.wake_senders();
         self.src_match_sync.notify_one();
     }
 
@@ -265,23 +268,27 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         }
     }
 
-    /// The single transmit task: takes the highest-priority ready frame, secures it (so
-    /// frame-counter order always matches on-air order), transmits it, and reports back
-    /// to the table. Serializing all transmits here is what keeps the counter
-    /// monotonic.
-    pub(super) async fn sender_task(&self) {
+    /// The transmit task of one PHY: takes the highest-priority frame ready for it,
+    /// secures it, transmits it, and reports back to the table. A slow PHY never holds
+    /// up another's frames. Only the radio's copies carry NWK frame counters, and its
+    /// single task keeps their order the on-air order.
+    pub(super) async fn sender_task(&self, phy: PhyIndex) {
+        let wake = match phy {
+            PhyIndex::Radio => &self.send_wakes[0],
+            PhyIndex::Secondary(index) => &self.send_wakes[usize::from(index) + 1],
+        };
+
         loop {
             loop {
                 // The frame leaves the table on loan, so the core is unlocked across the
                 // transmit
-                let now = self.core_now();
-                let Some(mut in_flight) = self.core().sends.dequeue(now) else {
+                let Some(mut in_flight) = self.dequeue_for(phy) else {
                     break;
                 };
 
                 let transmit = in_flight.transmit();
                 let result = self
-                    .transmit(in_flight.frame_mut(), transmit)
+                    .transmit(in_flight.frame_mut(), transmit, phy)
                     .await
                     .map_err(|err| match err {
                         DeliveryError::FrameTooLong => TransmitError::Rejected(err),
@@ -298,14 +305,34 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                 self.commit_sends(core);
             }
 
-            self.send_wake.notified().await;
+            wake.notified().await;
         }
+    }
+
+    /// Lend the next frame ready for `phy` from the send table.
+    // The closure borrows the core through the guard until `dequeue` returns; the lint
+    // misses that borrow
+    #[allow(clippy::significant_drop_tightening)]
+    fn dequeue_for(&self, phy: PhyIndex) -> Option<InFlight<Frame>> {
+        let now = self.core_now();
+        let mut guard = self.core();
+        // A plain `&mut ZigbeeCore`, so the closure borrows `nib` beside `sends`
+        let core = &mut *guard;
+
+        core.sends.dequeue(now, phy, |frame, next_hop| {
+            unicast_phy(&core.nib.neighbors, frame, next_hop)
+        })
     }
 
     /// Build the 802.15.4 frame for one transmit and hand it to the radio. The frame is
     /// finished in place (aux header, frame-pending bit) and keeps that state between
     /// attempts; every attempt overwrites it.
-    async fn transmit(&self, frame: &mut Frame, transmit: Transmit) -> Result<(), DeliveryError> {
+    async fn transmit(
+        &self,
+        frame: &mut Frame,
+        transmit: Transmit,
+        phy: PhyIndex,
+    ) -> Result<Delivery, DeliveryError> {
         match (transmit, frame) {
             (
                 Transmit::Unicast {
@@ -316,35 +343,44 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                 Frame::Nwk {
                     nwk_frame,
                     security,
-                    ..
                 },
             ) => {
                 // Spec 3.6.4.5.5: the route record goes out before the data frame, not
                 // before its retries
                 if first_attempt {
-                    self.transmit_route_record(nwk_frame, next_hop).await;
+                    self.transmit_route_record(nwk_frame, next_hop, phy).await;
                 }
 
-                self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending)
-                    .await
+                self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending, phy)
+                    .await?;
+                Ok(Delivery::Confirmed)
             }
             (Transmit::Unicast { frame_pending, .. }, Frame::Raw(raw)) => {
                 raw.header_mut().frame_control.frame_pending = frame_pending;
-                self.send_802154_frame(raw, PhyIndex::Radio).await.map(drop)
+                self.send_802154_frame(raw, phy).await?;
+                Ok(Delivery::Confirmed)
             }
             (
                 Transmit::Broadcast,
                 Frame::Nwk {
                     nwk_frame,
                     security,
-                    phys,
                 },
-            ) => self.transmit_broadcast(nwk_frame, *security, phys).await,
+            ) => {
+                // A secondary PHY confirms a broadcast every peer acked; the radio never
+                // does, its passive-ack quorum does
+                match self.transmit_broadcast(nwk_frame, *security, phy).await? {
+                    TxResult::Acked => Ok(Delivery::Confirmed),
+                    _ => Ok(Delivery::Unconfirmed),
+                }
+            }
             (Transmit::Broadcast, Frame::Raw(raw)) => {
-                self.send_802154_frame(raw, PhyIndex::Radio).await.map(drop)
+                self.send_802154_frame(raw, phy).await?;
+                Ok(Delivery::Unconfirmed)
             }
             (Transmit::Gpdf(trigger), Frame::Gpdf { frame, channel }) => {
-                self.transmit_gpdf(frame, *channel, trigger).await
+                self.transmit_gpdf(frame, *channel, trigger).await?;
+                Ok(Delivery::Unconfirmed)
             }
             (Transmit::Gpdf(_), _) | (_, Frame::Gpdf { .. }) => {
                 unreachable!("GPDFs only come from the GPDF table")
@@ -432,7 +468,17 @@ impl Frame {
         Self::Nwk {
             nwk_frame,
             security,
-            phys: PhySet::ALL,
         }
+    }
+}
+
+/// The PHY a unicast's next attempt goes over: the next hop's cheapest link. A raw MAC
+/// frame, and a frame to a device we have no link to, go over the radio.
+fn unicast_phy(neighbors: &Neighbors, frame: &Frame, next_hop: Nwk) -> PhyIndex {
+    match frame {
+        Frame::Nwk { .. } => neighbors
+            .link(next_hop)
+            .map_or(PhyIndex::Radio, |link| link.phy),
+        Frame::Raw(_) | Frame::Gpdf { .. } => PhyIndex::Radio,
     }
 }

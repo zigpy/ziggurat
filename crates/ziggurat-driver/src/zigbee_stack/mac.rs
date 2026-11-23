@@ -23,8 +23,8 @@ use ziggurat_zigbee::nwk::frame::{
 use super::TrafficClass;
 
 use super::{
-    DeliveryError, Frame, GpdfTrigger, NwkDeviceType, PROTOCOL_VERSION, PhyIndex, STACK_PROFILE,
-    Schedule, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
+    DeliveryError, Frame, GpdfTrigger, NwkDeviceType, PROTOCOL_VERSION, PhyIndex, PhySet,
+    STACK_PROFILE, Schedule, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
@@ -180,7 +180,12 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             }
         };
 
-        self.enqueue_broadcast(Frame::Raw(beacon_frame), policy, Schedule::Once);
+        self.enqueue_broadcast(
+            Frame::Raw(beacon_frame),
+            policy,
+            Schedule::Once,
+            PhySet::only(PhyIndex::Radio),
+        );
     }
 
     /// The beacon-spam reactor (the [`hack_beacon_spam_duration`] hack): while a spray
