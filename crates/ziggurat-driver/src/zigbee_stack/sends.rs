@@ -316,6 +316,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                 Frame::Nwk {
                     nwk_frame,
                     security,
+                    phy,
                 },
             ) => {
                 // Spec 3.6.4.5.5: the route record goes out before the data frame, not
@@ -324,7 +325,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                     self.transmit_route_record(nwk_frame, next_hop).await;
                 }
 
-                self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending)
+                self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending, *phy)
                     .await
             }
             (Transmit::Unicast { frame_pending, .. }, Frame::Raw(raw)) => {
@@ -336,8 +337,9 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                 Frame::Nwk {
                     nwk_frame,
                     security,
+                    phy,
                 },
-            ) => self.transmit_broadcast(nwk_frame, *security).await,
+            ) => self.transmit_broadcast(nwk_frame, *security, *phy).await,
             (Transmit::Broadcast, Frame::Raw(raw)) => {
                 self.send_802154_frame(raw, PhyIndex::Radio).await
             }
@@ -430,6 +432,7 @@ impl Frame {
         Self::Nwk {
             nwk_frame,
             security,
+            phy: None,
         }
     }
 }

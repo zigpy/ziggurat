@@ -291,6 +291,9 @@ pub enum Frame {
     Nwk {
         nwk_frame: NwkFrame,
         security: NwkSecurityMode,
+        /// The PHY to send on. `None` picks one: the cheapest link to the next hop for
+        /// a unicast, every PHY for a broadcast.
+        phy: Option<PhyIndex>,
     },
     /// An already-finished 802.15.4 frame (a beacon, an association response),
     /// transmitted as-is but for its MAC sequence number.

@@ -318,14 +318,17 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             .with_radius(self.tunables.concentrator_radius());
 
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
-        self.send_oneshot_broadcast(Broadcast {
-            frame: many_to_one_request_frame,
-            security: NwkSecurityMode::NetworkKey,
-            policy: TxPolicy {
-                priority: TxPriority::Background,
-                class: TrafficClass::Critical,
+        self.send_oneshot_broadcast(
+            Broadcast {
+                frame: many_to_one_request_frame,
+                security: NwkSecurityMode::NetworkKey,
+                policy: TxPolicy {
+                    priority: TxPriority::Background,
+                    class: TrafficClass::Critical,
+                },
             },
-        })
+            None,
+        )
     }
 
     /// Advertise many-to-one routes while we are a concentrator, idling otherwise.
@@ -480,7 +483,13 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         };
 
         let result = self
-            .transmit_unicast(&mut frame, next_hop, NwkSecurityMode::NetworkKey, false)
+            .transmit_unicast(
+                &mut frame,
+                next_hop,
+                NwkSecurityMode::NetworkKey,
+                false,
+                None,
+            )
             .await;
 
         if result.is_err() {

@@ -407,11 +407,11 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         }
 
         if is_transit {
-            self.relay_unicast_nwk_frame(decrypted_nwk_frame, source_nwk, lqi, rssi);
+            self.relay_unicast_nwk_frame(decrypted_nwk_frame, source_nwk, phy, lqi, rssi);
             return None;
         }
 
-        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, lqi, rssi)
+        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, phy, lqi, rssi)
             .then_some(decrypted_nwk_frame)
     }
 

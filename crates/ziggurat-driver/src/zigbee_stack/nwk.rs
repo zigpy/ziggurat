@@ -164,6 +164,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         &self,
         nwk_frame: &NwkFrame,
         sender_nwk: Nwk,
+        phy: PhyIndex,
         lqi: u8,
         rssi: i8,
     ) -> bool {
@@ -218,7 +219,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         // Handle LQA calculation
         self.maybe_age_neighbors();
-        self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
+        self.maybe_recompute_lqa(sender_nwk, phy, lqi, rssi);
 
         // Spec 3.6.6: link status and route request broadcasts bypass the broadcast
         // transaction table; route requests have their own cost-comparing dedup logic
@@ -260,7 +261,9 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         // Handle NWK commands
         if let NwkPayload::Command(command) = &nwk_frame.payload {
             match command {
-                NwkCommand::LinkStatus(cmd) => self.handle_link_status(nwk_frame, cmd.clone(), lqi),
+                NwkCommand::LinkStatus(cmd) => {
+                    self.handle_link_status(nwk_frame, cmd.clone(), phy, lqi);
+                }
                 NwkCommand::RouteReply(cmd) => self.handle_route_reply(nwk_frame, cmd.clone()),
                 NwkCommand::RouteRecord(cmd) => {
                     tracing::trace!("Route record command frame received: {cmd:?}");
@@ -592,7 +595,17 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         next_hop_address: Nwk,
         security: NwkSecurityMode,
         frame_pending: bool,
+        phy: Option<PhyIndex>,
     ) -> Result<(), DeliveryError> {
+        // A device we have no link to is tried over the radio
+        let phy = phy.unwrap_or_else(|| {
+            self.core()
+                .nib
+                .neighbors
+                .link(next_hop_address)
+                .map_or(PhyIndex::Radio, |link| link.phy)
+        });
+
         let key = self.secure_nwk_frame(nwk_frame, security);
         let mut ieee802154_frame = self.build_unicast_802154_data_frame(
             next_hop_address,
@@ -626,9 +639,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         self.increment_tx_total();
 
-        let result = self
-            .send_802154_frame(&mut ieee802154_frame, PhyIndex::Radio)
-            .await;
+        let result = self.send_802154_frame(&mut ieee802154_frame, phy).await;
 
         if let Err(e) = &result {
             // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
@@ -637,7 +648,9 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             if let DeliveryError::NwkNoAck { .. } = e {
                 let mut core = self.core();
                 if let Some(next_hop_eui64) = core.nib.address_map.eui64_for(next_hop_address) {
-                    core.nib.neighbors.record_transmit_failure(next_hop_eui64);
+                    core.nib
+                        .neighbors
+                        .record_transmit_failure(next_hop_eui64, phy);
                 }
             }
 
@@ -813,9 +826,13 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         Ok(handle)
     }
 
-    /// Send a single-copy broadcast: assign its sequence number and queue one copy for
-    /// the sender. The transmit result is the verdict.
-    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) -> SendHandle {
+    /// Send a single-copy broadcast on `phy`, or every PHY: assign its sequence number
+    /// and queue one copy for the sender. The transmit result is the verdict.
+    pub(super) fn send_oneshot_broadcast(
+        &self,
+        send: Broadcast,
+        phy: Option<PhyIndex>,
+    ) -> SendHandle {
         let Broadcast {
             frame: mut nwk_frame,
             security,
@@ -823,14 +840,20 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        self.enqueue_broadcast(Frame::nwk(nwk_frame, security), policy, Schedule::Once)
+        let frame = Frame::Nwk {
+            nwk_frame,
+            security,
+            phy,
+        };
+        self.enqueue_broadcast(frame, policy, Schedule::Once)
     }
 
-    /// Encrypt and broadcast a single copy of a frame on every PHY.
+    /// Encrypt and broadcast a single copy of a frame on `phy`, or every PHY.
     pub(super) async fn transmit_broadcast(
         &self,
         nwk_frame: &mut NwkFrame,
         security: NwkSecurityMode,
+        phy: Option<PhyIndex>,
     ) -> Result<(), DeliveryError> {
         let key = self.secure_nwk_frame(nwk_frame, security);
 
@@ -871,6 +894,10 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         self.increment_tx_total();
 
+        if let Some(phy) = phy {
+            return self.send_802154_frame(&mut ieee802154_frame, phy).await;
+        }
+
         // The radio's outcome is the verdict; the secondary PHYs are sent to after it
         let result = self
             .send_802154_frame(&mut ieee802154_frame, PhyIndex::Radio)
@@ -890,6 +917,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         &self,
         mut nwk_frame: NwkFrame,
         sender_nwk: Nwk,
+        phy: PhyIndex,
         lqi: u8,
         rssi: i8,
     ) {
@@ -906,7 +934,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         // Transit frames are link quality measurements for the transmitting neighbor
         // just like frames addressed to us
-        self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
+        self.maybe_recompute_lqa(sender_nwk, phy, lqi, rssi);
 
         // Receiving a unicast from a neighbor counts as inbound activity
         self.core().nib.neighbors.record_inbound_activity(
