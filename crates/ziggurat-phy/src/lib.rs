@@ -1,4 +1,5 @@
-//! Radio PHY abstraction.
+//! PHY abstraction: one 802.15.4 radio, plus secondary PHYs that carry 802.15.4
+//! frames over other media.
 
 #![no_std]
 
@@ -18,6 +19,10 @@ pub trait Receiver<T>: Send {
     fn recv(&mut self) -> impl Future<Output = Option<T>> + Send;
 }
 
+/// The MAC defaults of 802.15.4: `macMaxFrameRetries` and `macMaxCSMABackoffs`.
+pub const DEFAULT_MAX_FRAME_RETRIES: u8 = 3;
+pub const DEFAULT_MAX_CSMA_BACKOFFS: u8 = 4;
+
 /// A frame to transmit. `psdu` is the 802.15.4 frame without the FCS; `channel`
 /// overrides the current channel for this frame only.
 #[derive(Debug, Clone)]
@@ -32,6 +37,21 @@ pub struct TxFrame {
     pub tx_at: Option<TxAt>,
 }
 
+impl TxFrame {
+    /// An untimed frame on the current channel, with CSMA-CA and the MAC defaults.
+    pub const fn new(psdu: Psdu) -> Self {
+        Self {
+            psdu,
+            channel: None,
+            csma_ca: true,
+            max_frame_retries: DEFAULT_MAX_FRAME_RETRIES,
+            max_csma_backoffs: DEFAULT_MAX_CSMA_BACKOFFS,
+            security_processed: true,
+            tx_at: None,
+        }
+    }
+}
+
 /// When a timed transmit starts.
 ///
 /// The end of its SFD is at `base_us + delay_us` on the radio clock, the clock of
@@ -44,6 +64,7 @@ pub struct TxAt {
 }
 
 /// A received frame, normalized: `psdu` is the 802.15.4 frame with the FCS stripped.
+/// `channel` and `timestamp_us` belong to the radio; a secondary PHY sets them to 0.
 #[derive(Debug, Clone)]
 pub struct RxFrame {
     pub psdu: Psdu,
@@ -96,14 +117,54 @@ pub enum RadioError {
     Other(String),
 }
 
-pub trait RadioPhy: Send + Sync + 'static {
+/// A medium that carries 802.15.4 frames: the radio, or a secondary PHY such as a
+/// backbone over IP.
+pub trait Phy: Send + Sync + 'static {
+    /// The PHY's received-frame stream, handed out by [`subscribe_rx`].
+    type RxStream: Receiver<RxFrame>;
+
+    /// Transmit a frame with the PHY's own MAC parameters. `psdu` is without the FCS.
+    /// A frame that requests no ACK reports [`TxResult::Acked`] once sent, as the radio
+    /// does.
+    fn transmit_psdu(
+        &self,
+        psdu: Psdu,
+    ) -> impl Future<Output = Result<TxResult, RadioError>> + Send;
+
+    /// Open a fresh received-frame stream, redirecting delivery to it. Called once per
+    /// driver instance; a later call supersedes the previous stream.
+    fn subscribe_rx(&self) -> Self::RxStream;
+}
+
+/// The secondary PHY type of a node that has none.
+#[derive(Debug)]
+pub enum NoPhy {}
+
+impl Receiver<RxFrame> for NoPhy {
+    async fn recv(&mut self) -> Option<RxFrame> {
+        unreachable!("NoPhy has no values")
+    }
+}
+
+impl Phy for NoPhy {
+    type RxStream = Self;
+
+    async fn transmit_psdu(&self, _psdu: Psdu) -> Result<TxResult, RadioError> {
+        unreachable!("NoPhy has no values")
+    }
+
+    fn subscribe_rx(&self) -> Self {
+        unreachable!("NoPhy has no values")
+    }
+}
+
+/// The 802.15.4 radio. Every node has one: joins, sleepy children, scans and timed
+/// transmits need it.
+pub trait RadioPhy: Phy {
     /// Exclusive control of the radio, held for the guard's lifetime.
     type Exclusive<'a>: ExclusiveRadio + Send
     where
         Self: 'a;
-
-    /// The backend's received-frame stream, handed out by [`subscribe_rx`].
-    type RxStream: Receiver<RxFrame>;
 
     /// The backend's reset-notification stream, handed out by [`subscribe_reset`].
     type ResetStream: Receiver<ResetEvent>;
@@ -137,10 +198,6 @@ pub trait RadioPhy: Send + Sync + 'static {
 
     /// Take exclusive control of the radio until the returned guard is dropped.
     fn lock(&self) -> impl Future<Output = Self::Exclusive<'_>> + Send;
-
-    /// Open a fresh received-frame stream, redirecting delivery to it. Called once per
-    /// driver instance; a later call supersedes the previous stream.
-    fn subscribe_rx(&self) -> Self::RxStream;
 
     /// Open a fresh reset-notification stream, redirecting delivery to it.
     fn subscribe_reset(&self) -> Self::ResetStream;

@@ -14,9 +14,9 @@ use core::time::Duration;
 
 use embedded_io_async::{Read, Write};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_ieee_802154::{FCS_LENGTH, Ieee802154Frame, Msdu};
+use ziggurat_ieee_802154::{FCS_LENGTH, Ieee802154Frame, Msdu, Psdu};
 use ziggurat_phy::{
-    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
+    ExclusiveRadio, Phy, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxFrame,
     TxResult,
 };
 use ziggurat_runtime::runtime::Runtime;
@@ -480,9 +480,20 @@ fn tx_frame_to_spinel(frame: TxFrame, channel: u8) -> SpinelTxFrame {
     }
 }
 
+impl<R: Runtime> Phy for SpinelPhy<R> {
+    type RxStream = QueueRx<RxFrame>;
+
+    async fn transmit_psdu(&self, psdu: Psdu) -> Result<TxResult, RadioError> {
+        RadioPhy::transmit(self, TxFrame::new(psdu)).await
+    }
+
+    fn subscribe_rx(&self) -> QueueRx<RxFrame> {
+        subscribe(&self.streams.rx, "received frames", 32)
+    }
+}
+
 impl<R: Runtime> RadioPhy for SpinelPhy<R> {
     type Exclusive<'a> = SpinelExclusive<'a, R>;
-    type RxStream = QueueRx<RxFrame>;
     type ResetStream = QueueRx<ResetEvent>;
 
     async fn reset(&self) -> Result<(), RadioError> {
@@ -576,10 +587,6 @@ impl<R: Runtime> RadioPhy for SpinelPhy<R> {
         let home = *self.home_channel.lock();
         set_spinel_prop(&self.client, SpinelPropertyId::PhyChan, &[home]).await?;
         Ok(max_rssi)
-    }
-
-    fn subscribe_rx(&self) -> QueueRx<RxFrame> {
-        subscribe(&self.streams.rx, "received frames", 32)
     }
 
     fn subscribe_reset(&self) -> QueueRx<ResetEvent> {

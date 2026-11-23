@@ -28,7 +28,7 @@ use embassy_sync::signal::Signal;
 use ziggurat_ieee_802154::Psdu;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_phy::{
-    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxAt,
+    ExclusiveRadio, Phy, RadioConfig, RadioError, RadioPhy, Receiver, ResetEvent, RxFrame, TxAt,
     TxFrame, TxResult,
 };
 use ziggurat_runtime::sync::{AsyncMutex, AsyncMutexGuard};
@@ -195,9 +195,20 @@ impl ExclusiveRadio for OtLinkExclusive<'_> {
     }
 }
 
+impl Phy for OtLinkPhy {
+    type RxStream = OtLinkRx;
+
+    async fn transmit_psdu(&self, psdu: Psdu) -> Result<TxResult, RadioError> {
+        RadioPhy::transmit(self, TxFrame::new(psdu)).await
+    }
+
+    fn subscribe_rx(&self) -> OtLinkRx {
+        OtLinkRx(RX_CHANNEL.receiver())
+    }
+}
+
 impl RadioPhy for OtLinkPhy {
     type Exclusive<'a> = OtLinkExclusive<'a>;
-    type RxStream = OtLinkRx;
     type ResetStream = OtLinkResetStream;
 
     async fn reset(&self) -> Result<(), RadioError> {
@@ -252,10 +263,6 @@ impl RadioPhy for OtLinkPhy {
             phy: self,
             _guard: self.exclusive.lock().await,
         }
-    }
-
-    fn subscribe_rx(&self) -> OtLinkRx {
-        OtLinkRx(RX_CHANNEL.receiver())
     }
 
     fn subscribe_reset(&self) -> OtLinkResetStream {
