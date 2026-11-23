@@ -509,27 +509,15 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         self.core().nib.next_sequence_number()
     }
 
-    /// Give the frame the auxiliary header for this attempt over `phy` and return the
-    /// key to encrypt it with, or `None` for a frame sent unsecured. A trusted link
-    /// protects what it carries itself, so a frame sent over one carries no NWK
-    /// security (spec 4.3.1.3). The frame keeps this state between attempts, which may
-    /// go over different PHYs.
-    fn secure_nwk_frame(
-        &self,
-        nwk_frame: &mut NwkFrame,
-        security: NwkSecurityMode,
-        phy: PhyIndex,
-    ) -> Option<Key> {
-        let secured = security == NwkSecurityMode::NetworkKey && phy == PhyIndex::Radio;
-        nwk_frame.nwk_header.frame_control.security = secured;
-
-        if secured {
+    /// Give the frame the auxiliary header for this attempt and return the key to
+    /// encrypt it with, or `None` for a frame sent unsecured.
+    fn secure_nwk_frame(&self, nwk_frame: &mut NwkFrame, security: NwkSecurityMode) -> Option<Key> {
+        if security == NwkSecurityMode::NetworkKey {
             // The encryption frame counter always increments
             nwk_frame.aux_header = Some(self.outgoing_aux_header(self.next_nwk_frame_counter()));
 
             Some(self.core().nib.nwk_security.network_key())
         } else {
-            nwk_frame.aux_header = None;
             None
         }
     }
@@ -613,7 +601,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         frame_pending: bool,
         phy: PhyIndex,
     ) -> Result<(), DeliveryError> {
-        let key = self.secure_nwk_frame(nwk_frame, security, phy);
+        let key = self.secure_nwk_frame(nwk_frame, security);
         let mut ieee802154_frame = self.build_unicast_802154_data_frame(
             next_hop_address,
             OutgoingNwkFrame {

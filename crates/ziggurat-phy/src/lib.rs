@@ -139,10 +139,6 @@ pub enum RadioError {
 
 /// A medium that carries 802.15.4 frames: the radio, or a secondary PHY such as a
 /// backbone over IP.
-///
-/// Every secondary PHY is a trusted link (Zigbee R23 4.3.1): it authenticates,
-/// protects the integrity of, and encrypts what it carries, with its own replay
-/// protection. The NWK frames it carries have no NWK security.
 pub trait Phy: Send + Sync + 'static {
     /// The PHY's received-frame stream, handed out by [`subscribe_rx`].
     type RxStream: Receiver<RxFrame>;

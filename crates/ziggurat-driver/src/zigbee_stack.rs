@@ -745,9 +745,8 @@ pub struct ZigbeeStack<P: RadioPhy, S: Phy, R: Runtime> {
     pub config: NetworkConfig,
     pub tunables: Tunables,
     pub radio: Arc<P>,
-    /// PHYs besides the radio, such as a backbone over IP. They are trusted links: the
-    /// NWK frames they carry have no NWK security. They carry NWK data frames only:
-    /// joins, sleepy children, scans and GP stay on the radio.
+    /// PHYs besides the radio, such as a backbone over IP. They carry NWK data frames
+    /// only: joins, sleepy children, scans and GP stay on the radio.
     pub secondary_phys: Vec<Arc<S>>,
     pub notifications: Mutex<VecDeque<ZigbeeNotification>>,
     notification_wake: Notify,
