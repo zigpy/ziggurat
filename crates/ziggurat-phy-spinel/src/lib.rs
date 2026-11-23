@@ -328,7 +328,7 @@ impl<R: Runtime> ExclusiveRadio for SpinelExclusive<'_, R> {
             .transmit_frame(&spinel_frame)
             .await
             .map_err(map_err)?;
-        Ok(map_status(status))
+        Ok(map_status(status).for_radio_psdu(&spinel_frame.psdu))
     }
 }
 
@@ -529,7 +529,7 @@ impl<R: Runtime> RadioPhy for SpinelPhy<R> {
             .transmit_frame(&spinel_frame)
             .await
             .map_err(map_err)?;
-        Ok(map_status(status))
+        Ok(map_status(status).for_radio_psdu(&spinel_frame.psdu))
     }
 
     async fn energy_detect(&self, channel: u8, duration: Duration) -> Result<i8, RadioError> {

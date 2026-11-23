@@ -560,7 +560,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
 
         match result {
             // No ACK is requested
-            TxResult::Acked | TxResult::NoAck => Ok(()),
+            TxResult::Sent => Ok(()),
             TxResult::ChannelAccessFailure => Err(DeliveryError::CcaFailure),
             // The radio drops a timed frame whose start time has already passed
             TxResult::Aborted => Err(DeliveryError::GpdfWindowMissed),
@@ -609,16 +609,22 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
             }
         };
 
-        match result {
-            TxResult::Acked => Ok(()),
-            // A frame with no destination (e.g. a beacon) never requested an ACK, so
-            // "no ACK" is the expected outcome, not a failure.
-            TxResult::NoAck => frame
-                .header()
-                .dest_address
-                .map_or(Ok(()), |next_hop| Err(DeliveryError::NwkNoAck { next_hop })),
-            TxResult::ChannelAccessFailure => Err(DeliveryError::CcaFailure),
-            other => Err(DeliveryError::TransmitFailed(other)),
+        match (result, frame.header().dest_address) {
+            // A frame without an ACK request, such as a beacon or a radio broadcast,
+            // cannot be confirmed: passive acks stand in for it on the radio
+            (TxResult::Acked | TxResult::Sent, _) => Ok(()),
+            // A secondary PHY already retried the peers that missed its broadcast, so
+            // there is nothing left to retry here
+            (
+                TxResult::PartiallyAcked | TxResult::NoAck,
+                None | Some(Ieee802154Address::Nwk(Nwk(0xFFFF))),
+            ) => {
+                tracing::debug!("Broadcast on {phy:?} was not confirmed by every peer: {result:?}");
+                Ok(())
+            }
+            (TxResult::NoAck, Some(next_hop)) => Err(DeliveryError::NwkNoAck { next_hop }),
+            (TxResult::ChannelAccessFailure, _) => Err(DeliveryError::CcaFailure),
+            (other, _) => Err(DeliveryError::TransmitFailed(other)),
         }
     }
 }

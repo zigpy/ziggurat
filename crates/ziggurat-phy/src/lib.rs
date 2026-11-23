@@ -74,14 +74,34 @@ pub struct RxFrame {
     pub timestamp_us: u64,
 }
 
-/// The outcome of a transmit, after the radio's own MAC retries.
+/// The outcome of a transmit, after the PHY's own retries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxResult {
+    /// Every receiver the frame was addressed to confirmed it
     Acked,
+    /// A secondary PHY's broadcast that some of its peers did not confirm
+    PartiallyAcked,
+    /// No receiver the frame was addressed to confirmed it
     NoAck,
+    /// Sent, but the medium cannot confirm it: an 802.15.4 frame that requests no ACK
+    Sent,
     ChannelAccessFailure,
     Aborted,
     Failed,
+}
+
+/// The ACK Request bit of the first 802.15.4 frame control octet.
+const ACK_REQUEST: u8 = 0x20;
+
+impl TxResult {
+    /// A radio reports every frame it sent as a success, but 802.15.4 confirms only a
+    /// frame that requests an ACK: any other frame was only [`TxResult::Sent`].
+    pub const fn for_radio_psdu(self, psdu: &[u8]) -> Self {
+        match self {
+            Self::Acked if psdu[0] & ACK_REQUEST == 0 => Self::Sent,
+            other => other,
+        }
+    }
 }
 
 /// The full radio programming. Re-applied verbatim after a reset.
@@ -124,8 +144,10 @@ pub trait Phy: Send + Sync + 'static {
     type RxStream: Receiver<RxFrame>;
 
     /// Transmit a frame with the PHY's own MAC parameters. `psdu` is without the FCS.
-    /// A frame that requests no ACK reports [`TxResult::Acked`] once sent, as the radio
-    /// does.
+    ///
+    /// A secondary PHY delivers a broadcast to every peer it knows, retrying each one,
+    /// and reports [`TxResult::Acked`] only if every peer confirmed it. Which peers did
+    /// not is the PHY's own business: it ages them out by its own rule.
     fn transmit_psdu(
         &self,
         psdu: Psdu,
@@ -218,5 +240,28 @@ pub trait ExclusiveRadio: Send {
             let _ = promiscuous;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_radio_frame_without_ack_request_is_only_sent() {
+        // Frame control 0x8841: a data frame without an ACK request
+        assert_eq!(
+            TxResult::Acked.for_radio_psdu(&[0x41, 0x88]),
+            TxResult::Sent
+        );
+        // Frame control 0x8861: the same frame with an ACK request
+        assert_eq!(
+            TxResult::Acked.for_radio_psdu(&[0x61, 0x88]),
+            TxResult::Acked
+        );
+        assert_eq!(
+            TxResult::NoAck.for_radio_psdu(&[0x61, 0x88]),
+            TxResult::NoAck
+        );
     }
 }

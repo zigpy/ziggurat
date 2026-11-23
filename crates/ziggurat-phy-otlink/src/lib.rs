@@ -153,7 +153,7 @@ impl OtLinkPhy {
             frame.max_csma_backoffs,
             frame.tx_at,
         )?;
-        Ok(TX_COMPLETE.wait().await)
+        Ok(TX_COMPLETE.wait().await.for_radio_psdu(&frame.psdu))
     }
 }
 
