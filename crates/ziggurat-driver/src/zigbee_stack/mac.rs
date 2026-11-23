@@ -378,6 +378,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         // fetch the decryption key
         let key = self.core().nib.nwk_security.inbound_network_key(
             src_eui64,
+            phy,
             aux_header.key_sequence_number,
             aux_header.frame_counter,
         )?;

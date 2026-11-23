@@ -175,11 +175,11 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
         {
-            let old_frame_counter = self
-                .core()
-                .nib
-                .nwk_security
-                .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
+            let old_frame_counter = self.core().nib.nwk_security.note_inbound_frame_counter(
+                relaying_eui64,
+                phy,
+                aux_header.frame_counter,
+            );
 
             tracing::debug!(
                 "Incremented frame counter for {relaying_eui64:?} from {:?} to {}",
@@ -852,7 +852,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     ) -> Result<TxResult, DeliveryError> {
         self.increment_tx_total();
 
-        let key = self.secure_nwk_frame(nwk_frame, security, phy);
+        let key = self.secure_nwk_frame(nwk_frame, security);
 
         let (ieee802154_sequence_number, pan_id) = {
             let core = self.core();
@@ -908,10 +908,11 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
         {
-            self.core()
-                .nib
-                .nwk_security
-                .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
+            self.core().nib.nwk_security.note_inbound_frame_counter(
+                relaying_eui64,
+                phy,
+                aux_header.frame_counter,
+            );
         }
 
         // Transit frames are link quality measurements for the transmitting neighbor
