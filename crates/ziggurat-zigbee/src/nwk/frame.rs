@@ -614,11 +614,19 @@ impl NwkFrame {
             .expect("the NWK frame fits in an MSDU")
     }
 
-    /// Whether the frame, secured, fits an 802.15.4 frame with short addresses. The
-    /// key does not change the length.
+    /// Whether the frame, secured, fits an 802.15.4 frame with short addresses.
+    /// Encryption does not change the length, so the frame is only serialized, with
+    /// room for the MIC.
     pub fn fits_secured(&self) -> bool {
-        write_frame::<MAX_PHY_PACKET_SIZE>(|writer| self.serialize(writer, Some(&Key([0; 16]))))
-            .is_ok_and(|bytes| MAC_FRAME_OVERHEAD + bytes.len() <= MAX_PHY_PACKET_SIZE)
+        write_frame::<MAX_PHY_PACKET_SIZE>(|writer| {
+            self.nwk_header.serialize(writer)?;
+            self.aux_header
+                .as_ref()
+                .expect("a secured frame has an auxiliary header")
+                .serialize(writer)?;
+            self.payload.serialize(writer)
+        })
+        .is_ok_and(|bytes| MAC_FRAME_OVERHEAD + bytes.len() + MIC_LENGTH <= MAX_PHY_PACKET_SIZE)
     }
 }
 
@@ -704,6 +712,33 @@ mod test {
         // Make sure encryption is round trip
         assert_eq!(nwk_frame.to_bytes(), bytes);
         assert_eq!(decrypted_nwk_frame.encrypt(&key), bytes);
+    }
+
+    // The size check without encryption agrees with the encrypted frame at every
+    // payload length
+    #[test]
+    fn test_fits_secured_matches_the_encrypted_length() {
+        let bytes =
+            hex!("0802426b00000f2e287a0a0000a8ef171e004b120000f7a7e37b47adb47593c8a375c98ba6");
+        let key = Key::from_hex("e8785a1ed5996b3ef715cb3fbdd69187");
+        let mut frame = EncryptedNwkFrame::from_bytes(&bytes)
+            .unwrap()
+            .decrypt(&key)
+            .unwrap();
+
+        for length in 0..=MAX_NSDU_SIZE {
+            frame.payload = NwkPayload::Opaque(Nsdu::from_slice(&vec![0; length]).unwrap());
+
+            let encrypted_fits =
+                write_frame::<MAX_PHY_PACKET_SIZE>(|writer| frame.serialize(writer, Some(&key)))
+                    .is_ok_and(|bytes| MAC_FRAME_OVERHEAD + bytes.len() <= MAX_PHY_PACKET_SIZE);
+
+            assert_eq!(
+                frame.fits_secured(),
+                encrypted_fits,
+                "payload length {length}"
+            );
+        }
     }
 
     #[test]
