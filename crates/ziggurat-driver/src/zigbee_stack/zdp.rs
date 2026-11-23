@@ -372,7 +372,7 @@ impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
                     },
                     lqa: entry
                         .best_link()
-                        .and_then(|best| entry.links.get(&best.phy))
+                        .and_then(|best| entry.link(best.phy))
                         .and_then(|link| link.lqas.median())
                         .unwrap_or(0),
                 })
