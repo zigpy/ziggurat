@@ -11,14 +11,14 @@ use ziggurat_zigbee::nwk::commands::{
     NwkRouteReplyCommand, NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
-use ziggurat_zigbee::nwk::next_hop::RouteRecord;
+use ziggurat_zigbee::nwk::next_hop::{self, RouteRecord};
 
 use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, Frame, Nib, NwkSecurityMode, SendHandle, SendMode,
-    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
+    TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
@@ -434,38 +434,70 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.core().nib.is_concentrator
     }
 
-    /// Spec 3.6.4.5.5: the route record that tells `concentrator` the path from us or
-    /// our end device child, sent ahead of a data frame to it.
-    pub(super) fn route_record_frame(
-        &self,
-        nib: &mut Nib,
-        record: RouteRecord,
-        concentrator: Nwk,
-    ) -> Frame {
-        let (source, source_eui64, relays) = match record {
-            RouteRecord::Ours => (
+    /// Spec 3.6.4.5.5: transmit the route record due before `data`, to the same next hop.
+    /// The route record tells the concentrator the path from us or our end device
+    /// child. It goes out once here, so it always precedes the data. If it is not
+    /// acked, the send table retries it like any other unicast.
+    // The lint misses that `nib` borrows the guard until the frame is built
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) async fn transmit_route_record(&self, data: &NwkFrame, next_hop: Nwk) {
+        let concentrator = data.nwk_header.destination;
+
+        let mut frame = {
+            let mut core = self.core();
+            let nib = &mut core.nib;
+
+            let Some(record) = next_hop::route_record_due(
+                &nib.routing,
+                &nib.neighbors,
+                data,
                 self.state.network_address,
-                self.state.ieee_address,
-                Vec::new(),
-            ),
-            // The path from our child starts with us
-            RouteRecord::Child { nwk, eui64 } => {
-                (nwk, eui64, Vec::from([self.state.network_address]))
-            }
-        };
+            ) else {
+                return;
+            };
 
-        tracing::debug!("Sending a route record for {source:?} to {concentrator:?}");
+            let (source, source_eui64, relays) = match record {
+                RouteRecord::Ours => {
+                    nib.routing.note_route_record_sent(concentrator, next_hop);
+                    (
+                        self.state.network_address,
+                        self.state.ieee_address,
+                        Vec::new(),
+                    )
+                }
+                // The path from our child starts with us
+                RouteRecord::Child { nwk, eui64 } => {
+                    (nwk, eui64, Vec::from([self.state.network_address]))
+                }
+            };
 
-        let frame = self
-            .nwk_command_frame(
+            tracing::debug!("Sending a route record for {source:?} to {concentrator:?}");
+
+            self.nwk_command_frame(
                 concentrator,
                 NwkCommand::RouteRecord(NwkRouteRecordCommand { relays }),
             )
             .with_source(source)
             .with_source_ieee(Some(source_eui64))
-            .with_sequence_number(nib.next_sequence_number());
+            .with_sequence_number(nib.next_sequence_number())
+        };
 
-        Frame::nwk(frame, NwkSecurityMode::NetworkKey)
+        let result = self
+            .transmit_unicast(&mut frame, next_hop, NwkSecurityMode::NetworkKey, false)
+            .await;
+
+        if result.is_err() {
+            drop(self.enqueue_unicast(
+                Frame::nwk(frame, NwkSecurityMode::NetworkKey),
+                TxPolicy {
+                    priority: TxPriority::UserNormal,
+                    class: TrafficClass::Critical,
+                },
+                Confirm::OnHandoff,
+                next_hop,
+                None,
+            ));
+        }
     }
 
     pub(super) fn invalidate_routes_via(&self, next_hop: Nwk) {

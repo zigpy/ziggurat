@@ -72,7 +72,6 @@ impl Fixture {
                 next_hop: CHILD_NWK,
                 poll_address: Some(poll_address),
             },
-            None,
             self.now,
             &self.tunables,
         );
@@ -174,20 +173,10 @@ impl Fixture {
     /// Run a timer pass in which the routing table offers this next hop toward
     /// `DESTINATION`. Returns what the pass settles.
     fn pass(&mut self, next_hop: Option<Nwk>) -> Vec<Verdict> {
-        self.pass_preceded(next_hop, None)
-    }
-
-    /// [`Self::pass`], with a frame the routed send must be preceded by.
-    fn pass_preceded(
-        &mut self,
-        next_hop: Option<Nwk>,
-        preceded_by: Option<&'static str>,
-    ) -> Vec<Verdict> {
         self.sends.tick(self.now, &self.tunables, |_| {
             next_hop.map(|next_hop| Routed {
                 next_hop,
                 poll_address: None,
-                preceded_by,
             })
         });
         self.settled()
@@ -280,6 +269,36 @@ fn test_held_unicast_waits_without_a_next_hop() {
     assert!(fixture.dequeue().is_none());
 }
 
+// Only a unicast's first transmit is marked as such; its retries are not
+#[test]
+fn test_retry_is_not_a_first_attempt() {
+    let mut fixture = Fixture::new();
+    fixture.hold_unicast();
+    assert!(fixture.pass(Some(NEXT_HOP)).is_empty());
+
+    let in_flight = fixture.dequeue().unwrap();
+    assert!(matches!(
+        in_flight.transmit(),
+        Transmit::Unicast {
+            first_attempt: true,
+            ..
+        }
+    ));
+    let failed = Err(TransmitError::Failed(SendFailure::Cancelled));
+    assert!(fixture.report(in_flight, failed).is_empty());
+    assert!(fixture.pass(None).is_empty());
+
+    let in_flight = fixture.dequeue().unwrap();
+    assert!(matches!(
+        in_flight.transmit(),
+        Transmit::Unicast {
+            first_attempt: false,
+            ..
+        }
+    ));
+    assert_eq!(fixture.transmitted(in_flight).len(), 1);
+}
+
 // A held unicast waits for a next hop, not for a discovery: any pass that finds one
 // releases it.
 #[test]
@@ -296,42 +315,6 @@ fn test_held_unicast_is_routed_once_a_next_hop_is_found() {
         in_flight.transmit(),
         Transmit::Unicast { next_hop, .. } if next_hop == NEXT_HOP
     ));
-}
-
-// A route record found due when a held unicast is routed goes out first, and the
-// unicast waits until it is settled, retries included
-#[test]
-fn test_held_unicast_waits_for_the_frame_routed_ahead_of_it() {
-    let mut fixture = Fixture::new();
-    let held = fixture.hold_unicast();
-
-    assert!(
-        fixture
-            .pass_preceded(Some(NEXT_HOP), Some("route record"))
-            .is_empty()
-    );
-
-    let in_flight = fixture.dequeue().unwrap();
-    assert_eq!(in_flight.frame, "route record");
-    assert!(matches!(
-        in_flight.transmit(),
-        Transmit::Unicast { next_hop, .. } if next_hop == NEXT_HOP
-    ));
-
-    // The first attempt fails: the unicast keeps waiting for the retry
-    assert!(fixture.dequeue().is_none());
-    let failed = Err(TransmitError::Failed(SendFailure::Cancelled));
-    assert!(fixture.report(in_flight, failed).is_empty());
-    assert!(fixture.pass(None).is_empty());
-
-    let in_flight = fixture.dequeue().unwrap();
-    assert_eq!(in_flight.frame, "route record");
-    let record = in_flight.id;
-    assert_eq!(fixture.transmitted(in_flight), [(record, Ok(()))]);
-
-    let in_flight = fixture.dequeue().unwrap();
-    assert_eq!(in_flight.frame, "held unicast");
-    assert_eq!(fixture.transmitted(in_flight), [(held, Ok(()))]);
 }
 
 #[test]

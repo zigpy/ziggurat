@@ -184,6 +184,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
+        // A frame the concentrator source-routed to us shows it has our route
+        if nwk_frame.nwk_header.source_route.is_some() {
+            self.core()
+                .nib
+                .routing
+                .note_source_routed_frame(nwk_frame.nwk_header.source);
+        }
+
         // Update the address cache. Hearing a device is not a join, so the address keeps
         // its session state.
         if let Some(src_eui64) = nwk_frame.nwk_header.source_ieee {
@@ -418,17 +426,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         let handle = match resolved {
-            NextHop::Resolved {
-                next_hop,
-                route_record,
-            } => self.enqueue_resolved_in(
-                &mut core,
-                Frame::nwk(nwk_frame, security),
-                policy,
-                confirm,
-                next_hop,
-                route_record,
-            ),
+            NextHop::Resolved(next_hop) => {
+                let poll_address = Self::poll_address(&core.nib, next_hop);
+                self.enqueue_unicast_in(
+                    &mut core,
+                    Frame::nwk(nwk_frame, security),
+                    policy,
+                    confirm,
+                    next_hop,
+                    poll_address,
+                )
+            }
             NextHop::NeedDiscovery => self.hold_for_route(
                 &mut core,
                 Frame::nwk(nwk_frame, security),
@@ -709,7 +717,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 ),
                 None => core
                     .sends
-                    .enqueue_unicast(unicast, None, self.core_now(), &self.tunables),
+                    .enqueue_unicast(unicast, self.core_now(), &self.tunables),
             };
         }
     }
@@ -943,16 +951,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let frame = Frame::nwk(nwk_frame, NwkSecurityMode::NetworkKey);
         match resolved {
-            NextHop::Resolved {
-                next_hop,
-                route_record,
-            } => {
+            NextHop::Resolved(next_hop) => {
                 tracing::debug!("Relaying frame to {destination:?} via {next_hop:?}");
 
                 // The originator's sequence number is preserved. Any failure handling
                 // (route invalidation, the network status back to the originator) follows
                 // the send table's verdict; nothing is awaited here.
-                self.enqueue_resolved_in(
+                let poll_address = Self::poll_address(&core.nib, next_hop);
+                self.enqueue_unicast_in(
                     &mut core,
                     frame,
                     TxPolicy {
@@ -961,7 +967,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     },
                     Confirm::OnHandoff,
                     next_hop,
-                    route_record,
+                    poll_address,
                 );
             }
             NextHop::NeedDiscovery => {

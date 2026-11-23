@@ -174,7 +174,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     },
                     memory_constrained: false,
                     many_to_one: entry.many_to_one,
-                    route_record_required: entry.route_record_required,
+                    route_record_required: entry.route_record_state
+                        != routing::RouteRecordState::Known,
                     next_hop_address: entry.next_hop_address,
                 })
                 .collect();

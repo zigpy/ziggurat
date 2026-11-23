@@ -31,12 +31,10 @@ pub struct Unicast<F> {
 
 /// How a held unicast is sent once it has a route.
 #[derive(Debug)]
-pub struct Routed<F> {
+pub struct Routed {
     pub next_hop: Nwk,
     /// The address the device polls under, if the frame must wait for its poll.
     pub poll_address: Option<Ieee802154Address>,
-    /// A frame sent first, to the same next hop.
-    pub preceded_by: Option<F>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,12 +64,12 @@ struct Record<F> {
     /// Transmit attempts left after the current one. A failed transmit of a held frame
     /// waits for the next poll instead, until the frame expires.
     attempts_remaining: u8,
+    /// The frame was lent to the radio before.
+    attempted: bool,
     stage: Stage,
     deadline: Instant,
     /// The broadcast this frame copies to a sleepy child.
     copy_of: Option<SendId>,
-    /// The send that goes first: this frame is not sent while that one is in the table.
-    after: Option<SendId>,
 }
 
 impl<F> Record<F> {
@@ -132,9 +130,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
     /// A unicast fails if not handed off within the handoff timeout; a held frame if
     /// not polled for within the transaction persistence time. A send admitted earlier
     /// passes the deadline it was admitted with: it replaces the handoff timeout and
-    /// caps the persistence time. A send `after` another is not sent while that one is
-    /// in the table.
-    #[allow(clippy::too_many_arguments)]
+    /// caps the persistence time.
     pub(super) fn enqueue(
         &mut self,
         id: SendId,
@@ -142,7 +138,6 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
         now: Instant,
         admitted_deadline: Option<Instant>,
         copy_of: Option<SendId>,
-        after: Option<SendId>,
         tunables: &Tunables,
     ) {
         let persistence_deadline = now + tunables.transaction_persistence_time();
@@ -162,10 +157,10 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
                 next_hop: unicast.next_hop,
                 poll_address: unicast.poll_address,
                 attempts_remaining: tunables.unicast_retries(),
+                attempted: false,
                 stage,
                 deadline,
                 copy_of,
-                after,
             },
         );
     }
@@ -175,13 +170,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
     pub(super) fn best_queued(&self, now: Instant) -> Option<(SendId, TxPriority)> {
         self.records
             .iter()
-            .filter(|(_, record)| {
-                record.stage == Stage::Queued
-                    && now < record.deadline
-                    && record
-                        .after
-                        .is_none_or(|first| !self.records.contains_key(&first))
-            })
+            .filter(|(_, record)| record.stage == Stage::Queued && now < record.deadline)
             .max_by_key(|(id, record)| (record.priority, Reverse(**id)))
             .map(|(id, record)| (*id, record.priority))
     }
@@ -202,6 +191,8 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
         let record = self.records.get_mut(&id).unwrap();
         debug_assert_eq!(record.stage, Stage::Queued);
         record.stage = Stage::Transmitting { acked: false };
+        let first_attempt = !record.attempted;
+        record.attempted = true;
 
         InFlight {
             id,
@@ -209,6 +200,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
             transmit: Transmit::Unicast {
                 next_hop: record.next_hop,
                 frame_pending,
+                first_attempt,
             },
         }
     }

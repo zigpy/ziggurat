@@ -14,7 +14,7 @@ use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::gp::build_gpdf_to_gpd;
-use ziggurat_zigbee::nwk::next_hop::{self, NextHop, RouteRecord};
+use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{
     Action, Broadcast as BroadcastRecord, Gpdf as GpdfRecord, Routed, TransmitError,
     Unicast as UnicastRecord,
@@ -65,42 +65,6 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 next_hop,
                 poll_address,
             },
-            None,
-            self.core_now(),
-            &self.tunables,
-        );
-
-        SendHandle::new(id, &self.send_watches)
-    }
-
-    /// Enqueue a NWK unicast to the next hop resolution chose, preceded by the route
-    /// record it found due. Under a core lock the caller holds and commits.
-    pub(super) fn enqueue_resolved_in(
-        &self,
-        core: &mut ZigbeeCore,
-        frame: Frame,
-        policy: TxPolicy,
-        confirm: Confirm,
-        next_hop: Nwk,
-        route_record: Option<RouteRecord>,
-    ) -> SendHandle {
-        let Frame::Nwk { nwk_frame, .. } = &frame else {
-            unreachable!("only NWK unicasts are routed")
-        };
-        let destination = nwk_frame.nwk_header.destination;
-
-        let preceded_by =
-            route_record.map(|record| self.route_record_frame(&mut core.nib, record, destination));
-        let poll_address = Self::poll_address(&core.nib, next_hop);
-        let id = core.sends.enqueue_unicast(
-            UnicastRecord {
-                frame,
-                priority: policy.priority,
-                confirm,
-                next_hop,
-                poll_address,
-            },
-            preceded_by,
             self.core_now(),
             &self.tunables,
         );
@@ -253,14 +217,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .map(Ieee802154Address::Eui64)
     }
 
-    /// Resolve the route of an unrouted frame again: how it is sent once it has one.
-    /// `None` means no route yet.
+    /// Resolve the route of an unrouted frame again: its next hop, and the address it
+    /// polls under if it is a sleepy child. `None` means no route yet.
     fn resolve_unrouted_unicast(
         &self,
         nib: &mut Nib,
         frame: &mut Frame,
         now: CoreInstant,
-    ) -> Option<Routed<Frame>> {
+    ) -> Option<Routed> {
         let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
         };
@@ -291,14 +255,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         match resolved {
-            NextHop::Resolved {
-                next_hop,
-                route_record,
-            } => Some(Routed {
+            NextHop::Resolved(next_hop) => Some(Routed {
                 next_hop,
                 poll_address: Self::poll_address(nib, next_hop),
-                preceded_by: route_record
-                    .map(|record| self.route_record_frame(nib, record, destination)),
             }),
             // A relayed frame is discarded once its source is no longer our child. It
             // stays held until its deadline, as it did before
@@ -352,12 +311,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 Transmit::Unicast {
                     next_hop,
                     frame_pending,
+                    first_attempt,
                 },
                 Frame::Nwk {
                     nwk_frame,
                     security,
                 },
             ) => {
+                // Spec 3.6.4.5.5: the route record goes out before the data frame, not
+                // before its retries
+                if first_attempt {
+                    self.transmit_route_record(nwk_frame, next_hop).await;
+                }
+
                 self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending)
                     .await
             }

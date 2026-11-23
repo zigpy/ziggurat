@@ -26,6 +26,17 @@ pub enum Status {
     Inactive = 3,
 }
 
+/// Spec 3.6.4.5.5: whether a concentrator still needs our route record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRecordState {
+    /// The concentrator has our route, or never asked for it.
+    Known,
+    /// The concentrator asked for our route record, and we have not sent one since.
+    Needed,
+    /// We sent a route record, but the concentrator has not yet shown it has our route.
+    Sent,
+}
+
 #[derive(Debug)]
 pub struct TableEntry {
     /// Destination address the routing table entry is for
@@ -40,9 +51,9 @@ pub struct TableEntry {
     /// many-to-one route request.
     pub many_to_one: bool,
 
-    /// A flag indicating that a route record command frame SHOULD be sent to the
-    /// destination prior to the next data packet.
-    pub route_record_required: bool,
+    /// Whether a route record command frame SHOULD be sent to the destination prior to
+    /// the next data packet (the spec's "route record required" flag).
+    pub route_record_state: RouteRecordState,
 
     /// When set to TRUE, this flag indicates that an expected regular many-to-one route
     /// request was missed, i.e. the last many-to-one route request for this destination
@@ -85,7 +96,7 @@ impl TableEntry {
             status,
             no_route_cache: false,
             many_to_one: false,
-            route_record_required: false,
+            route_record_state: RouteRecordState::Known,
             expired: false,
             next_hop_address,
             path_cost: u8::MAX,
@@ -582,12 +593,11 @@ impl Routing {
 
     /// Spec 3.6.4.5.5: whether a route record has to precede a data frame toward
     /// `destination` over its many-to-one route. A frame relayed for one of our end
-    /// device children always needs one. A frame we originate needs one while the
-    /// concentrator asks for it: a concentrator that keeps a route record table then
-    /// has our route until its next advertisement asks again, so the request is
-    /// cleared; one that keeps none needs a route record before every frame.
-    pub fn route_record_due(&mut self, destination: Nwk, for_end_device_child: bool) -> bool {
-        let Some(entry) = self.route_table.get_mut(&destination) else {
+    /// device children always needs one. A frame we originate needs one until the
+    /// concentrator shows it has our route. A concentrator that keeps no route cache
+    /// needs one before every frame.
+    pub fn route_record_required(&self, destination: Nwk, for_end_device_child: bool) -> bool {
+        let Some(entry) = self.route_table.get(&destination) else {
             return false;
         };
 
@@ -595,26 +605,31 @@ impl Routing {
             return false;
         }
 
-        if for_end_device_child {
-            return true;
-        }
-
-        let due = entry.route_record_required;
-        if !entry.no_route_cache {
-            entry.route_record_required = false;
-        }
-
-        due
+        for_end_device_child
+            || entry.no_route_cache
+            || entry.route_record_state != RouteRecordState::Known
     }
 
-    /// Spec 3.6.4.3.2: relaying a source-routed frame proves the concentrator that
-    /// originated it holds a route record for the frame's source; no route record
-    /// has to precede the next frame toward it (unless it keeps no route cache).
+    /// We transmitted our route record to `concentrator` via `next_hop`. A concentrator
+    /// that is our neighbor needs no source route to reach us.
+    pub fn note_route_record_sent(&mut self, concentrator: Nwk, next_hop: Nwk) {
+        if let Some(entry) = self.route_table.get_mut(&concentrator) {
+            entry.route_record_state = if next_hop == concentrator {
+                RouteRecordState::Known
+            } else {
+                RouteRecordState::Sent
+            };
+        }
+    }
+
+    /// A frame source-routed by `concentrator` reached us, so it has a source route
+    /// through us (spec 3.6.4.3.2). It only proves the concentrator has our route if
+    /// our route record went out after its last advertisement.
     pub fn note_source_routed_frame(&mut self, concentrator: Nwk) {
         if let Some(entry) = self.route_table.get_mut(&concentrator)
-            && !entry.no_route_cache
+            && entry.route_record_state == RouteRecordState::Sent
         {
-            entry.route_record_required = false;
+            entry.route_record_state = RouteRecordState::Known;
         }
     }
 
@@ -800,7 +815,7 @@ impl Routing {
         // concentrator; spec 3.6.4.5.1.8: a later plain request never clears it
         if many_to_one != NwkRouteRequestManyToOne::NotManyToOne {
             originator_entry.many_to_one = true;
-            originator_entry.route_record_required = true;
+            originator_entry.route_record_state = RouteRecordState::Needed;
             originator_entry.no_route_cache = many_to_one
                 == NwkRouteRequestManyToOne::ManyToOneSenderDoesntSupportRouteRecordTable;
         }

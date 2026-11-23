@@ -1,8 +1,8 @@
-//! The MAC next hop of a unicast we originate or relay.
+//! The MAC next hop of a unicast we originate or relay, and the route record due before
+//! it is transmitted.
 //!
 //! A decision over the routing and neighbor tables that may rewrite the frame to carry
-//! a source route (spec 3.6.4.3), with the route record due ahead of it (spec
-//! 3.6.4.5.5).
+//! a source route (spec 3.6.4.3).
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -59,7 +59,8 @@ pub enum HostRoute {
     SourceRoute(Vec<Nwk>),
 }
 
-/// A route record that must precede a data frame to a concentrator (spec 3.6.4.5.5).
+/// A route record to transmit just before a data frame to a concentrator (spec
+/// 3.6.4.5.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteRecord {
     /// For a frame we originate: the path starts at us.
@@ -71,11 +72,8 @@ pub enum RouteRecord {
 /// The outcome of resolving a unicast's MAC next hop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NextHop {
-    /// Transmit to this next hop now, after the route record when one is due.
-    Resolved {
-        next_hop: Nwk,
-        route_record: Option<RouteRecord>,
-    },
+    /// Transmit to this next hop now.
+    Resolved(Nwk),
     /// No route known; the frame must wait for route discovery.
     NeedDiscovery,
     /// No route known and the frame's `discover_route` flag forbids discovering one.
@@ -130,11 +128,10 @@ pub fn reaches_directly(
         )
 }
 
-/// Resolve the MAC next hop for a unicast, and the route record due ahead of it.
+/// Resolve the MAC next hop for a unicast.
 ///
 /// Following or applying a source route rewrites `frame`'s header in place (spec
-/// 3.6.4.3). A due route record is taken from the routing table, so a resolved frame
-/// must be sent.
+/// 3.6.4.3).
 pub fn resolve(
     routing: &mut Routing,
     neighbors: &Neighbors,
@@ -143,26 +140,17 @@ pub fn resolve(
     policy: Policy,
     now: Instant,
 ) -> NextHop {
-    let mut resolved = match mode {
-        SendMode::Direct => NextHop::Resolved {
-            next_hop: frame.nwk_header.destination,
-            route_record: None,
-        },
+    match mode {
+        SendMode::Direct => NextHop::Resolved(frame.nwk_header.destination),
         SendMode::Route(directive) => route(routing, neighbors, frame, directive, policy, now),
         SendMode::Relay => relay(routing, neighbors, frame, policy, now),
-    };
-
-    if let NextHop::Resolved { route_record, .. } = &mut resolved {
-        *route_record = due_route_record(routing, neighbors, frame, policy.network_address);
     }
-
-    resolved
 }
 
-/// Spec 3.6.4.5.5: the route record due ahead of a data frame from us or our end device
-/// child toward a concentrator.
-fn due_route_record(
-    routing: &mut Routing,
+/// Spec 3.6.4.5.5: the route record to transmit just before a data frame from us or our
+/// end device child toward a concentrator.
+pub fn route_record_due(
+    routing: &Routing,
     neighbors: &Neighbors,
     frame: &NwkFrame,
     network_address: Nwk,
@@ -176,13 +164,16 @@ fn due_route_record(
 
     if source == network_address {
         return routing
-            .route_record_due(destination, false)
+            .route_record_required(destination, false)
             .then_some(RouteRecord::Ours);
     }
 
+    // TODO: spec 3.6.4.5.5 allows skipping the route record for a child that already
+    // received a frame the concentrator source-routed to it. We send one before every
+    // relayed frame.
     let eui64 = neighbors.end_device_child_eui64(source)?;
     routing
-        .route_record_due(destination, true)
+        .route_record_required(destination, true)
         .then_some(RouteRecord::Child { nwk: source, eui64 })
 }
 
@@ -219,30 +210,18 @@ fn relay(
 
         // Delivery to our own end device child skips the rest of the relay list
         if neighbors.end_device_child_eui64(destination).is_some() {
-            return NextHop::Resolved {
-                next_hop: destination,
-                route_record: None,
-            };
+            return NextHop::Resolved(destination);
         }
 
-        return NextHop::Resolved {
-            next_hop,
-            route_record: None,
-        };
+        return NextHop::Resolved(next_hop);
     }
 
     if reaches_directly(neighbors, destination, policy, now) {
-        return NextHop::Resolved {
-            next_hop: destination,
-            route_record: None,
-        };
+        return NextHop::Resolved(destination);
     }
 
     if let Some(next_hop) = routing.next_hop(destination) {
-        return NextHop::Resolved {
-            next_hop,
-            route_record: None,
-        };
+        return NextHop::Resolved(next_hop);
     }
 
     // Spec 3.6.4.5.1: a relay discovers a route only for a frame from its own end device
@@ -277,20 +256,14 @@ fn route(
     // End device children never route-discover; their parent delivers directly. This
     // also keeps a stale route record from outliving a device rejoining as our child.
     if neighbors.end_device_child_eui64(destination).is_some() {
-        return NextHop::Resolved {
-            next_hop: destination,
-            route_record: None,
-        };
+        return NextHop::Resolved(destination);
     }
 
     // A neighbor with a good link is reached directly. No route is cheaper
     if !policy.force_route_discovery
         && is_direct_neighbor(neighbors, destination, policy.direct_max_link_cost)
     {
-        return NextHop::Resolved {
-            next_hop: destination,
-            route_record: None,
-        };
+        return NextHop::Resolved(destination);
     }
 
     // A stored source route (concentrator behavior) wins over the routing table.
@@ -305,10 +278,7 @@ fn route(
 
         match routing.route_to(destination, policy.max_source_route, first_hop_usable) {
             Some(Route::NextHop(next_hop)) => {
-                return NextHop::Resolved {
-                    next_hop,
-                    route_record: None,
-                };
+                return NextHop::Resolved(next_hop);
             }
             Some(Route::SourceRouted(relays)) => return apply_source_route(frame, relays),
             None => {}
@@ -319,10 +289,7 @@ fn route(
     if !policy.force_route_discovery
         && let Some(next_hop) = routing.next_hop(destination)
     {
-        return NextHop::Resolved {
-            next_hop,
-            route_record: None,
-        };
+        return NextHop::Resolved(next_hop);
     }
 
     // A router child that just attached has sent no link status yet, send to it
@@ -334,10 +301,7 @@ fn route(
             policy.new_router_child_window,
         )
     {
-        return NextHop::Resolved {
-            next_hop: destination,
-            route_record: None,
-        };
+        return NextHop::Resolved(destination);
     }
 
     // No usable route. A host hint stands in for discovery rather than triggering it.
@@ -358,10 +322,7 @@ fn apply_host_route(frame: &mut NwkFrame, route: &HostRoute) -> NextHop {
     match route {
         // The next hop routes onward itself, so `discover_route` is left as built:
         // an intermediate hop still needs it to reach the final destination.
-        HostRoute::NextHop(next_hop) => NextHop::Resolved {
-            next_hop: *next_hop,
-            route_record: None,
-        },
+        HostRoute::NextHop(next_hop) => NextHop::Resolved(*next_hop),
         HostRoute::SourceRoute(relays) => apply_source_route(frame, relays.clone()),
     }
 }
@@ -375,10 +336,7 @@ fn apply_source_route(frame: &mut NwkFrame, relays: Vec<Nwk>) -> NextHop {
         relay_index: relays.len() as u8 - 1,
         relays,
     });
-    NextHop::Resolved {
-        next_hop,
-        route_record: None,
-    }
+    NextHop::Resolved(next_hop)
 }
 
 #[cfg(test)]
@@ -401,15 +359,6 @@ mod tests {
     const ACTIVITY: ActivityParams = ActivityParams {
         initial_count: 3,
         period: Duration::from_secs(15),
-    };
-    const POLICY: Policy = Policy {
-        network_address: OWN,
-        is_concentrator: false,
-        force_route_discovery: false,
-        max_source_route: 11,
-        source_route_max_first_hop_cost: 3,
-        new_router_child_window: Duration::from_secs(30),
-        direct_max_link_cost: 2,
     };
 
     /// A routing table with a many-to-one route to `CONCENTRATOR` through `RELAY`, from
@@ -484,83 +433,64 @@ mod tests {
         )
     }
 
-    fn resolve_frame(
-        routing: &mut Routing,
-        neighbors: &Neighbors,
-        mut frame: NwkFrame,
-        mode: &SendMode,
-    ) -> NextHop {
-        resolve(routing, neighbors, &mut frame, mode, POLICY, NOW)
-    }
-
-    // A concentrator that keeps a route record table needs our route record once per
-    // request for it
+    // A concentrator that keeps a route record table needs our route record until it
+    // source-routes a frame through us after we sent one
     #[test]
-    fn test_our_data_frame_takes_the_route_record_once() {
+    fn test_our_data_frames_need_route_records_until_the_concentrator_has_our_route() {
         let mut routing = routing_to_concentrator();
         let neighbors = Neighbors::default();
-        let mode = SendMode::Route(RouteDirective::StackDecides);
+        let due = |routing: &Routing| route_record_due(routing, &neighbors, &data_frame(OWN), OWN);
 
+        // A source route built before the concentrator asked again is no proof
+        routing.note_source_routed_frame(CONCENTRATOR);
+        assert_eq!(due(&routing), Some(RouteRecord::Ours));
+
+        // Sending one is no proof either
+        routing.note_route_record_sent(CONCENTRATOR, RELAY);
+        assert_eq!(due(&routing), Some(RouteRecord::Ours));
+
+        routing.note_source_routed_frame(CONCENTRATOR);
+        assert_eq!(due(&routing), None);
+    }
+
+    // A concentrator that is our neighbor needs no source route to reach us
+    #[test]
+    fn test_neighbor_concentrator_needs_one_route_record() {
+        let mut routing = routing_to_concentrator();
+        let neighbors = Neighbors::default();
+
+        routing.note_route_record_sent(CONCENTRATOR, CONCENTRATOR);
         assert_eq!(
-            resolve_frame(&mut routing, &neighbors, data_frame(OWN), &mode),
-            NextHop::Resolved {
-                next_hop: RELAY,
-                route_record: Some(RouteRecord::Ours),
-            }
-        );
-        assert_eq!(
-            resolve_frame(&mut routing, &neighbors, data_frame(OWN), &mode),
-            NextHop::Resolved {
-                next_hop: RELAY,
-                route_record: None,
-            }
+            route_record_due(&routing, &neighbors, &data_frame(OWN), OWN),
+            None
         );
     }
 
     // Spec 3.6.4.5.5: every data frame from an end device child to a concentrator needs
-    // a route record, and taking one leaves our own request in place
+    // a route record, even once the concentrator has our own route
     #[test]
-    fn test_relayed_child_data_frame_always_takes_a_route_record() {
+    fn test_child_data_frames_always_need_a_route_record() {
         let mut routing = routing_to_concentrator();
         let neighbors = neighbors_with_child();
-        let child_record = NextHop::Resolved {
-            next_hop: RELAY,
-            route_record: Some(RouteRecord::Child {
-                nwk: CHILD,
-                eui64: CHILD_EUI64,
-            }),
-        };
+
+        routing.note_route_record_sent(CONCENTRATOR, RELAY);
+        routing.note_source_routed_frame(CONCENTRATOR);
 
         for _ in 0..2 {
             assert_eq!(
-                resolve_frame(
-                    &mut routing,
-                    &neighbors,
-                    data_frame(CHILD),
-                    &SendMode::Relay
-                ),
-                child_record
+                route_record_due(&routing, &neighbors, &data_frame(CHILD), OWN),
+                Some(RouteRecord::Child {
+                    nwk: CHILD,
+                    eui64: CHILD_EUI64,
+                })
             );
         }
-
-        assert_eq!(
-            resolve_frame(
-                &mut routing,
-                &neighbors,
-                data_frame(OWN),
-                &SendMode::Route(RouteDirective::StackDecides)
-            ),
-            NextHop::Resolved {
-                next_hop: RELAY,
-                route_record: Some(RouteRecord::Ours),
-            }
-        );
     }
 
-    // Only data frames carry route records, and only from us or our end device child
+    // Only data frames need route records, and only from us or our end device child
     #[test]
     fn test_no_route_record_for_commands_or_other_sources() {
-        let mut routing = routing_to_concentrator();
+        let routing = routing_to_concentrator();
         let neighbors = neighbors_with_child();
         let command = frame(
             NwkFrameType::Command,
@@ -570,43 +500,10 @@ mod tests {
             })),
         );
 
+        assert_eq!(route_record_due(&routing, &neighbors, &command, OWN), None);
         assert_eq!(
-            resolve_frame(
-                &mut routing,
-                &neighbors,
-                command,
-                &SendMode::Route(RouteDirective::StackDecides)
-            ),
-            NextHop::Resolved {
-                next_hop: RELAY,
-                route_record: None,
-            }
-        );
-        assert_eq!(
-            resolve_frame(
-                &mut routing,
-                &neighbors,
-                data_frame(Nwk(0x4444)),
-                &SendMode::Relay
-            ),
-            NextHop::Resolved {
-                next_hop: RELAY,
-                route_record: None,
-            }
-        );
-
-        // Neither frame took our own request
-        assert_eq!(
-            resolve_frame(
-                &mut routing,
-                &neighbors,
-                data_frame(OWN),
-                &SendMode::Route(RouteDirective::StackDecides)
-            ),
-            NextHop::Resolved {
-                next_hop: RELAY,
-                route_record: Some(RouteRecord::Ours),
-            }
+            route_record_due(&routing, &neighbors, &data_frame(Nwk(0x4444)), OWN),
+            None
         );
     }
 }
