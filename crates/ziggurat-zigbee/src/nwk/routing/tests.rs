@@ -309,6 +309,20 @@ fn test_unchanged_route_record_reports_a_relay_route_it_restores() {
     );
 }
 
+// With source routes turned off, a route record with no relays is still a direct route
+#[test]
+fn test_empty_route_record_is_used_with_source_routes_off() {
+    let mut routing = Routing::default();
+    routing.store_route_record(DEVICE, vec![]);
+    routing.store_route_record(OTHER_DEVICE, vec![ROUTER]);
+
+    assert_eq!(
+        routing.route_to(DEVICE, 0, |_| true),
+        Some(Route::NextHop(DEVICE))
+    );
+    assert_eq!(routing.route_to(OTHER_DEVICE, 0, |_| true), None);
+}
+
 // A route record wins over the routing table, so a reported failure must remove it
 // too, whether it is direct or a source route.
 #[test]

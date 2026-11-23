@@ -656,7 +656,9 @@ impl Routing {
         let record = self
             .route_record_table
             .get(&destination)
-            .filter(|relays| relays.len() < max_source_route as usize)
+            // A record with no relays needs no source route header, so the limit does not
+            // apply to it
+            .filter(|relays| relays.is_empty() || relays.len() < max_source_route as usize)
             .filter(|relays| first_hop_usable(*relays.last().unwrap_or(&destination)));
 
         match record {
