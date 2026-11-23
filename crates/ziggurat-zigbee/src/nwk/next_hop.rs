@@ -445,8 +445,8 @@ mod tests {
         routing.note_source_routed_frame(CONCENTRATOR);
         assert_eq!(due(&routing), Some(RouteRecord::Ours));
 
-        // Sending one is no proof either
-        routing.note_route_record_sent(CONCENTRATOR, RELAY);
+        // An acked one is no proof either
+        routing.note_route_record_acked(CONCENTRATOR, RELAY);
         assert_eq!(due(&routing), Some(RouteRecord::Ours));
 
         routing.note_source_routed_frame(CONCENTRATOR);
@@ -459,7 +459,7 @@ mod tests {
         let mut routing = routing_to_concentrator();
         let neighbors = Neighbors::default();
 
-        routing.note_route_record_sent(CONCENTRATOR, CONCENTRATOR);
+        routing.note_route_record_acked(CONCENTRATOR, CONCENTRATOR);
         assert_eq!(
             route_record_due(&routing, &neighbors, &data_frame(OWN), OWN),
             None
@@ -473,7 +473,7 @@ mod tests {
         let mut routing = routing_to_concentrator();
         let neighbors = neighbors_with_child();
 
-        routing.note_route_record_sent(CONCENTRATOR, RELAY);
+        routing.note_route_record_acked(CONCENTRATOR, RELAY);
         routing.note_source_routed_frame(CONCENTRATOR);
 
         for _ in 0..2 {

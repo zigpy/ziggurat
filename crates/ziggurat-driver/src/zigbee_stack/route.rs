@@ -443,7 +443,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) async fn transmit_route_record(&self, data: &NwkFrame, next_hop: Nwk) {
         let concentrator = data.nwk_header.destination;
 
-        let mut frame = {
+        let (record, mut frame) = {
             let mut core = self.core();
             let nib = &mut core.nib;
 
@@ -457,14 +457,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             };
 
             let (source, source_eui64, relays) = match record {
-                RouteRecord::Ours => {
-                    nib.routing.note_route_record_sent(concentrator, next_hop);
-                    (
-                        self.state.network_address,
-                        self.state.ieee_address,
-                        Vec::new(),
-                    )
-                }
+                RouteRecord::Ours => (
+                    self.state.network_address,
+                    self.state.ieee_address,
+                    Vec::new(),
+                ),
                 // The path from our child starts with us
                 RouteRecord::Child { nwk, eui64 } => {
                     (nwk, eui64, Vec::from([self.state.network_address]))
@@ -473,18 +470,28 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             tracing::debug!("Sending a route record for {source:?} to {concentrator:?}");
 
-            self.nwk_command_frame(
-                concentrator,
-                NwkCommand::RouteRecord(NwkRouteRecordCommand { relays }),
-            )
-            .with_source(source)
-            .with_source_ieee(Some(source_eui64))
-            .with_sequence_number(nib.next_sequence_number())
+            let frame = self
+                .nwk_command_frame(
+                    concentrator,
+                    NwkCommand::RouteRecord(NwkRouteRecordCommand { relays }),
+                )
+                .with_source(source)
+                .with_source_ieee(Some(source_eui64))
+                .with_sequence_number(nib.next_sequence_number());
+
+            (record, frame)
         };
 
         let result = self
             .transmit_unicast(&mut frame, next_hop, NwkSecurityMode::NetworkKey, false)
             .await;
+
+        if result.is_ok() && record == RouteRecord::Ours {
+            self.core()
+                .nib
+                .routing
+                .note_route_record_acked(concentrator, next_hop);
+        }
 
         if result.is_err() {
             drop(self.enqueue_unicast(

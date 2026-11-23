@@ -610,9 +610,9 @@ impl Routing {
             || entry.route_record_state != RouteRecordState::Known
     }
 
-    /// We transmitted our route record to `concentrator` via `next_hop`. A concentrator
-    /// that is our neighbor needs no source route to reach us.
-    pub fn note_route_record_sent(&mut self, concentrator: Nwk, next_hop: Nwk) {
+    /// `next_hop` acked our route record to `concentrator`. A concentrator that is our
+    /// neighbor got it directly, and needs no source route to reach us.
+    pub fn note_route_record_acked(&mut self, concentrator: Nwk, next_hop: Nwk) {
         if let Some(entry) = self.route_table.get_mut(&concentrator) {
             entry.route_record_state = if next_hop == concentrator {
                 RouteRecordState::Known
