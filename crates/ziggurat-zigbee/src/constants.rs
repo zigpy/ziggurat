@@ -1,5 +1,6 @@
 use core::fmt;
 use core::marker::PhantomData;
+use core::ops::RangeBounds;
 use core::sync::atomic::Ordering::Relaxed;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize};
 use core::time::Duration;
@@ -218,8 +219,12 @@ impl TunableValue for EndDeviceTimeout {
 /// Defines [`Tunables`] once: the struct, its defaults, the typed getters, and the
 /// by-field-name `set` used by the `SetTunable` protocol command all come from this
 /// single field list.
+///
+/// A field of an ordered type may end in `; valid <range>`: `set` then rejects a value
+/// outside that range, for values the stack cannot run with at all (not every unwise
+/// one).
 macro_rules! tunables {
-    ($($(#[$attr:meta])* $name:ident: $ty:ty = $default:expr,)*) => {
+    ($($(#[$attr:meta])* $name:ident: $ty:ty = $default:expr $(; valid $valid:expr)?,)*) => {
         /// Protocol parameters and policy knobs, initialized to spec-derived defaults.
         ///
         /// Unlike the module-level constants above, every field here is tweakable at
@@ -253,6 +258,11 @@ macro_rules! tunables {
                     $(stringify!($name) => {
                         let value = <$ty as TunableValue>::decode(raw)
                             .ok_or(TunableError::InvalidValue)?;
+                        $(
+                            if !RangeBounds::<$ty>::contains(&$valid, &value) {
+                                return Err(TunableError::InvalidValue);
+                            }
+                        )?
                         <$ty as TunableValue>::store(value, &self.$name);
                     })*
                     _ => return Err(TunableError::UnknownName),
@@ -312,8 +322,9 @@ tunables! {
     /// many-to-one route request.
     mtorr_delivery_failure_threshold: u8 = 1,
 
-    /// The time between link status command frames.
-    link_status_period: Duration = Duration::from_secs(15),
+    /// The time between link status command frames. Activity decay divides by it, so
+    /// it cannot be zero.
+    link_status_period: Duration = Duration::from_secs(15); valid Duration::from_micros(1)..,
 
     /// `nwkcMinRouterBootstrapJitter`: the shortest delay before a gratuitous link
     /// status.
@@ -451,5 +462,20 @@ mod test {
             Err(TunableError::InvalidValue)
         );
         assert!(tunables.hack_beacon_spam_duration().is_zero());
+    }
+
+    #[test]
+    fn test_set_rejects_value_outside_valid_range() {
+        let tunables = Tunables::default();
+
+        // A zero link status period: rejected, value unchanged.
+        assert_eq!(
+            tunables.set("link_status_period", 0),
+            Err(TunableError::InvalidValue)
+        );
+        assert_eq!(tunables.link_status_period(), Duration::from_secs(15));
+
+        tunables.set("link_status_period", 1).unwrap();
+        assert_eq!(tunables.link_status_period(), Duration::from_micros(1));
     }
 }
