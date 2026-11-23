@@ -53,6 +53,14 @@ impl LqaSamples {
     }
 }
 
+/// The PHY a frame came in on or goes out on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PhyIndex {
+    Radio,
+    /// An index into the driver's secondary PHYs
+    Secondary(u8),
+}
+
 /// Compute the link cost (1-7) based on the LQI (0-255).
 const fn lqi_to_link_cost(lqi: u8) -> u8 {
     match lqi {

@@ -7,7 +7,7 @@ use core::time::Duration;
 
 use ziggurat_driver::runtime::{EmbassyRuntime, Spawn};
 use ziggurat_driver::zigbee_stack::{Tunables, ZigbeeStack};
-use ziggurat_phy::{RadioPhy, Receiver};
+use ziggurat_phy::{NoPhy, RadioPhy, Receiver};
 use ziggurat_protocol::{
     self as proto, CapturedPacketPayload, ChannelPayload, ConfigurePayload, EnergyResultPayload,
     Error, Event, FirmwareInfoPayload, FrameType, Header, HwAddressPayload, NwkUpdateIdPayload,
@@ -196,14 +196,14 @@ async fn dispatch<P: RadioPhy>(
 // -- guards ------------------------------------------------------------------------
 
 /// The stack, in any state after `configure`.
-fn configured<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, EmbassyRuntime>>, Error> {
+fn configured<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, NoPhy, EmbassyRuntime>>, Error> {
     app.stack
         .as_ref()
         .ok_or(Error::Status(Status::NotConfigured))
 }
 
 /// The stack, if it is in the load window (configured but not started).
-fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, EmbassyRuntime>>, Error> {
+fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, NoPhy, EmbassyRuntime>>, Error> {
     match app.stack.as_ref() {
         Some(stack) if !app.started => Ok(stack),
         Some(_) => Err(Status::AlreadyStarted.into()),
@@ -212,7 +212,7 @@ fn loadable<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, EmbassyRunt
 }
 
 /// The stack, if it is running.
-fn running<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, EmbassyRuntime>>, Error> {
+fn running<P: RadioPhy>(app: &App<P>) -> Result<&Arc<ZigbeeStack<P, NoPhy, EmbassyRuntime>>, Error> {
     match app.stack.as_ref() {
         Some(stack) if app.started => Ok(stack),
         Some(_) => Err(Status::NotStarted.into()),
@@ -266,7 +266,13 @@ async fn handle_configure<P: RadioPhy>(
     }
     app.started = false;
 
-    let stack = ZigbeeStack::new(app.phy.clone(), config, Tunables::default(), app.spawner);
+    let stack = ZigbeeStack::new(
+        app.phy.clone(),
+        Vec::new(),
+        config,
+        Tunables::default(),
+        app.spawner,
+    );
     stack
         .state
         .core
@@ -297,7 +303,7 @@ async fn handle_start_network<P: RadioPhy>(app: &mut App<P>) -> Result<Response,
 async fn scan_table<P: RadioPhy>(
     app: &App<P>,
     request_id: RequestId,
-    snapshot: impl FnOnce(&ZigbeeStack<P, EmbassyRuntime>) -> Vec<Event>,
+    snapshot: impl FnOnce(&ZigbeeStack<P, NoPhy, EmbassyRuntime>) -> Vec<Event>,
 ) -> Result<Response, Error> {
     let stack = configured(app)?;
 

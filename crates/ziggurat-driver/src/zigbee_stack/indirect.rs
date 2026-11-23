@@ -1,7 +1,7 @@
 use crate::runtime::Runtime;
 use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154CommandFrame};
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::{RadioError, RadioPhy};
+use ziggurat_phy::{Phy, RadioError, RadioPhy};
 
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLeaveCommand};
 
@@ -9,7 +9,7 @@ use super::{
     Confirm, DeviceLeaveReason, Frame, NwkSecurityMode, TxPolicy, ZigbeeNotification, ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// 802.15.4 spec 6.7.3: a MAC Data Request extracts the oldest frame awaiting the
     /// polling device. The poll doubles as the child keepalive (spec 3.6.10.4).
     pub(super) fn handle_data_request(&self, command_frame: &Ieee802154CommandFrame) {

@@ -1,13 +1,13 @@
 use crate::runtime::Runtime;
 use ziggurat_ieee_802154::types::Eui64;
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode};
 use ziggurat_zigbee::nwk::frame::{NwkFrame, is_broadcast};
 use ziggurat_zigbee::zcl::endpoints::{BROADCAST_ENDPOINT, Endpoint, Indication};
 
 use super::{ApsAck, RouteDirective, TxPriority, ZigbeeStack};
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// Serve an application endpoint from the stack, rather than the client. Its
     /// simple descriptor joins the ones ZDP requests read.
     pub fn add_application_endpoint(&self, endpoint: Endpoint) {

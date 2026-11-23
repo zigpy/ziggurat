@@ -11,7 +11,7 @@ use core::time::Duration;
 
 use ziggurat_ieee_802154::Ieee802154Address;
 use ziggurat_ieee_802154::types::Nwk;
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::gp::build_gpdf_to_gpd;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
@@ -24,11 +24,11 @@ use crate::runtime::Runtime;
 
 use super::{
     Confirm, CoreGuard, DeliveryError, EnqueueError, Frame, GpdfTarget, Nib, NwkSecurityMode,
-    RouteDirective, Schedule, SendHandle, SendId, SendMode, Transmit, TxPolicy, ZigbeeCore,
-    ZigbeeStack,
+    PhyIndex, RouteDirective, Schedule, SendHandle, SendId, SendMode, Transmit, TxPolicy,
+    ZigbeeCore, ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// Enqueue a unicast to `next_hop`, held until the device polls under
     /// `poll_address` if it is given. Every send gets a handle: dropping the returned
     /// handle is how a caller detaches from a send it does not await.
@@ -329,7 +329,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
             (Transmit::Unicast { frame_pending, .. }, Frame::Raw(raw)) => {
                 raw.header_mut().frame_control.frame_pending = frame_pending;
-                self.send_802154_frame(raw).await
+                self.send_802154_frame(raw, PhyIndex::Radio).await
             }
             (
                 Transmit::Broadcast,
@@ -338,7 +338,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     security,
                 },
             ) => self.transmit_broadcast(nwk_frame, *security).await,
-            (Transmit::Broadcast, Frame::Raw(raw)) => self.send_802154_frame(raw).await,
+            (Transmit::Broadcast, Frame::Raw(raw)) => {
+                self.send_802154_frame(raw, PhyIndex::Radio).await
+            }
             (Transmit::Gpdf(trigger), Frame::Gpdf { frame, channel }) => {
                 self.transmit_gpdf(frame, *channel, trigger).await
             }

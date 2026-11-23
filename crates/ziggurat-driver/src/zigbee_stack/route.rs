@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::Nwk;
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
@@ -21,7 +21,7 @@ use super::{
     TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     #[allow(clippy::significant_drop_tightening)]
     pub(super) fn handle_route_reply(
         &self,

@@ -9,7 +9,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 
 use crate::runtime::Runtime;
 use crate::sync::{Mutex, Notify};
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 
 use super::ZigbeeStack;
 
@@ -39,7 +39,7 @@ impl core::fmt::Debug for Tasklets {
     }
 }
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// Drive every in-flight tasklet, multiplexed on this one task.
     pub(super) async fn tasklet_task(&self) {
         let mut running: FuturesUnordered<Tasklet> = FuturesUnordered::new();

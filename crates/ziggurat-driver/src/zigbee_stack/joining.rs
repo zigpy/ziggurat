@@ -34,11 +34,11 @@ use ziggurat_zigbee::nwk::commands::{
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, DeviceLeaveReason, EnqueueError, Frame, JoinKind,
-    NwkDeviceType, NwkSecurityMode, RadioPhy, RouteDirective, SendHandle, SendMode, TxPolicy,
+    NwkDeviceType, NwkSecurityMode, Phy, RadioPhy, RouteDirective, SendHandle, SendMode, TxPolicy,
     TxPriority, Unicast, ZigbeeNotification, ZigbeeStack, neighbors,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     #[allow(clippy::significant_drop_tightening)]
     pub fn process_802154_association_request(
         &self,

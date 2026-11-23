@@ -9,7 +9,7 @@ use ziggurat_zigbee::nwk::frame::{BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkRouteD
 
 use alloc::vec::Vec;
 use core::time::Duration;
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 use ziggurat_zigbee::flat_map::Entry;
 
 use super::TrafficClass;
@@ -18,7 +18,7 @@ use super::{
     RouteDirective, SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// The EUI64 an inbound secured APS frame was encrypted by: the auxiliary header's
     /// extended source when present, otherwise resolved from the NWK frame (spec
     /// 4.4.1.2 step 2).

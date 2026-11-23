@@ -23,14 +23,14 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ziggurat_driver::runtime::{TokioRuntime, TokioSpawner};
 use ziggurat_driver::zigbee_stack::{SendHandle, Tunables, ZigbeeNotification, ZigbeeStack};
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
-use ziggurat_phy::{Phy, RadioConfig, RadioPhy, Receiver};
+use ziggurat_phy::{NoPhy, Phy, RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_protocol::{self as proto};
 
 use reconnect::{Outage, ReconnectPolicy};
 
 type Radio = SpinelPhy<TokioRuntime>;
-type Stack = ZigbeeStack<Radio, TokioRuntime>;
+type Stack = ZigbeeStack<Radio, NoPhy, TokioRuntime>;
 
 /// Outbound frames a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -716,6 +716,7 @@ impl ZigguratServer {
         let aps_frame_counter = payload.state.aps_frame_counter;
         let stack = ZigbeeStack::new(
             phy,
+            Vec::new(),
             proto::network_config(&payload),
             Tunables::default(),
             TokioSpawner::default(),

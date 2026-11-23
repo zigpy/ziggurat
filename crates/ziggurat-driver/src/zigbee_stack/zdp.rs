@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{TooLong, energy_detect_value, write_frame};
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, Asdu};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, is_broadcast};
 
@@ -34,7 +34,7 @@ const MGMT_LQI_DESCRIPTORS_PER_FRAME: usize = 2;
 /// Routing records per Mgmt_Rtg_rsp, keeping the ASDU within the NWK payload budget.
 const MGMT_RTG_DESCRIPTORS_PER_FRAME: usize = 10;
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// Dispatch the ZDP commands the stack itself consumes: the neighbor table they
     /// maintain and the descriptors they read live here. The client still observes the
     /// frames. `aps_security` is the requester's EUI64 if the request was APS-secured.

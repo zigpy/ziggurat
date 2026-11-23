@@ -7,7 +7,7 @@ use crate::ziggurat_ieee_802154::{
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
@@ -24,12 +24,12 @@ use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError,
-    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective,
-    Schedule, SendHandle, SendId, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore,
-    ZigbeeNotification, ZigbeeStack,
+    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, PhyIndex,
+    RouteDirective, Schedule, SendHandle, SendId, SendMode, TxPolicy, TxPriority, Unicast,
+    ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// A device joined or rejoined as `nwk`: the address starts a new session. The
     /// mapping and the state it replaces change under one lock, so no send can be
     /// enqueued against the old session in between.
@@ -626,7 +626,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.increment_tx_total();
 
-        let result = self.send_802154_frame(&mut ieee802154_frame).await;
+        let result = self
+            .send_802154_frame(&mut ieee802154_frame, PhyIndex::Radio)
+            .await;
 
         if let Err(e) = &result {
             // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
@@ -824,7 +826,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.enqueue_broadcast(Frame::nwk(nwk_frame, security), policy, Schedule::Once)
     }
 
-    /// Encrypt and broadcast a single copy of a frame.
+    /// Encrypt and broadcast a single copy of a frame on every PHY.
     pub(super) async fn transmit_broadcast(
         &self,
         nwk_frame: &mut NwkFrame,
@@ -869,7 +871,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.increment_tx_total();
 
-        self.send_802154_frame(&mut ieee802154_frame).await
+        // The radio's outcome is the verdict; the secondary PHYs are sent to after it
+        let result = self
+            .send_802154_frame(&mut ieee802154_frame, PhyIndex::Radio)
+            .await;
+
+        for phy in self.phys().skip(1) {
+            self.send_802154_frame(&mut ieee802154_frame, phy).await?;
+        }
+
+        result
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.
