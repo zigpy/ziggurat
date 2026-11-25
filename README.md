@@ -54,7 +54,7 @@ The most performant way to run Ziggurat is straight on your host machine, hooked
 an OpenThread RCP radio:
 1. Flash your Zigbee radio with OpenThread RCP firmware, the same firmware you use for
    Thread. Radios with Silicon Labs chips (e.g. EFR32MG21, EFR32MG24) are recommended
-   but others work too.
+   but any radio running OpenThread RCP firmware should also work.
 2. Install the Ziggurat server app from the [Zigpy app repo for Home Assistant](https://github.com/zigpy/addons).
 3. Set up ZHA (or start a migration) and select "manual" as the serial port path. Type
    in `ws://3ccd9485-ziggurat:9999` as the URL.
