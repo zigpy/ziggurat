@@ -645,6 +645,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             );
         }
 
+        // Our own route record was acked, on its first attempt or a retry
+        if result.is_ok()
+            && nwk_frame.nwk_header.source == self.state.network_address
+            && matches!(
+                nwk_frame.payload,
+                NwkPayload::Command(NwkCommand::RouteRecord(_))
+            )
+        {
+            self.core()
+                .nib
+                .routing
+                .note_route_record_acked(nwk_frame.nwk_header.destination, next_hop_address);
+        }
+
         result
     }
 
