@@ -1,4 +1,4 @@
-## ziggurat
+# ziggurat
 An open source Zigbee stack implemented in Rust.
 
 Traditional Zigbee coordinator firmware is written in C and is compiled to run self-contained
@@ -13,9 +13,9 @@ Ziggurat requires low-level access to a Zigbee radio. Thankfully, there already 
 firmware that provides this out of the box: **OpenThread RCP**! The same firmware can
 now be used for both Zigbee and Thread.
 
-### Why
+## Why
 
-#### Speed
+### Speed
 The most powerful Zigbee microcontrollers today have only a few hundred kilobytes of RAM
 and maybe a megabyte of flash. Their Zigbee firmware is written with this resource-constrained
 environment in mind: limited packet buffers, simpler routing algorithms, fewer concurrent
@@ -26,7 +26,7 @@ more than a few hundred kilobytes of RAM. Routing, discovery, and neighbor table
 need size limits. We can buffer an unlimited number of requests. We can keep track of
 multiple concurrent routes to a single device and pick intelligently, reducing latency.
 
-#### Openness
+### Openness
 To compile firmware for a given Zigbee/Thread chip, you use a chip vendor's SDK.
 For example, Silicon Labs [Simplicity SDK](https://github.com/SiliconLabs/simplicity_sdk).
 These SDKs are a mix of pre-compiled libraries without source code and a bit of source code
@@ -39,17 +39,17 @@ developed in the open. There are no closed-source binary blobs. OpenThread RCP u
 standardized serial protocol and is effectively chip-agnostic, allowing Ziggurat to work
 with any radio that supports OpenThread RCP.
 
-#### Rust
+### Rust
 Rust is memory safe and fast. It's also fun to write. Ziggurat is written in fairly performant
 Rust to reduce the round trip latency when communicating with the radio hardware and to allow
 it to run on even the most basic of hosts, and the same code runs embedded in the radio
 firmware itself (see below).
 
-### Setup
+## Setup
 Ziggurat is in beta testing and can be set up as a regular ZHA radio in **Home Assistant
 2026.7.0** or newer. There are two ways to run it:
 
-#### Ziggurat on host
+### Ziggurat on host
 The most performant way to run Ziggurat is straight on your host machine, hooked up to
 an OpenThread RCP radio:
 1. Flash your Zigbee radio with OpenThread RCP firmware, the same firmware you use for
@@ -99,7 +99,7 @@ Keep in mind the host stack is the recommended way to run Ziggurat, as running i
 microcontroller is slightly less performant than on host and may have fewer features as
 Ziggurat continues development.
 
-### Development
+## Development
 Ziggurat aims to implement the portions of a Zigbee stack used by normal Home Assistant
 users, not the entire binder of Zigbee specification verbatim. It is feature-complete
 in terms of functionality exposed by consumer Zigbee devices:
@@ -117,7 +117,7 @@ Zigbee R23 and R23.1 support (i.e. Zigbee 4.0) are low on the list but planned f
 future. Keep in mind Zigbee is both forward and backward compatible and practically nothing
 user-visible has changed in these revisions.
 
-#### Testing
+### Testing
 Ziggurat's public API is a simple WebSocket server. You can run it locally instead of in
 the Home Assistant app:
 
@@ -127,7 +127,7 @@ cargo run --bin ziggurat -- --device /dev/cu.SLAB_USBtoUART --listen 0.0.0.0:999
 
 The adapter itself is stateless. ZHA pushes all network configuration to it on startup.
 
-#### Future work
+### Future work
 - Ziggurat statically allocates most protocol-level parsing buffers. Only a few places in
   the stack (e.g. `HashMap`) still rely on dynamic allocation.
 - For testing purposes (especially CI) it would be convenient to allow Ziggurat to have a
