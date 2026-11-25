@@ -57,7 +57,7 @@ an OpenThread RCP radio:
    but others work too.
 2. Install the Ziggurat server app from the [Zigpy app repo for Home Assistant](https://github.com/zigpy/addons).
 3. Set up ZHA (or start a migration) and select "manual" as the serial port path. Type
-   in `ws://local-ziggurat:9999` as the URL.
+   in `ws://3ccd9485-ziggurat:9999` as the URL.
 4. When ZHA asks for the radio type, pick **Ziggurat** and migrate your existing network
    (or set a new one up).
 5. Done.
