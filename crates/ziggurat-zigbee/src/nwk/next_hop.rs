@@ -453,6 +453,23 @@ mod tests {
         assert_eq!(due(&routing), None);
     }
 
+    // A route record acked after the concentrator showed it has our route was already in
+    // flight, and changes nothing
+    #[test]
+    fn test_late_route_record_ack_keeps_the_route_known() {
+        let mut routing = routing_to_concentrator();
+        let neighbors = Neighbors::default();
+
+        routing.note_route_record_acked(CONCENTRATOR, RELAY);
+        routing.note_source_routed_frame(CONCENTRATOR);
+        routing.note_route_record_acked(CONCENTRATOR, RELAY);
+
+        assert_eq!(
+            route_record_due(&routing, &neighbors, &data_frame(OWN), OWN),
+            None
+        );
+    }
+
     // A concentrator that is our neighbor needs no source route to reach us
     #[test]
     fn test_neighbor_concentrator_needs_one_route_record() {

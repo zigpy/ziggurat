@@ -615,14 +615,15 @@ impl Routing {
     }
 
     /// `next_hop` acked our route record to `concentrator`. A concentrator that is our
-    /// neighbor got it directly, and needs no source route to reach us.
+    /// neighbor got it directly, and needs no source route to reach us. A concentrator
+    /// that already has our route keeps it: a later route record does not undo that.
     pub fn note_route_record_acked(&mut self, concentrator: Nwk, next_hop: Nwk) {
         if let Some(entry) = self.route_table.get_mut(&concentrator) {
-            entry.route_record_state = if next_hop == concentrator {
-                RouteRecordState::Known
-            } else {
-                RouteRecordState::Sent
-            };
+            if next_hop == concentrator {
+                entry.route_record_state = RouteRecordState::Known;
+            } else if entry.route_record_state == RouteRecordState::Needed {
+                entry.route_record_state = RouteRecordState::Sent;
+            }
         }
     }
 
