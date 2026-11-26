@@ -60,6 +60,47 @@ pub fn network_config(payload: &ConfigurePayload) -> NetworkConfig {
     }
 }
 
+/// Raise a `configure` payload's outgoing NWK and APS frame counters to the final ones
+/// of the stack it replaces, wherever the new stack would encrypt under the same nonces.
+///
+/// A client reconfiguring a running stack (a restart of the client, not of the server)
+/// sends the counters it read some time before: frames the old stack sent since then
+/// already used the values in between. Reusing them would repeat CCM* nonces, and every
+/// neighbour drops those frames as replays. A nonce is the source address and the frame
+/// counter, under a key: the NWK counter is carried over when the IEEE address and the
+/// network key stay the same, the APS counter (shared by every link key) when the IEEE
+/// address does. Call it once the replaced stack has stopped, so its counters are final.
+pub fn carry_frame_counters<P: RadioPhy, R: Runtime>(
+    replaced: &ZigbeeStack<P, R>,
+    state: &mut NetworkState,
+) {
+    let live = network_info_payload(replaced, false).state;
+
+    if live.ieee_address != state.ieee_address {
+        return;
+    }
+
+    if live.network_key == state.network_key
+        && live.network_key_tx_counter > state.network_key_tx_counter
+    {
+        tracing::info!(
+            "Carrying the NWK frame counter over from the replaced stack: {} -> {}",
+            state.network_key_tx_counter,
+            live.network_key_tx_counter
+        );
+        state.network_key_tx_counter = live.network_key_tx_counter;
+    }
+
+    if live.aps_frame_counter > state.aps_frame_counter {
+        tracing::info!(
+            "Carrying the APS frame counter over from the replaced stack: {} -> {}",
+            state.aps_frame_counter,
+            live.aps_frame_counter
+        );
+        state.aps_frame_counter = live.aps_frame_counter;
+    }
+}
+
 pub fn network_info_payload<P: RadioPhy, R: Runtime>(
     stack: &ZigbeeStack<P, R>,
     started: bool,

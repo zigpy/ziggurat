@@ -245,15 +245,15 @@ async fn handle_shutdown<P: RadioPhy>(app: &mut App<P>) -> Result<Response, Erro
 
 async fn handle_configure<P: RadioPhy>(
     app: &mut App<P>,
-    request: ConfigurePayload,
+    mut request: ConfigurePayload,
 ) -> Result<Response, Error> {
-    let config = proto::network_config(&request);
-
     if let Some(old_stack) = app.stack.take() {
         old_stack.shutdown().await;
+        proto::carry_frame_counters(&old_stack, &mut request.state);
     }
     app.started = false;
 
+    let config = proto::network_config(&request);
     let stack = ZigbeeStack::new(app.phy.clone(), config, Tunables::default(), app.spawner);
     stack
         .state
