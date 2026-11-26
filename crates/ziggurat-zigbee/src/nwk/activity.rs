@@ -52,6 +52,9 @@ pub struct ActivityParams {
 /// The decay steps owed for the time from `*decayed_at` to `now`, at one count per
 /// `period`. `*decayed_at` moves forward by the steps returned, so the rest of the time
 /// counts toward the next call.
+///
+/// `period` must be at least one microsecond: the `link_status_period` tunable it
+/// comes from rejects anything shorter.
 pub fn take_decay_steps(decayed_at: &mut Instant, now: Instant, period: Duration) -> u16 {
     let steps_per_count = u64::from(STEPS_PER_COUNT);
     let period = u64::try_from(period.as_micros()).unwrap();
