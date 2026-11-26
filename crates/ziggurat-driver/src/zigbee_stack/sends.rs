@@ -16,7 +16,7 @@ use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::gp::build_gpdf_to_gpd;
 use ziggurat_zigbee::nwk::next_hop::{self, NextHop};
 use ziggurat_zigbee::sends::{
-    Action, Broadcast as BroadcastRecord, Gpdf as GpdfRecord, TransmitError,
+    Action, Broadcast as BroadcastRecord, Gpdf as GpdfRecord, Routed, TransmitError,
     Unicast as UnicastRecord,
 };
 
@@ -197,12 +197,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     }
 
     /// The stack settings next-hop resolution reads.
-    pub(super) fn next_hop_policy(&self) -> next_hop::Policy {
+    pub(super) fn next_hop_policy(&self, nib: &Nib) -> next_hop::Policy {
         next_hop::Policy {
-            is_concentrator: self.state.is_concentrator,
+            network_address: self.state.network_address,
+            is_concentrator: nib.is_concentrator,
             force_route_discovery: self.state.hack_force_route_discovery,
             max_source_route: self.tunables.max_source_route(),
+            source_route_max_first_hop_cost: self.tunables.source_route_max_first_hop_cost(),
             new_router_child_window: 2 * self.tunables.link_status_period(),
+            direct_max_link_cost: self.tunables.direct_max_link_cost(),
         }
     }
 
@@ -214,42 +217,51 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .map(Ieee802154Address::Eui64)
     }
 
-    /// Resolve the route of an unrouted frame again: its next hop and the address it
+    /// Resolve the route of an unrouted frame again: its next hop, and the address it
     /// polls under if it is a sleepy child. `None` means no route yet.
     fn resolve_unrouted_unicast(
         &self,
-        nib: &Nib,
+        nib: &mut Nib,
         frame: &mut Frame,
         now: CoreInstant,
-    ) -> Option<(Nwk, Option<Ieee802154Address>)> {
+    ) -> Option<Routed> {
         let Frame::Nwk { nwk_frame, .. } = frame else {
             unreachable!("only NWK unicasts await a route")
         };
+        let destination = nwk_frame.nwk_header.destination;
 
         // A forced discovery holds the frame only while it is underway. Once it is
         // answered or has lapsed, the frame takes any route like every other frame
-        let mut policy = self.next_hop_policy();
-        policy.force_route_discovery &= nib.routing.own_discovery_underway(
-            self.state.network_address,
-            nwk_frame.nwk_header.destination,
-            now,
-        );
+        let mut policy = self.next_hop_policy(nib);
+        policy.force_route_discovery &=
+            nib.routing
+                .own_discovery_underway(self.state.network_address, destination, now);
+
+        // The frames we hold that we did not originate are relayed for our end device
+        // children
+        let mode = if nwk_frame.nwk_header.source == self.state.network_address {
+            SendMode::Route(RouteDirective::StackDecides)
+        } else {
+            SendMode::Relay
+        };
 
         let resolved = next_hop::resolve(
-            &nib.routing,
+            &mut nib.routing,
             &nib.neighbors,
             nwk_frame,
-            &SendMode::Route(RouteDirective::StackDecides),
+            &mode,
             policy,
             now,
         );
 
         match resolved {
-            NextHop::Resolved(next_hop) => Some((next_hop, Self::poll_address(nib, next_hop))),
-            NextHop::NeedDiscovery => None,
-            NextHop::Discard => {
-                unreachable!("a frame is only held for a route if it allows discovery")
-            }
+            NextHop::Resolved(next_hop) => Some(Routed {
+                next_hop,
+                poll_address: Self::poll_address(nib, next_hop),
+            }),
+            // A relayed frame is discarded once its source is no longer our child. It
+            // stays held until its deadline, as it did before
+            NextHop::NeedDiscovery | NextHop::Discard => None,
         }
     }
 
@@ -299,12 +311,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 Transmit::Unicast {
                     next_hop,
                     frame_pending,
+                    first_attempt,
                 },
                 Frame::Nwk {
                     nwk_frame,
                     security,
                 },
             ) => {
+                // Spec 3.6.4.5.5: the route record goes out before the data frame, not
+                // before its retries
+                if first_attempt {
+                    self.transmit_route_record(nwk_frame, next_hop).await;
+                }
+
                 self.transmit_unicast(nwk_frame, next_hop, *security, frame_pending)
                     .await
             }
@@ -365,7 +384,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .deliver_broadcasts(|key| self.passive_ack_quorum_heard(&core.nib, key));
 
         core.sends.tick(now, &self.tunables, |frame| {
-            self.resolve_unrouted_unicast(&core.nib, frame, now)
+            self.resolve_unrouted_unicast(&mut core.nib, frame, now)
         });
 
         let discoveries = core.nib.routing.tick_discoveries(

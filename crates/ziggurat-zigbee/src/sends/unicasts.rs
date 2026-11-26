@@ -29,6 +29,14 @@ pub struct Unicast<F> {
     pub poll_address: Option<Ieee802154Address>,
 }
 
+/// How a held unicast is sent once it has a route.
+#[derive(Debug)]
+pub struct Routed {
+    pub next_hop: Nwk,
+    /// The address the device polls under, if the frame must wait for its poll.
+    pub poll_address: Option<Ieee802154Address>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     /// Ready for the sender.
@@ -56,6 +64,8 @@ struct Record<F> {
     /// Transmit attempts left after the current one. A failed transmit of a held frame
     /// waits for the next poll instead, until the frame expires.
     attempts_remaining: u8,
+    /// The frame was lent to the radio before.
+    attempted: bool,
     stage: Stage,
     deadline: Instant,
     /// The broadcast this frame copies to a sleepy child.
@@ -147,6 +157,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
                 next_hop: unicast.next_hop,
                 poll_address: unicast.poll_address,
                 attempts_remaining: tunables.unicast_retries(),
+                attempted: false,
                 stage,
                 deadline,
                 copy_of,
@@ -180,6 +191,8 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
         let record = self.records.get_mut(&id).unwrap();
         debug_assert_eq!(record.stage, Stage::Queued);
         record.stage = Stage::Transmitting { acked: false };
+        let first_attempt = !record.attempted;
+        record.attempted = true;
 
         InFlight {
             id,
@@ -187,6 +200,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
             transmit: Transmit::Unicast {
                 next_hop: record.next_hop,
                 frame_pending,
+                first_attempt,
             },
         }
     }

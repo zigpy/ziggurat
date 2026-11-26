@@ -298,7 +298,10 @@ pub struct NetworkState {
 pub struct ConfigurePayload {
     pub role: NodeRole,
     pub source_routing: bool,
-    pub reserved: u7,
+    /// A router's tree depth; the coordinator's is always 0. Older clients leave these
+    /// bits reserved, as 0.
+    pub depth: u4,
+    pub reserved: u3,
     pub state: NetworkState,
 }
 

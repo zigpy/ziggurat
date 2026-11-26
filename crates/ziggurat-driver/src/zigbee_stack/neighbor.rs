@@ -7,15 +7,13 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::nwk::NwkDeviceType;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use ziggurat_zigbee::nwk::next_hop;
 
 use super::TrafficClass;
 
 use super::{
     Broadcast, EnqueueError, NwkSecurityMode, SendHandle, TxPolicy, TxPriority, ZigbeeStack,
 };
-
-/// Maximum number of link status entries that can be carried in a single frame.
-const MAX_LINK_STATUSES: usize = 7;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
@@ -65,6 +63,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     pub(super) fn end_device_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
         self.core().nib.neighbors.end_device_child_eui64(nwk)
+    }
+
+    /// Whether a unicast goes straight to its destination, with no route: an end device
+    /// child, a router child that has sent no link status yet, or a neighbor with a good
+    /// link.
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) fn sends_directly_to(&self, destination: Nwk) -> bool {
+        let now = self.core_now();
+        let core = self.core();
+        let policy = self.next_hop_policy(&core.nib);
+
+        next_hop::reaches_directly(&core.nib.neighbors, destination, policy, now)
     }
 
     pub(super) fn sleepy_child_eui64(&self, nwk: Nwk) -> Option<Eui64> {
@@ -176,25 +186,38 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         link_statuses.sort_by_key(|a| a.address.as_u16());
 
         let total = link_statuses.len();
+        let build_frame = |start: usize, end: usize| {
+            self.nwk_command_frame(
+                BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
+                NwkCommand::LinkStatus(NwkLinkStatusCommand {
+                    is_first_frame: start == 0,
+                    is_last_frame: end == total,
+                    link_statuses: link_statuses[start..end].to_vec(),
+                }),
+            )
+            .with_radius(1)
+        };
+        // Measured with the auxiliary header the frame is sent with
+        let aux_header = self.outgoing_aux_header(0);
+        let fits = |start: usize, end: usize| {
+            let mut frame = build_frame(start, end);
+            frame.aux_header = Some(aux_header.clone());
+            frame.fits_secured()
+        };
         let mut start = 0;
 
         loop {
-            // Each frame carries up to `MAX_LINK_STATUSES` entries; consecutive frames
-            // repeat one boundary entry (the last of frame N is the first of frame N+1)
-            // so a receiver can stitch the advertised address range together (spec
-            // 3.6.4.4.2). An empty list still emits a single first+last frame.
-            let end = core::cmp::min(start + MAX_LINK_STATUSES, total);
+            // Spec 3.4.8.3.2: the list is split only when it does not fit in one frame.
+            // Each frame takes as many entries as fit, and consecutive frames repeat
+            // one boundary entry (the last of frame N is the first of frame N+1), so a
+            // receiver can stitch the advertised address range together. An empty list
+            // still emits a single first+last frame.
+            let mut end = total.min(start + 1);
+            while end < total && fits(start, end + 1) {
+                end += 1;
+            }
 
-            let link_status_frame = self
-                .nwk_command_frame(
-                    BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                    NwkCommand::LinkStatus(NwkLinkStatusCommand {
-                        is_first_frame: start == 0,
-                        is_last_frame: end == total,
-                        link_statuses: link_statuses[start..end].to_vec(),
-                    }),
-                )
-                .with_radius(1);
+            let link_status_frame = build_frame(start, end);
 
             // The last frame is the tracked one; earlier chunks are fire-and-forget.
             // They drain the single sender in admission order, so the last frame's
@@ -227,7 +250,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     fn restart_link_status_period(&self) {
         let now = self.core_now();
-        let period = self.tunables.link_status_period();
+        let jitter = self
+            .tunables
+            .link_status_jitter()
+            .mul_f32(crate::rng::random_f32::<R>());
+        let period = self.tunables.link_status_period().saturating_sub(jitter);
 
         self.core().nib.link_status_debouncer.fired(now, period);
     }

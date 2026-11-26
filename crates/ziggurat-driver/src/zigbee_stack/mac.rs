@@ -152,7 +152,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     protocol_version: PROTOCOL_VERSION,
                     reserved1: 0b00,
                     router_capacity: true,
-                    device_depth: 0,
+                    device_depth: self.state.depth,
                     end_device_capacity,
                     extended_pan_id: self.state.extended_pan_id,
                     tx_offset: 0xFFFFFF,

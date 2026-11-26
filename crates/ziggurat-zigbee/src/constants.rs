@@ -296,6 +296,18 @@ tunables! {
     /// often not heard, so waiting for it only causes needless retransmissions.
     broadcast_relayer_max_link_cost: u8 = 3,
 
+    /// A stored source route is used only while our outgoing cost to its first hop, as
+    /// that neighbor's link status reports it, is at most this value. The route was
+    /// learned from frames sent toward us, which says nothing about the link outward.
+    source_route_max_first_hop_cost: u8 = 3,
+
+    /// A neighbor is sent to directly, with no route, only while its link cost is at
+    /// most this value (spec 3.6.3.3). The link cost is the worse of the two directions.
+    /// Every link costs at least 1, so a relayed path costs at least 2. A direct link
+    /// of cost 1 or 2 is as cheap as any route a discovery could find. Above 2, a
+    /// relayed path may be cheaper, so a discovery decides.
+    direct_max_link_cost: u8 = 2,
+
     /// The minimum time between two consecutive many-to-one route requests, even when
     /// error thresholds are crossed.
     mtorr_min_interval: Duration = Duration::from_secs(10),
@@ -315,6 +327,12 @@ tunables! {
     /// The time between link status command frames.
     link_status_period: Duration = Duration::from_secs(15),
 
+    /// Each link status period is shortened by a random amount up to this value (spec
+    /// 3.6.4.4.1). Routers that start together would otherwise send in step forever,
+    /// and a link status is sent once, without retries, so the same frames would
+    /// collide every period.
+    link_status_jitter: Duration = Duration::from_secs(1),
+
     /// `nwkcMinRouterBootstrapJitter`: the shortest delay before a gratuitous link
     /// status.
     min_router_bootstrap_jitter: Duration = Duration::from_millis(500),
@@ -332,8 +350,15 @@ tunables! {
     initial_rreq_retries: u8 = 3,
     rreq_retries: u8 = 2,
     rreq_retry_interval: Duration = Duration::from_millis(254),
-    min_rreq_jitter: Duration = Duration::from_millis(2),
-    max_rreq_jitter: Duration = Duration::from_millis(128),
+
+    /// A relayed route request waits this long per unit of cost of the link it came
+    /// over, plus up to `rreq_jitter` at random. Over a path the waits add up to the
+    /// path cost times this value, so copies tend to arrive cheapest first. The spec
+    /// allows a cost-dependent delay (3.6.4.5.1.4). With link costs up to 7, the
+    /// defaults stay within the spec's 2 x [2, 128] ms window.
+    rreq_delay_per_link_cost: Duration = Duration::from_millis(32),
+    rreq_jitter: Duration = Duration::from_millis(32),
+
     unicast_retries: u8 = 3,
     unicast_retry_delay: Duration = Duration::from_millis(50),
     broadcast_delivery_time: Duration = Duration::from_millis(9000),

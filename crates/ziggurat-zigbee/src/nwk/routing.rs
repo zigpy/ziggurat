@@ -26,6 +26,17 @@ pub enum Status {
     Inactive = 3,
 }
 
+/// Spec 3.6.4.5.5: whether a concentrator still needs our route record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRecordState {
+    /// The concentrator has our route, or never asked for it.
+    Known,
+    /// The concentrator asked for our route record, and we have not sent one since.
+    Needed,
+    /// We sent a route record, but the concentrator has not yet shown it has our route.
+    Sent,
+}
+
 #[derive(Debug)]
 pub struct TableEntry {
     /// Destination address the routing table entry is for
@@ -40,9 +51,9 @@ pub struct TableEntry {
     /// many-to-one route request.
     pub many_to_one: bool,
 
-    /// A flag indicating that a route record command frame SHOULD be sent to the
-    /// destination prior to the next data packet.
-    pub route_record_required: bool,
+    /// Whether a route record command frame SHOULD be sent to the destination prior to
+    /// the next data packet (the spec's "route record required" flag).
+    pub route_record_state: RouteRecordState,
 
     /// When set to TRUE, this flag indicates that an expected regular many-to-one route
     /// request was missed, i.e. the last many-to-one route request for this destination
@@ -74,6 +85,12 @@ pub struct TableEntry {
 }
 
 impl TableEntry {
+    /// Whether our data frames to this concentrator need a route record first. One that
+    /// keeps no route cache needs one before every frame.
+    pub fn route_record_required(&self) -> bool {
+        self.no_route_cache || self.route_record_state != RouteRecordState::Known
+    }
+
     const fn new(
         destination: Nwk,
         status: Status,
@@ -85,7 +102,7 @@ impl TableEntry {
             status,
             no_route_cache: false,
             many_to_one: false,
-            route_record_required: false,
+            route_record_state: RouteRecordState::Known,
             expired: false,
             next_hop_address,
             path_cost: u8::MAX,
@@ -457,6 +474,14 @@ impl Routing {
 
     /// Mark every active route through the given next hop as inactive, forcing a fresh
     /// discovery on next use.
+    /// Whether the active route to `destination` was learned from its many-to-one
+    /// route request.
+    pub fn is_many_to_one_route(&self, destination: Nwk) -> bool {
+        self.route_table
+            .get(&destination)
+            .is_some_and(|entry| entry.status == Status::Active && entry.many_to_one)
+    }
+
     pub fn invalidate_via(&mut self, next_hop: Nwk) {
         for entry in self.route_table.values_mut() {
             if entry.status == Status::Active && entry.next_hop_address == next_hop {
@@ -572,14 +597,44 @@ impl Routing {
         self.remove_route_record(destination)
     }
 
-    /// Spec 3.6.4.3.2: relaying a source-routed frame proves the concentrator that
-    /// originated it holds a route record for the frame's source; no route record
-    /// has to precede the next frame toward it (unless it keeps no route cache).
+    /// Spec 3.6.4.5.5: whether a route record has to precede a data frame toward
+    /// `destination` over its many-to-one route. A frame relayed for one of our end
+    /// device children always needs one. A frame we originate needs one until the
+    /// concentrator shows it has our route. A concentrator that keeps no route cache
+    /// needs one before every frame.
+    pub fn route_record_required(&self, destination: Nwk, for_end_device_child: bool) -> bool {
+        let Some(entry) = self.route_table.get(&destination) else {
+            return false;
+        };
+
+        if entry.status != Status::Active || !entry.many_to_one {
+            return false;
+        }
+
+        for_end_device_child || entry.route_record_required()
+    }
+
+    /// `next_hop` acked our route record to `concentrator`. A concentrator that is our
+    /// neighbor got it directly, and needs no source route to reach us. A concentrator
+    /// that already has our route keeps it: a later route record does not undo that.
+    pub fn note_route_record_acked(&mut self, concentrator: Nwk, next_hop: Nwk) {
+        if let Some(entry) = self.route_table.get_mut(&concentrator) {
+            if next_hop == concentrator {
+                entry.route_record_state = RouteRecordState::Known;
+            } else if entry.route_record_state == RouteRecordState::Needed {
+                entry.route_record_state = RouteRecordState::Sent;
+            }
+        }
+    }
+
+    /// A frame source-routed by `concentrator` reached us, so it has a source route
+    /// through us (spec 3.6.4.3.2). It only proves the concentrator has our route if
+    /// our route record went out after its last advertisement.
     pub fn note_source_routed_frame(&mut self, concentrator: Nwk) {
         if let Some(entry) = self.route_table.get_mut(&concentrator)
-            && !entry.no_route_cache
+            && entry.route_record_state == RouteRecordState::Sent
         {
-            entry.route_record_required = false;
+            entry.route_record_state = RouteRecordState::Known;
         }
     }
 
@@ -588,21 +643,30 @@ impl Routing {
     /// intermediate router still holding state (and our entries toward devices are
     /// mostly reverse-route side effects of their discoveries). This deviates from
     /// the spec's table-first order (3.6.4.3).
-    pub fn route_to(&self, destination: Nwk, max_source_route: u8) -> Option<Route> {
-        // TODO: a route record wins unconditionally here, with no outgoing-link-cost check.
-        // For a concentrator this reverses the device->coordinator path and assumes the link
-        // is symmetric: a device reachable directly inbound advertises Relay Count 0, so we
-        // transmit direct even when our outbound link to it is poor (asymmetric radio). The
-        // cost-aware AODV path only runs in the `_` fallback. Fold the neighbor's
-        // `outgoing_cost` in so a Relay-Count-0 record only yields `NextHop` when the
-        // outbound link is actually good; otherwise fall through to cost-based routing.
-        match self.route_record_table.get(&destination) {
+    ///
+    /// A source route is the reverse of the path a route record took toward us, so it
+    /// only proves the links in that direction. It is used only when `first_hop_usable`
+    /// accepts our link to its first hop: the last relay, or the destination itself
+    /// when there are none. Otherwise the cost-aware routing table decides.
+    pub fn route_to(
+        &self,
+        destination: Nwk,
+        max_source_route: u8,
+        first_hop_usable: impl Fn(Nwk) -> bool,
+    ) -> Option<Route> {
+        let record = self
+            .route_record_table
+            .get(&destination)
+            // A record with no relays needs no source route header, so the limit does not
+            // apply to it
+            .filter(|relays| relays.is_empty() || relays.len() < max_source_route as usize)
+            .filter(|relays| first_hop_usable(*relays.last().unwrap_or(&destination)));
+
+        match record {
             // Spec 3.6.4.3.1: no intermediate relays means direct transmission
             Some(relays) if relays.is_empty() => Some(Route::NextHop(destination)),
-            Some(relays) if relays.len() < max_source_route as usize => {
-                Some(Route::SourceRouted(relays.clone()))
-            }
-            _ => self.next_hop(destination).map(Route::NextHop),
+            Some(relays) => Some(Route::SourceRouted(relays.clone())),
+            None => self.next_hop(destination).map(Route::NextHop),
         }
     }
 
@@ -758,7 +822,7 @@ impl Routing {
         // concentrator; spec 3.6.4.5.1.8: a later plain request never clears it
         if many_to_one != NwkRouteRequestManyToOne::NotManyToOne {
             originator_entry.many_to_one = true;
-            originator_entry.route_record_required = true;
+            originator_entry.route_record_state = RouteRecordState::Needed;
             originator_entry.no_route_cache = many_to_one
                 == NwkRouteRequestManyToOne::ManyToOneSenderDoesntSupportRouteRecordTable;
         }

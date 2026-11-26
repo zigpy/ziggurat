@@ -106,9 +106,18 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         _ => ZdpAffinity::NoneOfTheAbove,
                     },
                     permit_joining: ZdpPermitJoining::Unknown,
-                    // We are the coordinator (tree depth 0), so every neighbor of
-                    // ours sits at depth 1
-                    depth: 1,
+                    // Spec Table 2-102: the neighbor's tree depth. We know only the
+                    // coordinator's, the root's, and our children's, one below ours.
+                    // Other neighbors are reported as if they were our children. A
+                    // coordinator first heard in a link status is stored as a router,
+                    // but its address is always 0x0000
+                    depth: if entry.device_type == NwkDeviceType::Coordinator
+                        || entry.network_address == Nwk(0x0000)
+                    {
+                        0
+                    } else {
+                        (self.state.depth + 1).min(MAX_DEPTH)
+                    },
                     lqa: entry.lqas.median().unwrap_or(0),
                 })
                 .collect();
@@ -169,7 +178,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     },
                     memory_constrained: false,
                     many_to_one: entry.many_to_one,
-                    route_record_required: entry.route_record_required,
+                    route_record_required: entry.route_record_required(),
                     next_hop_address: entry.next_hop_address,
                 })
                 .collect();

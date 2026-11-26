@@ -2,20 +2,22 @@ use crate::runtime::Runtime;
 use core::cmp;
 use core::time::Duration;
 
+use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::Nwk;
 use ziggurat_phy::RadioPhy;
 
 use ziggurat_zigbee::nwk::commands::{
-    NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteReplyCommand,
-    NwkRouteRequestCommand, NwkRouteRequestManyToOne,
+    NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
+    NwkRouteReplyCommand, NwkRouteRequestCommand, NwkRouteRequestManyToOne,
 };
 use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame};
+use ziggurat_zigbee::nwk::next_hop::{self, RouteRecord};
 
 use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
+    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
     TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
@@ -138,12 +140,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         let sender_ieee = sender_link.eui64;
 
-        // The maximum of the incoming and outgoing costs is used for computations to
-        // deprioritize asymmetric routes
-        let contributing_path_cost = cmp::max(sender_link.outgoing_cost, sender_link.incoming_cost);
         let updated_path_cost = route_request_cmd
             .path_cost
-            .saturating_add(contributing_path_cost);
+            .saturating_add(sender_link.cost());
 
         // Deduplicate route requests and track the best path back to the originator.
         // Only the first copy, one advertising a strictly better forward cost, or an
@@ -210,7 +209,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                         route_request_identifier: route_request_cmd.route_request_identifier,
                         originator_nwk: nwk_frame.nwk_header.source,
                         responder_nwk: route_request_cmd.destination_address,
-                        path_cost: contributing_path_cost,
+                        path_cost: sender_link.cost(),
                         originator_eui64: nwk_frame.nwk_header.source_ieee,
                         responder_eui64: Some(responder_eui64),
                     }),
@@ -267,16 +266,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_radius(rebroadcast_radius)
             .with_sequence_number(nwk_frame.nwk_header.sequence_number);
 
-        // Spec 3.6.4.5.1.4: relayed route requests are jittered and retried. The jitter
-        // bounds are loaded once and subtracted saturating: a runtime tunable change can
-        // transiently leave min above max.
-        let min_jitter = self.tunables.min_rreq_jitter();
-        let max_jitter = self.tunables.max_rreq_jitter();
-        let jitter = (min_jitter
-            + max_jitter
-                .saturating_sub(min_jitter)
-                .mul_f32(crate::rng::random_f32::<R>()))
-            * 2;
+        // Spec 3.6.4.5.1.4: relayed route requests are delayed and retried. The delay
+        // grows with the cost of the link this copy came over, so along a path it adds
+        // up to the path cost: the cheapest copy tends to arrive first, and fewer
+        // routers relay again for a cheaper copy. The random part keeps neighbors that
+        // heard the same copy from relaying at the same moment
+        let jitter = self.tunables.rreq_delay_per_link_cost() * u32::from(sender_link.cost())
+            + self
+                .tunables
+                .rreq_jitter()
+                .mul_f32(crate::rng::random_f32::<R>());
 
         let attempts = self.tunables.rreq_retries().saturating_add(1);
         let mut core = self.core();
@@ -285,7 +284,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core.nib
             .routing
             .note_route_request_handled(originator, request_id);
-        self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        let relay =
+            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        core.sends
+            .route_request_relayed(originator, request_id, relay);
         self.commit_sends(core);
     }
 
@@ -326,38 +328,51 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
+    /// Advertise many-to-one routes while we are a concentrator, idling otherwise.
     pub async fn periodic_many_to_one_route_request_task(&self) {
-        // Receivers drop route requests from senders with a zero outgoing cost, so
-        // the first advertisement waits until link status exchanges establish a
-        // neighbor link, bounded by a fixed ceiling in case the network is silent
-        let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period();
-
         loop {
-            if self.core().nib.neighbors.any_live_router_link() {
-                break;
+            while !self.is_concentrator() {
+                self.concentrator_changed.notified().await;
             }
 
-            if self
-                .timeout_at_core(startup_deadline, self.link_status_received.notified())
-                .await
-                .is_err()
-            {
-                break;
+            // Receivers drop route requests from senders with a zero outgoing cost, so
+            // the first advertisement waits until link status exchanges establish a
+            // neighbor link, bounded by a fixed ceiling in case the network is silent
+            let startup_deadline = self.core_now() + 2 * self.tunables.link_status_period();
+
+            while !self.core().nib.neighbors.any_live_router_link()
+                && self
+                    .timeout_at_core(startup_deadline, self.link_status_received.notified())
+                    .await
+                    .is_ok()
+            {}
+
+            while self.is_concentrator() {
+                let now = self.core_now();
+                let max_interval = self.tunables.mtorr_max_interval();
+                self.core().nib.mtorr_debouncer.fired(now, max_interval);
+
+                let _ = self.send_many_to_one_route_request().delivered().await;
+
+                self.core().nib.routing.reset_mtorr_triggers();
+
+                // Advertise every max interval, or sooner when one was requested. Being
+                // turned off ends the wait
+                loop {
+                    let due = core::pin::pin!(
+                        self.wait_for_debouncer(|nib| &nib.mtorr_debouncer, &self.mtorr_wake)
+                    );
+                    let changed = core::pin::pin!(self.concentrator_changed.notified());
+
+                    if matches!(
+                        futures::future::select(due, changed).await,
+                        futures::future::Either::Left(_)
+                    ) || !self.is_concentrator()
+                    {
+                        break;
+                    }
+                }
             }
-        }
-
-        loop {
-            let now = self.core_now();
-            let max_interval = self.tunables.mtorr_max_interval();
-            self.core().nib.mtorr_debouncer.fired(now, max_interval);
-
-            let _ = self.send_many_to_one_route_request().delivered().await;
-
-            self.core().nib.routing.reset_mtorr_triggers();
-
-            // Advertise every max interval, or sooner when one was requested
-            self.wait_for_debouncer(|nib| &nib.mtorr_debouncer, &self.mtorr_wake)
-                .await;
         }
     }
 
@@ -375,15 +390,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Count a received route-failure network status toward an early many-to-one
     /// route request.
     pub(super) fn note_route_error(&self) {
-        if !self.state.is_concentrator {
-            return;
-        }
-
-        let kick = self
-            .core()
-            .nib
-            .routing
-            .note_route_error(self.tunables.mtorr_route_error_threshold());
+        let kick = {
+            let mut core = self.core();
+            core.nib.is_concentrator
+                && core
+                    .nib
+                    .routing
+                    .note_route_error(self.tunables.mtorr_route_error_threshold())
+        };
 
         if kick {
             self.request_many_to_one_route_request();
@@ -393,18 +407,93 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Count a locally failed unicast delivery toward an early many-to-one route
     /// request.
     pub(super) fn note_delivery_failure(&self) {
-        if !self.state.is_concentrator {
-            return;
-        }
-
-        let kick = self
-            .core()
-            .nib
-            .routing
-            .note_delivery_failure(self.tunables.mtorr_delivery_failure_threshold());
+        let kick = {
+            let mut core = self.core();
+            core.nib.is_concentrator
+                && core
+                    .nib
+                    .routing
+                    .note_delivery_failure(self.tunables.mtorr_delivery_failure_threshold())
+        };
 
         if kick {
             self.request_many_to_one_route_request();
+        }
+    }
+
+    /// Become a concentrator, or stop being one. It takes effect at once: the first
+    /// advertisement goes out right away, and frames stop being source-routed when it
+    /// is turned off. Route records keep being stored either way, since devices send
+    /// them for as long as their many-to-one routes last.
+    pub fn set_concentrator(&self, enabled: bool) {
+        self.core().nib.is_concentrator = enabled;
+        self.concentrator_changed.notify_one();
+    }
+
+    fn is_concentrator(&self) -> bool {
+        self.core().nib.is_concentrator
+    }
+
+    /// Spec 3.6.4.5.5: transmit the route record due before `data`, to the same next hop.
+    /// The route record tells the concentrator the path from us or our end device
+    /// child. It goes out once here, so it always precedes the data. If it is not
+    /// acked, the send table retries it like any other unicast.
+    // The lint misses that `nib` borrows the guard until the frame is built
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) async fn transmit_route_record(&self, data: &NwkFrame, next_hop: Nwk) {
+        let concentrator = data.nwk_header.destination;
+
+        let mut frame = {
+            let mut core = self.core();
+            let nib = &mut core.nib;
+
+            let Some(record) = next_hop::route_record_due(
+                &nib.routing,
+                &nib.neighbors,
+                data,
+                self.state.network_address,
+            ) else {
+                return;
+            };
+
+            let (source, source_eui64, relays) = match record {
+                RouteRecord::Ours => (
+                    self.state.network_address,
+                    self.state.ieee_address,
+                    Vec::new(),
+                ),
+                // The path from our child starts with us
+                RouteRecord::Child { nwk, eui64 } => {
+                    (nwk, eui64, Vec::from([self.state.network_address]))
+                }
+            };
+
+            tracing::debug!("Sending a route record for {source:?} to {concentrator:?}");
+
+            self.nwk_command_frame(
+                concentrator,
+                NwkCommand::RouteRecord(NwkRouteRecordCommand { relays }),
+            )
+            .with_source(source)
+            .with_source_ieee(Some(source_eui64))
+            .with_sequence_number(nib.next_sequence_number())
+        };
+
+        let result = self
+            .transmit_unicast(&mut frame, next_hop, NwkSecurityMode::NetworkKey, false)
+            .await;
+
+        if result.is_err() {
+            drop(self.enqueue_unicast(
+                Frame::nwk(frame, NwkSecurityMode::NetworkKey),
+                TxPolicy {
+                    priority: TxPriority::UserNormal,
+                    class: TrafficClass::Critical,
+                },
+                Confirm::OnHandoff,
+                next_hop,
+                None,
+            ));
         }
     }
 
