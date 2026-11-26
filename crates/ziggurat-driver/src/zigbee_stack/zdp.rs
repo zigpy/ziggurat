@@ -1,25 +1,28 @@
 use crate::runtime::Runtime;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_ieee_802154::{TooLong, write_frame};
+use ziggurat_ieee_802154::{TooLong, energy_detect_value, write_frame};
 use ziggurat_phy::RadioPhy;
-use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, ApsFrameControl, ApsFrameType};
-use ziggurat_zigbee::nwk::frame::{
-    BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, NwkRouteDiscovery,
-};
+use ziggurat_zigbee::aps::frame::{ApsDataFrame, ApsDeliveryMode, Asdu};
+use ziggurat_zigbee::nwk::frame::{BROADCAST_ALL_ROUTERS_AND_COORDINATOR, NwkFrame, is_broadcast};
 
+use ziggurat_zigbee::zdp::nwk_update::{self, NwkUpdate};
 use ziggurat_zigbee::zdp::{
-    DeviceAnnce, MgmtLqiReq, MgmtLqiRsp, MgmtRtgReq, MgmtRtgRsp, NeighborDescriptor, ParentAnnce,
-    ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID, ZdpAffinity, ZdpClusterId, ZdpCommand,
-    ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus, ZdpRxOnWhenIdle, ZdpStatus, mgmt_table_page,
+    DeviceAnnce, MgmtBindReq, MgmtBindRsp, MgmtLqiReq, MgmtLqiRsp, MgmtNwkUpdateReq, MgmtRtgReq,
+    MgmtRtgRsp, NeighborDescriptor, ParentAnnce, ParentAnnceRsp, RoutingDescriptor, ZDP_PROFILE_ID,
+    ZdpAffinity, ZdpClusterId, ZdpCommand, ZdpDeviceType, ZdpPermitJoining, ZdpRouteStatus,
+    ZdpRxOnWhenIdle, ZdpStatus, mgmt_table_page,
 };
 
-use super::TrafficClass;
 use super::{
-    Broadcast, Confirm, EnqueueError, MAX_DEPTH, NwkDeviceType, NwkSecurityMode, RouteDirective,
-    SendHandle, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeStack, neighbors, routing,
+    ApsAck, EnqueueError, MAX_DEPTH, NwkDeviceType, RouteDirective, SendHandle, TxPriority,
+    ZigbeeCore, ZigbeeStack, neighbors, routing,
 };
+
+/// A ZDP response's cluster is its request's with the high bit set (spec 2.4.4.1).
+const ZDP_RESPONSE_BIT: u16 = 0x8000;
 
 /// EUI64s per Parent_annce frame, keeping the ASDU within the NWK payload budget.
 const PARENT_ANNCE_CHILDREN_PER_FRAME: usize = 8;
@@ -33,11 +36,20 @@ const MGMT_RTG_DESCRIPTORS_PER_FRAME: usize = 10;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// Dispatch the ZDP commands the stack itself consumes: the neighbor table they
-    /// maintain lives here. The client still observes the frames.
-    pub(super) fn handle_zdp_frame(&self, nwk_frame: &NwkFrame, aps_frame: &ApsDataFrame) {
+    /// maintain and the descriptors they read live here. The client still observes the
+    /// frames. `aps_security` is the requester's EUI64 if the request was APS-secured.
+    pub(super) fn handle_zdp_frame(
+        &self,
+        nwk_frame: &NwkFrame,
+        aps_frame: &ApsDataFrame,
+        aps_security: Option<Eui64>,
+    ) {
         if aps_frame.profile_id != ZDP_PROFILE_ID || aps_frame.destination_endpoint != Some(0) {
             return;
         }
+
+        let source = nwk_frame.nwk_header.source;
+        let broadcast = is_broadcast(nwk_frame.nwk_header.destination);
 
         match ZdpClusterId::try_from(aps_frame.cluster_id) {
             Ok(ZdpClusterId::DeviceAnnce) => self.handle_device_annce(nwk_frame, aps_frame),
@@ -45,8 +57,248 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             Ok(ZdpClusterId::ParentAnnceRsp) => self.handle_parent_annce_rsp(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtLqiReq) => self.handle_mgmt_lqi_req(nwk_frame, aps_frame),
             Ok(ZdpClusterId::MgmtRtgReq) => self.handle_mgmt_rtg_req(nwk_frame, aps_frame),
-            // Management responses from other devices are the client's business
-            Ok(ZdpClusterId::MgmtLqiRsp | ZdpClusterId::MgmtRtgRsp) | Err(_) => {}
+            Ok(ZdpClusterId::NwkAddrReq) => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .nwk_addr_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::IeeeAddrReq) => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .ieee_addr_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::NodeDescReq) => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
+                    let requester = aps_security
+                        .or(nwk_frame.nwk_header.source_ieee)
+                        .or_else(|| core.nib.address_map.eui64_for(source));
+                    core.descriptors.node_desc_rsp(
+                        request,
+                        &core.nib.neighbors,
+                        broadcast,
+                        requester,
+                    )
+                });
+            }
+            Ok(ZdpClusterId::PowerDescReq) => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .power_desc_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::SimpleDescReq) => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .simple_desc_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::ActiveEpReq) => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors.active_ep_rsp(request, broadcast)
+                });
+            }
+            Ok(ZdpClusterId::MatchDescReq) => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |core, request| {
+                    core.descriptors
+                        .match_desc_rsp(request, &core.nib.neighbors, broadcast)
+                });
+            }
+            // Spec 2.4.4.3.4: a router keeps no binding table, and reports it empty.
+            // The coordinator's bindings are the client's business
+            Ok(ZdpClusterId::MgmtBindReq) if self.state.role == NwkDeviceType::Router => {
+                self.answer_zdp_request(aps_frame, source, aps_security, |_, _: &MgmtBindReq| {
+                    (!broadcast).then_some(MgmtBindRsp {
+                        status: ZdpStatus::Success,
+                        binding_table_entries: 0,
+                        start_index: 0,
+                        binding_table_list_count: 0,
+                    })
+                });
+            }
+            Ok(ZdpClusterId::MgmtBindReq) => {}
+            Ok(ZdpClusterId::MgmtNwkUpdateReq) if self.state.role == NwkDeviceType::Router => {
+                self.handle_mgmt_nwk_update_req(nwk_frame, aps_frame, aps_security);
+            }
+            // The coordinator's channel is the client's to manage
+            Ok(ZdpClusterId::MgmtNwkUpdateReq) => {}
+            // Responses from other devices are the client's business
+            Ok(
+                ZdpClusterId::NwkAddrRsp
+                | ZdpClusterId::IeeeAddrRsp
+                | ZdpClusterId::NodeDescRsp
+                | ZdpClusterId::PowerDescRsp
+                | ZdpClusterId::SimpleDescRsp
+                | ZdpClusterId::ActiveEpRsp
+                | ZdpClusterId::MatchDescRsp
+                | ZdpClusterId::MgmtLqiRsp
+                | ZdpClusterId::MgmtRtgRsp
+                | ZdpClusterId::MgmtBindRsp
+                | ZdpClusterId::MgmtNwkUpdateNotify,
+            ) => {}
+            Err(_) if aps_frame.cluster_id & ZDP_RESPONSE_BIT == 0 => {
+                self.reject_unsupported_zdp_request(nwk_frame, aps_frame, aps_security);
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Spec 2.4.3.3.9.2: change channel, store a new manager, or scan for energy, as
+    /// the network manager asks.
+    fn handle_mgmt_nwk_update_req(
+        &self,
+        nwk_frame: &NwkFrame,
+        aps_frame: &ApsDataFrame,
+        aps_security: Option<Eui64>,
+    ) {
+        let source = nwk_frame.nwk_header.source;
+
+        let (tsn, request) = match MgmtNwkUpdateReq::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!("Malformed network update request from {source:?}: {err}");
+                return;
+            }
+        };
+
+        let unicast = !is_broadcast(nwk_frame.nwk_header.destination)
+            && aps_frame.frame_control.delivery_mode == ApsDeliveryMode::Unicast;
+
+        let Some(update) = NwkUpdate::from_request(&request, unicast) else {
+            return;
+        };
+
+        let arc_self = self
+            .self_weak
+            .upgrade()
+            .expect("Unable to upgrade self reference");
+
+        match update {
+            NwkUpdate::ChangeChannel { channel, update_id } => {
+                self.tasklets.push(async move {
+                    arc_self.change_channel_on_request(channel, update_id).await;
+                });
+            }
+            NwkUpdate::UpdateManager {
+                channel_mask,
+                manager,
+            } => {
+                let mut core = self.core();
+                core.aib.channel_mask = channel_mask;
+                core.nib.manager_address = manager;
+            }
+            NwkUpdate::EnergyScan {
+                channels,
+                duration,
+                count,
+            } => {
+                self.tasklets.push(async move {
+                    arc_self
+                        .report_energy_scans(source, tsn, channels, duration, count, aps_security)
+                        .await;
+                });
+            }
+            NwkUpdate::Reject(status) => {
+                if let Err(err) =
+                    self.send_zdp_unicast(source, tsn, &nwk_update::rejection(status), aps_security)
+                {
+                    tracing::warn!("Failed to refuse a network update from {source:?}: {err}");
+                }
+            }
+        }
+    }
+
+    /// Frequency agility annex: switch channel once the request had time to reach
+    /// every router, adopt its update id, and restart the transmission counts. The
+    /// update id goes first so no beacon on the new channel advertises the old one.
+    async fn change_channel_on_request(&self, channel: u8, update_id: u8) {
+        R::sleep(self.tunables.broadcast_delivery_time()).await;
+
+        tracing::info!("Changing to channel {channel} as the network manager asked");
+        self.set_nwk_update_id(update_id);
+
+        if let Err(err) = self.set_channel(channel).await {
+            tracing::warn!("Failed to change to channel {channel}: {err}");
+            return;
+        }
+
+        let mut core = self.core();
+        core.nib.tx_total = 0;
+        core.nib.neighbors.reset_transmit_failures();
+    }
+
+    /// Spec 2.4.3.3.9.2 step 5: scan the channels `count` times, reporting each pass
+    /// to the requester.
+    async fn report_energy_scans(
+        &self,
+        requester: Nwk,
+        tsn: u8,
+        channels: Vec<u8>,
+        duration: Duration,
+        count: u8,
+        aps_security: Option<Eui64>,
+    ) {
+        for _ in 0..count {
+            let mut energy_values = Vec::with_capacity(channels.len());
+
+            for &channel in &channels {
+                match self.energy_detect(channel, duration).await {
+                    Ok(rssi) => energy_values.push(energy_detect_value(rssi)),
+                    Err(err) => {
+                        tracing::warn!("Energy scan of channel {channel} failed: {err}");
+                        return;
+                    }
+                }
+            }
+
+            let total_transmissions = self.core().nib.tx_total;
+            let report = nwk_update::scan_report(&channels, energy_values, total_transmissions);
+
+            if let Err(err) = self.send_zdp_unicast(requester, tsn, &report, aps_security) {
+                tracing::warn!("Failed to report an energy scan to {requester:?}: {err}");
+            }
+        }
+    }
+
+    /// Spec 2.4.4.1: a router answers a unicast request it does not support with only
+    /// the response cluster and NOT_SUPPORTED, and drops a broadcast one. On the
+    /// coordinator the client may support the request.
+    fn reject_unsupported_zdp_request(
+        &self,
+        nwk_frame: &NwkFrame,
+        aps_frame: &ApsDataFrame,
+        aps_security: Option<Eui64>,
+    ) {
+        if self.state.role != NwkDeviceType::Router
+            || is_broadcast(nwk_frame.nwk_header.destination)
+            || aps_frame.frame_control.delivery_mode != ApsDeliveryMode::Unicast
+        {
+            return;
+        }
+
+        let Some(&tsn) = aps_frame.asdu.first() else {
+            return;
+        };
+
+        let source = nwk_frame.nwk_header.source;
+
+        if let Err(err) = self.send_aps_unicast(
+            source,
+            ZDP_PROFILE_ID,
+            aps_frame.cluster_id | ZDP_RESPONSE_BIT,
+            0,
+            0,
+            ApsAck::None,
+            None,
+            0,
+            vec![tsn, ZdpStatus::NotSupported as u8],
+            aps_security,
+            false,
+            TxPriority::UserNormal,
+            RouteDirective::StackDecides,
+        ) {
+            tracing::warn!("Failed to reject a ZDP request from {source:?}: {err}");
         }
     }
 
@@ -132,7 +384,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             neighbor_table_list: descriptors,
         };
 
-        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, None) {
             tracing::warn!("Failed to send a neighbor table response to {source:?}: {err}");
         }
     }
@@ -193,7 +445,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             routing_table_list: descriptors,
         };
 
-        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, None) {
             tracing::warn!("Failed to send a routing table response to {source:?}: {err}");
         }
     }
@@ -277,70 +529,88 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             children: claimed,
         };
 
-        if let Err(err) = self.send_zdp_command(source, ApsDeliveryMode::Unicast, tsn, &response) {
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, None) {
             tracing::warn!("Failed to send a parent announcement response to {source:?}: {err}");
         }
     }
 
-    /// Build and enqueue a ZDP command.
-    fn send_zdp_command<T: ZdpCommand + Sync>(
+    /// Answer a device and service discovery request. The answer is unicast to the
+    /// requester, with the APS security the request arrived with.
+    fn answer_zdp_request<Req: ZdpCommand, Rsp: ZdpCommand>(
+        &self,
+        aps_frame: &ApsDataFrame,
+        source: Nwk,
+        aps_security: Option<Eui64>,
+        answer: impl FnOnce(&ZigbeeCore, &Req) -> Option<Rsp>,
+    ) {
+        let (tsn, request) = match Req::deserialize(&aps_frame.asdu) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!("Malformed {:?} from {source:?}: {err}", Req::CLUSTER_ID);
+                return;
+            }
+        };
+
+        let Some(response) = answer(&self.core(), &request) else {
+            return;
+        };
+
+        if let Err(err) = self.send_zdp_unicast(source, tsn, &response, aps_security) {
+            tracing::warn!("Failed to send {:?} to {source:?}: {err}", Rsp::CLUSTER_ID);
+        }
+    }
+
+    /// Unicast a ZDP command between endpoints 0. `aps_security` secures it with the
+    /// link key shared with that device. Unacknowledged: a lost response is covered by
+    /// the requester's own retries.
+    fn send_zdp_unicast<T: ZdpCommand>(
         &self,
         destination: Nwk,
-        delivery_mode: ApsDeliveryMode,
+        tsn: u8,
+        command: &T,
+        aps_security: Option<Eui64>,
+    ) -> Result<SendHandle, EnqueueError> {
+        let asdu: Asdu = write_frame(|writer| command.serialize(tsn, writer))
+            .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
+
+        self.send_aps_unicast(
+            destination,
+            ZDP_PROFILE_ID,
+            T::CLUSTER_ID as u16,
+            0,
+            0,
+            ApsAck::None,
+            None,
+            0,
+            asdu.to_vec(),
+            aps_security,
+            false,
+            TxPriority::UserNormal,
+            RouteDirective::StackDecides,
+        )
+        .map(|(handle, _)| handle)
+    }
+
+    /// Broadcast a ZDP command between endpoints 0.
+    fn send_zdp_broadcast<T: ZdpCommand>(
+        &self,
+        destination: Nwk,
         tsn: u8,
         command: &T,
     ) -> Result<SendHandle, EnqueueError> {
-        let asdu = write_frame(|writer| command.serialize(tsn, writer))
+        let asdu: Asdu = write_frame(|writer| command.serialize(tsn, writer))
             .map_err(|TooLong| EnqueueError::PayloadTooLong)?;
 
-        let aps_frame = ApsDataFrame {
-            frame_control: ApsFrameControl {
-                frame_type: ApsFrameType::Data,
-                delivery_mode,
-                reserved1: 0b0,
-                security: false,
-                ack_request: false,
-                extended_header: false,
-            },
-            group_id: None,
-            destination_endpoint: Some(0),
-            cluster_id: T::CLUSTER_ID as u16,
-            profile_id: ZDP_PROFILE_ID,
-            source_endpoint: 0,
-            counter: self.next_aps_counter(),
-            asdu,
-        };
-
-        tracing::trace!("Prepared unicast ZDP APS frame: {aps_frame:?}");
-        let nwk_frame = self
-            .nwk_data_frame(
-                destination,
-                write_frame(|writer| aps_frame.serialize(writer))
-                    .map_err(|TooLong| EnqueueError::PayloadTooLong)?,
-            )
-            .with_discover_route(NwkRouteDiscovery::Enable)
-            .with_radius(2 * MAX_DEPTH);
-
-        // ZDP responses are answerable to the remote requester's retries: best-effort
-        let policy = TxPolicy {
-            priority: TxPriority::UserNormal,
-            class: TrafficClass::Host,
-        };
-
-        match delivery_mode {
-            ApsDeliveryMode::Broadcast => self.send_broadcast(Broadcast {
-                frame: nwk_frame,
-                security: NwkSecurityMode::NetworkKey,
-                policy,
-            }),
-            ApsDeliveryMode::Unicast | ApsDeliveryMode::Multicast => self.send_unicast(Unicast {
-                frame: nwk_frame,
-                security: NwkSecurityMode::NetworkKey,
-                mode: SendMode::Route(RouteDirective::StackDecides),
-                policy,
-                confirm: Confirm::OnHandoff,
-            }),
-        }
+        self.send_aps_broadcast(
+            destination,
+            ZDP_PROFILE_ID,
+            T::CLUSTER_ID as u16,
+            0,
+            0,
+            0,
+            asdu.to_vec(),
+            TxPriority::UserNormal,
+        )
     }
 
     /// Spec 2.4.4.2.22.2: a router answered our parent announcement, claiming
@@ -427,12 +697,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             let tsn = self.next_aps_counter();
             let started = self.core_now();
 
-            match self.send_zdp_command(
-                BROADCAST_ALL_ROUTERS_AND_COORDINATOR,
-                ApsDeliveryMode::Broadcast,
-                tsn,
-                &announcement,
-            ) {
+            match self.send_zdp_broadcast(BROADCAST_ALL_ROUTERS_AND_COORDINATOR, tsn, &announcement)
+            {
                 Ok(send) => {
                     let _ = send.handed_off().await;
                 }

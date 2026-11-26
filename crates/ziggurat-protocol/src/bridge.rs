@@ -19,6 +19,8 @@ use ziggurat_phy::RadioPhy;
 use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
 use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
 use ziggurat_zigbee::nwk::routing;
+use ziggurat_zigbee::zdp::descriptors::ManufacturerCode;
+use ziggurat_zigbee::zdp::SimpleDescriptor;
 
 use crate::send_tracker::{ConfirmKind, SendTracker};
 
@@ -245,6 +247,65 @@ pub fn apply_source_routes<P: RadioPhy, R: Runtime>(
             .routing
             .store_route_record(entry.destination, entry.relays);
     }
+}
+
+#[allow(clippy::significant_drop_tightening)]
+pub fn add_endpoint<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: AddEndpointPayload,
+) -> Result<(), Error> {
+    if !(1..=254).contains(&payload.endpoint) {
+        tracing::warn!("Rejecting endpoint {}", payload.endpoint);
+        return Err(Status::InvalidRequest.into());
+    }
+
+    let mut core = stack.state.core.lock();
+
+    // The stack serves this endpoint itself, and describes it from what it serves
+    if core.endpoints.contains(payload.endpoint) {
+        tracing::warn!(
+            "Rejecting endpoint {}: the stack serves it",
+            payload.endpoint
+        );
+        return Err(Status::InvalidRequest.into());
+    }
+
+    core.descriptors.add_endpoint(SimpleDescriptor {
+        endpoint: payload.endpoint,
+        profile_id: payload.profile_id,
+        device_id: payload.device_id,
+        device_version: payload.device_version,
+        input_clusters: payload.input_clusters,
+        output_clusters: payload.output_clusters,
+    });
+    Ok(())
+}
+
+pub fn set_manufacturer_codes<P: RadioPhy, R: Runtime>(
+    stack: &ZigbeeStack<P, R>,
+    payload: SetManufacturerCodesPayload,
+) -> Result<(), Error> {
+    if payload.entries.iter().any(|entry| entry.prefix.len() > 8) {
+        tracing::warn!("Rejecting a manufacturer code prefix longer than an EUI64");
+        return Err(Status::InvalidRequest.into());
+    }
+
+    let codes = payload
+        .entries
+        .into_iter()
+        .map(|entry| ManufacturerCode {
+            prefix: entry.prefix,
+            code: entry.code,
+        })
+        .collect();
+
+    stack
+        .state
+        .core
+        .lock()
+        .descriptors
+        .set_manufacturer_codes(codes);
+    Ok(())
 }
 
 impl From<&NetworkBeacon> for BeaconPayload {

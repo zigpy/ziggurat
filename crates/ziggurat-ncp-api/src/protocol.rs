@@ -171,6 +171,18 @@ async fn dispatch<P: RadioPhy>(
             proto::set_tunable(&**configured(app)?, &payload)?;
             Ok(Response::Empty)
         }
+        Request::AddEndpoint(payload) => {
+            proto::add_endpoint(&**configured(app)?, payload)?;
+            Ok(Response::Empty)
+        }
+        Request::SetManufacturerCodes(payload) => {
+            proto::set_manufacturer_codes(&**configured(app)?, payload)?;
+            Ok(Response::Empty)
+        }
+        Request::SetConcentrator(payload) => {
+            configured(app)?.set_concentrator(payload.enabled);
+            Ok(Response::Empty)
+        }
         Request::CancelRequest(payload) => {
             let stack = running(app)?.clone();
             let result = crate::with_send_tracker(&app.sends, |tracker| {

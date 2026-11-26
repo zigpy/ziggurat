@@ -2,10 +2,15 @@
 use alloc::vec::Vec;
 
 use crate::nwk::commands::NwkRejoinCapabilityInformation;
-use abstract_bits::{AbstractBits, BitReader, abstract_bits};
+use abstract_bits::{
+    AbstractBits, BitReader, BitWriter, FromBytesError, ToBytesError, abstract_bits,
+};
 use num_enum::TryFromPrimitive;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use ziggurat_ieee_802154::{FrameWriter, TooLong};
+
+pub mod descriptors;
+pub mod nwk_update;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DeserializeError {
@@ -23,18 +28,35 @@ pub enum DeserializeError {
 /// endpoints 0 under this profile, with a transaction sequence number prefix.
 pub const ZDP_PROFILE_ID: u16 = 0x0000;
 
-/// Zigbee spec 2.4.3/2.4.4: ZDP cluster identifiers. Only the clusters the stack
-/// itself consumes are listed; everything else is the client's business.
+/// Zigbee spec 2.4.3/2.4.4: ZDP cluster identifiers
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, Clone, Copy)]
 #[repr(u16)]
 pub enum ZdpClusterId {
+    NwkAddrReq = 0x0000,
+    IeeeAddrReq = 0x0001,
+    NodeDescReq = 0x0002,
+    PowerDescReq = 0x0003,
+    SimpleDescReq = 0x0004,
+    ActiveEpReq = 0x0005,
+    MatchDescReq = 0x0006,
     DeviceAnnce = 0x0013,
     ParentAnnce = 0x001F,
     MgmtLqiReq = 0x0031,
     MgmtRtgReq = 0x0032,
+    MgmtBindReq = 0x0033,
+    MgmtNwkUpdateReq = 0x0038,
+    NwkAddrRsp = 0x8000,
+    IeeeAddrRsp = 0x8001,
+    NodeDescRsp = 0x8002,
+    PowerDescRsp = 0x8003,
+    SimpleDescRsp = 0x8004,
+    ActiveEpRsp = 0x8005,
+    MatchDescRsp = 0x8006,
     ParentAnnceRsp = 0x801F,
     MgmtLqiRsp = 0x8031,
     MgmtRtgRsp = 0x8032,
+    MgmtBindRsp = 0x8033,
+    MgmtNwkUpdateNotify = 0x8038,
 }
 
 /// Zigbee spec Table 2-129 (partial): ZDP response status values.
@@ -43,7 +65,335 @@ pub enum ZdpClusterId {
 #[repr(u8)]
 pub enum ZdpStatus {
     Success = 0x00,
+    InvRequestType = 0x80,
+    DeviceNotFound = 0x81,
+    InvalidEp = 0x82,
+    NotActive = 0x83,
     NotSupported = 0x84,
+    NoDescriptor = 0x89,
+}
+
+/// The RequestType of a NWK_addr_req or IEEE_addr_req (spec Table 2-47).
+pub const ADDR_REQUEST_SINGLE: u8 = 0x00;
+pub const ADDR_REQUEST_EXTENDED: u8 = 0x01;
+
+/// Zigbee spec 2.4.3.1.1: find the network address of a device by its IEEE address.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NwkAddrReq {
+    pub ieee_addr: Eui64,
+    pub request_type: u8,
+    pub start_index: u8,
+}
+
+impl ZdpCommand for NwkAddrReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::NwkAddrReq;
+}
+
+/// Zigbee spec 2.4.3.1.2: find the IEEE address of a device by its network address.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct IeeeAddrReq {
+    pub nwk_addr_of_interest: Nwk,
+    pub request_type: u8,
+    pub start_index: u8,
+}
+
+impl ZdpCommand for IeeeAddrReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::IeeeAddrReq;
+}
+
+/// The tail of an extended address response: a page of the network addresses of the
+/// responder's end device children.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AssociatedDevices {
+    num_assoc_dev: u8,
+    pub start_index: u8,
+    #[abstract_bits(length_from = num_assoc_dev)]
+    pub nwk_addr_assoc_dev_list: Vec<Nwk>,
+}
+
+/// The two address responses share one layout. The associated devices are present
+/// only in an extended response, and no field says so: they are present when bytes
+/// remain after the addresses. `abstract_bits` cannot express that, so the
+/// serialization is written by hand.
+macro_rules! address_response {
+    ($(#[$doc:meta])* $name:ident, $cluster:expr) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Eq, PartialEq)]
+        pub struct $name {
+            pub status: ZdpStatus,
+            pub ieee_addr_remote_dev: Eui64,
+            pub nwk_addr_remote_dev: Nwk,
+            pub associated_devices: Option<AssociatedDevices>,
+        }
+
+        impl AbstractBits for $name {
+            const MIN_BITS: usize = ZdpStatus::MIN_BITS + Eui64::MIN_BITS + Nwk::MIN_BITS;
+            const MAX_BITS: usize = Self::MIN_BITS + AssociatedDevices::MAX_BITS;
+
+            fn write_abstract_bits(&self, writer: &mut BitWriter) -> Result<(), ToBytesError> {
+                self.status.write_abstract_bits(writer)?;
+                self.ieee_addr_remote_dev.write_abstract_bits(writer)?;
+                self.nwk_addr_remote_dev.write_abstract_bits(writer)?;
+                if let Some(associated_devices) = &self.associated_devices {
+                    associated_devices.write_abstract_bits(writer)?;
+                }
+                Ok(())
+            }
+
+            fn read_abstract_bits(reader: &mut BitReader) -> Result<Self, FromBytesError> {
+                let status = ZdpStatus::read_abstract_bits(reader)?;
+                let ieee_addr_remote_dev = Eui64::read_abstract_bits(reader)?;
+                let nwk_addr_remote_dev = Nwk::read_abstract_bits(reader)?;
+                let associated_devices = if reader.remaining_bits() > 0 {
+                    Some(AssociatedDevices::read_abstract_bits(reader)?)
+                } else {
+                    None
+                };
+
+                Ok(Self {
+                    status,
+                    ieee_addr_remote_dev,
+                    nwk_addr_remote_dev,
+                    associated_devices,
+                })
+            }
+        }
+
+        impl ZdpCommand for $name {
+            const CLUSTER_ID: ZdpClusterId = $cluster;
+        }
+    };
+}
+
+address_response!(
+    /// Zigbee spec 2.4.4.2.1: the answer to a NWK_addr_req.
+    NwkAddrRsp,
+    ZdpClusterId::NwkAddrRsp
+);
+
+address_response!(
+    /// Zigbee spec 2.4.4.2.2: the answer to an IEEE_addr_req.
+    IeeeAddrRsp,
+    ZdpClusterId::IeeeAddrRsp
+);
+
+/// Zigbee spec 2.4.3.1.3. An R23 sender appends TLVs, which are ignored.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NodeDescReq {
+    pub nwk_addr_of_interest: Nwk,
+}
+
+impl ZdpCommand for NodeDescReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::NodeDescReq;
+}
+
+/// Zigbee spec 2.4.3.1.4.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PowerDescReq {
+    pub nwk_addr_of_interest: Nwk,
+}
+
+impl ZdpCommand for PowerDescReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::PowerDescReq;
+}
+
+/// Zigbee spec 2.4.3.1.5.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SimpleDescReq {
+    pub nwk_addr_of_interest: Nwk,
+    pub endpoint: u8,
+}
+
+impl ZdpCommand for SimpleDescReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::SimpleDescReq;
+}
+
+/// Zigbee spec 2.4.3.1.6.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ActiveEpReq {
+    pub nwk_addr_of_interest: Nwk,
+}
+
+impl ZdpCommand for ActiveEpReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::ActiveEpReq;
+}
+
+/// Zigbee spec 2.4.3.1.7: find the endpoints that serve or use any of the clusters.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MatchDescReq {
+    pub nwk_addr_of_interest: Nwk,
+    pub profile_id: u16,
+    num_in_clusters: u8,
+    #[abstract_bits(length_from = num_in_clusters)]
+    pub in_cluster_list: Vec<u16>,
+    num_out_clusters: u8,
+    #[abstract_bits(length_from = num_out_clusters)]
+    pub out_cluster_list: Vec<u16>,
+}
+
+impl ZdpCommand for MatchDescReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MatchDescReq;
+}
+
+/// Zigbee spec Table 2-34: the logical type field of the node descriptor.
+#[abstract_bits(bits = 3)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum LogicalType {
+    Coordinator = 0b000,
+    Router = 0b001,
+    EndDevice = 0b010,
+}
+
+/// Zigbee spec Table 2-35: the frequency band field holds one bit per band.
+pub const FREQUENCY_BAND_2400_MHZ: u8 = 0b01000;
+
+/// Zigbee spec 2.3.2.3.10: the server mask of the node descriptor.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ServerMask {
+    pub primary_trust_center: bool,
+    pub backup_trust_center: bool,
+    reserved: u4,
+    pub network_manager: bool,
+    reserved: u2,
+    pub stack_compliance_revision: u7,
+}
+
+/// Zigbee spec 2.3.2.3: the node descriptor.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NodeDescriptor {
+    pub logical_type: LogicalType,
+    pub complex_descriptor_available: bool,
+    pub user_descriptor_available: bool,
+    reserved: u3,
+    pub aps_flags: u3,
+    pub frequency_band: u5,
+    pub mac_capability_flags: NwkRejoinCapabilityInformation,
+    pub manufacturer_code: u16,
+    pub maximum_buffer_size: u8,
+    pub maximum_incoming_transfer_size: u16,
+    pub server_mask: ServerMask,
+    pub maximum_outgoing_transfer_size: u16,
+    pub descriptor_capability_field: u8,
+}
+
+/// Zigbee spec 2.4.4.2.3. The descriptor is present only on success.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NodeDescRsp {
+    pub status: ZdpStatus,
+    pub nwk_addr_of_interest: Nwk,
+    #[abstract_bits(presence_from = matches!(status, ZdpStatus::Success))]
+    pub node_descriptor: Option<NodeDescriptor>,
+}
+
+impl ZdpCommand for NodeDescRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::NodeDescRsp;
+}
+
+/// Zigbee spec 2.3.2.4: the power descriptor. Each field is a small enumeration or
+/// bitmap; see Tables 2-36 to 2-39 for the values.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PowerDescriptor {
+    pub current_power_mode: u4,
+    pub available_power_sources: u4,
+    pub current_power_source: u4,
+    pub current_power_source_level: u4,
+}
+
+/// Zigbee spec 2.4.4.2.4. The descriptor is present only on success.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PowerDescRsp {
+    pub status: ZdpStatus,
+    pub nwk_addr_of_interest: Nwk,
+    #[abstract_bits(presence_from = matches!(status, ZdpStatus::Success))]
+    pub power_descriptor: Option<PowerDescriptor>,
+}
+
+impl ZdpCommand for PowerDescRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::PowerDescRsp;
+}
+
+/// Zigbee spec 2.3.2.5: the simple descriptor of one endpoint.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SimpleDescriptor {
+    pub endpoint: u8,
+    pub profile_id: u16,
+    pub device_id: u16,
+    pub device_version: u4,
+    reserved: u4,
+    input_cluster_count: u8,
+    #[abstract_bits(length_from = input_cluster_count)]
+    pub input_clusters: Vec<u16>,
+    output_cluster_count: u8,
+    #[abstract_bits(length_from = output_cluster_count)]
+    pub output_clusters: Vec<u16>,
+}
+
+impl SimpleDescriptor {
+    /// The serialized length in bytes: the fixed fields, two count bytes, and two
+    /// bytes per cluster.
+    pub const fn length(&self) -> u8 {
+        (8 + 2 * (self.input_clusters.len() + self.output_clusters.len())) as u8
+    }
+}
+
+/// Zigbee spec 2.4.4.2.5. `length` is the descriptor's byte length, 0 when absent.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SimpleDescRsp {
+    pub status: ZdpStatus,
+    pub nwk_addr_of_interest: Nwk,
+    pub length: u8,
+    #[abstract_bits(presence_from = matches!(status, ZdpStatus::Success))]
+    pub simple_descriptor: Option<SimpleDescriptor>,
+}
+
+impl ZdpCommand for SimpleDescRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::SimpleDescRsp;
+}
+
+/// Zigbee spec 2.4.4.2.6.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ActiveEpRsp {
+    pub status: ZdpStatus,
+    pub nwk_addr_of_interest: Nwk,
+    active_ep_count: u8,
+    #[abstract_bits(length_from = active_ep_count)]
+    pub active_ep_list: Vec<u8>,
+}
+
+impl ZdpCommand for ActiveEpRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::ActiveEpRsp;
+}
+
+/// Zigbee spec 2.4.4.2.7.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MatchDescRsp {
+    pub status: ZdpStatus,
+    pub nwk_addr_of_interest: Nwk,
+    match_length: u8,
+    #[abstract_bits(length_from = match_length)]
+    pub match_list: Vec<u8>,
+}
+
+impl ZdpCommand for MatchDescRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MatchDescRsp;
 }
 
 pub trait ZdpCommand: AbstractBits + Sized {
@@ -234,6 +584,70 @@ pub struct MgmtRtgRsp {
 
 impl ZdpCommand for MgmtRtgRsp {
     const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtRtgRsp;
+}
+
+/// Zigbee spec 2.4.3.3.4: request a slice of the remote device's binding table.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtBindReq {
+    pub start_index: u8,
+}
+
+impl ZdpCommand for MgmtBindReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtBindReq;
+}
+
+/// Zigbee spec 2.4.4.3.4: a slice of our binding table. We keep no binding table, so
+/// the binding descriptor list is always empty and left out.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtBindRsp {
+    pub status: ZdpStatus,
+    pub binding_table_entries: u8,
+    pub start_index: u8,
+    pub binding_table_list_count: u8,
+}
+
+impl ZdpCommand for MgmtBindRsp {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtBindRsp;
+}
+
+/// Zigbee spec 2.4.3.3.9: ask for an energy scan, a channel change, or a new channel
+/// mask and network manager, depending on the scan duration. The fields after it are
+/// present only for the request they belong to.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtNwkUpdateReq {
+    pub scan_channels: u32,
+    pub scan_duration: u8,
+    #[abstract_bits(presence_from = matches!(scan_duration, 0x00..=0x05))]
+    pub scan_count: Option<u8>,
+    #[abstract_bits(presence_from = matches!(scan_duration, 0xFE | 0xFF))]
+    pub nwk_update_id: Option<u8>,
+    #[abstract_bits(presence_from = matches!(scan_duration, 0xFF))]
+    pub nwk_manager_addr: Option<Nwk>,
+}
+
+impl ZdpCommand for MgmtNwkUpdateReq {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtNwkUpdateReq;
+}
+
+/// Zigbee spec 2.4.4.3.9: the result of an energy scan, or the status of a failed
+/// Mgmt_NWK_Update_req.
+#[abstract_bits]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MgmtNwkUpdateNotify {
+    pub status: ZdpStatus,
+    pub scanned_channels: u32,
+    pub total_transmissions: u16,
+    pub transmission_failures: u16,
+    scanned_channels_list_count: u8,
+    #[abstract_bits(length_from = scanned_channels_list_count)]
+    pub energy_values: Vec<u8>,
+}
+
+impl ZdpCommand for MgmtNwkUpdateNotify {
+    const CLUSTER_ID: ZdpClusterId = ZdpClusterId::MgmtNwkUpdateNotify;
 }
 
 /// Spec 2.4.4.3.2 / 2.4.4.3.3: one page of a Mgmt_Lqi_rsp or Mgmt_Rtg_rsp table.
