@@ -1,0 +1,8 @@
+cycles 720, all-ok 720 (100.00%)
+cmd_ack   missing   0  p50   33.6  p95   42.3  p99   44.3  max   75.7 ms
+cmd_rsp   missing   0  p50   51.2  p95   62.7  p99   72.0  max   82.6 ms
+report    missing   0  p50   88.5  p95  140.8  p99  149.0  max  155.7 ms
+read_ack  missing   0  p50   39.6  p95   52.9  p99   63.8  max   79.1 ms
+read_rsp  missing   0  p50   60.0  p95   72.8  p99   82.7  max   99.9 ms
+nacks: []
+failed cycles: []

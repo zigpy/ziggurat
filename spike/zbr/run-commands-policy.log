@@ -1,0 +1,16 @@
+-- on: send seq=1 ep=10 cluster=0006 zcl=011101
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=1 ep=10 cluster=0x0006 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=1 ep=10 cluster=0x0006 profile=0x0104 zcl=18 11 0b 01 00
+-- read-onoff: send seq=2 ep=10 cluster=0006 zcl=0022000000
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=2 ep=10 cluster=0x0006 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=2 ep=10 cluster=0x0006 profile=0x0104 zcl=08 22 01 00 00 00 10 01
+-- off: send seq=3 ep=10 cluster=0006 zcl=011300
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=3 ep=10 cluster=0x0006 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=3 ep=10 cluster=0x0006 profile=0x0104 zcl=18 13 0b 00 00
+-- read-onoff: send seq=4 ep=10 cluster=0006 zcl=0024000000
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=ack seq=4 ep=10 cluster=0x0006 profile=0x0000 zcl=-
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=- seq=4 ep=10 cluster=0x0006 profile=0x0104 zcl=08 24 01 00 00 00 10 00
+-- configure-reporting: send seq=5 ep=10 cluster=0006 zcl=002506000000100000100e
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=nack seq=5 ep=10 cluster=0x0006 profile=0x0000 status=policy-denied zcl=-
+-- zdo-ieee-req: send seq=6 ep=0 cluster=0001 zcl=26771f0000
+UNICAST   from [fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0]:23106 flags=nack seq=6 ep=0 cluster=0x0001 profile=0x0000 status=policy-denied zcl=-

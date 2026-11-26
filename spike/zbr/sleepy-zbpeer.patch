@@ -1,0 +1,76 @@
+--- zbpeer/main/zigbee_node.c
++++ zbr_sleepy/main/zigbee_node.c
+@@ -28,12 +28,14 @@
+ #define SCAN_DURATION         3 /* (2^3 + 1) beacon intervals per channel, as BDB steering */
+ #define ALL_CHANNELS_MASK     0x07FFF800U /* channels 11..26 */
+ #define MANUFACTURER_NAME     "\x09""ESPRESSIF"
+-#define MODEL_IDENTIFIER      "\x0d""otbr_test_dev"
++#define MODEL_IDENTIFIER      "\x0a""zbr_sleepy"
+ #define ZIGBEE_TASK_STACK     4096
+ #define ZIGBEE_TASK_PRIORITY  5
+ #define ED_SCAN_DURATION      3    /* (2^3 + 1) x 15.36 ms = 138 ms per channel, about 2.2 s for channels 11..26 */
+ #define ED_SCAN_WAIT_MS       6000
+-#define REPORT_MAX_INTERVAL_MS 10000 /* a report at least every 10 s, and one on every change */
++#define REPORT_MAX_INTERVAL_MS 3600000 /* SPIKE sleepy: report on change, else hourly */
++#define SED_POLL_MS           15000   /* SPIKE sleepy: data poll (keepalive) interval */
++#define SPIKE_CHANNELS        (1U << 15)
+ #define REPORT_DST_ADDR       0x0000 /* the coordinator */
+ #define REPORT_DST_EP         1      /* the coordinator's (zigpy's) endpoint */
+ #define ZCL_FC_FRAME_TYPE     0x03U  /* ZCL frame control: frame type bits */
+@@ -242,10 +244,11 @@
+ {
+     esp_zigbee_config_t config = {
+         .device_config = {
+-            .device_type = EZB_NWK_DEVICE_TYPE_ROUTER,
++            .device_type = EZB_NWK_DEVICE_TYPE_END_DEVICE,
+             .install_code_policy = false,
+-            .zczr_config = {
+-                .max_children = 10,
++            .zed_config = {
++                .ed_timeout = EZB_NWK_ED_TIMEOUT_2MIN,
++                .keep_alive = SED_POLL_MS,
+             },
+         },
+         .platform_config = {
+@@ -259,8 +262,9 @@
+     ESP_ERROR_CHECK(mac_counters_start()); /* before the stack enables the radio */
+     ESP_ERROR_CHECK(esp_zigbee_init(&config));
+     ezb_aps_secur_enable_distributed_security(false);
+-    ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(ALL_CHANNELS_MASK));
+-    ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(ALL_CHANNELS_MASK));
++    ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(SPIKE_CHANNELS));
++    ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(SPIKE_CHANNELS));
++    ezb_set_rx_on_when_idle(false); /* SPIKE: sleepy end device */
+     ESP_ERROR_CHECK(ezb_app_signal_add_handler(app_signal_handler));
+     ESP_ERROR_CHECK(light_device_create());
+     ezb_apsde_data_indication_handler_register(aps_indication_handler);
+--- zbpeer/CMakeLists.txt
++++ zbr_sleepy/CMakeLists.txt
+@@ -5,5 +5,5 @@
+ cmake_minimum_required(VERSION 3.22)
+ 
+ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+-include(${CMAKE_CURRENT_LIST_DIR}/../tools/version.cmake)
+-project(s2q_zbpeer)
++set(PROJECT_VER "zbr-sleepy-spike")
++project(zbr_sleepy)
+--- zbpeer/sdkconfig.defaults
++++ zbr_sleepy/sdkconfig.defaults
+@@ -1,7 +1,7 @@
+ CONFIG_IDF_TARGET="esp32c6"
+ 
+ # Waveshare ESP32-C6-DEV-KIT-N8: 8 MB flash; the console is UART0 behind the board's CH343 bridge (the default console)
+-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
++CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+ CONFIG_PARTITION_TABLE_CUSTOM=y
+ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+@@ -12,7 +12,7 @@
+ 
+ # Zigbee router (coordinator or router stack, native 802.15.4 radio)
+ CONFIG_ZB_ENABLED=y
+-CONFIG_ZB_ZCZR=y
++CONFIG_ZB_ZED=y
+ CONFIG_ZB_RADIO_NATIVE=y
+ 
+ CONFIG_COMPILER_OPTIMIZATION_SIZE=y

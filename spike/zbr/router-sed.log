@@ -1,0 +1,418 @@
+[2m2026-11-22T00:00:42.552355+01:00[0m [32m INFO[0m [2mziggurat[0m[2m:[0m Listening for WebSocket clients on 127.0.0.1:19997
+[2m2026-11-22T00:00:42.552363+01:00[0m [32m INFO[0m [2mziggurat::zbr_router[0m[2m:[0m ZBR router: fetching network settings from ws://127.0.0.1:19998
+[2m2026-11-22T00:00:42.598980+01:00[0m [32m INFO[0m [2mziggurat::zbr_router[0m[2m:[0m ZBR router: joining PAN PanId(0x2275) (ext Eui64(bf:21:54:02:88:05:4e:3d)) on channel 15 as router Nwk(0x4965) / Eui64(20:6e:f1:ff:fe:0a:d8:8c)
+[2m2026-11-22T00:00:42.599048+01:00[0m [32m INFO[0m [2mziggurat[0m[2m:[0m Initializing Zigbee stack with new settings...
+[2m2026-11-22T00:00:42.600250+01:00[0m [31mERROR[0m [2mziggurat_spinel[0m[2m:[0m RCP announced a reset: ResetPowerOn
+[2m2026-11-22T00:00:42.600293+01:00[0m [32m INFO[0m [2mziggurat_driver::zigbee_stack[0m[2m:[0m Radio reset complete: "ResetPowerOn"
+[2m2026-11-22T00:00:42.612943+01:00[0m [32m INFO[0m [2mziggurat_driver::zigbee_stack[0m[2m:[0m Sending initial link status broadcast
+[2m2026-11-22T00:00:42.622251+01:00[0m [32m INFO[0m [2mziggurat[0m[2m:[0m Zigbee stack initialized and running.
+[2m2026-11-22T00:00:42.622375+01:00[0m [32m INFO[0m [2mziggurat::zbr_router[0m[2m:[0m ZBR router: Device_annce for Nwk(0x4965): Ok(())
+[2m2026-11-22T00:00:42.622401+01:00[0m [32m INFO[0m [2mziggurat::zbr_router[0m[2m:[0m ZBR router: up
+[2m2026-11-22T00:00:42.622383+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: EPID Eui64(bf:21:54:02:88:05:4e:3d) -> prefix fd9e:4994:3fb::/64, multicast ff35:40:fd9e:4994:3fb::1, UDP port 23106, policy Full
+[2m2026-11-22T00:00:42.622510+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: route the prefix locally: ip -6 route add local fd9e:4994:3fb::/64 dev lo
+[2m2026-11-22T00:00:43.260443+01:00[0m [32m INFO[0m [2mziggurat_zigbee::nwk::neighbors[0m[2m:[0m Creating new neighbor entry for Eui64(ac:eb:e6:ff:fe:0b:ff:a4)
+[2m2026-11-22T00:00:43.457677+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:aeeb:e6ff:fe0b:ffa4 cluster 0x0005 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:00:43.457703+01:00[0m [32m INFO[0m [2mziggurat::zbr_router[0m[2m:[0m ZBR router: ZDP 0x0005 from Nwk(0x0000) answered: Ok(())
+[2m2026-11-22T00:00:49.408237+01:00[0m [32m INFO[0m [2mziggurat_zigbee::nwk::neighbors[0m[2m:[0m Creating new neighbor entry for Eui64(20:6e:f1:ff:fe:0a:e0:a0)
+[2m2026-11-22T00:00:51.179243+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: Eui64(20:6e:f1:ff:fe:0a:f9:c4) is sleepy (capability 0x84)
+[2m2026-11-22T00:00:51.179396+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: learned Eui64(20:6e:f1:ff:fe:0a:f9:c4) = Nwk(0x7bf9)
+[2m2026-11-22T00:00:51.179443+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0013 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:00:59.285016+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:46267 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 1->128
+[2m2026-11-22T00:01:06.824413+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:46267
+[2m2026-11-22T00:01:06.890376+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0000 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:01:06.890434+01:00[0m [32m INFO[0m [2mziggurat::zbr_router[0m[2m:[0m ZBR router: ZDP 0x0000 from Nwk(0x7bf9) answered: Ok(())
+[2m2026-11-22T00:01:07.087053+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:01:26.844258+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:46267 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 2->129
+[2m2026-11-22T00:01:39.535205+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:01:52.226923+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:46267 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 3->130
+[2m2026-11-22T00:02:04.916571+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:02:07.295289+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:46267
+[2m2026-11-22T00:02:07.318340+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:02:42.647469+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 1->131
+[2m2026-11-22T00:02:55.336620+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:03:08.034416+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 2->132
+[2m2026-11-22T00:03:20.723352+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:03:22.551857+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:03:27.652674+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 3->133
+[2m2026-11-22T00:03:40.343560+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:03:53.034442+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 4->134
+[2m2026-11-22T00:04:05.723951+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:04:07.795543+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:04:12.657624+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 5->135
+[2m2026-11-22T00:04:25.349321+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:04:38.040104+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 6->136
+[2m2026-11-22T00:04:50.730096+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:04:53.024510+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:04:57.662278+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 7->137
+[2m2026-11-22T00:05:10.354334+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:05:23.043696+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 8->138
+[2m2026-11-22T00:05:23.254987+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:05:42.681256+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 9->139
+[2m2026-11-22T00:05:55.370133+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:06:08.065425+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 10->140
+[2m2026-11-22T00:06:08.504265+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:06:27.684115+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 11->141
+[2m2026-11-22T00:06:40.375865+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:06:53.065777+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 12->142
+[2m2026-11-22T00:06:53.745744+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:07:12.692637+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 13->143
+[2m2026-11-22T00:07:25.382646+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:07:38.079355+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 14->144
+[2m2026-11-22T00:07:38.994458+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:07:57.711582+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 15->145
+[2m2026-11-22T00:08:10.402781+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:08:23.093705+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 16->146
+[2m2026-11-22T00:08:24.224652+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:08:42.722418+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 17->147
+[2m2026-11-22T00:08:55.412567+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:09:08.101901+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 18->148
+[2m2026-11-22T00:09:09.449816+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:09:27.726858+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 19->149
+[2m2026-11-22T00:09:40.416383+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:09:53.106323+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 20->150
+[2m2026-11-22T00:09:54.696185+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:10:12.744896+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 21->151
+[2m2026-11-22T00:10:25.435655+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:10:38.127872+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 22->152
+[2m2026-11-22T00:10:39.954730+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:10:57.757833+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 23->153
+[2m2026-11-22T00:11:10.447977+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:11:23.138503+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 24->154
+[2m2026-11-22T00:11:25.173948+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:11:42.775313+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 25->155
+[2m2026-11-22T00:11:55.466377+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:12:08.157601+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 26->156
+[2m2026-11-22T00:12:10.423417+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:12:27.786766+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 27->157
+[2m2026-11-22T00:12:40.476841+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:12:40.631361+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:12:57.787965+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 28->158
+[2m2026-11-22T00:13:10.476935+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:13:10.871845+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:13:12.787262+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 29->159
+[2m2026-11-22T00:13:25.478202+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:13:26.086282+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:13:26.132002+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:13:26.132373+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 30->160
+[2m2026-11-22T00:13:26.483425+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:13:57.818210+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 31->161
+[2m2026-11-22T00:14:10.508395+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:14:11.754140+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:14:11.783148+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:14:11.783375+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 32->162
+[2m2026-11-22T00:14:12.143374+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:14:42.846235+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 33->163
+[2m2026-11-22T00:14:55.535940+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:14:57.411509+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:14:57.453625+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:14:57.453900+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 34->164
+[2m2026-11-22T00:14:57.661656+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:15:27.876484+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 35->165
+[2m2026-11-22T00:15:40.566417+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:15:42.872890+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:15:42.952968+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:15:42.953365+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 36->166
+[2m2026-11-22T00:15:43.181933+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:16:12.890925+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 37->167
+[2m2026-11-22T00:16:13.312136+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:16:13.372459+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:16:13.372752+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 38->168
+[2m2026-11-22T00:16:13.613450+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:16:57.928399+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 39->169
+[2m2026-11-22T00:16:58.752464+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:16:58.822500+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:16:58.822834+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 40->170
+[2m2026-11-22T00:16:59.040537+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:17:42.948395+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 41->171
+[2m2026-11-22T00:17:44.203733+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:17:44.271380+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:17:44.271722+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 42->172
+[2m2026-11-22T00:17:44.553061+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:18:27.980264+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 43->173
+[2m2026-11-22T00:18:29.852363+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:18:29.941257+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:18:29.941572+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 44->174
+[2m2026-11-22T00:18:30.141676+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:19:13.020352+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 45->175
+[2m2026-11-22T00:19:15.321628+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:19:15.362589+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:19:15.362857+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 46->176
+[2m2026-11-22T00:19:15.630666+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:19:58.059611+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 47->177
+[2m2026-11-22T00:20:00.760781+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:20:00.813974+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:20:00.814361+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 48->178
+[2m2026-11-22T00:20:01.030100+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:20:13.088528+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:e0a0 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:20:43.089242+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 49->179
+[2m2026-11-22T00:20:46.220084+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:20:46.260350+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:20:46.260643+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 50->180
+[2m2026-11-22T00:20:46.560397+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:21:28.129601+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 51->181
+[2m2026-11-22T00:21:31.860464+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:21:31.919628+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:21:31.919912+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 52->182
+[2m2026-11-22T00:21:32.179646+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:22:13.151863+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 53->183
+[2m2026-11-22T00:22:17.329970+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:22:17.369901+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:22:17.370135+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 54->184
+[2m2026-11-22T00:22:17.721315+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:22:58.184211+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 55->185
+[2m2026-11-22T00:23:02.999226+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:23:03.040209+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:23:03.040463+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 56->186
+[2m2026-11-22T00:23:03.311798+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:23:43.217636+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 57->187
+[2m2026-11-22T00:23:48.433486+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:23:48.459734+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:23:48.460084+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 58->188
+[2m2026-11-22T00:23:48.761155+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:24:28.254285+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 59->189
+[2m2026-11-22T00:24:33.877762+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:24:33.940070+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:24:33.940440+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 60->190
+[2m2026-11-22T00:24:34.213545+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:25:13.286332+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 61->191
+[2m2026-11-22T00:25:19.350146+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:25:19.389198+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:25:19.389414+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 62->192
+[2m2026-11-22T00:25:19.648733+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:25:58.325313+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 63->193
+[2m2026-11-22T00:26:04.798894+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:26:04.828734+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:26:04.829066+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 64->194
+[2m2026-11-22T00:26:05.099727+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:26:43.334721+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 65->195
+[2m2026-11-22T00:26:50.229928+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:26:50.269473+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:26:50.269829+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 66->196
+[2m2026-11-22T00:26:50.548055+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:27:28.372356+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 67->197
+[2m2026-11-22T00:27:35.678233+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:27:35.719249+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:27:35.719553+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 68->198
+[2m2026-11-22T00:27:36.009444+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:28:13.409356+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 69->199
+[2m2026-11-22T00:28:21.135448+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:28:21.180058+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:28:21.180324+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 70->200
+[2m2026-11-22T00:28:21.479084+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:28:58.438196+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 71->201
+[2m2026-11-22T00:29:11.128433+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:29:23.819535+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 72->202
+[2m2026-11-22T00:29:36.516316+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:29:36.799727+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:29:43.439498+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 73->203
+[2m2026-11-22T00:29:56.130682+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:30:08.823066+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 74->204
+[2m2026-11-22T00:30:21.513333+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:30:22.024583+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:30:28.445960+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 75->205
+[2m2026-11-22T00:30:41.135565+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:30:53.825148+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 76->206
+[2m2026-11-22T00:31:06.515444+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:31:07.288409+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:31:13.452217+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 77->207
+[2m2026-11-22T00:31:26.141332+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:31:38.832533+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 78->208
+[2m2026-11-22T00:31:51.522326+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:31:52.516389+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:31:58.458480+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 79->209
+[2m2026-11-22T00:32:11.147405+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:32:23.837731+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 80->210
+[2m2026-11-22T00:32:36.528203+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:32:37.767166+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:32:43.464229+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 81->211
+[2m2026-11-22T00:32:56.155460+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:33:08.846084+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 82->212
+[2m2026-11-22T00:33:21.537579+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:33:23.000992+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:33:28.469721+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 83->213
+[2m2026-11-22T00:33:41.160062+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:33:53.851737+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 84->214
+[2m2026-11-22T00:34:06.539991+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:34:08.245275+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:34:13.474274+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 85->215
+[2m2026-11-22T00:34:26.163195+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:34:38.852567+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 86->216
+[2m2026-11-22T00:34:51.542414+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:34:53.487538+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:34:58.479268+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 87->217
+[2m2026-11-22T00:35:11.169499+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:35:23.858565+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 88->218
+[2m2026-11-22T00:35:36.548277+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:35:38.730979+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:35:43.483332+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 89->219
+[2m2026-11-22T00:35:56.174076+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:36:08.863594+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 90->220
+[2m2026-11-22T00:36:08.955179+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:36:28.494730+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 91->221
+[2m2026-11-22T00:36:41.206205+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:36:53.897576+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 92->222
+[2m2026-11-22T00:36:54.205517+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:37:13.513265+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 93->223
+[2m2026-11-22T00:37:26.263881+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:37:38.954208+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 94->224
+[2m2026-11-22T00:37:39.435232+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:37:58.527275+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 95->225
+[2m2026-11-22T00:38:11.218759+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:38:23.909060+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 96->226
+[2m2026-11-22T00:38:24.685116+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:38:43.529968+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 97->227
+[2m2026-11-22T00:38:56.220697+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:39:08.910401+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 98->228
+[2m2026-11-22T00:39:09.905467+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:39:28.548583+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 99->229
+[2m2026-11-22T00:39:41.256777+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:39:53.946442+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 100->230
+[2m2026-11-22T00:39:55.164590+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:40:13.565723+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 101->231
+[2m2026-11-22T00:40:26.255290+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:40:38.946508+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 102->232
+[2m2026-11-22T00:40:40.384103+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:40:58.583756+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 103->233
+[2m2026-11-22T00:41:11.275470+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:41:23.965506+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 104->234
+[2m2026-11-22T00:41:25.633320+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:41:43.601236+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 105->235
+[2m2026-11-22T00:41:56.297874+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:42:08.988684+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 106->236
+[2m2026-11-22T00:42:10.864043+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:42:28.616619+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 107->237
+[2m2026-11-22T00:42:41.305882+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:42:53.997594+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 108->238
+[2m2026-11-22T00:42:56.123936+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:43:13.634121+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 109->239
+[2m2026-11-22T00:43:26.325496+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:43:39.016798+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 110->240
+[2m2026-11-22T00:43:41.343329+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:43:58.651447+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 111->241
+[2m2026-11-22T00:44:11.340269+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:44:11.592280+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:44:11.663364+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:44:11.663623+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 112->242
+[2m2026-11-22T00:44:11.894425+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:44:43.676559+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 113->243
+[2m2026-11-22T00:44:56.368930+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:44:57.023593+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:44:57.048544+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:44:57.048814+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 114->244
+[2m2026-11-22T00:44:57.364812+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:45:28.707317+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 115->245
+[2m2026-11-22T00:45:41.398305+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:45:42.492842+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:45:42.534030+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:45:42.534310+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 116->246
+[2m2026-11-22T00:45:42.831975+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:46:13.732670+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 117->247
+[2m2026-11-22T00:46:26.434333+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:46:28.122133+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:46:28.161277+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:46:28.161531+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 118->248
+[2m2026-11-22T00:46:28.422440+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:46:58.753434+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 119->249
+[2m2026-11-22T00:47:11.442293+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T00:47:13.581478+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:47:13.681519+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:47:13.681779+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 120->250
+[2m2026-11-22T00:47:13.921595+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:47:43.782607+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 121->251
+[2m2026-11-22T00:47:44.032610+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:47:44.092688+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:47:44.092931+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 122->252
+[2m2026-11-22T00:47:44.322797+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:48:28.811689+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 123->253
+[2m2026-11-22T00:48:29.470870+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:48:29.532049+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:48:29.532297+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 124->254
+[2m2026-11-22T00:48:29.786071+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:49:13.839712+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 125->255
+[2m2026-11-22T00:49:14.930285+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:49:14.991303+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:49:14.991547+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 126->128
+[2m2026-11-22T00:49:15.241318+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:49:58.883448+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 127->129
+[2m2026-11-22T00:50:00.382385+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:50:00.441646+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:50:00.441971+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 0->130
+[2m2026-11-22T00:50:00.690579+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:50:43.926598+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 1->131
+[2m2026-11-22T00:50:45.829757+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:50:45.890918+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:50:45.891212+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 2->132
+[2m2026-11-22T00:50:46.152044+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:51:28.952548+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 3->133
+[2m2026-11-22T00:51:31.270100+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:51:31.330164+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:51:31.330415+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 4->134
+[2m2026-11-22T00:51:31.589339+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:52:13.983799+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 5->135
+[2m2026-11-22T00:52:16.720330+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:52:16.822497+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:52:16.822721+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 6->136
+[2m2026-11-22T00:52:17.125617+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:52:59.004738+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 7->137
+[2m2026-11-22T00:53:02.400740+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:53:02.439790+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:53:02.440129+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 8->138
+[2m2026-11-22T00:53:02.710324+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:53:44.045256+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 9->139
+[2m2026-11-22T00:53:47.829933+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:53:47.920141+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:53:47.920439+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 10->140
+[2m2026-11-22T00:53:48.162186+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:54:29.085212+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 11->141
+[2m2026-11-22T00:54:33.280569+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:54:33.300319+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:54:33.300575+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 12->142
+[2m2026-11-22T00:54:33.599498+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:55:14.125752+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 13->143
+[2m2026-11-22T00:55:18.743570+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:55:18.820639+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:55:18.820874+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 14->144
+[2m2026-11-22T00:55:19.088713+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:55:59.165792+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 15->145
+[2m2026-11-22T00:56:04.393849+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:56:04.439119+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:56:04.439380+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 16->146
+[2m2026-11-22T00:56:04.719040+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:56:44.205249+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 17->147
+[2m2026-11-22T00:56:49.838289+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:56:49.930708+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:56:49.931003+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 18->148
+[2m2026-11-22T00:56:50.125311+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:57:29.240179+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 19->149
+[2m2026-11-22T00:57:35.307566+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:57:35.348601+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:57:35.348860+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 20->150
+[2m2026-11-22T00:57:35.629536+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:58:14.278314+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 21->151
+[2m2026-11-22T00:58:20.738767+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:58:20.830052+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:58:20.830421+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 22->152
+[2m2026-11-22T00:58:21.047925+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:58:59.309313+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 23->153
+[2m2026-11-22T00:59:06.189498+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:59:06.229368+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:59:06.229712+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 24->154
+[2m2026-11-22T00:59:06.518392+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:59:44.347132+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 25->155
+[2m2026-11-22T00:59:51.647367+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T00:59:51.688505+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T00:59:51.688788+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 26->156
+[2m2026-11-22T00:59:51.967525+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T01:00:29.384239+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 27->157
+[2m2026-11-22T01:00:37.086709+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T01:00:37.127758+01:00[0m [34mDEBUG[0m [2mziggurat::zbr[0m[2m:[0m ZBR: unsolicited fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> ff35:40:fd9e:4994:3fb::1
+[2m2026-11-22T01:00:37.127977+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 28->158
+[2m2026-11-22T01:00:37.427817+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T01:01:14.421291+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 29->159
+[2m2026-11-22T01:01:27.112401+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T01:01:39.802765+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 30->160
+[2m2026-11-22T01:01:52.492445+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: sleepy Eui64(20:6e:f1:ff:fe:0a:f9:c4) missed it, sending again
+[2m2026-11-22T01:02:05.182432+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 31->161
+[2m2026-11-22T01:02:07.578406+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762
+[2m2026-11-22T01:02:35.210228+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: [::1]:42762 -> Eui64(20:6e:f1:ff:fe:0a:f9:c4) (Nwk(0x7bf9)) ep 10 cluster 0x0006 profile 0x0104 tsn 32->162
+[2m2026-11-22T01:02:37.807722+01:00[0m [32m INFO[0m [2mziggurat::zbr[0m[2m:[0m ZBR: reply fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 cluster 0x0006 -> [::1]:42762

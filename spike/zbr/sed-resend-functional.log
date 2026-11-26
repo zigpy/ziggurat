@@ -1,0 +1,11 @@
+[   0.00] -- on attempt 1: seq=1 zcl=010101
+[   2.35] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=0 cluster=0x0013 zcl=00 f9 7b c4 f9 0a fe ff f1 6e 20 84
+[  18.21]    ack 18.17s, response 18.21s zcl=18 01 0b 01 00
+[  18.21] -- listening 20s
+[  18.26] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=0 cluster=0x0000 zcl=01 8c d8 0a fe ff f1 6e 20 00 00
+[  18.42] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=10 cluster=0x0006 zcl=08 01 0a 00 00 10 01
+[  38.23] -- off attempt 1: seq=2 zcl=010200
+[  48.63]    ack 10.40s, response 10.41s zcl=18 02 0b 00 00
+[  48.63] -- listening 20s
+[  48.66] MULTICAST from fd9e:4994:3fb:0:226e:f1ff:fe0a:f9c4 ep=10 cluster=0x0006 zcl=08 03 0a 00 00 10 00
+[  68.65] done, 0 step(s) failed
