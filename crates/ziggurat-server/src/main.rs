@@ -67,6 +67,24 @@ fn radio_error(e: impl std::fmt::Display) -> proto::Error {
     proto::Status::RadioError.into()
 }
 
+/// Whether a request replaces, starts or stops the stack, loads it, or resets the
+/// radio under it. These run one at a time; everything else runs concurrently.
+const fn changes_lifecycle(request: &proto::Request) -> bool {
+    use proto::Request as R;
+    match request {
+        R::Reset(payload) => payload.hard,
+        R::Configure(_)
+        | R::LoadKeyTable(_)
+        | R::LoadChildren(_)
+        | R::LoadAddressCache(_)
+        | R::LoadRouteTable(_)
+        | R::LoadSourceRoutes(_)
+        | R::StartNetwork
+        | R::Shutdown => true,
+        _ => false,
+    }
+}
+
 /// One connection's send-confirmation machinery: a per-connection [`proto::SendTracker`]
 /// and its shared wake. Confirms are per-connection (no cross-client `request_id`
 /// collisions on the shared hub) and lossless (they bypass the drop-oldest notification
@@ -87,6 +105,11 @@ pub struct ZigguratServer {
     phy: AsyncMutex<Option<Arc<Phy>>>,
     stack: Mutex<Option<Arc<Stack>>>,
     started: AtomicBool,
+    /// Held for the whole of every request that changes which stack is current or
+    /// whether it runs (see [`changes_lifecycle`]). Requests run on their own tasks, so
+    /// without it a `configure` could replace the stack while a `start_network` on it
+    /// is still awaiting the radio.
+    lifecycle: AsyncMutex<()>,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
     notification_forwarder: Mutex<Option<JoinHandle<()>>>,
 }
@@ -102,6 +125,7 @@ impl ZigguratServer {
             phy: AsyncMutex::new(None),
             stack: Mutex::new(None),
             started: AtomicBool::new(false),
+            lifecycle: AsyncMutex::new(()),
             notification_tx,
             notification_forwarder: Mutex::new(None),
         }
@@ -524,6 +548,14 @@ impl ZigguratServer {
         sends: &Sends,
     ) -> Result<proto::Response, proto::Error> {
         use proto::Request as R;
+
+        // Released when the handler returns; other requests keep running meanwhile
+        let _lifecycle = if changes_lifecycle(&request) {
+            Some(self.lifecycle.lock().await)
+        } else {
+            None
+        };
+
         match request {
             R::Reset(payload) => self.handle_reset(payload).await,
             R::GetFirmwareInfo => Ok(proto::Response::FirmwareInfo(proto::FirmwareInfoPayload {
@@ -731,6 +763,17 @@ impl ZigguratServer {
 
         if let Err(e) = stack.start_network().await {
             tracing::warn!("Network start failed: {e}");
+            return Err(proto::Status::NetworkStartFailed.into());
+        }
+
+        // The lifecycle lock keeps the stack current while it starts. Should anything
+        // replace it anyway, the replaced stack must not run on next to its successor.
+        if !self
+            .current_stack()
+            .is_some_and(|current| Arc::ptr_eq(&current, &stack))
+        {
+            tracing::warn!("The stack was replaced while it started, stopping it");
+            stack.shutdown().await;
             return Err(proto::Status::NetworkStartFailed.into());
         }
 
@@ -1152,4 +1195,117 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ziggurat_driver::ziggurat_ieee_802154::types::Key;
+
+    /// A server whose radio transport is already open but never driven: the RCP never
+    /// answers, so a network start waits for a reset notification until it gives up.
+    fn test_server() -> Arc<ZigguratServer> {
+        let server = ZigguratServer::new(SerialConfig {
+            device: String::new(),
+            baudrate: 0,
+            flow_control: FlowControlMode::None,
+            reconnect_timeout: Duration::ZERO,
+            reconnect_on_unresponsive: false,
+        });
+        *server.phy.try_lock().unwrap() = Some(Arc::new(Phy::new()));
+        Arc::new(server)
+    }
+
+    fn configure(pan_id: u16) -> proto::Request {
+        proto::Request::Configure(proto::ConfigurePayload {
+            role: proto::NodeRole::Coordinator,
+            source_routing: false,
+            state: proto::NetworkState {
+                channel: 15,
+                nwk_update_id: 0,
+                pan_id: PanId(pan_id),
+                extended_pan_id: Eui64([1; 8]),
+                nwk_address: Nwk(0x0000),
+                ieee_address: Eui64([2; 8]),
+                network_key: Key([3; 16]),
+                network_key_seq: 0,
+                network_key_tx_counter: 0,
+                tc_link_key: Key(*b"ZigBeeAlliance09"),
+                has_tclk_seed: false,
+                tclk_seed: Key([0; 16]),
+                tclk_flavor: proto::TclkFlavorId::ZStack,
+                tx_power: DEFAULT_TX_POWER,
+                aps_frame_counter: 0,
+            },
+        })
+    }
+
+    /// Run one request the way `dispatch` does, on its own task.
+    fn spawn_request(
+        server: &Arc<ZigguratServer>,
+        request: proto::Request,
+    ) -> JoinHandle<Result<proto::Response, proto::Error>> {
+        let server = server.clone();
+        tokio::spawn(async move {
+            let (outbound, _outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_DEPTH);
+            let (sends, _sweeper) = server.spawn_send_sweeper(outbound.clone());
+            server.handle(0, request, &outbound, &sends).await
+        })
+    }
+
+    fn pan_id(server: &ZigguratServer) -> PanId {
+        server.current_stack().unwrap().state.core.lock().mac.pan_id
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_configure_waits_for_a_network_start() {
+        let server = test_server();
+        let configured = spawn_request(&server, configure(0x1234)).await.unwrap();
+        assert!(configured.is_ok());
+
+        let start = spawn_request(&server, proto::Request::StartNetwork);
+        // Let the start reach its wait for the radio's reset notification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!start.is_finished());
+
+        // A replacement configure must not tear the stack down under the start: it
+        // waits until the start is over
+        let reconfigure = spawn_request(&server, configure(0x5678));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!reconfigure.is_finished());
+        assert!(!start.is_finished());
+        assert_eq!(pan_id(&server), PanId(0x1234));
+
+        assert!(reconfigure.await.unwrap().is_ok());
+        assert!(start.is_finished());
+        assert!(matches!(
+            start.await.unwrap(),
+            Err(proto::Error::Status(proto::Status::NetworkStartFailed))
+        ));
+
+        assert_eq!(pan_id(&server), PanId(0x5678));
+        assert!(!server.started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_other_requests_do_not_wait_for_a_network_start() {
+        let server = test_server();
+        let configured = spawn_request(&server, configure(0x1234)).await.unwrap();
+        assert!(configured.is_ok());
+
+        let start = spawn_request(&server, proto::Request::StartNetwork);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let info = spawn_request(&server, proto::Request::GetNetworkInfo)
+            .await
+            .unwrap();
+        assert!(matches!(
+            info,
+            Ok(proto::Response::NetworkInfo(proto::NetworkInfoPayload {
+                started: false,
+                ..
+            }))
+        ));
+        assert!(!start.is_finished());
+    }
 }
