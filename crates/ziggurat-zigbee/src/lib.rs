@@ -10,6 +10,7 @@ pub mod debouncer;
 pub mod flat_map;
 pub mod gp;
 pub mod nwk;
+pub mod phy;
 pub mod ring_buffer;
 pub mod sends;
 pub mod time;

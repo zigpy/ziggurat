@@ -24,7 +24,7 @@ use ziggurat_driver::runtime::{EmbassyRuntime, EmbassySpawner};
 use ziggurat_driver::sync::Notify;
 use ziggurat_driver::zigbee_stack::{SendHandle, ZigbeeStack};
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
-use ziggurat_phy::{RadioConfig, RadioPhy};
+use ziggurat_phy::{NoPhy, RadioConfig, RadioPhy};
 use ziggurat_protocol::{ConfirmKind, RequestId, SendTracker};
 
 pub(crate) const DEFAULT_TX_POWER: i8 = 8;
@@ -96,7 +96,7 @@ pub struct App<P: RadioPhy> {
     pub phy: Arc<P>,
     pub spawner: EmbassySpawner,
     pub platform: &'static dyn Platform,
-    pub stack: Option<Arc<ZigbeeStack<P, EmbassyRuntime>>>,
+    pub stack: Option<Arc<ZigbeeStack<P, NoPhy, EmbassyRuntime>>>,
     /// Whether the configured stack has been started (`configure` -> `load_*` ->
     /// `start_network` are separate phases).
     pub started: bool,
@@ -161,7 +161,7 @@ pub async fn handle_frame<P: RadioPhy>(app: &mut App<P>, frame: &[u8]) {
 /// Start the receive loop, the notification pump, and the send-confirm reactor for
 /// a freshly-started stack.
 pub(crate) fn spawn_stack_pumps<P: RadioPhy>(
-    stack: &Arc<ZigbeeStack<P, EmbassyRuntime>>,
+    stack: &Arc<ZigbeeStack<P, NoPhy, EmbassyRuntime>>,
     sends: SendTrackerCell,
 ) {
     stack.spawn_tracked(|arc_self| async move {

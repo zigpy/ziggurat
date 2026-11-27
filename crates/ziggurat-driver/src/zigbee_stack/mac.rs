@@ -11,7 +11,7 @@ use ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
 use ziggurat_ieee_802154::{
     FCS_LENGTH, FrameWriter, MAX_PHY_PACKET_SIZE, Psdu, TooLong, write_frame,
 };
-use ziggurat_phy::{ExclusiveRadio, RadioPhy, TxAt, TxFrame, TxResult};
+use ziggurat_phy::{ExclusiveRadio, Phy, RadioPhy, TxAt, TxFrame, TxResult};
 use ziggurat_zigbee::beacon::ZigbeeBeacon;
 use ziggurat_zigbee::constants::GP_PROTOCOL_VERSION;
 use ziggurat_zigbee::gp::{GpNwkFrameControl, GpSecurityLevel, GpdfHeader};
@@ -23,8 +23,8 @@ use ziggurat_zigbee::nwk::frame::{
 use super::TrafficClass;
 
 use super::{
-    DeliveryError, Frame, GpdfTrigger, NwkDeviceType, PROTOCOL_VERSION, STACK_PROFILE, Schedule,
-    TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
+    DeliveryError, Frame, GpdfTrigger, NwkDeviceType, PROTOCOL_VERSION, PhyIndex, PhySet,
+    STACK_PROFILE, Schedule, TxPolicy, TxPriority, ZigbeeNotification, ZigbeeStack,
 };
 
 /// Spacing between sprayed beacons while a [`hack_beacon_spam_duration`] window is open.
@@ -32,7 +32,7 @@ use super::{
 /// [`hack_beacon_spam_duration`]: super::Tunables::hack_beacon_spam_duration
 const BEACON_SPAM_INTERVAL: Duration = Duration::from_millis(5);
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     pub fn process_802154_command_frame(&self, command_frame: &Ieee802154CommandFrame) {
         // Not every radio filters by address. Without this check, a data poll sent to a
         // parent in another PAN looks like a poll from an unknown child of ours.
@@ -180,7 +180,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
         };
 
-        self.enqueue_broadcast(Frame::Raw(beacon_frame), policy, Schedule::Once);
+        self.enqueue_broadcast(
+            Frame::Raw(beacon_frame),
+            policy,
+            Schedule::Once,
+            PhySet::only(PhyIndex::Radio),
+        );
     }
 
     /// The beacon-spam reactor (the [`hack_beacon_spam_duration`] hack): while a spray
@@ -245,6 +250,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::cognitive_complexity)]
     pub fn process_802154_data_frame(
         &self,
+        phy: PhyIndex,
         data_frame: &Ieee802154DataFrame<&[u8]>,
         lqi: u8,
         rssi: i8,
@@ -262,6 +268,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if GpNwkFrameControl::read_abstract_bits(&mut BitReader::from(data_frame.payload))
             .is_ok_and(|control| control.protocol_version == GP_PROTOCOL_VERSION)
         {
+            if phy != PhyIndex::Radio {
+                tracing::debug!("Ignoring GPDF from {phy:?}");
+                return None;
+            }
             self.process_gpdf(data_frame, pan_id, lqi, rssi, timestamp_us);
             return None;
         }
@@ -316,8 +326,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             && nwk_frame.nwk_header.destination.as_u16()
                 < BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16();
 
-        // The only unencrypted NWK frames we accept are trust center rejoin requests
+        // The only unencrypted NWK frames we accept are trust center rejoin requests,
+        // and only over the radio
         if !nwk_frame.nwk_header.frame_control.security {
+            if phy != PhyIndex::Radio {
+                tracing::debug!("Ignoring unsecured NWK frame from {phy:?}");
+                return None;
+            }
+
             let payload = NwkPayload::from_bytes(
                 nwk_frame.nwk_header.frame_control.frame_type,
                 Nsdu::from_slice(nwk_frame.ciphertext).expect("the parser bounds the payload"),
@@ -362,6 +378,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         // fetch the decryption key
         let key = self.core().nib.nwk_security.inbound_network_key(
             src_eui64,
+            phy,
             aux_header.key_sequence_number,
             aux_header.frame_counter,
         )?;
@@ -396,11 +413,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
 
         if is_transit {
-            self.relay_unicast_nwk_frame(decrypted_nwk_frame, source_nwk, lqi, rssi);
+            self.relay_unicast_nwk_frame(decrypted_nwk_frame, source_nwk, phy, lqi, rssi);
             return None;
         }
 
-        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, lqi, rssi)
+        self.handle_decrypted_frame(&decrypted_nwk_frame, source_nwk, phy, lqi, rssi)
             .then_some(decrypted_nwk_frame)
     }
 
@@ -549,7 +566,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         match result {
             // No ACK is requested
-            TxResult::Acked | TxResult::NoAck => Ok(()),
+            TxResult::Sent => Ok(()),
             TxResult::ChannelAccessFailure => Err(DeliveryError::CcaFailure),
             // The radio drops a timed frame whose start time has already passed
             TxResult::Aborted => Err(DeliveryError::GpdfWindowMissed),
@@ -557,11 +574,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    /// Assign the frame its MAC sequence number and hand it to the radio.
+    /// Assign the frame its MAC sequence number and hand it to one PHY. A result that
+    /// is no failure for this frame comes back as `Ok`.
     pub(super) async fn send_802154_frame<Payload: ziggurat_ieee_802154::FramePayload>(
         &self,
         frame: &mut Ieee802154Frame<Payload>,
-    ) -> Result<(), DeliveryError> {
+        phy: PhyIndex,
+    ) -> Result<TxResult, DeliveryError> {
         self.assign_mac_sequence_number(frame);
 
         tracing::trace!("Sending 802.15.4 frame: {frame:?}");
@@ -572,33 +591,47 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         if self.state.hack_disable_tx {
             tracing::debug!("Not transmitting the frame, TX is disabled");
-            return Ok(());
+            return Ok(TxResult::Sent);
         }
 
-        let channel = self.core().mac.channel;
-        let result = self
-            .radio
-            .transmit(TxFrame {
-                psdu,
-                channel: Some(channel),
-                csma_ca: true,
-                max_frame_retries: self.tunables.mac_max_frame_retries(),
-                max_csma_backoffs: self.tunables.mac_max_csma_backoffs(),
-                security_processed: true,
-                tx_at: None,
-            })
-            .await?;
+        let result = match phy {
+            PhyIndex::Radio => {
+                let channel = self.core().mac.channel;
+                self.radio
+                    .transmit(TxFrame {
+                        psdu,
+                        channel: Some(channel),
+                        csma_ca: true,
+                        max_frame_retries: self.tunables.mac_max_frame_retries(),
+                        max_csma_backoffs: self.tunables.mac_max_csma_backoffs(),
+                        security_processed: true,
+                        tx_at: None,
+                    })
+                    .await?
+            }
+            PhyIndex::Secondary(index) => {
+                self.secondary_phys[usize::from(index)]
+                    .transmit_psdu(psdu)
+                    .await?
+            }
+        };
 
-        match result {
-            TxResult::Acked => Ok(()),
-            // A frame with no destination (e.g. a beacon) never requested an ACK, so
-            // "no ACK" is the expected outcome, not a failure.
-            TxResult::NoAck => frame
-                .header()
-                .dest_address
-                .map_or(Ok(()), |next_hop| Err(DeliveryError::NwkNoAck { next_hop })),
-            TxResult::ChannelAccessFailure => Err(DeliveryError::CcaFailure),
-            other => Err(DeliveryError::TransmitFailed(other)),
+        match (result, frame.header().dest_address) {
+            // A frame without an ACK request, such as a beacon or a radio broadcast,
+            // cannot be confirmed: passive acks stand in for it on the radio
+            (TxResult::Acked | TxResult::Sent, _) => Ok(result),
+            // A secondary PHY already retried the peers that missed its broadcast, so
+            // there is nothing left to retry here
+            (
+                TxResult::PartiallyAcked | TxResult::NoAck,
+                None | Some(Ieee802154Address::Nwk(Nwk(0xFFFF))),
+            ) => {
+                tracing::debug!("Broadcast on {phy:?} was not confirmed by every peer: {result:?}");
+                Ok(result)
+            }
+            (TxResult::NoAck, Some(next_hop)) => Err(DeliveryError::NwkNoAck { next_hop }),
+            (TxResult::ChannelAccessFailure, _) => Err(DeliveryError::CcaFailure),
+            (other, _) => Err(DeliveryError::TransmitFailed(other)),
         }
     }
 }

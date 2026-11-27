@@ -6,6 +6,7 @@ use crate::Instant;
 use crate::nwk::activity::{Activity, ActivityParams, take_decay_steps};
 use crate::nwk::commands::{NwkLinkStatus, NwkLinkStatusCommand};
 use crate::nwk::frame::NwkHeader;
+use crate::phy::PhyIndex;
 use crate::ring_buffer::RingBuffer;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
@@ -67,6 +68,42 @@ const fn lqi_to_link_cost(lqi: u8) -> u8 {
     }
 }
 
+/// The link to a neighbor over one of our PHYs.
+#[derive(Debug)]
+pub struct PhyLink {
+    /// A value indicating if previous transmissions to the device were successful or
+    /// not. Higher values indicate more failures.
+    pub transmit_failure: u8,
+    pub lqas: LqaSamples,
+
+    /// The outgoing cost field contains the cost of the link as measured by the
+    /// neighbor. The value is obtained from the most recent link status command frame
+    /// received from the neighbor. A value of 0 indicates that no link status command
+    /// listing this device has been received.
+    pub outgoing_cost: u8,
+
+    /// The number of `nwkLinkStatusPeriod` intervals that have passed since
+    /// the last link status command frame was received, up to a maximum value
+    /// of `nwkRouterAgeLimit`
+    // Spec-expected field: `pub age: u8`, we instead keep track of a timestamp
+    pub last_link_status_timestamp: Instant,
+}
+
+impl PhyLink {
+    const fn new(lqas: LqaSamples, now: Instant) -> Self {
+        Self {
+            transmit_failure: 0,
+            lqas,
+            outgoing_cost: 0,
+            last_link_status_timestamp: now,
+        }
+    }
+
+    pub fn incoming_cost(&self) -> u8 {
+        self.lqas.median().map_or(0, lqi_to_link_cost)
+    }
+}
+
 #[derive(Debug)]
 pub struct TableEntry {
     pub extended_address: Eui64,
@@ -86,22 +123,11 @@ pub struct TableEntry {
     pub device_timeout: Option<Duration>,
     pub relationship: Relationship,
 
-    /// A value indicating if previous transmissions to the device were successful or
-    /// not. Higher values indicate more failures.
-    pub transmit_failure: u8,
-    pub lqas: LqaSamples,
-
-    /// The outgoing cost field contains the cost of the link as measured by the
-    /// neighbor. The value is obtained from the most recent link status command frame
-    /// received from the neighbor. A value of 0 indicates that no link status command
-    /// listing this device has been received.
-    pub outgoing_cost: u8,
-
-    /// The number of `nwkLinkStatusPeriod` intervals that have passed since
-    /// the last link status command frame was received, up to a maximum value
-    /// of `nwkRouterAgeLimit`
-    // Spec-expected field: `pub age: u8`, we instead keep track of a timestamp
-    pub last_link_status_timestamp: Instant,
+    /// The links to the neighbor, one per PHY it was heard on. A child only has a
+    /// radio link. The radio link is kept inline so that a node without secondary PHYs
+    /// allocates nothing for links.
+    radio_link: Option<PhyLink>,
+    secondary_links: FlatMap<u8, PhyLink>,
 
     pub incoming_beacon_timestamp: u32,
     pub beacon_transmission_time_offset: u32,
@@ -127,20 +153,99 @@ pub struct TableEntry {
 
     pub router_connectivity: u8,
     pub router_neighbor_set_diversity: u8,
+    // TODO: these counters are not PHY-aware, and nothing reads them: we do not rank
+    // neighbors for eviction when the table is full (spec 3.6.4.4.3)
     pub router_outbound_activity: Activity,
     pub router_inbound_activity: Activity,
     pub security_timer: u8,
 }
 
 impl TableEntry {
-    /// Whether our link status lists this neighbor: a router we have heard from. A
-    /// neighbor without a sample has no cost to report.
-    pub fn is_in_link_status(&self) -> bool {
-        self.device_type == NwkDeviceType::Router && !self.lqas.is_empty()
+    pub fn link(&self, phy: PhyIndex) -> Option<&PhyLink> {
+        match phy {
+            PhyIndex::Radio => self.radio_link.as_ref(),
+            PhyIndex::Secondary(index) => self.secondary_links.get(&index),
+        }
     }
 
-    pub fn incoming_link_cost(&self) -> u8 {
-        self.lqas.median().map_or(0, lqi_to_link_cost)
+    fn link_mut(&mut self, phy: PhyIndex) -> Option<&mut PhyLink> {
+        match phy {
+            PhyIndex::Radio => self.radio_link.as_mut(),
+            PhyIndex::Secondary(index) => self.secondary_links.get_mut(&index),
+        }
+    }
+
+    fn link_or_insert_with(
+        &mut self,
+        phy: PhyIndex,
+        default: impl FnOnce() -> PhyLink,
+    ) -> &mut PhyLink {
+        match phy {
+            PhyIndex::Radio => self.radio_link.get_or_insert_with(default),
+            PhyIndex::Secondary(index) => self.secondary_links.entry(index).or_insert_with(default),
+        }
+    }
+
+    /// Every link, the radio first.
+    pub fn links(&self) -> impl Iterator<Item = (PhyIndex, &PhyLink)> {
+        let radio = self.radio_link.iter().map(|link| (PhyIndex::Radio, link));
+        let secondary = self
+            .secondary_links
+            .iter()
+            .map(|(&index, link)| (PhyIndex::Secondary(index), link));
+
+        radio.chain(secondary)
+    }
+
+    fn links_mut(&mut self) -> impl Iterator<Item = (PhyIndex, &mut PhyLink)> {
+        let radio = self
+            .radio_link
+            .iter_mut()
+            .map(|link| (PhyIndex::Radio, link));
+        let secondary = self
+            .secondary_links
+            .iter_mut()
+            .map(|(&index, link)| (PhyIndex::Secondary(index), link));
+
+        radio.chain(secondary)
+    }
+
+    /// Whether our link status on `phy` lists this neighbor: a router we have heard
+    /// from on it. A link without a sample has no cost to report.
+    pub fn is_in_link_status(&self, phy: PhyIndex) -> bool {
+        self.device_type == NwkDeviceType::Router
+            && self.link(phy).is_some_and(|link| !link.lqas.is_empty())
+    }
+
+    /// Whether any link has an outgoing cost: the neighbor's link status lists us.
+    pub fn has_outgoing_cost(&self) -> bool {
+        self.links().any(|(_, link)| link.outgoing_cost > 0)
+    }
+
+    /// The cheapest link. A link with both costs known wins over one without, and a
+    /// secondary PHY wins a tie with the radio.
+    pub fn best_link(&self) -> Option<NeighborLink> {
+        self.links()
+            .map(|(phy, link)| NeighborLink {
+                eui64: self.extended_address,
+                phy,
+                outgoing_cost: link.outgoing_cost,
+                incoming_cost: link.incoming_cost(),
+            })
+            .min_by_key(|link| {
+                (
+                    link.outgoing_cost == 0 || link.incoming_cost == 0,
+                    link.cost(),
+                    // Link cost only measures delivery, so a good radio link and a
+                    // backbone link both cost 1. The radio channel is airtime shared
+                    // with every device in range, while a secondary PHY is not, so a
+                    // tie goes to the secondary PHY: this keeps the channel free for
+                    // devices that only have the radio. Secondary PHYs tie-break by
+                    // index.
+                    link.phy == PhyIndex::Radio,
+                    link.phy,
+                )
+            })
     }
 
     pub const fn is_child(&self) -> bool {
@@ -177,10 +282,12 @@ pub struct ChildDescriptor {
     pub relationship: Relationship,
 }
 
-/// A snapshot of the radio link to one neighbor, for routing cost computations.
+/// A snapshot of the link to one neighbor over one PHY, for routing cost
+/// computations.
 #[derive(Debug, Clone, Copy)]
 pub struct NeighborLink {
     pub eui64: Eui64,
+    pub phy: PhyIndex,
     /// The cost of the link as measured by the neighbor
     pub outgoing_cost: u8,
     /// The cost of the link as measured by us, from received LQI samples
@@ -216,9 +323,9 @@ pub struct LinkStatusOutcome {
 #[derive(Debug, Default)]
 pub struct Neighbors {
     table: FlatMap<Eui64, TableEntry>,
-    /// LQI samples for senders that have no neighbor entry yet, capped at
+    /// LQI samples for senders that have no neighbor entry yet, per PHY, capped at
     /// [`PENDING_LQA_CAP`] entries.
-    pending_lqas: FlatMap<Nwk, LqaSamples>,
+    pending_lqas: FlatMap<(Nwk, PhyIndex), LqaSamples>,
     /// Up to when the activity counters have been decayed
     activity_decayed_at: Instant,
 }
@@ -226,44 +333,42 @@ pub struct Neighbors {
 impl Neighbors {
     /// Record an LQI sample for the device that transmitted a frame to us. LQA is a
     /// property of the radio link to the MAC transmitter; the frame's NWK originator
-    /// may be several hops away. Returns whether a link status is due: ours lists the
-    /// sender from now on and did not before.
-    pub fn record_lqa(&mut self, sender_nwk: Nwk, lqi: u8) -> bool {
+    /// may be several hops away. Returns whether a link status is due: ours on `phy`
+    /// lists the sender from now on and did not before.
+    pub fn record_lqa(&mut self, sender_nwk: Nwk, phy: PhyIndex, lqi: u8, now: Instant) -> bool {
         if let Some(entry) = self
             .table
             .values_mut()
             .find(|entry| entry.network_address == sender_nwk)
         {
-            let was_in_link_status = entry.is_in_link_status();
-            entry.lqas.push(lqi);
+            let was_in_link_status = entry.is_in_link_status(phy);
+            entry
+                .link_or_insert_with(phy, || PhyLink::new(LqaSamples::default(), now))
+                .lqas
+                .push(lqi);
 
-            !was_in_link_status && entry.is_in_link_status()
+            !was_in_link_status && entry.is_in_link_status(phy)
         } else {
             // No neighbor entry yet (e.g. a sibling router that has not sent a link
             // status command). Buffer the sample so the entry starts with usable link
             // quality the moment it is created.
-            if self.pending_lqas.len() >= PENDING_LQA_CAP
-                && !self.pending_lqas.contains_key(&sender_nwk)
-            {
+            let key = (sender_nwk, phy);
+            if self.pending_lqas.len() >= PENDING_LQA_CAP && !self.pending_lqas.contains_key(&key) {
                 self.pending_lqas.pop_first();
             }
 
-            self.pending_lqas.entry(sender_nwk).or_default().push(lqi);
+            self.pending_lqas.entry(key).or_default().push(lqi);
 
             false
         }
     }
 
-    /// The radio link to a neighbor, if the device is one.
+    /// The cheapest link to a neighbor, if the device is one.
     pub fn link(&self, nwk: Nwk) -> Option<NeighborLink> {
         self.table
             .values()
             .find(|entry| entry.network_address == nwk)
-            .map(|entry| NeighborLink {
-                eui64: entry.extended_address,
-                outgoing_cost: entry.outgoing_cost,
-                incoming_cost: entry.incoming_link_cost(),
-            })
+            .and_then(TableEntry::best_link)
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &TableEntry> {
@@ -605,10 +710,8 @@ impl Neighbors {
             timeout_at: child.device_timeout.map(|timeout| now + timeout),
             device_timeout: child.device_timeout,
             relationship: Relationship::Child,
-            transmit_failure: 0,
-            lqas: LqaSamples::default(),
-            outgoing_cost: 0,
-            last_link_status_timestamp: now,
+            radio_link: None,
+            secondary_links: FlatMap::new(),
             incoming_beacon_timestamp: 0,
             beacon_transmission_time_offset: 0,
             keepalive_received: false,
@@ -623,6 +726,10 @@ impl Neighbors {
             security_timer: 0,
         });
 
+        // A child attaches over the radio
+        entry
+            .radio_link
+            .get_or_insert_with(|| PhyLink::new(LqaSamples::default(), now));
         entry.attached_at = attached_at;
         entry.network_address = child.network_address;
         entry.device_type = child.device_type;
@@ -656,7 +763,7 @@ impl Neighbors {
         self.table
             .values()
             .filter(|entry| {
-                entry.device_type != NwkDeviceType::EndDevice && entry.outgoing_cost > 0
+                entry.device_type != NwkDeviceType::EndDevice && entry.has_outgoing_cost()
             })
             .map(|entry| entry.network_address)
             .collect()
@@ -665,7 +772,7 @@ impl Neighbors {
     pub fn any_live_router_link(&self) -> bool {
         self.table
             .values()
-            .any(|entry| entry.device_type == NwkDeviceType::Router && entry.outgoing_cost > 0)
+            .any(|entry| entry.device_type == NwkDeviceType::Router && entry.has_outgoing_cost())
     }
 
     /// The earliest end device child keepalive deadline, for scheduling the eviction
@@ -678,8 +785,9 @@ impl Neighbors {
             .min()
     }
 
-    /// Router neighbors with a good live link, which are expected to relay our
-    /// broadcasts (passive acknowledgment, spec 3.6.6).
+    /// Router neighbors with a good live radio link, which are expected to relay our
+    /// broadcasts (passive acknowledgment, spec 3.6.6). Passive acks make up for
+    /// 802.15.4 broadcasts being unconfirmed; a secondary PHY confirms its own.
     pub fn expected_broadcast_relayers(&self, max_link_cost: u8) -> Vec<Nwk> {
         self.table
             .values()
@@ -697,29 +805,39 @@ impl Neighbors {
 
     fn relays_broadcasts(entry: &TableEntry, max_link_cost: u8) -> bool {
         entry.device_type == NwkDeviceType::Router
-            && (1..=max_link_cost).contains(&entry.outgoing_cost)
-            && (1..=max_link_cost).contains(&entry.incoming_link_cost())
+            && entry.link(PhyIndex::Radio).is_some_and(|link| {
+                (1..=max_link_cost).contains(&link.outgoing_cost)
+                    && (1..=max_link_cost).contains(&link.incoming_cost())
+            })
     }
 
-    /// Reset link costs of neighbors that have been silent for `max_age` (stopped
-    /// sending link status frames), returning their addresses so routes through them
-    /// can be invalidated.
+    /// Reset the costs of links that have been silent for `max_age` (stopped sending
+    /// link status frames). Returns the neighbors left without a link that has an
+    /// outgoing cost, so routes through them can be invalidated.
     #[must_use = "routes through the returned aged-out neighbors must be invalidated; \
         dropping them leaves stale routes"]
     pub fn age(&mut self, now: Instant, max_age: Duration) -> Vec<Nwk> {
         let mut stale_neighbors = Vec::new();
 
         for neighbor in self.table.values_mut() {
-            if neighbor.outgoing_cost > 0 && neighbor.last_link_status_timestamp + max_age <= now {
-                neighbor.lqas.clear();
-                neighbor.outgoing_cost = 0;
-                stale_neighbors.push(neighbor.network_address);
+            let (nwk, eui64) = (neighbor.network_address, neighbor.extended_address);
+            let mut aged = false;
 
-                tracing::warn!(
-                    "Neighbor {:?} ({:?}) has ceased communicating, resetting link costs",
-                    neighbor.network_address,
-                    neighbor.extended_address
-                )
+            for (phy, link) in neighbor.links_mut() {
+                if link.outgoing_cost > 0 && link.last_link_status_timestamp + max_age <= now {
+                    link.lqas.clear();
+                    link.outgoing_cost = 0;
+                    aged = true;
+
+                    tracing::warn!(
+                        "Neighbor {nwk:?} ({eui64:?}) has ceased communicating over {phy:?}, \
+                        resetting link costs"
+                    )
+                }
+            }
+
+            if aged && !neighbor.has_outgoing_cost() {
+                stale_neighbors.push(nwk);
             }
         }
 
@@ -763,46 +881,57 @@ impl Neighbors {
         }
     }
 
-    /// A unicast to this neighbor went unacknowledged (spec Table 3-75).
-    pub fn record_transmit_failure(&mut self, eui64: Eui64) {
-        if let Some(entry) = self.table.get_mut(&eui64) {
-            entry.transmit_failure = entry.transmit_failure.saturating_add(1);
+    /// A unicast to this neighbor over `phy` went unacknowledged (spec Table 3-75).
+    pub fn record_transmit_failure(&mut self, eui64: Eui64, phy: PhyIndex) {
+        if let Some(link) = self
+            .table
+            .get_mut(&eui64)
+            .and_then(|entry| entry.link_mut(phy))
+        {
+            link.transmit_failure = link.transmit_failure.saturating_add(1);
         }
     }
 
     /// `nwkTxTotal` wrapped: the spec requires every transmit failure counter to reset.
     pub fn reset_transmit_failures(&mut self) {
         for entry in self.table.values_mut() {
-            entry.transmit_failure = 0;
+            for (_, link) in entry.links_mut() {
+                link.transmit_failure = 0;
+            }
         }
     }
 
-    /// The link statuses we advertise: one per neighbor with enough LQI samples.
-    pub fn link_status_entries(&self) -> Vec<NwkLinkStatus> {
+    /// The link statuses we advertise on `phy`: one per neighbor with an LQI sample
+    /// on it.
+    pub fn link_status_entries(&self, phy: PhyIndex) -> Vec<NwkLinkStatus> {
         self.table
             .values()
             // Only include routers in the link status list. Otherwise, we advertise
             // sleepy end devices that cannot be routed through.
-            .filter(|neighbor| neighbor.is_in_link_status())
-            .map(|neighbor| NwkLinkStatus {
-                address: neighbor.network_address,
-                incoming_cost: neighbor.incoming_link_cost(),
-                outgoing_cost: neighbor.outgoing_cost,
+            .filter(|neighbor| neighbor.is_in_link_status(phy))
+            .map(|neighbor| {
+                let link = neighbor.link(phy).expect("listed neighbors have a link");
+                NwkLinkStatus {
+                    address: neighbor.network_address,
+                    incoming_cost: link.incoming_cost(),
+                    outgoing_cost: link.outgoing_cost,
+                }
             })
             .collect()
     }
 
-    /// Digest a received link status command, updating the sender's entry (creating a
-    /// sibling entry for previously unseen routers). The frame's `lqi` is expected to
-    /// have gone through [`Self::record_lqa`] already, as the receive path does: it is
-    /// recorded here only for a new entry whose sample `record_lqa` did not buffer
-    /// (nothing buffered for the address, or another neighbor holds it).
+    /// Digest a link status command received on `phy`, updating the sender's link on
+    /// it (creating a sibling entry for previously unseen routers). The frame's `lqi`
+    /// is expected to have gone through [`Self::record_lqa`] already, as the receive
+    /// path does: it is recorded here only for a new link whose sample `record_lqa`
+    /// did not buffer (nothing buffered for the address, or another neighbor holds it).
     #[allow(clippy::too_many_arguments)]
     pub fn on_link_status(
         &mut self,
         own_address: Nwk,
         source_ieee: Eui64,
         source_nwk: Nwk,
+        phy: PhyIndex,
         lqi: u8,
         link_status_cmd: &NwkLinkStatusCommand,
         now: Instant,
@@ -816,7 +945,7 @@ impl Neighbors {
             .table
             .values()
             .filter_map(|neighbor_entry| {
-                if neighbor_entry.outgoing_cost > 0 {
+                if neighbor_entry.has_outgoing_cost() {
                     Some(neighbor_entry.network_address)
                 } else {
                     None
@@ -825,7 +954,10 @@ impl Neighbors {
             .collect::<FlatSet<Nwk>>();
 
         // Fold any LQI samples buffered for this address before its entry existed.
-        let mut buffered_lqas = self.pending_lqas.remove(&source_nwk).unwrap_or_default();
+        let mut buffered_lqas = self
+            .pending_lqas
+            .remove(&(source_nwk, phy))
+            .unwrap_or_default();
 
         // The receive path buffers the frame's LQI only while no neighbor holds the
         // address. When one does, the sample went to that neighbor's entry, and what
@@ -852,11 +984,14 @@ impl Neighbors {
             // router's. A full buffer replaces the older samples outright, which also
             // keeps the ring's order.
             if let Some(entry) = self.table.get_mut(&source_ieee) {
+                let link =
+                    entry.link_or_insert_with(phy, || PhyLink::new(LqaSamples::default(), now));
+
                 if buffered_lqas.is_full() {
-                    entry.lqas = core::mem::take(&mut buffered_lqas);
+                    link.lqas = core::mem::take(&mut buffered_lqas);
                 } else {
                     for &sample in buffered_lqas.values() {
-                        entry.lqas.push(sample);
+                        link.lqas.push(sample);
                     }
                 }
             }
@@ -865,12 +1000,12 @@ impl Neighbors {
         let was_in_link_status = self
             .table
             .get(&source_ieee)
-            .is_some_and(TableEntry::is_in_link_status);
+            .is_some_and(|entry| entry.is_in_link_status(phy));
 
         let neighbor_entry = self.table.entry(source_ieee).or_insert_with(|| {
             tracing::info!("Creating new neighbor entry for {source_ieee:?}");
 
-            let mut entry = TableEntry {
+            TableEntry {
                 extended_address: source_ieee,
                 network_address: source_nwk,
                 device_type: NwkDeviceType::Router,
@@ -879,10 +1014,8 @@ impl Neighbors {
                 timeout_at: None,
                 device_timeout: None,
                 relationship: Relationship::Sibling,
-                transmit_failure: 0,
-                lqas: LqaSamples::default(),
-                outgoing_cost: 0,
-                last_link_status_timestamp: now,
+                radio_link: None,
+                secondary_links: FlatMap::new(),
                 incoming_beacon_timestamp: 0,
                 beacon_transmission_time_offset: 0,
                 keepalive_received: true,
@@ -895,18 +1028,7 @@ impl Neighbors {
                 router_outbound_activity: Activity::new(activity.initial_count),
                 router_inbound_activity: Activity::new(activity.initial_count),
                 security_timer: 0,
-            };
-
-            // Seed with the samples buffered before the entry existed. This frame's LQI
-            // is added only when the receive path did not buffer it: counting it twice
-            // would give one frame two of the window's samples.
-            entry.lqas = buffered_lqas;
-
-            if !frame_lqi_buffered {
-                entry.lqas.push(lqi);
             }
-
-            entry
         });
 
         // End devices do not send link status (spec 3.6.4.4). An entry restored without
@@ -917,14 +1039,27 @@ impl Neighbors {
             neighbor_entry.rx_on_when_idle = true;
         }
 
-        let previous_outgoing_cost = neighbor_entry.outgoing_cost;
-
-        neighbor_entry.last_link_status_timestamp = now;
-
         if link_status_cmd.is_first_frame {
             neighbor_entry.router_connectivity = 0;
             neighbor_entry.router_neighbor_set_diversity = 0;
         }
+
+        // Seed a new link with the samples buffered before it existed. This frame's LQI
+        // is added only when the receive path did not buffer it: counting it twice
+        // would give one frame two of the window's samples.
+        let link = neighbor_entry.link_or_insert_with(phy, || {
+            let mut link = PhyLink::new(buffered_lqas, now);
+
+            if !frame_lqi_buffered {
+                link.lqas.push(lqi);
+            }
+
+            link
+        });
+
+        let previous_outgoing_cost = link.outgoing_cost;
+
+        link.last_link_status_timestamp = now;
 
         // The list is sorted by address. A frame says nothing about us if our address
         // is outside its range, or if its list is empty.
@@ -937,13 +1072,15 @@ impl Neighbors {
                 && (link_status_cmd.is_last_frame || own <= last.address.as_u16());
 
             if covers_us {
-                neighbor_entry.outgoing_cost = link_status_cmd
+                link.outgoing_cost = link_status_cmd
                     .link_statuses
                     .iter()
                     .find(|link_status| link_status.address == own_address)
                     .map_or(0, |link_status| link_status.incoming_cost);
             }
         }
+
+        let link_lost = previous_outgoing_cost > 0 && link.outgoing_cost == 0;
 
         for link_status in link_status_cmd.link_statuses.iter() {
             if link_status.outgoing_cost > 0 {
@@ -964,12 +1101,13 @@ impl Neighbors {
 
         tracing::trace!("Updated neighbor table entry: {neighbor_entry:?}");
 
-        let lost_link = previous_outgoing_cost > 0 && neighbor_entry.outgoing_cost == 0;
+        // The neighbor is lost only once no other PHY's link has an outgoing cost
+        let lost_link = link_lost && !neighbor_entry.has_outgoing_cost();
 
         LinkStatusOutcome {
             lost_link: lost_link.then_some(neighbor_entry.network_address),
             replaced_address,
-            link_status_due: !was_in_link_status && neighbor_entry.is_in_link_status(),
+            link_status_due: !was_in_link_status && neighbor_entry.is_in_link_status(phy),
             link_status_answer_due: link_status_cmd.link_statuses.is_empty(),
         }
     }
@@ -1068,17 +1206,35 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        neighbors.on_link_status(own, router, old, 200, &link_status, now, ACTIVITY);
-        neighbors.record_lqa(old, 200);
-        neighbors.record_lqa(old, 200);
+        neighbors.on_link_status(
+            own,
+            router,
+            old,
+            PhyIndex::Radio,
+            200,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
+        neighbors.record_lqa(old, PhyIndex::Radio, 200, Instant::from_micros(0));
+        neighbors.record_lqa(old, PhyIndex::Radio, 200, Instant::from_micros(0));
         assert_eq!(neighbors.link(old).unwrap().eui64, router);
 
         // The router moved to a new address and we missed its Device_annce: the
         // receive path buffers the LQI of its frames under the new address, then its
         // link status carries the new address with the router's EUI64
-        neighbors.record_lqa(new, 40);
-        neighbors.record_lqa(new, 40);
-        let outcome = neighbors.on_link_status(own, router, new, 40, &link_status, now, ACTIVITY);
+        neighbors.record_lqa(new, PhyIndex::Radio, 40, Instant::from_micros(0));
+        neighbors.record_lqa(new, PhyIndex::Radio, 40, Instant::from_micros(0));
+        let outcome = neighbors.on_link_status(
+            own,
+            router,
+            new,
+            PhyIndex::Radio,
+            40,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
         assert_eq!(
             outcome,
             LinkStatusOutcome {
@@ -1099,14 +1255,23 @@ mod test {
         assert_eq!(neighbors.entries().count(), 1);
 
         let advertised: Vec<Nwk> = neighbors
-            .link_status_entries()
+            .link_status_entries(PhyIndex::Radio)
             .iter()
             .map(|status| status.address)
             .collect();
         assert_eq!(advertised, vec![new]);
 
         // A later link status from the same address changes nothing
-        let outcome = neighbors.on_link_status(own, router, new, 40, &link_status, now, ACTIVITY);
+        let outcome = neighbors.on_link_status(
+            own,
+            router,
+            new,
+            PhyIndex::Radio,
+            40,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
         assert_eq!(outcome, LinkStatusOutcome::default());
     }
 
@@ -1121,6 +1286,7 @@ mod test {
             own,
             router,
             router_nwk,
+            PhyIndex::Radio,
             200,
             &listing,
             Instant::from_micros(0),
@@ -1133,8 +1299,16 @@ mod test {
             link_statuses: vec![],
         };
         let later = Instant::from_micros(1);
-        let outcome =
-            neighbors.on_link_status(own, router, router_nwk, 200, &empty, later, ACTIVITY);
+        let outcome = neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            &empty,
+            later,
+            ACTIVITY,
+        );
 
         assert_eq!(outcome.lost_link, None);
         assert_eq!(neighbors.link(router_nwk).unwrap().outgoing_cost, 1);
@@ -1148,7 +1322,16 @@ mod test {
         let empty = link_status_frame(true, true, &[]);
         let mut neighbors = Neighbors::default();
 
-        let outcome = neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ACTIVITY);
+        let outcome = neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            &empty,
+            now,
+            ACTIVITY,
+        );
         assert_eq!(
             outcome,
             LinkStatusOutcome {
@@ -1160,7 +1343,16 @@ mod test {
         );
 
         // The router is known now: its empty list is still owed an answer
-        let outcome = neighbors.on_link_status(own, router, router_nwk, 200, &empty, now, ACTIVITY);
+        let outcome = neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            &empty,
+            now,
+            ACTIVITY,
+        );
         assert_eq!(
             outcome,
             LinkStatusOutcome {
@@ -1174,8 +1366,16 @@ mod test {
         // Another unknown router makes one due too, whatever its list holds
         let other = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
         let listing = link_status_listing(own);
-        let outcome =
-            neighbors.on_link_status(own, other, Nwk(0x2222), 200, &listing, now, ACTIVITY);
+        let outcome = neighbors.on_link_status(
+            own,
+            other,
+            Nwk(0x2222),
+            PhyIndex::Radio,
+            200,
+            &listing,
+            now,
+            ACTIVITY,
+        );
         assert!(outcome.link_status_due);
         assert!(!outcome.link_status_answer_due);
     }
@@ -1184,30 +1384,31 @@ mod test {
     fn test_first_frame_from_a_router_without_samples_makes_our_link_status_due() {
         let mut neighbors = neighbors_with(NwkDeviceType::Router);
 
-        assert!(neighbors.record_lqa(CHILD_NWK, 200));
-        assert!(!neighbors.record_lqa(CHILD_NWK, 200));
+        assert!(neighbors.record_lqa(CHILD_NWK, PhyIndex::Radio, 200, Instant::from_micros(0)));
+        assert!(!neighbors.record_lqa(CHILD_NWK, PhyIndex::Radio, 200, Instant::from_micros(0)));
     }
 
     #[test]
     fn test_frames_from_other_senders_do_not_make_our_link_status_due() {
         // An end device is never listed
         let mut neighbors = neighbors_with(NwkDeviceType::EndDevice);
-        assert!(!neighbors.record_lqa(CHILD_NWK, 200));
+        assert!(!neighbors.record_lqa(CHILD_NWK, PhyIndex::Radio, 200, Instant::from_micros(0)));
 
         // Neither is a sender without a neighbor entry
-        assert!(!neighbors.record_lqa(Nwk(0x2222), 200));
+        assert!(!neighbors.record_lqa(Nwk(0x2222), PhyIndex::Radio, 200, Instant::from_micros(0)));
     }
 
     #[test]
     fn test_link_status_from_a_heard_end_device_makes_ours_due() {
         // A child restored without its device type is loaded as an end device
         let mut neighbors = neighbors_with(NwkDeviceType::EndDevice);
-        neighbors.record_lqa(CHILD_NWK, 200);
+        neighbors.record_lqa(CHILD_NWK, PhyIndex::Radio, 200, Instant::from_micros(0));
 
         let outcome = neighbors.on_link_status(
             Nwk(0x0000),
             Eui64::from_hex("00:11:22:33:44:55:66:77"),
             CHILD_NWK,
+            PhyIndex::Radio,
             200,
             &link_status_listing(Nwk(0x0000)),
             Instant::from_micros(0),
@@ -1224,11 +1425,28 @@ mod test {
         let mut neighbors = Neighbors::default();
 
         let listing = link_status_listing(own);
-        neighbors.on_link_status(own, router, router_nwk, 200, &listing, now, ACTIVITY);
+        neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            &listing,
+            now,
+            ACTIVITY,
+        );
 
         let without_us = link_status_listing(Nwk(0x2222));
-        let outcome =
-            neighbors.on_link_status(own, router, router_nwk, 200, &without_us, now, ACTIVITY);
+        let outcome = neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            &without_us,
+            now,
+            ACTIVITY,
+        );
 
         assert_eq!(
             outcome,
@@ -1269,8 +1487,26 @@ mod test {
         let mut neighbors = Neighbors::default();
 
         let listing = link_status_listing(own);
-        neighbors.on_link_status(own, router, router_nwk, 200, &listing, now, ACTIVITY);
-        neighbors.on_link_status(own, router, router_nwk, 200, frame, now, ACTIVITY);
+        neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            &listing,
+            now,
+            ACTIVITY,
+        );
+        neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            frame,
+            now,
+            ACTIVITY,
+        );
 
         neighbors.link(router_nwk).unwrap().outgoing_cost
     }
@@ -1324,16 +1560,25 @@ mod test {
             |neighbors: &Neighbors| neighbors.link(router_nwk).unwrap().incoming_cost;
 
         // One sample is the link quality, and the router is listed at once
-        neighbors.on_link_status(own, router, router_nwk, 200, &link_status, now, ACTIVITY);
+        neighbors.on_link_status(
+            own,
+            router,
+            router_nwk,
+            PhyIndex::Radio,
+            200,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
         assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(200));
-        assert_eq!(neighbors.link_status_entries().len(), 1);
+        assert_eq!(neighbors.link_status_entries(PhyIndex::Radio).len(), 1);
 
         // Two samples: their average
-        neighbors.record_lqa(router_nwk, 40);
+        neighbors.record_lqa(router_nwk, PhyIndex::Radio, 40, Instant::from_micros(0));
         assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(120));
 
         // Three samples: the median
-        neighbors.record_lqa(router_nwk, 40);
+        neighbors.record_lqa(router_nwk, PhyIndex::Radio, 40, Instant::from_micros(0));
         assert_eq!(incoming_cost(&neighbors), lqi_to_link_cost(40));
     }
 
@@ -1345,11 +1590,12 @@ mod test {
         let mut neighbors = Neighbors::default();
 
         // The receive path buffers the frame's LQI before the link status is digested
-        neighbors.record_lqa(router_nwk, 40);
+        neighbors.record_lqa(router_nwk, PhyIndex::Radio, 40, now);
         neighbors.on_link_status(
             own,
             router,
             router_nwk,
+            PhyIndex::Radio,
             40,
             &link_status_listing(own),
             now,
@@ -1357,7 +1603,7 @@ mod test {
         );
 
         // The next frame makes two samples, whose average is the link quality
-        neighbors.record_lqa(router_nwk, 200);
+        neighbors.record_lqa(router_nwk, PhyIndex::Radio, 200, now);
         assert_eq!(
             neighbors.link(router_nwk).unwrap().incoming_cost,
             lqi_to_link_cost(120)
@@ -1373,7 +1619,7 @@ mod test {
         let mut neighbors = Neighbors::default();
 
         // A sample buffered for the address before another device took it as our child
-        neighbors.record_lqa(contested, 40);
+        neighbors.record_lqa(contested, PhyIndex::Radio, 40, now);
         neighbors.upsert_child(
             ChildDescriptor {
                 eui64: other,
@@ -1389,11 +1635,12 @@ mod test {
 
         // A new router's link status from that address: the receive path records the
         // frame's LQI on the neighbor holding the address, not in the buffer
-        neighbors.record_lqa(contested, 200);
+        neighbors.record_lqa(contested, PhyIndex::Radio, 200, now);
         neighbors.on_link_status(
             own,
             router,
             contested,
+            PhyIndex::Radio,
             200,
             &link_status_listing(own),
             now,
@@ -1401,7 +1648,13 @@ mod test {
         );
 
         assert_eq!(
-            neighbors.table.get(&router).unwrap().incoming_link_cost(),
+            neighbors
+                .table
+                .get(&router)
+                .unwrap()
+                .best_link()
+                .unwrap()
+                .incoming_cost,
             lqi_to_link_cost(120)
         );
     }
@@ -1411,7 +1664,7 @@ mod test {
         let neighbors = neighbors_with(NwkDeviceType::Router);
 
         assert_eq!(neighbors.link(CHILD_NWK).unwrap().incoming_cost, 0);
-        assert!(neighbors.link_status_entries().is_empty());
+        assert!(neighbors.link_status_entries(PhyIndex::Radio).is_empty());
     }
 
     #[test]
@@ -1424,8 +1677,26 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        neighbors.on_link_status(own, router, old, 200, &link_status, now, ACTIVITY);
-        neighbors.on_link_status(own, other, contested, 200, &link_status, now, ACTIVITY);
+        neighbors.on_link_status(
+            own,
+            router,
+            old,
+            PhyIndex::Radio,
+            200,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
+        neighbors.on_link_status(
+            own,
+            other,
+            contested,
+            PhyIndex::Radio,
+            200,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
 
         // The router's link status from an address the other neighbor holds, or from
         // our own address, is an address conflict: the router keeps its entry's address
@@ -1434,6 +1705,7 @@ mod test {
                 own,
                 router,
                 conflicting,
+                PhyIndex::Radio,
                 200,
                 &link_status,
                 now,
@@ -1455,17 +1727,35 @@ mod test {
         let link_status = link_status_listing(own);
         let mut neighbors = Neighbors::default();
 
-        neighbors.on_link_status(own, router, old, 10, &link_status, now, ACTIVITY);
+        neighbors.on_link_status(
+            own,
+            router,
+            old,
+            PhyIndex::Radio,
+            10,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
 
         // More samples than the window buffered under the new address: the ring wraps
         for lqi in [10, 20, 200, 220] {
-            neighbors.record_lqa(new, lqi);
+            neighbors.record_lqa(new, PhyIndex::Radio, lqi, Instant::from_micros(0));
         }
-        neighbors.on_link_status(own, router, new, 220, &link_status, now, ACTIVITY);
+        neighbors.on_link_status(
+            own,
+            router,
+            new,
+            PhyIndex::Radio,
+            220,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
 
         // The window is [20, 200, 220] and its oldest (20) is replaced next, giving
         // [200, 220, 30]: a scrambled order would replace 220 and drop the median to 30
-        neighbors.record_lqa(new, 30);
+        neighbors.record_lqa(new, PhyIndex::Radio, 30, Instant::from_micros(0));
         assert_eq!(
             neighbors.link(new).unwrap().incoming_cost,
             lqi_to_link_cost(200)
@@ -1612,5 +1902,40 @@ mod test {
         assert!(!neighbors.note_nwk_secured_frame(child));
         assert_eq!(neighbors.entries().count(), 1);
         assert_eq!(relationship_of(&neighbors, child), Relationship::Child);
+    }
+
+    #[test]
+    fn test_only_radio_neighbors_relay_broadcasts() {
+        let own = Nwk(0x0000);
+        let now = Instant::from_micros(0);
+        let link_status = link_status_listing(own);
+        let mut neighbors = Neighbors::default();
+
+        let backbone_router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:11");
+        neighbors.on_link_status(
+            own,
+            backbone_router,
+            Nwk(0x1111),
+            PhyIndex::Secondary(0),
+            255,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
+
+        let radio_router = Eui64::from_hex("aa:bb:cc:dd:ee:ff:00:22");
+        neighbors.on_link_status(
+            own,
+            radio_router,
+            Nwk(0x2222),
+            PhyIndex::Radio,
+            255,
+            &link_status,
+            now,
+            ACTIVITY,
+        );
+
+        assert_eq!(neighbors.expected_broadcast_relayers(3), vec![Nwk(0x2222)]);
+        assert!(!neighbors.is_expected_broadcast_relayer(Nwk(0x1111), 3));
     }
 }

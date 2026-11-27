@@ -6,6 +6,7 @@ use ziggurat_ieee_802154::types::Nwk;
 use crate::Instant;
 use crate::constants::Tunables;
 use crate::gp::{GpdId, GpdfTarget};
+use crate::phy::{PhyIndex, PhySet};
 
 use super::*;
 
@@ -138,6 +139,7 @@ impl Fixture {
                     copies_remaining: 4,
                     next_attempt: self.now,
                 },
+                phys: PhySet::only(PhyIndex::Radio),
             },
             self.now,
             &self.tunables,
@@ -160,6 +162,7 @@ impl Fixture {
                     copies_remaining: 3,
                     next_attempt: self.now,
                 },
+                phys: PhySet::only(PhyIndex::Radio),
             },
             self.now,
             &self.tunables,
@@ -182,20 +185,25 @@ impl Fixture {
         self.settled()
     }
 
+    /// The next frame for the radio, where every unicast goes.
     fn dequeue(&mut self) -> Option<InFlight<&'static str>> {
-        self.sends.dequeue(self.now)
+        self.dequeue_on(PhyIndex::Radio)
     }
 
-    /// Report a successful transmit. Returns what it settles.
+    fn dequeue_on(&mut self, phy: PhyIndex) -> Option<InFlight<&'static str>> {
+        self.sends.dequeue(self.now, phy, |_, _| PhyIndex::Radio)
+    }
+
+    /// Report a confirmed transmit. Returns what it settles.
     fn transmitted(&mut self, in_flight: InFlight<&'static str>) -> Vec<Verdict> {
-        self.report(in_flight, Ok(()))
+        self.report(in_flight, Ok(Delivery::Confirmed))
     }
 
     /// Report a transmit. Returns what it settles.
     fn report(
         &mut self,
         in_flight: InFlight<&'static str>,
-        result: Result<(), TransmitError<SendFailure>>,
+        result: Result<Delivery, TransmitError<SendFailure>>,
     ) -> Vec<Verdict> {
         self.sends
             .transmitted(in_flight, result, self.now, Duration::ZERO, Duration::ZERO);
@@ -429,6 +437,101 @@ fn test_relayed_route_request_stops_the_costlier_relay() {
     assert!(fixture.dequeue().is_none());
 }
 
+/// A passive-ack broadcast to the radio and one secondary PHY, three copies each, the
+/// first due now.
+fn broadcast_on_two_phys(fixture: &mut Fixture, key: (Nwk, u8)) -> SendId {
+    fixture.sends.enqueue_broadcast(
+        Broadcast {
+            frame: "broadcast",
+            priority: TxPriority::UserNormal,
+            schedule: Schedule::PassiveAck {
+                key,
+                copies_remaining: 3,
+                next_attempt: fixture.now,
+            },
+            phys: PhySet::radio_and_secondary(1),
+        },
+        fixture.now,
+        &fixture.tunables,
+    )
+}
+
+// A broadcast goes out on each of its PHYs. The radio's passive-ack quorum does not
+// deliver it while the secondary PHY has yet to confirm it; the secondary PHY's next
+// copy does.
+#[test]
+fn test_broadcast_is_delivered_once_every_phy_has_it() {
+    let mut fixture = Fixture::new();
+    let key = (DESTINATION, 1);
+    let broadcast = broadcast_on_two_phys(&mut fixture, key);
+
+    assert!(fixture.pass(None).is_empty());
+    let radio_copy = fixture.dequeue_on(PhyIndex::Radio).unwrap();
+    let secondary_copy = fixture.dequeue_on(PhyIndex::Secondary(0)).unwrap();
+    assert!(
+        fixture
+            .report(radio_copy, Ok(Delivery::Unconfirmed))
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .report(secondary_copy, Ok(Delivery::Unconfirmed))
+            .is_empty()
+    );
+
+    fixture.sends.deliver_broadcasts(|heard| heard == key);
+    assert!(fixture.settled().is_empty());
+
+    // Only the secondary PHY gets another copy
+    assert!(fixture.pass(None).is_empty());
+    assert!(fixture.dequeue_on(PhyIndex::Radio).is_none());
+    let secondary_copy = fixture.dequeue_on(PhyIndex::Secondary(0)).unwrap();
+    assert_eq!(
+        fixture.report(secondary_copy, Ok(Delivery::Confirmed)),
+        [(broadcast, Ok(()))]
+    );
+}
+
+// A copy in flight on a slow PHY does not hold up the next frames for another PHY.
+#[test]
+fn test_busy_secondary_phy_does_not_hold_up_the_radio() {
+    let mut fixture = Fixture::new();
+    let key = (DESTINATION, 1);
+    let broadcast = broadcast_on_two_phys(&mut fixture, key);
+    fixture.sends.enqueue_broadcast(
+        Broadcast {
+            frame: "beacon",
+            priority: TxPriority::UserNormal,
+            schedule: Schedule::Once,
+            phys: PhySet::only(PhyIndex::Radio),
+        },
+        fixture.now,
+        &fixture.tunables,
+    );
+
+    assert!(fixture.pass(None).is_empty());
+    let secondary_copy = fixture.dequeue_on(PhyIndex::Secondary(0)).unwrap();
+
+    let mut radio_copy = fixture.dequeue_on(PhyIndex::Radio).unwrap();
+    assert_eq!(*radio_copy.frame_mut(), "broadcast");
+    assert!(
+        fixture
+            .report(radio_copy, Ok(Delivery::Unconfirmed))
+            .is_empty()
+    );
+    assert_eq!(
+        *fixture.dequeue_on(PhyIndex::Radio).unwrap().frame_mut(),
+        "beacon"
+    );
+
+    // A quorum on the radio and a confirmation on the secondary PHY deliver it
+    fixture.sends.deliver_broadcasts(|heard| heard == key);
+    assert_eq!(
+        fixture.report(secondary_copy, Ok(Delivery::Confirmed)),
+        [(broadcast, Ok(()))]
+    );
+}
+
 // A schedule with no copies at all never reaches the air: it fails as a handoff timeout
 // on its first pass instead of looking for a radio failure that never happened.
 #[test]
@@ -452,6 +555,7 @@ fn test_broadcast_without_copies_fails_on_first_pass() {
                 frame: "broadcast",
                 priority: TxPriority::UserNormal,
                 schedule,
+                phys: PhySet::only(PhyIndex::Radio),
             },
             fixture.now,
             &fixture.tunables,
@@ -500,6 +604,7 @@ fn test_gpdf_goes_ahead_of_other_frames() {
             frame: "broadcast",
             priority: TxPriority::StackCritical,
             schedule: Schedule::Once,
+            phys: PhySet::only(PhyIndex::Radio),
         },
         fixture.now,
         &fixture.tunables,

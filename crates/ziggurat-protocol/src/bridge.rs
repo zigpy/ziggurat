@@ -15,7 +15,7 @@ use ziggurat_driver::zigbee_stack::{
     ZigbeeNotification, ZigbeeStack,
 };
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 use ziggurat_zigbee::nwk::frame::NwkSecurityHeaderKeyId;
 use ziggurat_zigbee::nwk::neighbors::{ChildDescriptor, Relationship};
 use ziggurat_zigbee::nwk::routing;
@@ -62,8 +62,8 @@ pub fn network_config(payload: &ConfigurePayload) -> NetworkConfig {
     }
 }
 
-pub fn network_info_payload<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn network_info_payload<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     started: bool,
 ) -> NetworkInfoPayload {
     let stack_state = &stack.state;
@@ -109,7 +109,7 @@ pub fn network_info_payload<P: RadioPhy, R: Runtime>(
 }
 
 #[allow(clippy::significant_drop_tightening)] // the snapshot is built under the lock
-pub fn key_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<KeyEntry> {
+pub fn key_entries<P: RadioPhy, S: Phy, R: Runtime>(stack: &ZigbeeStack<P, S, R>) -> Vec<KeyEntry> {
     let core = stack.state.core.lock();
     let aps = &core.aib.aps_security;
     let outgoing = aps.outgoing_frame_counter();
@@ -124,7 +124,9 @@ pub fn key_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<Ke
         .collect()
 }
 
-pub fn child_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<ChildEntry> {
+pub fn child_entries<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
+) -> Vec<ChildEntry> {
     let core = stack.state.core.lock();
     core.nib
         .neighbors
@@ -142,7 +144,9 @@ pub fn child_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<
         .collect()
 }
 
-pub fn address_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<AddressEntry> {
+pub fn address_entries<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
+) -> Vec<AddressEntry> {
     let core = stack.state.core.lock();
     core.nib
         .address_map
@@ -151,7 +155,9 @@ pub fn address_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Ve
         .collect()
 }
 
-pub fn route_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<RouteEntry> {
+pub fn route_entries<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
+) -> Vec<RouteEntry> {
     let core = stack.state.core.lock();
     core.nib
         .routing
@@ -165,8 +171,8 @@ pub fn route_entries<P: RadioPhy, R: Runtime>(stack: &ZigbeeStack<P, R>) -> Vec<
         .collect()
 }
 
-pub fn apply_key_table<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn apply_key_table<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: LoadKeyTablePayload,
 ) {
     let mut core = stack.state.core.lock();
@@ -182,8 +188,8 @@ pub fn apply_key_table<P: RadioPhy, R: Runtime>(
     }
 }
 
-pub fn apply_children<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn apply_children<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: LoadChildrenPayload,
 ) {
     let now = stack.core_now();
@@ -211,8 +217,8 @@ pub fn apply_children<P: RadioPhy, R: Runtime>(
     }
 }
 
-pub fn apply_address_cache<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn apply_address_cache<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: LoadAddressCachePayload,
 ) {
     let mut core = stack.state.core.lock();
@@ -221,8 +227,8 @@ pub fn apply_address_cache<P: RadioPhy, R: Runtime>(
     }
 }
 
-pub fn apply_route_table<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn apply_route_table<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: LoadRouteTablePayload,
 ) {
     let mut core = stack.state.core.lock();
@@ -237,8 +243,8 @@ pub fn apply_route_table<P: RadioPhy, R: Runtime>(
     }
 }
 
-pub fn apply_source_routes<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn apply_source_routes<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: LoadSourceRoutesPayload,
 ) {
     let mut core = stack.state.core.lock();
@@ -250,8 +256,8 @@ pub fn apply_source_routes<P: RadioPhy, R: Runtime>(
 }
 
 #[allow(clippy::significant_drop_tightening)]
-pub fn add_endpoint<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn add_endpoint<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: AddEndpointPayload,
 ) -> Result<(), Error> {
     if !(1..=254).contains(&payload.endpoint) {
@@ -281,8 +287,8 @@ pub fn add_endpoint<P: RadioPhy, R: Runtime>(
     Ok(())
 }
 
-pub fn set_manufacturer_codes<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn set_manufacturer_codes<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: SetManufacturerCodesPayload,
 ) -> Result<(), Error> {
     if payload.entries.iter().any(|entry| entry.prefix.len() > 8) {
@@ -331,8 +337,8 @@ impl From<&NetworkBeacon> for BeaconPayload {
 /// Hand a unicast send to the stack, returning a [`SendHandle`] and the
 /// [`ConfirmKind`] that says which confirm frames it owes; the caller registers both
 /// in its [`SendTracker`].
-pub fn send_unicast<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn send_unicast<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: SendUnicastPayload,
 ) -> Result<((SendHandle, ConfirmKind), SendUnicastResultPayload), Error> {
     let aps_security = (payload.flags.aps_encryption && payload.flags.has_eui64)
@@ -373,8 +379,8 @@ pub fn send_unicast<P: RadioPhy, R: Runtime>(
 
 /// Hand a broadcast send to the stack; its confirm frame follows the end of its
 /// retransmissions.
-pub fn send_broadcast<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn send_broadcast<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: SendBroadcastPayload,
 ) -> Result<(SendHandle, ConfirmKind), Error> {
     stack
@@ -394,8 +400,8 @@ pub fn send_broadcast<P: RadioPhy, R: Runtime>(
 
 /// Hand a GPDF to the stack, held until its GPD listens. Its confirm frame is a
 /// `SendConfirm`: transmitted, or why not.
-pub fn send_gpdf<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn send_gpdf<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: SendGpdfPayload,
 ) -> Result<(SendHandle, ConfirmKind), Error> {
     let target = match payload.target {
@@ -421,8 +427,8 @@ pub fn send_gpdf<P: RadioPhy, R: Runtime>(
 
 /// Hand a groupcast send to the stack; it rides the broadcast machinery, so its confirm
 /// frame likewise follows the end of its retransmissions.
-pub fn send_groupcast<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn send_groupcast<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: SendGroupcastPayload,
 ) -> Result<(SendHandle, ConfirmKind), Error> {
     stack
@@ -480,8 +486,8 @@ fn route_directive(
 ///
 /// The reply is true if the tracker held the send and the driver settled it with
 /// `Cancelled`. A send in the radio at that moment is refused: its own result follows.
-pub fn cancel_request<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn cancel_request<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     tracker: &mut SendTracker,
     payload: &CancelRequestPayload,
 ) -> CancelResultPayload {
@@ -493,8 +499,8 @@ pub fn cancel_request<P: RadioPhy, R: Runtime>(
 
 /// Apply a `set_tunable` to the stack: the name is matched against the Rust field
 /// names of `Tunables`, the raw value decoded per the field's type.
-pub fn set_tunable<P: RadioPhy, R: Runtime>(
-    stack: &ZigbeeStack<P, R>,
+pub fn set_tunable<P: RadioPhy, S: Phy, R: Runtime>(
+    stack: &ZigbeeStack<P, S, R>,
     payload: &SetTunablePayload,
 ) -> Result<(), Error> {
     let name = core::str::from_utf8(&payload.name).map_err(|_| {

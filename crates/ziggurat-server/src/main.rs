@@ -23,14 +23,14 @@ use tracing_subscriber::{EnvFilter, fmt};
 use ziggurat_driver::runtime::{TokioRuntime, TokioSpawner};
 use ziggurat_driver::zigbee_stack::{SendHandle, Tunables, ZigbeeNotification, ZigbeeStack};
 use ziggurat_driver::ziggurat_ieee_802154::types::{Eui64, Nwk, PanId};
-use ziggurat_phy::{RadioConfig, RadioPhy, Receiver};
+use ziggurat_phy::{NoPhy, Phy, RadioConfig, RadioPhy, Receiver};
 use ziggurat_phy_spinel::SpinelPhy;
 use ziggurat_protocol::{self as proto};
 
 use reconnect::{Outage, ReconnectPolicy};
 
-type Phy = SpinelPhy<TokioRuntime>;
-type Stack = ZigbeeStack<Phy, TokioRuntime>;
+type Radio = SpinelPhy<TokioRuntime>;
+type Stack = ZigbeeStack<Radio, NoPhy, TokioRuntime>;
 
 /// Outbound frames a connection can queue before it is considered too slow and
 /// disconnected. Received frames dominate the traffic; a client that cannot keep up
@@ -84,7 +84,7 @@ pub struct ZigguratServer {
     /// lost (see [`run_link`]), never for a new stack, so stack replacement cannot race
     /// a straggling handle — a serial port re-open failing
     /// with `EBUSY`, or a second concurrent connection to the same TCP endpoint
-    phy: AsyncMutex<Option<Arc<Phy>>>,
+    phy: AsyncMutex<Option<Arc<Radio>>>,
     stack: Mutex<Option<Arc<Stack>>>,
     started: AtomicBool,
     notification_tx: broadcast::Sender<ZigbeeNotification>,
@@ -172,7 +172,7 @@ impl ZigguratServer {
     }
 
     /// The process-lifetime radio transport, opening the RCP link on first use.
-    async fn phy(&self) -> std::io::Result<Arc<Phy>> {
+    async fn phy(&self) -> std::io::Result<Arc<Radio>> {
         let mut phy = self.phy.lock().await;
 
         if let Some(phy) = &*phy {
@@ -180,7 +180,7 @@ impl ZigguratServer {
         }
 
         let transport = open_transport(&self.serial).await?;
-        let new_phy = Arc::new(Phy::new());
+        let new_phy = Arc::new(Radio::new());
         new_phy.set_close_when_unresponsive(self.serial.reconnect_on_unresponsive);
 
         tokio::spawn(run_link(new_phy.clone(), self.serial.clone(), transport));
@@ -716,6 +716,7 @@ impl ZigguratServer {
         let aps_frame_counter = payload.state.aps_frame_counter;
         let stack = ZigbeeStack::new(
             phy,
+            Vec::new(),
             proto::network_config(&payload),
             Tunables::default(),
             TokioSpawner::default(),
@@ -973,7 +974,7 @@ pub struct SerialConfig {
 ///
 /// Once the link cannot be reopened the whole process exits: the supervisor (Docker)
 /// restarts us. A half-dead process with a deaf radio is the worst failure mode.
-async fn run_link(phy: Arc<Phy>, serial: SerialConfig, transport: Box<dyn RcpTransport>) {
+async fn run_link(phy: Arc<Radio>, serial: SerialConfig, transport: Box<dyn RcpTransport>) {
     let policy = ReconnectPolicy {
         give_up_after: serial.reconnect_timeout,
         ..ReconnectPolicy::default()

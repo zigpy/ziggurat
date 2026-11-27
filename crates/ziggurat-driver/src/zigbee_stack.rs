@@ -3,9 +3,11 @@ use crate::ziggurat_ieee_802154::{Ieee802154Address, Ieee802154Frame, ParseError
 use crate::runtime::{Elapsed, RtInstant, Runtime, Spawn};
 use abstract_bits::AbstractBits;
 use arbitrary_int::prelude::*;
+use futures::FutureExt;
+use futures::future::Either;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk, PanId};
 use ziggurat_phy::{
-    ExclusiveRadio, RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult,
+    ExclusiveRadio, Phy, RadioConfig, RadioError, RadioPhy, Receiver, RxFrame, TxFrame, TxResult,
 };
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::aps::frame::{ApsFrame, parse_aps_frame};
@@ -63,6 +65,7 @@ pub use ziggurat_zigbee::nwk::next_hop::{HostRoute, RouteDirective, SendMode};
 pub use ziggurat_zigbee::nwk::routing::Routing;
 pub use ziggurat_zigbee::nwk::security::NwkSecurity;
 pub use ziggurat_zigbee::nwk::{neighbors, routing};
+pub use ziggurat_zigbee::phy::{PhyIndex, PhySet};
 pub use ziggurat_zigbee::sends::{
     ApsAckData, Confirm, GpdfTrigger, Schedule, SendFailure, SendFrame, SendId, Sends,
     SrcMatchTable, Transmit, TxPriority,
@@ -284,7 +287,7 @@ pub struct NetworkConfig {
 /// is assigned just before it reaches the air: a frame can wait in the table for
 /// seconds, and assigning the counter at admission would let later sends reach the air
 /// with higher counters first, which the destination's replay window rejects.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Frame {
     Nwk {
         nwk_frame: NwkFrame,
@@ -731,7 +734,7 @@ pub struct NetworkBeacon {
 }
 
 #[derive(Debug)]
-pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
+pub struct ZigbeeStack<P: RadioPhy, S: Phy, R: Runtime> {
     self_weak: Weak<Self>,
 
     /// The runtime clock baseline. `now` is converted to the sans-io [`CoreInstant`]
@@ -742,9 +745,13 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     pub config: NetworkConfig,
     pub tunables: Tunables,
     pub radio: Arc<P>,
+    /// PHYs besides the radio, such as a backbone over IP. They carry NWK data frames
+    /// only: joins, sleepy children, scans and GP stay on the radio.
+    pub secondary_phys: Vec<Arc<S>>,
     pub notifications: Mutex<VecDeque<ZigbeeNotification>>,
     notification_wake: Notify,
     pub raw_frame_rx: AsyncMutex<P::RxStream>,
+    pub secondary_rx: AsyncMutex<Vec<S::RxStream>>,
     pub reset_rx: AsyncMutex<P::ResetStream>,
     /// Whether a network scan is collecting. The receive loop only queues beacons while
     /// this is set, so stray beacons outside a scan are dropped.
@@ -793,8 +800,9 @@ pub struct ZigbeeStack<P: RadioPhy, R: Runtime> {
     /// so a host broadcast flood cannot starve stack-critical broadcasts.
     pub(crate) broadcast_budget: Mutex<BroadcastBudget>,
 
-    /// Wakes the sender task when a frame may have become ready to transmit.
-    pub(crate) send_wake: Notify,
+    /// Wakes each PHY's sender task when a frame may have become ready to transmit,
+    /// the radio's first.
+    pub(crate) send_wakes: Vec<Notify>,
     /// Wakes the send timer task when the send table's next deadline may have moved.
     pub(crate) send_timer_wake: Notify,
     /// The verdicts of the sends someone holds a handle to.
@@ -827,7 +835,7 @@ impl Drop for NetworkScan<'_> {
     }
 }
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// Briefly lock the protocol core. See [`CoreGuard`] for the locking discipline the
     /// returned guard encodes.
     fn core(&self) -> CoreGuard<'_> {
@@ -896,12 +904,24 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     pub fn new(
         radio: Arc<P>,
+        secondary_phys: Vec<Arc<S>>,
         config: NetworkConfig,
         tunables: Tunables,
         spawner: R::Spawner,
     ) -> Arc<Self> {
+        assert!(
+            secondary_phys.len() <= PhySet::MAX_SECONDARY,
+            "at most {} secondary PHYs",
+            PhySet::MAX_SECONDARY
+        );
+
         let raw_frame_rx = radio.subscribe_rx();
+        let secondary_rx = secondary_phys
+            .iter()
+            .map(|phy| phy.subscribe_rx())
+            .collect();
         let reset_rx = radio.subscribe_reset();
+        let send_wakes = (0..=secondary_phys.len()).map(|_| Notify::new()).collect();
 
         let initial_broadcast_tokens = tunables.broadcast_budget_tokens();
 
@@ -912,9 +932,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             config,
             tunables,
             radio,
+            secondary_phys,
             notifications: Mutex::new(VecDeque::new()),
             notification_wake: Notify::new(),
             raw_frame_rx: AsyncMutex::new(raw_frame_rx),
+            secondary_rx: AsyncMutex::new(secondary_rx),
             reset_rx: AsyncMutex::new(reset_rx),
             scan_active: AtomicBool::new(false),
             scan_claimed: AtomicBool::new(false),
@@ -933,7 +955,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             maintenance_wake: Notify::new(),
             tasklets: tasklets::Tasklets::default(),
             broadcast_budget: Mutex::new(BroadcastBudget::new(initial_broadcast_tokens)),
-            send_wake: Notify::new(),
+            send_wakes,
             send_watches: Arc::new(SendWatches::default()),
             send_timer_wake: Notify::new(),
             spawner,
@@ -1000,10 +1022,21 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     // exclusive access to shared state during frame processing.
     pub async fn run(&self) {
         loop {
-            let packet = self.recv_packet().await;
+            let (phy, packet) = self.recv_packet().await;
             let Some(ieee802154_frame) = parse_802154_frame(&packet.psdu) else {
                 continue;
             };
+
+            // A secondary PHY carries NWK data frames only
+            if phy != PhyIndex::Radio
+                && !matches!(
+                    ieee802154_frame,
+                    ziggurat_ieee_802154::Ieee802154Frame::Data(_)
+                )
+            {
+                tracing::debug!("Ignoring non-data frame from {phy:?}");
+                continue;
+            }
 
             if matches!(
                 ieee802154_frame,
@@ -1020,6 +1053,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             match ieee802154_frame {
                 ziggurat_ieee_802154::Ieee802154Frame::Data(ieee802154_data_frame) => {
                     let maybe_nwk_frame = self.process_802154_data_frame(
+                        phy,
                         &ieee802154_data_frame,
                         packet.lqi,
                         packet.rssi,
@@ -1131,28 +1165,77 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         }
     }
 
-    async fn recv_packet(&self) -> RxFrame {
-        let mut receiver = self
+    /// The radio and every secondary PHY.
+    pub(crate) const fn all_phys(&self) -> PhySet {
+        PhySet::radio_and_secondary(self.secondary_phys.len())
+    }
+
+    /// Where a broadcast that came in on `arrival` is relayed. Split horizon: a
+    /// secondary PHY already delivered it to all its peers, so it is not sent back
+    /// there. The radio is not fully meshed, so relaying back onto it is the flood.
+    pub(crate) const fn relay_phys(&self, arrival: PhyIndex) -> PhySet {
+        match arrival {
+            PhyIndex::Radio => self.all_phys(),
+            PhyIndex::Secondary(_) => self.all_phys().without(arrival),
+        }
+    }
+
+    /// Wake every PHY's sender: a frame may have become ready for any of them.
+    pub(crate) fn wake_senders(&self) {
+        for wake in &self.send_wakes {
+            wake.notify_one();
+        }
+    }
+
+    /// The next frame from any PHY. The radio is polled first.
+    async fn recv_packet(&self) -> (PhyIndex, RxFrame) {
+        let mut radio_rx = self
             .raw_frame_rx
             .try_lock()
             .expect("Raw frame receiver is locked");
+        let mut secondary_rx = self
+            .secondary_rx
+            .try_lock()
+            .expect("Secondary frame receivers are locked");
 
-        let Some(packet) = receiver.recv().await else {
-            panic!("Radio frame sender hung up");
+        let (phy, packet) = if secondary_rx.is_empty() {
+            (PhyIndex::Radio, radio_rx.recv().await)
+        } else {
+            let radio = core::pin::pin!(async { (PhyIndex::Radio, radio_rx.recv().await) });
+            let secondary = futures::future::select_all(secondary_rx.iter_mut().enumerate().map(
+                |(index, rx)| {
+                    async move {
+                        let index = u8::try_from(index).expect("at most 255 secondary PHYs");
+                        (PhyIndex::Secondary(index), rx.recv().await)
+                    }
+                    .boxed()
+                },
+            ));
+
+            match futures::future::select(radio, secondary).await {
+                Either::Left((received, _)) => received,
+                Either::Right(((received, _, _), _)) => received,
+            }
         };
-        packet
+
+        let Some(packet) = packet else {
+            panic!("{phy:?} frame sender hung up");
+        };
+        (phy, packet)
     }
 
     pub async fn start_network(&self) -> Result<(), RadioError> {
         self.reset_radio().await?;
         self.apply_radio_configuration().await?;
 
-        // The single sender task drains the transmit queue; it must run before anything
-        // enqueues a frame (the initial link status broadcast below would otherwise
-        // block on a completion nobody resolves).
-        self.spawn_tracked(|arc_self| async move {
-            arc_self.sender_task().await;
-        });
+        // Each PHY's sender task drains its transmit queue; they must run before
+        // anything enqueues a frame (the initial link status broadcast below would
+        // otherwise block on a completion nobody resolves).
+        for phy in self.all_phys().iter() {
+            self.spawn_tracked(move |arc_self| async move {
+                arc_self.sender_task(phy).await;
+            });
+        }
 
         // Drives everything in the send table that waits on time: route discoveries,
         // unicast retries, broadcast retransmissions, and every send's deadline. Must

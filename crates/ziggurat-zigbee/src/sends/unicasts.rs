@@ -11,6 +11,7 @@ use ziggurat_ieee_802154::types::{Eui64, Nwk};
 use crate::Instant;
 use crate::constants::Tunables;
 use crate::flat_map::FlatMap;
+use crate::phy::PhyIndex;
 
 use super::{
     Action, ApsAckData, Confirm, InFlight, Outbox, SendFailure, SendFrame, SendId, SrcMatchTable,
@@ -167,15 +168,36 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
 
     /// The highest-priority queued send, oldest first within a priority. A send past its
     /// deadline is left for `tick` to fail.
-    pub(super) fn best_queued(&self, now: Instant) -> Option<(SendId, TxPriority)> {
+    /// The highest-priority unicast queued for `phy`, oldest first within a priority.
+    /// A frame held for a poll goes over the radio, where the child polls; any other
+    /// goes where `unicast_phy` sends its next hop.
+    pub(super) fn best_queued(
+        &self,
+        now: Instant,
+        phy: PhyIndex,
+        mut unicast_phy: impl FnMut(&F, Nwk) -> PhyIndex,
+    ) -> Option<(SendId, TxPriority)> {
         self.records
             .iter()
             .filter(|(_, record)| record.stage == Stage::Queued && now < record.deadline)
+            .filter(|(_, record)| {
+                let record_phy = match record.poll_address {
+                    Some(_) => PhyIndex::Radio,
+                    None => unicast_phy(
+                        record
+                            .frame
+                            .as_ref()
+                            .expect("a queued frame is not on loan"),
+                        record.next_hop,
+                    ),
+                };
+                record_phy == phy
+            })
             .max_by_key(|(id, record)| (record.priority, Reverse(**id)))
             .map(|(id, record)| (*id, record.priority))
     }
 
-    pub(super) fn dequeue(&mut self, id: SendId) -> InFlight<F> {
+    pub(super) fn dequeue(&mut self, id: SendId, phy: PhyIndex) -> InFlight<F> {
         // More frames await the same device: it keeps polling
         let frame_pending = self
             .records
@@ -202,6 +224,7 @@ impl<F: SendFrame, E: From<SendFailure>> Unicasts<F, E> {
                 frame_pending,
                 first_attempt,
             },
+            phy,
         }
     }
 

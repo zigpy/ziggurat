@@ -7,7 +7,7 @@ use crate::ziggurat_ieee_802154::{
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Key, Nwk};
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy, TxResult};
 use ziggurat_zigbee::Instant as CoreInstant;
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkCommandId, NwkEndDeviceTimeoutResponseStatus, NwkNetworkStatus,
@@ -24,12 +24,12 @@ use ziggurat_zigbee::sends::{Unicast as UnicastRecord, UnroutedUnicast};
 
 use super::{
     AddrConflictSource, Broadcast, Confirm, CoreGuard, DeliveryError, EnqueueError,
-    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, RouteDirective,
-    Schedule, SendHandle, SendId, SendMode, TxPolicy, TxPriority, Unicast, ZigbeeCore,
-    ZigbeeNotification, ZigbeeStack,
+    FailedNwkUnicast, Frame, MAX_DEPTH, Nib, NwkSecurityMode, PROTOCOL_VERSION, PhyIndex, PhySet,
+    RouteDirective, Schedule, SendHandle, SendId, SendMode, TxPolicy, TxPriority, Unicast,
+    ZigbeeCore, ZigbeeNotification, ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     /// A device joined or rejoined as `nwk`: the address starts a new session. The
     /// mapping and the state it replaces change under one lock, so no send can be
     /// enqueued against the old session in between.
@@ -64,8 +64,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.commit_sends(core);
     }
 
-    /// Filter broadcast frames based on the NWK broadcast transaction table
-    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk) -> bool {
+    /// Filter broadcast frames based on the NWK broadcast transaction table. Only a
+    /// copy heard on the radio is a passive acknowledgment.
+    pub fn filter_broadcast(&self, nwk_frame: &NwkFrame, sender_nwk: Nwk, phy: PhyIndex) -> bool {
         let now = self.core_now();
 
         // We cannot handle broadcasts until the network has been running for at least
@@ -84,7 +85,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let duplicate = nib.broadcasts.filter_received(
             nwk_frame.nwk_header.source,
             nwk_frame.nwk_header.sequence_number,
-            sender_nwk,
+            (phy == PhyIndex::Radio).then_some(sender_nwk),
             || {
                 nib.neighbors
                     .expected_broadcast_relayers(self.tunables.broadcast_relayer_max_link_cost())
@@ -110,6 +111,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         core: &mut ZigbeeCore,
         nwk_frame: NwkFrame,
+        phys: PhySet,
         attempts: u8,
         initial_delay: Duration,
     ) -> SendId {
@@ -125,6 +127,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 copies_remaining: attempts,
                 next_attempt: self.core_now() + initial_delay,
             },
+            phys,
         )
         .id()
     }
@@ -164,6 +167,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         nwk_frame: &NwkFrame,
         sender_nwk: Nwk,
+        phy: PhyIndex,
         lqi: u8,
         rssi: i8,
     ) -> bool {
@@ -171,11 +175,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
         {
-            let old_frame_counter = self
-                .core()
-                .nib
-                .nwk_security
-                .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
+            let old_frame_counter = self.core().nib.nwk_security.note_inbound_frame_counter(
+                relaying_eui64,
+                phy,
+                aux_header.frame_counter,
+            );
 
             tracing::debug!(
                 "Incremented frame counter for {relaying_eui64:?} from {:?} to {}",
@@ -218,7 +222,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         // Handle LQA calculation
         self.maybe_age_neighbors();
-        self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
+        self.maybe_recompute_lqa(sender_nwk, phy, lqi, rssi);
 
         // Spec 3.6.6: link status and route request broadcasts bypass the broadcast
         // transaction table; route requests have their own cost-comparing dedup logic
@@ -232,7 +236,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             >= BROADCAST_ALL_ROUTERS_AND_COORDINATOR.as_u16()
             && !bypasses_transaction_table
         {
-            if self.filter_broadcast(nwk_frame, sender_nwk) {
+            if self.filter_broadcast(nwk_frame, sender_nwk, phy) {
                 tracing::trace!("Filtering broadcast, stopping further processing");
                 return false;
             }
@@ -254,13 +258,15 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             }
 
             // A fresh broadcast is relayed onward to the rest of the mesh
-            self.maybe_relay_broadcast(nwk_frame);
+            self.maybe_relay_broadcast(nwk_frame, phy);
         }
 
         // Handle NWK commands
         if let NwkPayload::Command(command) = &nwk_frame.payload {
             match command {
-                NwkCommand::LinkStatus(cmd) => self.handle_link_status(nwk_frame, cmd.clone(), lqi),
+                NwkCommand::LinkStatus(cmd) => {
+                    self.handle_link_status(nwk_frame, cmd.clone(), phy, lqi);
+                }
                 NwkCommand::RouteReply(cmd) => self.handle_route_reply(nwk_frame, cmd.clone()),
                 NwkCommand::RouteRecord(cmd) => {
                     tracing::trace!("Route record command frame received: {cmd:?}");
@@ -285,7 +291,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                     }
                 }
                 NwkCommand::RouteRequest(cmd) => {
-                    self.handle_route_request(nwk_frame, cmd.clone(), sender_nwk);
+                    self.handle_route_request(nwk_frame, cmd.clone(), sender_nwk, phy);
                 }
                 NwkCommand::RejoinRequest(cmd) => {
                     self.handle_rejoin_request(nwk_frame, cmd.clone(), true);
@@ -584,14 +590,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         })
     }
 
-    /// One transmit attempt for a unicast: assign the frame counter, encrypt, and send
-    /// once. The send table decides what a failure means (a retry, or the verdict).
+    /// One transmit attempt for a unicast over `phy`: assign the frame counter,
+    /// encrypt, and send once. The send table decides what a failure means (a retry,
+    /// or the verdict).
     pub(super) async fn transmit_unicast(
         &self,
         nwk_frame: &mut NwkFrame,
         next_hop_address: Nwk,
         security: NwkSecurityMode,
         frame_pending: bool,
+        phy: PhyIndex,
     ) -> Result<(), DeliveryError> {
         let key = self.secure_nwk_frame(nwk_frame, security);
         let mut ieee802154_frame = self.build_unicast_802154_data_frame(
@@ -626,7 +634,10 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.increment_tx_total();
 
-        let result = self.send_802154_frame(&mut ieee802154_frame).await;
+        let result = self
+            .send_802154_frame(&mut ieee802154_frame, phy)
+            .await
+            .map(drop);
 
         if let Err(e) = &result {
             // Spec Table 3-75: an unacknowledged unicast is a transmit failure recorded
@@ -635,7 +646,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             if let DeliveryError::NwkNoAck { .. } = e {
                 let mut core = self.core();
                 if let Some(next_hop_eui64) = core.nib.address_map.eui64_for(next_hop_address) {
-                    core.nib.neighbors.record_transmit_failure(next_hop_eui64);
+                    core.nib
+                        .neighbors
+                        .record_transmit_failure(next_hop_eui64, phy);
                 }
             }
 
@@ -796,6 +809,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 copies_remaining: self.tunables.max_broadcast_retries().saturating_add(1),
                 next_attempt: self.core_now(),
             },
+            self.all_phys(),
         );
 
         // Sleepy children never hear the over-the-air broadcast; queue a unicast copy
@@ -811,9 +825,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         Ok(handle)
     }
 
-    /// Send a single-copy broadcast: assign its sequence number and queue one copy for
-    /// the sender. The transmit result is the verdict.
-    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast) -> SendHandle {
+    /// Send a single-copy broadcast on `phys`: assign its sequence number and queue one
+    /// copy for the sender. The transmit result is the verdict.
+    pub(super) fn send_oneshot_broadcast(&self, send: Broadcast, phys: PhySet) -> SendHandle {
         let Broadcast {
             frame: mut nwk_frame,
             security,
@@ -821,15 +835,23 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         } = send;
         nwk_frame.nwk_header.sequence_number = self.next_nwk_sequence_number();
 
-        self.enqueue_broadcast(Frame::nwk(nwk_frame, security), policy, Schedule::Once)
+        self.enqueue_broadcast(
+            Frame::nwk(nwk_frame, security),
+            policy,
+            Schedule::Once,
+            phys,
+        )
     }
 
-    /// Encrypt and broadcast a single copy of a frame.
+    /// Secure a frame for `phy` and broadcast one copy of it there.
     pub(super) async fn transmit_broadcast(
         &self,
         nwk_frame: &mut NwkFrame,
         security: NwkSecurityMode,
-    ) -> Result<(), DeliveryError> {
+        phy: PhyIndex,
+    ) -> Result<TxResult, DeliveryError> {
+        self.increment_tx_total();
+
         let key = self.secure_nwk_frame(nwk_frame, security);
 
         let (ieee802154_sequence_number, pan_id) = {
@@ -867,9 +889,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             fcs: 0x0000, // It'll be replaced
         });
 
-        self.increment_tx_total();
-
-        self.send_802154_frame(&mut ieee802154_frame).await
+        self.send_802154_frame(&mut ieee802154_frame, phy).await
     }
 
     /// Zigbee spec 3.6.4.3: relay a unicast frame addressed to another device.
@@ -879,6 +899,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         mut nwk_frame: NwkFrame,
         sender_nwk: Nwk,
+        phy: PhyIndex,
         lqi: u8,
         rssi: i8,
     ) {
@@ -887,15 +908,16 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         if let Some(aux_header) = &nwk_frame.aux_header
             && let Some(relaying_eui64) = aux_header.extended_source
         {
-            self.core()
-                .nib
-                .nwk_security
-                .note_inbound_frame_counter(relaying_eui64, aux_header.frame_counter);
+            self.core().nib.nwk_security.note_inbound_frame_counter(
+                relaying_eui64,
+                phy,
+                aux_header.frame_counter,
+            );
         }
 
         // Transit frames are link quality measurements for the transmitting neighbor
         // just like frames addressed to us
-        self.maybe_recompute_lqa(sender_nwk, lqi, rssi);
+        self.maybe_recompute_lqa(sender_nwk, phy, lqi, rssi);
 
         // Receiving a unicast from a neighbor counts as inbound activity
         self.core().nib.neighbors.record_inbound_activity(
@@ -1115,7 +1137,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// retransmits until the passive-ack quorum is heard or attempts run out.
     // The guard is moved into `commit_sends`; the lint misses the move
     #[allow(clippy::significant_drop_tightening)]
-    fn maybe_relay_broadcast(&self, nwk_frame: &NwkFrame) {
+    fn maybe_relay_broadcast(&self, nwk_frame: &NwkFrame, arrival: PhyIndex) {
         // Broadcast NWK commands are not generically relayed: link status and leave
         // frames have a radius of 1, and route requests accumulate path cost in their
         // own relay logic
@@ -1175,6 +1197,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 copies_remaining: self.tunables.max_broadcast_retries().saturating_add(1),
                 next_attempt: self.core_now() + self.broadcast_jitter(),
             },
+            self.relay_phys(arrival),
         );
     }
 }

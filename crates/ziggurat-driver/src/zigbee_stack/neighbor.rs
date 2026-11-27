@@ -2,7 +2,7 @@ use crate::runtime::Runtime;
 use alloc::vec::Vec;
 use core::time::Duration;
 use ziggurat_ieee_802154::types::{Eui64, Nwk};
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 
 use ziggurat_zigbee::nwk::NwkDeviceType;
 use ziggurat_zigbee::nwk::commands::{NwkCommand, NwkLinkStatusCommand};
@@ -12,12 +12,18 @@ use ziggurat_zigbee::nwk::next_hop;
 use super::TrafficClass;
 
 use super::{
-    Broadcast, EnqueueError, NwkSecurityMode, SendHandle, TxPolicy, TxPriority, ZigbeeStack,
+    Broadcast, EnqueueError, NwkSecurityMode, PhyIndex, PhySet, SendHandle, TxPolicy, TxPriority,
+    ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
-    pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, lqi: u8, _rssi: i8) {
-        let link_status_due = self.core().nib.neighbors.record_lqa(sender_nwk, lqi);
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
+    pub(super) fn maybe_recompute_lqa(&self, sender_nwk: Nwk, phy: PhyIndex, lqi: u8, _rssi: i8) {
+        let now = self.core_now();
+        let link_status_due = self
+            .core()
+            .nib
+            .neighbors
+            .record_lqa(sender_nwk, phy, lqi, now);
 
         if link_status_due {
             self.request_link_status_for_new_router();
@@ -119,6 +125,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         &self,
         nwk_frame: &NwkFrame,
         link_status_cmd: NwkLinkStatusCommand,
+        phy: PhyIndex,
         lqi: u8,
     ) {
         tracing::debug!("Link status command frame: {link_status_cmd:?}");
@@ -134,6 +141,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             self.state.network_address,
             source_ieee,
             nwk_frame.nwk_header.source,
+            phy,
             lqi,
             &link_status_cmd,
             self.core_now(),
@@ -164,8 +172,8 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         self.link_status_received.notify_one();
     }
 
-    /// Broadcast the link status notification. The returned handle tracks the last
-    /// frame of the batch.
+    /// Broadcast the link status notification on every PHY, each listing the
+    /// neighbors on that PHY. The returned handle tracks the last frame of the batch.
     pub fn send_link_status_broadcast(&self, empty: bool) -> Result<SendHandle, EnqueueError> {
         tracing::debug!("Sending periodic link status broadcast");
 
@@ -176,10 +184,25 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
         self.maybe_age_neighbors();
 
+        let handles: Vec<SendHandle> = self
+            .all_phys()
+            .iter()
+            .map(|phy| self.send_link_status_on(phy, empty))
+            .collect();
+
+        // The single sender drains in admission order, so the last frame's handoff
+        // implies every PHY's batch was transmitted
+        Ok(handles
+            .into_iter()
+            .last()
+            .expect("the radio is always present"))
+    }
+
+    fn send_link_status_on(&self, phy: PhyIndex, empty: bool) -> SendHandle {
         let mut link_statuses = if empty {
             Vec::new()
         } else {
-            self.core().nib.neighbors.link_status_entries()
+            self.core().nib.neighbors.link_status_entries(phy)
         };
 
         // Link statuses are sorted in ascending order
@@ -238,9 +261,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 },
             };
 
-            let sent = self.send_oneshot_broadcast(send);
+            let sent = self.send_oneshot_broadcast(send, PhySet::only(phy));
             if is_last {
-                return Ok(sent);
+                return sent;
             }
 
             // Repeat the boundary entry as the first of the next frame

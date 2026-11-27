@@ -1,4 +1,5 @@
 use crate::flat_map::FlatMap;
+use crate::phy::PhyIndex;
 
 use ziggurat_ieee_802154::types::{Eui64, Key};
 
@@ -11,7 +12,15 @@ enum NetworkKeyType {
 struct NwkSecurityDescriptor {
     key_seq_number: u8,
     outgoing_frame_counter: u32,
-    incoming_frame_counter_set: FlatMap<Eui64, u32>,
+    /// Keyed by relayer and the PHY its frame came in on. Each PHY's sender secures
+    /// its own copies as it transmits them, so a relayer's counters rise on each PHY
+    /// but interleave arbitrarily across PHYs.
+    // XXX: a frame captured on one PHY can be replayed once on each other PHY, as
+    // long as its counter is above the last one seen from that relayer there. The
+    // relayer's link status on every PHY bounds this to a link status period. The
+    // broadcast table and APS duplicate rejection catch replays within their windows,
+    // NWK commands have no such dedup and are handled again. A forger needs no key.
+    incoming_frame_counter_set: FlatMap<(Eui64, PhyIndex), u32>,
     key: Key,
     #[allow(dead_code)]
     network_key_type: NetworkKeyType,
@@ -107,10 +116,11 @@ impl NwkSecurity {
     /// Validate an inbound secured frame's auxiliary header against the active
     /// security material, returning the key to decrypt it with. `None` rejects the
     /// frame: an unknown key sequence number, or a frame counter that rolled
-    /// backward for the relaying device (replay protection, spec 4.3.1.2).
+    /// backward for the relaying device on `phy` (replay protection, spec 4.3.1.2).
     pub fn inbound_network_key(
         &self,
         sender: Eui64,
+        phy: PhyIndex,
         key_sequence_number: u8,
         frame_counter: u32,
     ) -> Option<Key> {
@@ -126,7 +136,7 @@ impl NwkSecurity {
             return None;
         }
 
-        match self.primary.incoming_frame_counter_set.get(&sender) {
+        match self.primary.incoming_frame_counter_set.get(&(sender, phy)) {
             None => {
                 tracing::debug!("Unknown sender, not validating frame counter");
             }
@@ -150,10 +160,15 @@ impl NwkSecurity {
     }
 
     /// Store the security frame counter of a successfully decrypted frame for its
-    /// relaying device, the baseline for future replay checks.
-    pub fn note_inbound_frame_counter(&mut self, sender: Eui64, frame_counter: u32) -> Option<u32> {
+    /// relaying device on `phy`, the baseline for future replay checks there.
+    pub fn note_inbound_frame_counter(
+        &mut self,
+        sender: Eui64,
+        phy: PhyIndex,
+        frame_counter: u32,
+    ) -> Option<u32> {
         self.primary
             .incoming_frame_counter_set
-            .insert(sender, frame_counter)
+            .insert((sender, phy), frame_counter)
     }
 }

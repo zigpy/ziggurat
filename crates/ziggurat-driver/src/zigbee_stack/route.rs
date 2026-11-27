@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use alloc::vec::Vec;
 use ziggurat_ieee_802154::types::Nwk;
-use ziggurat_phy::RadioPhy;
+use ziggurat_phy::{Phy, RadioPhy};
 
 use ziggurat_zigbee::nwk::commands::{
     NwkCommand, NwkNetworkStatus, NwkNetworkStatusCommand, NwkRouteRecordCommand,
@@ -17,11 +17,11 @@ use super::TrafficClass;
 use super::routing::RouteReplyDisposition;
 
 use super::{
-    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, SendHandle, SendMode, TxPolicy,
-    TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
+    AddrConflictSource, Broadcast, Confirm, Frame, NwkSecurityMode, PhyIndex, SendHandle, SendMode,
+    TxPolicy, TxPriority, Unicast, ZigbeeCore, ZigbeeStack,
 };
 
-impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
+impl<P: RadioPhy, S: Phy, R: Runtime> ZigbeeStack<P, S, R> {
     #[allow(clippy::significant_drop_tightening)]
     pub(super) fn handle_route_reply(
         &self,
@@ -109,6 +109,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         nwk_frame: &NwkFrame,
         route_request_cmd: NwkRouteRequestCommand,
         sender_nwk: Nwk,
+        arrival: PhyIndex,
     ) {
         tracing::debug!(
             "Route request command frame (sender {sender_nwk:?}): {route_request_cmd:?}"
@@ -284,8 +285,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         core.nib
             .routing
             .note_route_request_handled(originator, request_id);
-        let relay =
-            self.broadcast_route_request(&mut core, relayed_route_request_cmd, attempts, jitter);
+        let relay = self.broadcast_route_request(
+            &mut core,
+            relayed_route_request_cmd,
+            self.relay_phys(arrival),
+            attempts,
+            jitter,
+        );
         core.sends
             .route_request_relayed(originator, request_id, relay);
         self.commit_sends(core);
@@ -318,14 +324,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .with_radius(self.tunables.concentrator_radius());
 
         // Many-to-one route requests are not retried (spec 3.6.4.5.1)
-        self.send_oneshot_broadcast(Broadcast {
-            frame: many_to_one_request_frame,
-            security: NwkSecurityMode::NetworkKey,
-            policy: TxPolicy {
-                priority: TxPriority::Background,
-                class: TrafficClass::Critical,
+        self.send_oneshot_broadcast(
+            Broadcast {
+                frame: many_to_one_request_frame,
+                security: NwkSecurityMode::NetworkKey,
+                policy: TxPolicy {
+                    priority: TxPriority::Background,
+                    class: TrafficClass::Critical,
+                },
             },
-        })
+            self.all_phys(),
+        )
     }
 
     /// Advertise many-to-one routes while we are a concentrator, idling otherwise.
@@ -440,7 +449,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// acked, the send table retries it like any other unicast.
     // The lint misses that `nib` borrows the guard until the frame is built
     #[allow(clippy::significant_drop_tightening)]
-    pub(super) async fn transmit_route_record(&self, data: &NwkFrame, next_hop: Nwk) {
+    pub(super) async fn transmit_route_record(
+        &self,
+        data: &NwkFrame,
+        next_hop: Nwk,
+        phy: PhyIndex,
+    ) {
         let concentrator = data.nwk_header.destination;
 
         let mut frame = {
@@ -480,7 +494,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         };
 
         let result = self
-            .transmit_unicast(&mut frame, next_hop, NwkSecurityMode::NetworkKey, false)
+            .transmit_unicast(
+                &mut frame,
+                next_hop,
+                NwkSecurityMode::NetworkKey,
+                false,
+                phy,
+            )
             .await;
 
         if result.is_err() {
@@ -589,6 +609,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         let request = self.broadcast_route_request(
             core,
             route_request_frame,
+            self.all_phys(),
             self.tunables.initial_rreq_retries().saturating_add(1),
             Duration::ZERO,
         );

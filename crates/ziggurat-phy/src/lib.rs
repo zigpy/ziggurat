@@ -1,4 +1,5 @@
-//! Radio PHY abstraction.
+//! PHY abstraction: one 802.15.4 radio, plus secondary PHYs that carry 802.15.4
+//! frames over other media.
 
 #![no_std]
 
@@ -18,6 +19,10 @@ pub trait Receiver<T>: Send {
     fn recv(&mut self) -> impl Future<Output = Option<T>> + Send;
 }
 
+/// The MAC defaults of 802.15.4: `macMaxFrameRetries` and `macMaxCSMABackoffs`.
+pub const DEFAULT_MAX_FRAME_RETRIES: u8 = 3;
+pub const DEFAULT_MAX_CSMA_BACKOFFS: u8 = 4;
+
 /// A frame to transmit. `psdu` is the 802.15.4 frame without the FCS; `channel`
 /// overrides the current channel for this frame only.
 #[derive(Debug, Clone)]
@@ -32,6 +37,21 @@ pub struct TxFrame {
     pub tx_at: Option<TxAt>,
 }
 
+impl TxFrame {
+    /// An untimed frame on the current channel, with CSMA-CA and the MAC defaults.
+    pub const fn new(psdu: Psdu) -> Self {
+        Self {
+            psdu,
+            channel: None,
+            csma_ca: true,
+            max_frame_retries: DEFAULT_MAX_FRAME_RETRIES,
+            max_csma_backoffs: DEFAULT_MAX_CSMA_BACKOFFS,
+            security_processed: true,
+            tx_at: None,
+        }
+    }
+}
+
 /// When a timed transmit starts.
 ///
 /// The end of its SFD is at `base_us + delay_us` on the radio clock, the clock of
@@ -44,6 +64,7 @@ pub struct TxAt {
 }
 
 /// A received frame, normalized: `psdu` is the 802.15.4 frame with the FCS stripped.
+/// `channel` and `timestamp_us` belong to the radio; a secondary PHY sets them to 0.
 #[derive(Debug, Clone)]
 pub struct RxFrame {
     pub psdu: Psdu,
@@ -53,14 +74,34 @@ pub struct RxFrame {
     pub timestamp_us: u64,
 }
 
-/// The outcome of a transmit, after the radio's own MAC retries.
+/// The outcome of a transmit, after the PHY's own retries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxResult {
+    /// Every receiver the frame was addressed to confirmed it
     Acked,
+    /// A secondary PHY's broadcast that some of its peers did not confirm
+    PartiallyAcked,
+    /// No receiver the frame was addressed to confirmed it
     NoAck,
+    /// Sent, but the medium cannot confirm it: an 802.15.4 frame that requests no ACK
+    Sent,
     ChannelAccessFailure,
     Aborted,
     Failed,
+}
+
+/// The ACK Request bit of the first 802.15.4 frame control octet.
+const ACK_REQUEST: u8 = 0x20;
+
+impl TxResult {
+    /// A radio reports every frame it sent as a success, but 802.15.4 confirms only a
+    /// frame that requests an ACK: any other frame was only [`TxResult::Sent`].
+    pub const fn for_radio_psdu(self, psdu: &[u8]) -> Self {
+        match self {
+            Self::Acked if psdu[0] & ACK_REQUEST == 0 => Self::Sent,
+            other => other,
+        }
+    }
 }
 
 /// The full radio programming. Re-applied verbatim after a reset.
@@ -96,14 +137,56 @@ pub enum RadioError {
     Other(String),
 }
 
-pub trait RadioPhy: Send + Sync + 'static {
+/// A medium that carries 802.15.4 frames: the radio, or a secondary PHY such as a
+/// backbone over IP.
+pub trait Phy: Send + Sync + 'static {
+    /// The PHY's received-frame stream, handed out by [`subscribe_rx`].
+    type RxStream: Receiver<RxFrame>;
+
+    /// Transmit a frame with the PHY's own MAC parameters. `psdu` is without the FCS.
+    ///
+    /// A secondary PHY delivers a broadcast to every peer it knows, retrying each one,
+    /// and reports [`TxResult::Acked`] only if every peer confirmed it. Which peers did
+    /// not is the PHY's own business: it ages them out by its own rule.
+    fn transmit_psdu(
+        &self,
+        psdu: Psdu,
+    ) -> impl Future<Output = Result<TxResult, RadioError>> + Send;
+
+    /// Open a fresh received-frame stream, redirecting delivery to it. Called once per
+    /// driver instance; a later call supersedes the previous stream.
+    fn subscribe_rx(&self) -> Self::RxStream;
+}
+
+/// The secondary PHY type of a node that has none.
+#[derive(Debug)]
+pub enum NoPhy {}
+
+impl Receiver<RxFrame> for NoPhy {
+    async fn recv(&mut self) -> Option<RxFrame> {
+        unreachable!("NoPhy has no values")
+    }
+}
+
+impl Phy for NoPhy {
+    type RxStream = Self;
+
+    async fn transmit_psdu(&self, _psdu: Psdu) -> Result<TxResult, RadioError> {
+        unreachable!("NoPhy has no values")
+    }
+
+    fn subscribe_rx(&self) -> Self {
+        unreachable!("NoPhy has no values")
+    }
+}
+
+/// The 802.15.4 radio. Every node has one: joins, sleepy children, scans and timed
+/// transmits need it.
+pub trait RadioPhy: Phy {
     /// Exclusive control of the radio, held for the guard's lifetime.
     type Exclusive<'a>: ExclusiveRadio + Send
     where
         Self: 'a;
-
-    /// The backend's received-frame stream, handed out by [`subscribe_rx`].
-    type RxStream: Receiver<RxFrame>;
 
     /// The backend's reset-notification stream, handed out by [`subscribe_reset`].
     type ResetStream: Receiver<ResetEvent>;
@@ -138,10 +221,6 @@ pub trait RadioPhy: Send + Sync + 'static {
     /// Take exclusive control of the radio until the returned guard is dropped.
     fn lock(&self) -> impl Future<Output = Self::Exclusive<'_>> + Send;
 
-    /// Open a fresh received-frame stream, redirecting delivery to it. Called once per
-    /// driver instance; a later call supersedes the previous stream.
-    fn subscribe_rx(&self) -> Self::RxStream;
-
     /// Open a fresh reset-notification stream, redirecting delivery to it.
     fn subscribe_reset(&self) -> Self::ResetStream;
 }
@@ -161,5 +240,28 @@ pub trait ExclusiveRadio: Send {
             let _ = promiscuous;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_radio_frame_without_ack_request_is_only_sent() {
+        // Frame control 0x8841: a data frame without an ACK request
+        assert_eq!(
+            TxResult::Acked.for_radio_psdu(&[0x41, 0x88]),
+            TxResult::Sent
+        );
+        // Frame control 0x8861: the same frame with an ACK request
+        assert_eq!(
+            TxResult::Acked.for_radio_psdu(&[0x61, 0x88]),
+            TxResult::Acked
+        );
+        assert_eq!(
+            TxResult::NoAck.for_radio_psdu(&[0x61, 0x88]),
+            TxResult::NoAck
+        );
     }
 }
