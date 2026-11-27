@@ -58,8 +58,7 @@ impl SpinelTxFrame {
 
     /// Append the `STREAM_RAW` value: the PSDU and its transmit metadata.
     pub fn serialize_into(&self, result: &mut Vec<u8>) {
-        result.extend_from_slice(&(self.psdu.len() as u16).to_le_bytes());
-        result.extend_from_slice(&self.psdu);
+        write_psdu(&self.psdu, result);
 
         // TODO: These are not really optional per-field, they must be contiguous: if a
         // field is not provided, all subsequent fields must be omitted as well
@@ -109,88 +108,153 @@ impl SpinelTxFrame {
     }
 }
 
+/// Reads the fields of a radio frame property value in order.
+struct FieldReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> FieldReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], SpinelRadioFrameError> {
+        let end = self.offset + length;
+        let field = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(SpinelRadioFrameError::TooShort {
+                expected: end,
+                got: self.bytes.len(),
+            })?;
+        self.offset = end;
+
+        Ok(field)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], SpinelRadioFrameError> {
+        Ok(self.take(N)?.try_into().expect("took exactly N bytes"))
+    }
+
+    fn u8(&mut self) -> Result<u8, SpinelRadioFrameError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, SpinelRadioFrameError> {
+        self.array().map(u16::from_le_bytes)
+    }
+
+    /// A Spinel struct (`t`): a little-endian `u16` length, then that many bytes.
+    fn spinel_struct(&mut self) -> Result<Self, SpinelRadioFrameError> {
+        let length = self.u16()?;
+        self.take(usize::from(length)).map(Self::new)
+    }
+
+    /// A PSDU (`d`): a little-endian `u16` length, then the bytes, FCS included.
+    fn psdu(&mut self) -> Result<Psdu, SpinelRadioFrameError> {
+        let length = usize::from(self.u16()?);
+        Psdu::from_slice(self.take(length)?)
+            .map_err(|_| SpinelRadioFrameError::PsduTooLong { got: length })
+    }
+
+    /// The next field, or `None` once the value ends. Trailing fields are optional.
+    fn optional<T>(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> Result<T, SpinelRadioFrameError>,
+    ) -> Result<Option<T>, SpinelRadioFrameError> {
+        if self.is_empty() {
+            Ok(None)
+        } else {
+            read(self).map(Some)
+        }
+    }
+}
+
+fn write_psdu(psdu: &[u8], result: &mut Vec<u8>) {
+    result.extend_from_slice(&(psdu.len() as u16).to_le_bytes());
+    result.extend_from_slice(psdu);
+}
+
+/// Writes a Spinel struct (`t`): its length, then the bytes `write` appends.
+fn write_spinel_struct(result: &mut Vec<u8>, write: impl FnOnce(&mut Vec<u8>)) {
+    let start = result.len();
+    result.extend_from_slice(&[0, 0]);
+    write(result);
+
+    let length = (result.len() - start - 2) as u16;
+    result[start..start + 2].copy_from_slice(&length.to_le_bytes());
+}
+
+impl SpinelTxFrame {
+    /// Parses a `STREAM_RAW` transmit request, as an RCP receives it.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelRadioFrameError> {
+        let mut reader = FieldReader::new(bytes);
+
+        Ok(Self {
+            psdu: reader.psdu()?,
+            channel: reader.optional(FieldReader::u8)?,
+            max_csma_backoffs: reader.optional(FieldReader::u8)?,
+            max_frame_retries: reader.optional(FieldReader::u8)?,
+            enable_csma_ca: reader.optional(|r| r.u8().map(|b| b != 0))?,
+            is_header_updated: reader.optional(|r| r.u8().map(|b| b != 0))?,
+            is_a_retransmit: reader.optional(|r| r.u8().map(|b| b != 0))?,
+            is_security_processed: reader.optional(|r| r.u8().map(|b| b != 0))?,
+            tx_delay: reader.optional(|r| r.array().map(u32::from_le_bytes))?,
+            tx_delay_base_time: reader.optional(|r| r.array().map(u32::from_le_bytes))?,
+            rx_channel_after_tx: reader.optional(FieldReader::u8)?,
+            tx_power: reader.optional(|r| r.u8().map(|b| b as i8))?,
+        })
+    }
+}
+
+/// A received frame and its metadata, the `STREAM_RAW` value an RCP sends unsolicited.
+/// An ACK in a transmit-done notification uses the same layout.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SpinelRxFrame {
     pub psdu: Psdu,
     pub rssi: i8,
     pub noise_floor: i8,
-    pub flags: u32,
+    pub flags: u16,
     pub channel: u8,
     pub lqi: u8,
     pub timestamp_us: u64,
-    pub receive_error: u8,
+    pub receive_error: u32,
 }
 
 #[derive(Error, Debug, PartialEq, Eq)]
-pub enum SpinelRxFrameError {
+pub enum SpinelRadioFrameError {
     #[error("frame too short, expected at least {expected} bytes, got {got}")]
     TooShort { expected: usize, got: usize },
     #[error("PSDU too long to fit its frame bound, got {got} bytes")]
     PsduTooLong { got: usize },
+    #[error("packed integer did not terminate")]
+    InvalidPackedInteger,
 }
 
 impl SpinelRxFrame {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelRxFrameError> {
-        let mut offset = 0;
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpinelRadioFrameError> {
+        let mut reader = FieldReader::new(bytes);
 
-        // The 2-byte PSDU length prefix must be present before it can be read
-        if bytes.len() < 2 {
-            return Err(SpinelRxFrameError::TooShort {
-                expected: 2,
-                got: bytes.len(),
-            });
-        }
-        let psdu_len = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
+        let psdu = reader.psdu()?;
+        let rssi = reader.u8()? as i8;
+        let noise_floor = reader.u8()? as i8;
+        let flags = reader.u16()?;
 
-        // The PSDU is followed by a fixed metadata trailer: rssi, noise floor, flags,
-        // channel, lqi, timestamp, and receive error
-        let expected = offset + psdu_len + (1 + 1 + 4 + 1 + 1 + 8 + 1);
-        if expected > bytes.len() {
-            return Err(SpinelRxFrameError::TooShort {
-                expected,
-                got: bytes.len(),
-            });
-        }
+        let mut phy = reader.spinel_struct()?;
+        let channel = phy.u8()?;
+        let lqi = phy.u8()?;
+        let timestamp_us = phy.array().map(u64::from_le_bytes)?;
 
-        let psdu = Psdu::from_slice(&bytes[offset..offset + psdu_len])
-            .map_err(|_| SpinelRxFrameError::PsduTooLong { got: psdu_len })?;
-        offset += psdu_len;
+        let vendor = reader.spinel_struct()?;
+        let (receive_error, _) = packed_uint21_deserialize(vendor.bytes)
+            .map_err(|_| SpinelRadioFrameError::InvalidPackedInteger)?;
 
-        let rssi = bytes[offset] as i8;
-        offset += 1;
-
-        let noise_floor = bytes[offset] as i8;
-        offset += 1;
-
-        let flags = u32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]);
-        offset += 4;
-
-        let channel = bytes[offset];
-        offset += 1;
-
-        let lqi = bytes[offset];
-        offset += 1;
-
-        let timestamp_us = u64::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-            bytes[offset + 4],
-            bytes[offset + 5],
-            bytes[offset + 6],
-            bytes[offset + 7],
-        ]);
-        offset += 8;
-
-        // Any vendor-specific bytes after it are not read
-        let receive_error = bytes[offset];
+        // The MAC struct that follows carries Thread ACK security state; Zigbee has none
 
         Ok(Self {
             psdu,
@@ -202,6 +266,66 @@ impl SpinelRxFrame {
             timestamp_us,
             receive_error,
         })
+    }
+
+    pub fn serialize_into(&self, result: &mut Vec<u8>) {
+        write_psdu(&self.psdu, result);
+        result.push(self.rssi as u8);
+        result.push(self.noise_floor as u8);
+        result.extend_from_slice(&self.flags.to_le_bytes());
+
+        write_spinel_struct(result, |phy| {
+            phy.push(self.channel);
+            phy.push(self.lqi);
+            phy.extend_from_slice(&self.timestamp_us.to_le_bytes());
+        });
+        write_spinel_struct(result, |vendor| {
+            packed_uint21_into(self.receive_error, vendor);
+        });
+        // ACK key id and frame counter, which only Thread's ACK security uses
+        write_spinel_struct(result, |mac| {
+            mac.push(0);
+            mac.extend_from_slice(&0u32.to_le_bytes());
+        });
+    }
+}
+
+/// The `LAST_STATUS` value an RCP answers a `STREAM_RAW` transmit with once it is done.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct SpinelTxDone {
+    pub status: SpinelStatus,
+    /// The frame-pending bit of the ACK
+    pub frame_pending: bool,
+    /// The ACK, for a transmit that requested one and succeeded
+    pub ack: Option<SpinelRxFrame>,
+}
+
+impl SpinelTxDone {
+    pub fn serialize_into(&self, result: &mut Vec<u8>) {
+        packed_uint21_into(self.status as u32, result);
+        result.push(u8::from(self.frame_pending));
+        // Header updated: the RCP did not touch the frame's security header
+        result.push(0);
+
+        if self.status != SpinelStatus::Ok {
+            return;
+        }
+
+        match &self.ack {
+            Some(ack) => ack.serialize_into(result),
+            // A success without an ACK still carries an empty frame and its metadata
+            None => SpinelRxFrame {
+                psdu: Psdu::new(),
+                rssi: 0,
+                noise_floor: 0,
+                flags: 0,
+                channel: 0,
+                lqi: 0,
+                timestamp_us: 0,
+                receive_error: 0,
+            }
+            .serialize_into(result),
+        }
     }
 }
 
